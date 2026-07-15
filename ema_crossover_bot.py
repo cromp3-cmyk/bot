@@ -1,8 +1,7 @@
 """
-EMA-Crossover-Bot für Lighter - MIT WEBSOCKET CANDLES
+EMA-Crossover-Bot für Lighter - NUR BEI CROSSOVER-WECHSEL!
 ================================================================================
-Empfängt 1-Minuten Candles über WebSocket (mark_price_candle)
-EMA7 + EMA21 basierend auf Candle-Closes
+Handelt NUR wenn sich der Crossover-Zustand ändert (UP → DOWN oder DOWN → UP)
 """
 
 import asyncio
@@ -261,17 +260,16 @@ last_trade_price = None
 current_position_side = None
 fast_ema = EMACalculator(EMA_FAST)
 slow_ema = EMACalculator(EMA_SLOW)
-last_signal = None
-candle_buffer = []  # Für initiale Candles beim Verbinden
+last_crossover_state = None  # "up" oder "down" oder None
 
 async def execute_signal(direction, price):
-    global current_position_side, last_signal
+    global current_position_side
 
     if current_position_side == direction:
+        debug_log(f"⏭️ Bereits {direction}, ignoriere")
         return
 
     debug_log(f"📡 SIGNAL: {direction.upper()} {SYMBOL} @ {price}")
-    last_signal = direction
 
     if DRY_RUN:
         debug_log("🧪 DRY_RUN - keine Order")
@@ -288,31 +286,25 @@ async def execute_signal(direction, price):
             current_position_side = result.get("side")
 
 async def listen():
-    global last_trade_price, last_signal, candle_buffer
+    global last_trade_price, last_crossover_state
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
-    candle_count = 0
 
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
-        # ===== CANDLE CHANNEL SUBSCRIBE =====
-        subscribe_msg = {
+        await ws.send(json.dumps({
             "type": "subscribe",
             "channel": f"mark_price_candle/{MARKET_INDEX}/1m"
-        }
-        await ws.send(json.dumps(subscribe_msg))
+        }))
         debug_log(f"✅ Abonniert: mark_price_candle/{MARKET_INDEX}/1m")
 
-        # ===== TRADE CHANNEL SUBSCRIBE (für Preis) =====
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
         debug_log(f"✅ Abonniert: trade/{MARKET_INDEX}")
 
         async for raw in ws:
             msg = json.loads(raw)
             channel = msg.get("channel", "")
-            msg_type = msg.get("type", "")
 
-            # ===== CANDLE UPDATES =====
             if "mark_price_candle" in channel:
                 candles = msg.get("candles", [])
                 if not candles:
@@ -323,33 +315,34 @@ async def listen():
                     if close is None:
                         continue
                     
-                    # Debug für erste Candle
-                    if candle_count < 3:
-                        debug_log(f"🕐 Candle erhalten: Close={close}, t={candle.get('t')}")
-                        candle_count += 1
-                    
-                    # EMA updaten (NUR mit Candle-Closes!)
                     fast_ema.add_candle(float(close))
                     slow_ema.add_candle(float(close))
                     
-                    # Crossover prüfen
                     if fast_ema.is_initialized and slow_ema.is_initialized:
-                        if fast_ema.ema > slow_ema.ema and last_signal != "buy":
-                            debug_log(f"📈 CROSSOVER UP: EMA{EMA_FAST} ({fast_ema.ema:.3f}) > EMA{EMA_SLOW} ({slow_ema.ema:.3f})")
-                            if last_trade_price:
-                                await execute_signal("buy", last_trade_price)
-                        elif fast_ema.ema < slow_ema.ema and last_signal != "sell":
-                            debug_log(f"📉 CROSSOVER DOWN: EMA{EMA_FAST} ({fast_ema.ema:.3f}) < EMA{EMA_SLOW} ({slow_ema.ema:.3f})")
-                            if last_trade_price:
-                                await execute_signal("sell", last_trade_price)
+                        # ===== CROSSOVER-ZUSTAND ERKENNEN =====
+                        if fast_ema.ema > slow_ema.ema:
+                            current_state = "up"
+                        else:
+                            current_state = "down"
+                        
+                        # ===== NUR BEI WECHSEL HANDELN! =====
+                        if last_crossover_state is not None and current_state != last_crossover_state:
+                            if current_state == "up":
+                                debug_log(f"📈 CROSSOVER UP: EMA{EMA_FAST} ({fast_ema.ema:.3f}) > EMA{EMA_SLOW} ({slow_ema.ema:.3f})")
+                                if last_trade_price:
+                                    await execute_signal("buy", last_trade_price)
+                            else:
+                                debug_log(f"📉 CROSSOVER DOWN: EMA{EMA_FAST} ({fast_ema.ema:.3f}) < EMA{EMA_SLOW} ({slow_ema.ema:.3f})")
+                                if last_trade_price:
+                                    await execute_signal("sell", last_trade_price)
+                        
+                        last_crossover_state = current_state
 
-            # ===== TRADE UPDATES (für Preis) =====
             elif "trade" in channel:
                 trades = msg.get("trades", [])
                 if trades:
                     last_trade_price = float(trades[-1]["price"])
 
-            # ===== STATUS-LOG =====
             now = time.time()
             if now - last_status_log >= STATUS_LOG_INTERVAL:
                 last_status_log = now
@@ -358,16 +351,17 @@ async def listen():
                     f"ema_{EMA_FAST}": round(fast_ema.ema, 3) if fast_ema.ema else None,
                     f"ema_{EMA_SLOW}": round(slow_ema.ema, 3) if slow_ema.ema else None,
                     "position": current_position_side or "flach",
-                    "letztes_signal": last_signal or "keins",
+                    "crossover": last_crossover_state or "keiner",
                     "candles": len(fast_ema.closes)
                 })
 
 async def main():
-    global current_position_side, last_signal
+    global current_position_side, last_crossover_state
 
     print("=" * 60)
     print(f"🚀 EMA-Crossover-Bot für {SYMBOL}")
     print(f"   EMA: {EMA_FAST}/{EMA_SLOW} (WebSocket Mark Price Candles)")
+    print(f"   ⚠️ NUR bei Crossover-WECHSEL handeln!")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
@@ -376,7 +370,6 @@ async def main():
         pos = await get_current_position(SYMBOL)
         if pos:
             current_position_side = pos["side"]
-            last_signal = pos["side"]
             debug_log(f"📌 Position: {current_position_side}")
 
     while True:
@@ -385,6 +378,6 @@ async def main():
         except Exception as e:
             debug_log("⚠️ Reconnect in 5s", {"error": str(e)})
             await asyncio.sleep(5)
-            
+
 if __name__ == "__main__":
     asyncio.run(main())
