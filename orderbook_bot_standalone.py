@@ -106,17 +106,23 @@ async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
         import lighter
         from lighter import CandlestickApi
         
-        debug_log(f"📡 Hole Candles über Lighter SDK: market_id={market_id}, resolution={resolution}, count_back={count_back}")
+        # Timestamps berechnen
+        end_timestamp = int(time.time())
+        start_timestamp = end_timestamp - (count_back * 60)  # count_back Minuten zurück
+        
+        debug_log(f"📡 Hole Candles über Lighter SDK: market_id={market_id}, resolution={resolution}")
+        debug_log(f"   start_timestamp={start_timestamp}, end_timestamp={end_timestamp}")
         
         # API Client erstellen
         client = lighter.ApiClient()
         candle_api = CandlestickApi(client)
         
-        # Candles abrufen - OHNE "s" am Ende!
+        # Candles abrufen - MIT start_timestamp und end_timestamp!
         response = await candle_api.candles(
             market_id=market_id,
             resolution=resolution,
-            count_back=count_back
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp
         )
         
         # Client schließen
