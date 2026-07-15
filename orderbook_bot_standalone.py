@@ -1,6 +1,6 @@
 """
 EMA-Crossover-Bot für Lighter
-- Holt 1-Minuten Candles über Lighter SDK (CandlestickApi)
+- Holt 1-Minuten Candles über Lighter SDK (CandlestickApi.candles)
 - EMA7 + EMA21 basierend auf Candle-Closes
 - Kauft/Verkauft bei Crossover
 """
@@ -99,7 +99,7 @@ class EMACalculator:
             multiplier = 2 / (self.period + 1)
             self.ema = (close_price - self.ema) * multiplier + self.ema
 
-# ========== CANDLES VIA LIGHTER SDK ==========
+# ========== CANDLES VIA LIGHTER SDK (KORREKT) ==========
 async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
     """Holt Candles über das offizielle Lighter Python SDK"""
     try:
@@ -112,8 +112,8 @@ async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
         client = lighter.ApiClient()
         candle_api = CandlestickApi(client)
         
-        # Candles abrufen
-        response = await candle_api.candlesticks(
+        # Candles abrufen - OHNE "s" am Ende!
+        response = await candle_api.candles(
             market_id=market_id,
             resolution=resolution,
             count_back=count_back
@@ -367,11 +367,9 @@ async def execute_signal(direction, price):
 
     now = time.time()
     
-    # Cooldown prüfen
     if now - last_signal_time < SIGNAL_COOLDOWN:
         return
     
-    # Mindesthaltedauer prüfen
     if current_position_side is not None and (now - position_opened_at) < MIN_HOLD_SECONDS:
         debug_log(f"⏳ Reverse blockiert - Mindesthaltedauer noch nicht erreicht", {
             "aktuelle_position_seit_sekunden": round(now - position_opened_at, 1),
@@ -406,7 +404,6 @@ async def init_emas_from_lighter():
         debug_log("⚠️ Keine Candles von Lighter SDK erhalten")
         return False
     
-    # Candles durchgehen und EMAs aufbauen (NUR CANDLE-CLOSES!)
     for candle in candles:
         close_price = candle["close"]
         if close_price > 0:
@@ -445,19 +442,14 @@ async def listen():
                     size = float(trade["size"])
                     minute = int(time.time() / 60)
                     
-                    # ===== 1-MINUTE CANDLE =====
                     if current_candle is None or current_candle["minute"] != minute:
-                        # Candle schließen
                         if current_candle is not None:
                             close = current_candle["close"]
-                            
-                            # EMA mit Candle-Close updaten (NUR 1 Wert pro Minute!)
                             fast_ema.add_candle(close)
                             slow_ema.add_candle(close)
                             
-                            debug_log(f"🕐 Neue Candle: Close={close:.3f}, High={current_candle['high']:.3f}, Low={current_candle['low']:.3f}")
+                            debug_log(f"🕐 Neue Candle: Close={close:.3f}")
                             
-                            # Crossover prüfen (wenn EMAs initialisiert)
                             if fast_ema.is_initialized and slow_ema.is_initialized:
                                 now = time.time()
                                 if now - last_signal_time >= SIGNAL_COOLDOWN:
@@ -468,7 +460,6 @@ async def listen():
                                         debug_log(f"📉 CROSSOVER DOWN: EMA7 ({fast_ema.ema:.3f}) < EMA21 ({slow_ema.ema:.3f})")
                                         await execute_signal("sell", close)
                         
-                        # Neue Candle starten
                         current_candle = {
                             "minute": minute,
                             "open": price,
@@ -478,13 +469,11 @@ async def listen():
                             "volume": 0
                         }
                     else:
-                        # Candle updaten
                         current_candle["high"] = max(current_candle["high"], price)
                         current_candle["low"] = min(current_candle["low"], price)
                         current_candle["close"] = price
                         current_candle["volume"] += size
 
-                    # ===== STATUS-LOG =====
                     now = time.time()
                     if now - last_status_log >= STATUS_LOG_INTERVAL:
                         last_status_log = now
@@ -508,7 +497,6 @@ async def main():
     print(f"   Min Hold: {MIN_HOLD_SECONDS}s | Cooldown: {SIGNAL_COOLDOWN}s")
     print("=" * 70)
 
-    # ===== INIT: EMAs mit Candles von Lighter SDK =====
     await init_emas_from_lighter()
 
     if not DRY_RUN:
@@ -517,7 +505,6 @@ async def main():
             current_position_side = OPEN_POSITIONS[SYMBOL]["side"]
             debug_log(f"📌 Bestehende Position: {current_position_side}")
 
-    # ===== WEBSOCKET LISTEN =====
     while True:
         try:
             await listen()
