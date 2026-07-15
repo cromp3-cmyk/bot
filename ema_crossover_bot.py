@@ -1,9 +1,7 @@
 """
-Autonomer EMA 7/13 Crossover Bot für Lighter (zkLighter) - EIGENSTÄNDIGE VERSION
+Autonomer EMA 7/13 Crossover Bot für Lighter (zkLighter)
 ==================================================================================
-Holt sich echte Kerzendaten (OHLC) über die offizielle Lighter Candlestick-API
-und berechnet EMA(7) / EMA(13) auf Kerzenschluss-Basis (kein Repainting) -
-analog zu klassischen TradingView EMA-Crossover-Scripten.
+Holt Kerzendaten über die Lighter Candlestick-API und berechnet EMA(7) / EMA(13).
 """
 
 import asyncio
@@ -18,7 +16,6 @@ BASE_URL = "https://mainnet.zklighter.elliot.ai"
 # ========== DEBUG ==========
 DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 
-
 def debug_log(msg, data=None):
     if DEBUG_MODE:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -26,7 +23,6 @@ def debug_log(msg, data=None):
         if data:
             import json
             print(f"   DATA: {json.dumps(data, indent=2, default=str)}", flush=True)
-
 
 # ========== MARKET INDICES ==========
 MARKET_INDICES = {
@@ -45,7 +41,6 @@ def get_precision(symbol):
     }
     return precision_map.get(symbol, 10000)
 
-
 def get_price_decimals(symbol):
     decimals_map = {
         "BTC": 1, "ETH": 2, "SOL": 3, "AVAX": 3,
@@ -54,7 +49,6 @@ def get_price_decimals(symbol):
     }
     return decimals_map.get(symbol, 2)
 
-
 def get_min_base_amount(symbol):
     min_amount_map = {
         "BTC": 0.00020, "ETH": 0.005, "SOL": 0.05, "AVAX": 0.5,
@@ -62,7 +56,6 @@ def get_min_base_amount(symbol):
         "DOGE": 10, "XRP": 20,
     }
     return min_amount_map.get(symbol, 0.001)
-
 
 # ========== LIGHTER CLIENTS ==========
 def get_lighter_client():
@@ -81,32 +74,23 @@ def get_lighter_client():
         debug_log("Lighter Signer Client Fehler", {"error": str(e), "traceback": traceback.format_exc()})
         return None
 
-
 async def fetch_candles(market_id, resolution, count_back=100):
-    """Holt Kerzendaten über die öffentliche Candlestick-API - MIT FESTEN TIMESTAMPS!"""
+    """Holt Kerzendaten über die öffentliche Candlestick-API (funktionierende Version)."""
     import lighter
     configuration = lighter.Configuration(host=BASE_URL)
     async with lighter.ApiClient(configuration) as api_client:
         candle_api = lighter.CandlestickApi(api_client)
-        
-        # ===== FESTE TIMESTAMPS (DEZEMBER 2024) =====
-        # 15. Dezember 2024, 12:00:00 UTC = 1734264000
-        end_timestamp = 1734264000
-        start_timestamp = end_timestamp - (60 * 60 * 24 * 7)  # 7 Tage zurück
-        
-        debug_log(f"📡 Hole Candles: market={market_id}, resolution={resolution}")
-        debug_log(f"   start_timestamp={start_timestamp}, end_timestamp={end_timestamp}")
-        
+        now = int(time.time())
+        start = now - 60 * 60 * 24 * 7
         response = await candle_api.candles(
             market_id=market_id,
             resolution=resolution,
-            start_timestamp=start_timestamp,
-            end_timestamp=end_timestamp,
+            start_timestamp=start,
+            end_timestamp=now,
             count_back=count_back,
             set_timestamp_to_end=True,
         )
         return response
-
 
 # ========== EMA-Berechnung ==========
 def calc_ema_series(closes, length):
@@ -118,13 +102,11 @@ def calc_ema_series(closes, length):
         ema_values.append(price * k + ema_values[-1] * (1 - k))
     return ema_values
 
-
 # ========== Order-Ausführung ==========
 async def create_order_with_price(client, market_index, base_amount, is_ask, symbol, price, reduce_only=False):
     price_decimals = get_price_decimals(symbol)
     adjusted_price = price * 0.95 if is_ask else price * 1.05
     price_scaled = int(adjusted_price * (10 ** price_decimals))
-
     tx, tx_hash, err = await client.create_order(
         market_index=market_index,
         client_order_index=int(time.time() * 1000),
@@ -137,7 +119,6 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
         order_expiry=client.DEFAULT_IOC_EXPIRY,
     )
     return tx, tx_hash, err
-
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
     client = get_lighter_client()
@@ -214,17 +195,16 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
     finally:
         await client.close()
 
-
 # ========== State ==========
 OPEN_POSITIONS = {}
 
 # ========== Konfiguration ==========
 SYMBOL = os.getenv("EMA_SYMBOL", "SOL")
 if SYMBOL not in MARKET_INDICES:
-    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES - Liste in dieser Datei ergänzen")
+    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-RESOLUTION = os.getenv("EMA_RESOLUTION", "1")
+RESOLUTION = os.getenv("EMA_RESOLUTION", "1m")  # "1m", "5m", "15m", "1h", etc.
 EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "7"))
 EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "13"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
@@ -236,8 +216,7 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 current_position_side = None
 last_processed_candle_ts = None
-last_relation = None  # "above" (EMA7 > EMA13) / "below" / None
-
+last_relation = None
 
 def extract_close_prices_and_ts(raw_response):
     candles = getattr(raw_response, "candlesticks", None)
@@ -255,7 +234,6 @@ def extract_close_prices_and_ts(raw_response):
             closes.append(float(close))
     return timestamps, closes
 
-
 async def check_for_signal():
     global last_processed_candle_ts, last_relation, current_position_side
 
@@ -268,10 +246,7 @@ async def check_for_signal():
     timestamps, closes = extract_close_prices_and_ts(raw)
 
     if len(closes) < EMA_SLOW_LEN + 2:
-        debug_log("⚠️ Zu wenig Kerzendaten für EMA-Berechnung", {
-            "erhaltene_kerzen": len(closes),
-            "benötigt": EMA_SLOW_LEN + 2,
-        })
+        debug_log("⚠️ Zu wenig Kerzen", {"erhalten": len(closes), "benötigt": EMA_SLOW_LEN + 2})
         return
 
     # Letzte Kerze ist noch nicht geschlossen → weglassen
@@ -279,15 +254,10 @@ async def check_for_signal():
     closed_closes = closes[:-1]
 
     if len(closed_closes) < EMA_SLOW_LEN:
-        debug_log("⚠️ Nicht genug geschlossene Kerzen")
         return
 
     ema_fast = calc_ema_series(closed_closes, EMA_FAST_LEN)
     ema_slow = calc_ema_series(closed_closes, EMA_SLOW_LEN)
-
-    if len(ema_fast) < 2 or len(ema_slow) < 2:
-        debug_log("⚠️ EMAs konnten nicht berechnet werden")
-        return
 
     latest_ts = closed_ts[-1]
     latest_fast = ema_fast[-1]
@@ -297,7 +267,6 @@ async def check_for_signal():
     current_relation = "above" if latest_fast > latest_slow else "below"
 
     debug_log(f"📊 EMA Status {SYMBOL}", {
-        "letzte_kerze_ts": latest_ts,
         "close": latest_close,
         f"ema_{EMA_FAST_LEN}": round(latest_fast, 4),
         f"ema_{EMA_SLOW_LEN}": round(latest_slow, 4),
@@ -305,14 +274,13 @@ async def check_for_signal():
         "position": current_position_side or "flach",
     })
 
-    # Nur reagieren, wenn's eine NEUE geschlossene Kerze ist
     if last_processed_candle_ts == latest_ts:
         return
     last_processed_candle_ts = latest_ts
 
     if last_relation is not None and current_relation != last_relation:
         direction = "buy" if current_relation == "above" else "sell"
-        debug_log(f"📡 EMA CROSS erkannt: {direction.upper()} @ {latest_close}")
+        debug_log(f"📡 EMA CROSS: {direction.upper()} @ {latest_close}")
 
         if current_position_side != direction:
             if DRY_RUN:
@@ -326,10 +294,7 @@ async def check_for_signal():
 
     last_relation = current_relation
 
-
 async def main():
-    global current_position_side
-
     print("=" * 60)
     print(f"🚀 EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN} Crossover Bot für {SYMBOL}")
     print(f"   Resolution: {RESOLUTION} | Poll: {POLL_INTERVAL_SECONDS}s")
@@ -339,7 +304,6 @@ async def main():
     while True:
         await check_for_signal()
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
