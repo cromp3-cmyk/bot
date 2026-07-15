@@ -1,5 +1,5 @@
 """
-EMA-Crossover-Bot für Lighter - MIT CANDLES VON LIGHTER API
+EMA-Crossover-Bot für Lighter - MIT FIXED DATE
 ================================================================================
 Holt 1-Minuten Candles direkt von der Lighter API
 EMA7 + EMA21 basierend auf Candle-Closes
@@ -241,22 +241,22 @@ class EMACalculator:
             multiplier = 2 / (self.period + 1)
             self.ema = (close_price - self.ema) * multiplier + self.ema
 
-# ========== CANDLES VON LIGHTER API (MIT FESTEN TIMESTAMPS) ==========
+# ========== CANDLES VON LIGHTER API (MIT FIXED DATE) ==========
 async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
-    """Holt Candles über das Lighter SDK - MIT FESTEN TIMESTAMPS!"""
+    """Holt Candles über das Lighter SDK - MIT FIXED DATE!"""
     try:
         import lighter
         from lighter import CandlestickApi
         
         debug_log(f"📡 Hole Candles von Lighter API: market_id={market_id}, resolution={resolution}, count_back={count_back}")
         
-        # ===== FESTE TIMESTAMPS (1. Januar 2025) =====
-        # Dein Server hat 2026, deshalb nehmen wir feste Werte!
-        # 1. Januar 2025 00:00:00 UTC = 1735689600000 Millisekunden
-        end_timestamp = 1735689600000
+        # ===== FIXED DATE (15. Dezember 2024) =====
+        fixed_date = datetime(2024, 12, 15, 12, 0, 0)
+        end_timestamp = int(fixed_date.timestamp() * 1000)
         start_timestamp = end_timestamp - (count_back * 60 * 1000)
         
         debug_log(f"   start_timestamp={start_timestamp}, end_timestamp={end_timestamp}")
+        debug_log(f"   Datum: {fixed_date.strftime('%Y-%m-%d %H:%M:%S')}")
         
         # API Client erstellen
         client = lighter.ApiClient()
