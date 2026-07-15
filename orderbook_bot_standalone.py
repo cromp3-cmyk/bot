@@ -1,8 +1,6 @@
 """
 Autonomer EMA-Crossover-Bot für Lighter (zkLighter)
-================================================================================
-Einfacher Bot der auf EMA-Crossover handelt (kein Orderbuch, kein OBI)
-Kauft wenn EMA(9) über EMA(21) kreuzt, verkauft wenn EMA(9) unter EMA(21) kreuzt
+MIT KORREKTEN EMAs (wie TradingView)
 """
 
 import asyncio
@@ -92,32 +90,27 @@ def get_min_base_amount(symbol):
     }
     return min_amount_map.get(symbol, 0.001)
 
-# ========== EMA CALCULATOR ==========
+# ========== KORREKTER EMA CALCULATOR ==========
 class EMACalculator:
-    """Berechnet EMA aus Preisen"""
+    """Berechnet EMA GENAU WIE TRADINGVIEW"""
     def __init__(self, period):
         self.period = period
         self.prices = deque(maxlen=period * 2)
         self.ema = None
+        self.is_initialized = False
         
     def add_price(self, price):
         self.prices.append(price)
-        if len(self.prices) >= self.period:
-            self.calculate_ema()
-    
-    def calculate_ema(self):
-        if len(self.prices) < self.period:
-            return
         
-        prices_list = list(self.prices)[-self.period:]
-        multiplier = 2 / (self.period + 1)
-        ema = prices_list[0]
-        
-        for price in prices_list[1:]:
-            ema = (price - ema) * multiplier + ema
-        
-        self.ema = ema
-        return ema
+        if len(self.prices) == self.period:
+            # Erster EMA = SMA (einfacher Durchschnitt) - genau wie TradingView!
+            self.ema = sum(self.prices) / self.period
+            self.is_initialized = True
+            
+        elif len(self.prices) > self.period:
+            # EMA Formel (genau wie TradingView!)
+            multiplier = 2 / (self.period + 1)
+            self.ema = (price - self.ema) * multiplier + self.ema
 
 # ========== LIGHTER CLIENT ==========
 def get_lighter_client():
@@ -319,7 +312,7 @@ if SYMBOL not in MARKET_INDICES:
 
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-# EMA Parameter
+# EMA Parameter (wie TradingView!)
 EMA_FAST = int(os.getenv("EMA_FAST", "9"))
 EMA_SLOW = int(os.getenv("EMA_SLOW", "21"))
 
@@ -334,7 +327,7 @@ last_trade_price = None
 current_position_side = None
 last_trade_time = 0.0
 
-# ========== EMA INSTANZEN ==========
+# ========== KORREKTE EMA INSTANZEN ==========
 fast_ema = EMACalculator(EMA_FAST)
 slow_ema = EMACalculator(EMA_SLOW)
 
@@ -385,14 +378,14 @@ async def listen():
                     size = float(trade["size"])
                     last_trade_price = price
 
-                    # EMA updaten
+                    # EMA updaten (JETZT KORREKT!)
                     fast_ema.add_price(price)
                     slow_ema.add_price(price)
 
                     now = time.time()
 
-                    # EMA-Crossover prüfen
-                    if fast_ema.ema is not None and slow_ema.ema is not None:
+                    # EMA-Crossover prüfen (wenn beide initialisiert)
+                    if fast_ema.is_initialized and slow_ema.is_initialized:
                         fast = fast_ema.ema
                         slow = slow_ema.ema
 
@@ -400,33 +393,34 @@ async def listen():
                         if now - last_signal_time < SIGNAL_COOLDOWN:
                             continue
 
-                        # Signal erkennen
+                        # Signal erkennen (wie TradingView!)
                         if fast > slow and current_position_side != "buy":
-                            debug_log(f"📈 EMA Crossover UP: {fast:.3f} > {slow:.3f}")
+                            debug_log(f"📈 EMA Crossover UP: EMA{EMA_FAST} ({fast:.3f}) > EMA{EMA_SLOW} ({slow:.3f})")
                             await execute_signal("buy", price)
                             last_signal_time = now
                             
                         elif fast < slow and current_position_side != "sell":
-                            debug_log(f"📉 EMA Crossover DOWN: {fast:.3f} < {slow:.3f}")
+                            debug_log(f"📉 EMA Crossover DOWN: EMA{EMA_FAST} ({fast:.3f}) < EMA{EMA_SLOW} ({slow:.3f})")
                             await execute_signal("sell", price)
                             last_signal_time = now
 
                     # Status-Log
                     if now - last_status_log >= STATUS_LOG_INTERVAL:
                         last_status_log = now
-                        debug_log(f"📊 Status {SYMBOL} EMA", {
+                        debug_log(f"📊 Status {SYMBOL} EMA (TradingView Style)", {
                             "preis": price,
                             f"ema_{EMA_FAST}": round(fast_ema.ema, 3) if fast_ema.ema else None,
                             f"ema_{EMA_SLOW}": round(slow_ema.ema, 3) if slow_ema.ema else None,
                             "position": current_position_side or "flach",
-                            "datenpunkte": len(fast_ema.prices)
+                            "datenpunkte": len(fast_ema.prices),
+                            "initialized": fast_ema.is_initialized
                         })
 
 async def main():
     global current_position_side
 
     print("=" * 70)
-    print(f"🚀 EMA-Crossover-Bot für {SYMBOL}")
+    print(f"🚀 EMA-Crossover-Bot für {SYMBOL} (wie TradingView!)")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   EMA: {EMA_FAST}/{EMA_SLOW}")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
