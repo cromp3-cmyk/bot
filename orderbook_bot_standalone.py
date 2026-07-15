@@ -5,11 +5,7 @@ Läuft komplett unabhängig, ohne Abhängigkeit zu einem anderen Bot/Repo.
 Verbindet sich per WebSocket mit Lighter, berechnet Order Book Imbalance (OBI)
 und tradet autonom bei bestätigtem Signal.
 
-WICHTIG VOR DEM LIVE-BETRIEB:
-- Erst mit DRY_RUN=true laufen lassen und Logs beobachten
-- requirements.txt braucht: websockets, requests, und das Lighter SDK-Paket
-  (den exakten Paketnamen/Version bitte aus deinem alten Repo übernehmen,
-  z.B. "pip freeze | grep -i lighter" dort ausführen)
+10-Sekunden-Normalisierung: Der OBI wird über die letzten 10 Sekunden gemittelt.
 """
 
 import asyncio
@@ -53,56 +49,35 @@ MARKET_INDICES = {
     "PENGU": 47, "PAXG": 48, "EIGEN": 49, "ARB": 50,
     "XLM": 119, "SOL2": 2,
 }
-# Hinweis: Das ist nur ein Ausschnitt der vollen Liste aus deinem alten Bot.
-# Falls du mehr Coins brauchst, kopier die komplette MARKET_INDICES-Map
-# 1:1 aus deiner webhook_server.py hier rein (nur diese eine Variable).
+
 
 # ========== COIN-PARAMETER ==========
 def get_precision(symbol):
     precision_map = {
-        "BTC": 100000,
-        "ETH": 10000, "XAU": 10000, "TSLA": 10000, "MSFT": 10000,
-        "GOOGL": 10000, "META": 10000, "NVDA": 10000,
-        "SOL": 1000, "TAO": 1000, "AAVE": 1000, "LTC": 1000,
-        "BCH": 1000, "XMR": 1000, "ZEC": 1000, "USDJPY": 1000,
-        "AVAX": 100, "BNB": 100, "HYPE": 100, "TRUMP": 100,
-        "UNI": 100, "APT": 100, "PENDLE": 100, "GMX": 100,
-        "VVV": 100, "XAG": 100,
-        "LINK": 10, "NEAR": 10, "DOT": 10, "SUI": 10, "ADA": 10,
-        "ARB": 10, "OP": 10, "WIF": 10, "WLD": 10, "TON": 10,
-        "JUP": 10, "ENA": 10, "SEI": 10, "ONDO": 10, "CRV": 10,
-        "LDO": 10, "EIGEN": 10, "GRASS": 10, "ZRO": 10, "DYDX": 10,
-        "XLM": 10,
-        "DOGE": 1, "XRP": 1, "POL": 1, "1000PEPE": 1, "1000SHIB": 1,
-        "1000BONK": 1, "1000FLOKI": 1, "PUMP": 1, "PENGU": 1,
+        "BTC": 100000, "ETH": 10000, "SOL": 1000, "DOGE": 1,
+        "XRP": 1, "LINK": 10, "AVAX": 100, "NEAR": 10,
+        "DOT": 10, "BNB": 100, "SUI": 10, "ADA": 10,
+        "ARB": 10, "OP": 10, "XLM": 10,
     }
     return precision_map.get(symbol, 10000)
 
 
 def get_price_decimals(symbol):
     decimals_map = {
-        "BTC": 1, "XAU": 1,
-        "ETH": 2,
-        "SOL": 3, "LTC": 3, "BCH": 3, "XMR": 3, "ZEC": 3,
-        "AAVE": 3, "TAO": 3, "USDJPY": 3,
-        "AVAX": 3, "BNB": 4, "UNI": 4, "APT": 4, "PENDLE": 4,
-        "GMX": 4, "VVV": 4, "TRUMP": 4, "HYPE": 4,
-        "LINK": 5, "NEAR": 5, "DOT": 5, "SUI": 5, "ADA": 5,
-        "ARB": 5, "OP": 5, "WIF": 5, "WLD": 5, "TON": 5,
-        "JUP": 5, "ENA": 5, "SEI": 5, "ONDO": 5, "CRV": 5,
-        "XLM": 5,
-        "DOGE": 6, "XRP": 6, "POL": 6, "1000PEPE": 6, "1000SHIB": 6,
-        "1000BONK": 6, "1000FLOKI": 6, "ZK": 6, "XAG": 6,
+        "BTC": 1, "ETH": 2, "SOL": 3, "DOGE": 6,
+        "XRP": 6, "LINK": 5, "AVAX": 3, "NEAR": 5,
+        "DOT": 5, "BNB": 4, "SUI": 5, "ADA": 5,
+        "ARB": 5, "OP": 5, "XLM": 5,
     }
     return decimals_map.get(symbol, 2)
 
 
 def get_min_base_amount(symbol):
     min_amount_map = {
-        "BTC": 0.00020, "ETH": 0.005, "SOL": 0.05, "DOGE": 10, "XRP": 20,
-        "LINK": 1.0, "AVAX": 0.5, "NEAR": 2.0, "DOT": 2.0, "BNB": 0.02,
-        "HYPE": 0.50, "SUI": 3.0, "ADA": 10.0, "ARB": 20.0, "OP": 10.0,
-        "XLM": 30,
+        "BTC": 0.00020, "ETH": 0.005, "SOL": 0.05, "DOGE": 10,
+        "XRP": 20, "LINK": 1.0, "AVAX": 0.5, "NEAR": 2.0,
+        "DOT": 2.0, "BNB": 0.02, "SUI": 3.0, "ADA": 10.0,
+        "ARB": 20.0, "OP": 10.0, "XLM": 30,
     }
     return min_amount_map.get(symbol, 0.001)
 
@@ -153,7 +128,7 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
 
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
-    """Öffnet, reversed oder legt auf eine Position nach - eigenständige Version."""
+    """Öffnet, reversed oder legt auf eine Position nach."""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -188,7 +163,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
             existing_pos = OPEN_POSITIONS[symbol]
 
             if existing_pos["side"] == new_side:
-                # Nachkaufen auf bestehende Position (gleiche Richtung)
                 tx, tx_hash, err = await create_order_with_price(
                     client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
                 )
@@ -209,7 +183,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
                 return {"success": True, "action": "add_to_position", "side": new_side, "tx_hash": str(tx_hash)}
 
             else:
-                # Reverse: alte Position schließen, neue eröffnen
                 close_is_ask = existing_pos["side"] == "long"
                 tx1, tx_hash1, err1 = await create_order_with_price(
                     client, market_index, existing_pos["base_amount"], close_is_ask, symbol,
@@ -256,17 +229,7 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
 
 
 async def sync_open_position_from_exchange(symbol):
-    """
-    Fragt beim Start die tatsächlich offene Position auf Lighter ab, damit ein
-    Neustart des Workers nicht dazu führt, dass eine bestehende Position
-    "vergessen" wird und versehentlich verdoppelt/falsch reversed wird.
-
-    WICHTIG: Basiert auf der öffentlichen Lighter-API-Doku (AccountApi /
-    "positions"-Endpoint). Ich konnte das nicht live gegen einen echten
-    Account testen - bitte die zurückgegebenen Werte in den Logs beim
-    ersten Start GENAU gegen deine echte Position auf der Lighter-Weboberfläche
-    prüfen, bevor du dich auf DRY_RUN=false verlässt.
-    """
+    """Synchronisiert offene Positionen beim Start"""
     try:
         import lighter
         account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
@@ -308,7 +271,7 @@ async def sync_open_position_from_exchange(symbol):
         debug_log(f"Keine offene Position für {symbol} beim Start gefunden - starte flach")
 
     except Exception as e:
-        debug_log("⚠️ Positions-Sync fehlgeschlagen - starte mit leerem State (bitte manuell prüfen!)", {
+        debug_log("⚠️ Positions-Sync fehlgeschlagen - starte mit leerem State", {
             "error": str(e), "traceback": traceback.format_exc()
         })
 
@@ -316,22 +279,58 @@ async def sync_open_position_from_exchange(symbol):
 # ========== State für offene Positionen ==========
 OPEN_POSITIONS = {}
 
-# ========== Konfiguration (per Umgebungsvariable) ==========
-SYMBOL = os.getenv("OB_SYMBOL", "BTC")
+# ========== Konfiguration ==========
+SYMBOL = os.getenv("OB_SYMBOL", "SOL").upper()
 if SYMBOL not in MARKET_INDICES:
-    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES gefunden - Liste in dieser Datei ergänzen")
+    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES gefunden")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-OBI_LEVELS = int(os.getenv("OBI_LEVELS", "25"))
-OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.30"))
-OBI_CONFIRM_SECONDS = float(os.getenv("OBI_CONFIRM_SECONDS", "15"))
-COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "30"))
-MIN_HOLD_SECONDS = float(os.getenv("MIN_HOLD_SECONDS", "120"))
+OBI_LEVELS = int(os.getenv("OBI_LEVELS", "15"))
+OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.12"))
+OBI_CONFIRM_SECONDS = float(os.getenv("OBI_CONFIRM_SECONDS", "5"))
+COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "15"))
+MIN_HOLD_SECONDS = float(os.getenv("MIN_HOLD_SECONDS", "30"))
 
-MARGIN = float(os.getenv("OB_MARGIN", "100"))
-LEVERAGE = int(os.getenv("OB_LEVERAGE", "10"))
+MARGIN = float(os.getenv("OB_MARGIN", "10"))
+LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+
+# ========== 10-Sekunden-Normalisierung ==========
+class OBINormalizer:
+    """Normalisiert OBI über ein Zeitfenster (10 Sekunden)"""
+    def __init__(self, window_seconds=10):
+        self.window_seconds = window_seconds
+        self.buffer = deque()  # (timestamp, obi_value)
+        self.normalized_obi = 0.0
+        
+    def add(self, raw_obi):
+        """Fügt einen Roh-OBI-Wert hinzu und berechnet den normalisierten Wert"""
+        now = time.time()
+        self.buffer.append((now, raw_obi))
+        
+        # Alte Werte entfernen (älter als window_seconds)
+        cutoff = now - self.window_seconds
+        while self.buffer and self.buffer[0][0] < cutoff:
+            self.buffer.popleft()
+        
+        # Mittelwert über alle Werte im Fenster
+        if self.buffer:
+            total = sum(v for _, v in self.buffer)
+            self.normalized_obi = total / len(self.buffer)
+        else:
+            self.normalized_obi = 0.0
+        
+        return self.normalized_obi
+    
+    def get(self):
+        """Gibt den aktuellen normalisierten OBI zurück"""
+        return self.normalized_obi
+    
+    def get_raw_count(self):
+        """Anzahl der Roh-Werte im Buffer"""
+        return len(self.buffer)
+
 
 # ========== Lokaler Orderbuch-State ==========
 order_book = {"bids": {}, "asks": {}}
@@ -339,10 +338,12 @@ last_trade_price = None
 current_position_side = None
 position_opened_at = 0.0
 last_trade_time = 0.0
-obi_history = deque(maxlen=20)  # nur fuer die Status-Anzeige, nicht mehr fuer die Signal-Logik
 
-# Zeit-basierte Bestätigung: wie lange hält der OBI schon durchgehend die Richtung
-lean_direction = None      # "buy" / "sell" / None
+# 10-Sekunden-Normalisierer
+obi_normalizer = OBINormalizer(window_seconds=10)
+
+# Zeit-basierte Bestätigung
+lean_direction = None
 lean_since = 0.0
 
 
@@ -358,7 +359,8 @@ def apply_order_book_update(msg):
                 book[price] = size
 
 
-def calc_obi(levels=OBI_LEVELS):
+def calc_raw_obi(levels=OBI_LEVELS):
+    """Berechnet den Roh-OBI (ohne Normalisierung)"""
     bids_sorted = sorted(order_book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
     asks_sorted = sorted(order_book["asks"].items(), key=lambda x: float(x[0]))[:levels]
     bid_vol = sum(v for _, v in bids_sorted)
@@ -383,6 +385,7 @@ async def execute_signal(direction, price):
         return
 
     debug_log(f"📡 OBI-Signal bestätigt: {direction.upper()} {SYMBOL} @ {price}", {
+        "normalisierter_OBI": round(obi_normalizer.get(), 3),
         "bestaetigt_seit_sekunden": round(now - lean_since, 1) if lean_since else None,
     })
 
@@ -402,73 +405,64 @@ async def execute_signal(direction, price):
 
 
 async def listen():
-    global last_trade_price
+    global last_trade_price, lean_direction, lean_since
 
     last_status_log = 0.0
-    STATUS_LOG_INTERVAL = 10  # Sekunden
-    raw_debug_count = 0
-    RAW_DEBUG_LIMIT = 15  # so viele Rohnachrichten am Anfang komplett loggen
+    STATUS_LOG_INTERVAL = 10
 
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
         await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDEX}"}))
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
 
         debug_log(f"✅ Verbunden, abonniert order_book:{MARKET_INDEX} und trade:{MARKET_INDEX}")
+        debug_log(f"📊 10-Sekunden-Normalisierung aktiv | Schwelle: {OBI_THRESHOLD}")
 
         async for raw in ws:
             msg = json.loads(raw)
             channel = msg.get("channel", "")
-            msg_type = msg.get("type", "")
-
-            # ==== TEMPORÄR: erste Rohnachrichten komplett loggen zum Debuggen ====
-            if raw_debug_count < RAW_DEBUG_LIMIT:
-                raw_debug_count += 1
-                debug_log(f"🔎 RAW Nachricht #{raw_debug_count}", {
-                    "type": msg_type,
-                    "channel": channel,
-                    "keys": list(msg.keys()),
-                    "raw_gekuerzt": raw[:500],
-                })
 
             if channel.startswith("order_book"):
                 apply_order_book_update(msg)
-                obi = calc_obi()
-                obi_history.append(obi)
-
-                # ==== Zeit-basierte Bestätigung: OBI muss durchgehend über der Schwelle bleiben ====
-                global lean_direction, lean_since
+                
+                # Roh-OBI berechnen und normalisieren
+                raw_obi = calc_raw_obi()
+                normalized_obi = obi_normalizer.add(raw_obi)
+                
                 now = time.time()
 
-                if obi >= OBI_THRESHOLD:
+                # ===== Signal mit normalisiertem OBI =====
+                if normalized_obi >= OBI_THRESHOLD:
                     current_lean = "buy"
-                elif obi <= -OBI_THRESHOLD:
+                elif normalized_obi <= -OBI_THRESHOLD:
                     current_lean = "sell"
                 else:
                     current_lean = None
 
                 if current_lean != lean_direction:
-                    # Richtung hat sich geändert (oder ist ins Neutrale gefallen) -> Timer neu starten
                     lean_direction = current_lean
                     lean_since = now if current_lean is not None else 0.0
                 elif current_lean is not None and (now - lean_since) >= OBI_CONFIRM_SECONDS and last_trade_price is not None:
                     await execute_signal(current_lean, last_trade_price)
 
-                # ==== Regelmäßiges Status-Log, auch wenn kein Signal feuert ====
+                # ===== Status-Log =====
                 if now - last_status_log >= STATUS_LOG_INTERVAL:
                     last_status_log = now
-                    if obi > 0.05:
-                        richtung = "Käufer dominieren leicht" if obi < OBI_THRESHOLD else "Käufer dominieren STARK"
-                    elif obi < -0.05:
-                        richtung = "Verkäufer dominieren leicht" if obi > -OBI_THRESHOLD else "Verkäufer dominieren STARK"
+                    
+                    if normalized_obi > 0.05:
+                        richtung = "Käufer dominieren leicht" if normalized_obi < OBI_THRESHOLD else "Käufer dominieren STARK"
+                    elif normalized_obi < -0.05:
+                        richtung = "Verkäufer dominieren leicht" if normalized_obi > -OBI_THRESHOLD else "Verkäufer dominieren STARK"
                     else:
                         richtung = "ausgeglichen"
 
-                    debug_log(f"📊 Status {SYMBOL}", {
-                        "aktueller_OBI": round(obi, 3),
+                    debug_log(f"📊 Status {SYMBOL} (10s-normalisiert)", {
+                        "roh_OBI": round(raw_obi, 3),
+                        "normalisierter_OBI": round(normalized_obi, 3),
                         "richtung": richtung,
                         "schwelle": OBI_THRESHOLD,
+                        "buffer_groesse": obi_normalizer.get_raw_count(),
                         "letzter_preis": last_trade_price,
-                        "bot_position": current_position_side or "flach (keine Position)",
+                        "bot_position": current_position_side or "flach",
                         "lean_haelt_seit_sekunden": round(now - lean_since, 1) if lean_direction else 0,
                         "braucht_sekunden_fuer_signal": OBI_CONFIRM_SECONDS,
                     })
@@ -483,9 +477,10 @@ async def main():
     global current_position_side
 
     print("=" * 60)
-    print(f"🚀 Orderbuch-Bot gestartet für {SYMBOL} (Market Index {MARKET_INDEX})")
+    print(f"🚀 Orderbuch-Bot mit 10-Sekunden-Normalisierung für {SYMBOL}")
     print(f"   DRY_RUN: {DRY_RUN}")
-    print(f"   OBI Levels: {OBI_LEVELS} | Schwelle: {OBI_THRESHOLD} | Bestätigung: {OBI_CONFIRM_SECONDS}s | Min. Haltedauer: {MIN_HOLD_SECONDS}s")
+    print(f"   OBI Levels: {OBI_LEVELS} | Schwelle: {OBI_THRESHOLD}")
+    print(f"   Bestätigung: {OBI_CONFIRM_SECONDS}s | Min. Haltedauer: {MIN_HOLD_SECONDS}s")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x | Cooldown: {COOLDOWN_SECONDS}s")
     print("=" * 60)
 
