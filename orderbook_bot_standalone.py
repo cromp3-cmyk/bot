@@ -1,10 +1,8 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter - FINAL
+EMA-Crossover-Bot für Lighter
 ================================================================================
-NUR OBI mit Normalisierung (einstellbar)
-Handelt NUR bei Signalwechsel: SELL→Short, BUY→Long
-Wenn schon Short, bleibt Short bis BUY kommt
-Wenn schon Long, bleibt Long bis SELL kommt
+Einfacher Bot der auf EMA-Crossover handelt (7/21)
+Kein Orderbuch, kein OBI – nur Preis!
 """
 
 import asyncio
@@ -110,7 +108,6 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
     return tx, tx_hash, err
 
 async def get_current_position(symbol):
-    """Holt die aktuelle Position vom Exchange"""
     try:
         import lighter
         account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
@@ -148,7 +145,6 @@ async def get_current_position(symbol):
         return None
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
-    """Öffnet oder reversed eine Position - NUR BEI SIGNALWECHSEL!"""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -158,7 +154,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         precision = get_precision(symbol)
         min_base_amount = get_min_base_amount(symbol)
 
-        # ===== 1. NEUE POSITIONSGRÖSSE BERECHNEN =====
         position_usdc = margin * leverage
         coin_amount = position_usdc / current_price
         base_amount = int(coin_amount * precision)
@@ -173,19 +168,20 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         new_side = "long" if action == "buy" else "short"
         new_is_ask = action != "buy"
 
-        # ===== 2. BESTEHENDE POSITION ABFRAGEN =====
+        try:
+            await client.update_leverage(market_index=market_index, leverage=leverage, margin_mode=0)
+        except Exception as e:
+            debug_log("Hebel setzen fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(1)
+
         current_pos = await get_current_position(symbol)
 
-        # ===== 3. WENN POSITION EXISTIERT → Prüfen! =====
         if current_pos:
-            debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']}")
-
-            # ==== GLEICHE RICHTUNG → NICHTS TUN! ====
             if current_pos["side"] == new_side:
-                debug_log(f"⏭️ Bereits {new_side}, ignoriere Signal!")
+                debug_log(f"⏭️ Bereits {new_side}, ignoriere")
                 return {"success": True, "action": "ignoriert", "side": new_side}
 
-            # ==== ANDERE RICHTUNG → Position schließen + neue öffnen ====
             debug_log(f"🔄 Wechsel von {current_pos['side']} zu {new_side}")
 
             close_is_ask = current_pos["side"] == "long"
@@ -208,7 +204,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
             debug_log(f"✅ {new_side} eröffnet")
             return {"success": True, "action": "reverse", "to_side": new_side, "tx_hash": str(tx_hash2)}
 
-        # ===== 4. KEINE POSITION → Neu eröffnen =====
         else:
             debug_log(f"🆕 Keine Position, eröffne {new_side}")
             tx, tx_hash, err = await create_order_with_price(
@@ -226,73 +221,44 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
     finally:
         await client.close()
 
+# ========== EMA CALCULATOR (wie TradingView) ==========
+class EMACalculator:
+    def __init__(self, period):
+        self.period = period
+        self.prices = deque(maxlen=period * 2)
+        self.ema = None
+        self.is_initialized = False
+
+    def add_price(self, price):
+        self.prices.append(price)
+        if len(self.prices) == self.period:
+            self.ema = sum(self.prices) / self.period
+            self.is_initialized = True
+        elif len(self.prices) > self.period:
+            multiplier = 2 / (self.period + 1)
+            self.ema = (price - self.ema) * multiplier + self.ema
+
 # ========== KONFIGURATION ==========
 SYMBOL = os.getenv("OB_SYMBOL", "SOL").upper()
 if SYMBOL not in MARKET_INDICES:
     raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES gefunden")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-OBI_LEVELS = int(os.getenv("OBI_LEVELS", "15"))
-OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.12"))
-NORMALIZE_SECONDS = float(os.getenv("NORMALIZE_SECONDS", "10"))
+# EMA Parameter (wie TradingView)
+EMA_FAST = int(os.getenv("EMA_FAST", "7"))
+EMA_SLOW = int(os.getenv("EMA_SLOW", "21"))
 
+# Trading Parameter
 MARGIN = float(os.getenv("OB_MARGIN", "10"))
 LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-# ========== NORMALISIERUNG ==========
-class OBINormalizer:
-    def __init__(self, window_seconds=10):
-        self.window_seconds = window_seconds
-        self.buffer = deque()
-        self.normalized_obi = 0.0
-
-    def add(self, raw_obi):
-        now = time.time()
-        self.buffer.append((now, raw_obi))
-        cutoff = now - self.window_seconds
-        while self.buffer and self.buffer[0][0] < cutoff:
-            self.buffer.popleft()
-
-        if self.buffer:
-            total = sum(v for _, v in self.buffer)
-            self.normalized_obi = total / len(self.buffer)
-        else:
-            self.normalized_obi = 0.0
-        return self.normalized_obi
-
-    def get(self):
-        return self.normalized_obi
-
-    def get_raw_count(self):
-        return len(self.buffer)
-
 # ========== LOKALER STATE ==========
-order_book = {"bids": {}, "asks": {}}
 last_trade_price = None
 current_position_side = None
-obi_normalizer = OBINormalizer(window_seconds=NORMALIZE_SECONDS)
-current_lean = None
-last_signal = None  # Letztes ausgeführtes Signal
-
-def apply_order_book_update(msg):
-    ob = msg.get("order_book", {})
-    for side_key, book in (("bids", order_book["bids"]), ("asks", order_book["asks"])):
-        for level in ob.get(side_key, []):
-            price = level["price"]
-            size = float(level["size"])
-            if size == 0:
-                book.pop(price, None)
-            else:
-                book[price] = size
-
-def calc_raw_obi(levels=OBI_LEVELS):
-    bids_sorted = sorted(order_book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
-    asks_sorted = sorted(order_book["asks"].items(), key=lambda x: float(x[0]))[:levels]
-    bid_vol = sum(v for _, v in bids_sorted)
-    ask_vol = sum(v for _, v in asks_sorted)
-    total = bid_vol + ask_vol
-    return 0.0 if total == 0 else (bid_vol - ask_vol) / total
+fast_ema = EMACalculator(EMA_FAST)
+slow_ema = EMACalculator(EMA_SLOW)
+last_signal = None
 
 async def execute_signal(direction, price):
     global current_position_side, last_signal
@@ -318,83 +284,65 @@ async def execute_signal(direction, price):
             current_position_side = result.get("side")
 
 async def listen():
-    global last_trade_price, current_lean, last_signal
+    global last_trade_price, last_signal
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
 
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
-        await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDEX}"}))
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
 
-        debug_log(f"✅ Verbunden | SELL→Short, BUY→Long")
-        debug_log(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-        debug_log(f"   ⚠️ NUR bei Signalwechsel handeln!")
+        debug_log(f"✅ Verbunden | EMA: {EMA_FAST}/{EMA_SLOW}")
+        debug_log(f"   Kauft wenn EMA{EMA_FAST} > EMA{EMA_SLOW}")
+        debug_log(f"   Verkauft wenn EMA{EMA_FAST} < EMA{EMA_SLOW}")
 
         async for raw in ws:
             msg = json.loads(raw)
             channel = msg.get("channel", "")
 
-            if channel.startswith("order_book"):
-                apply_order_book_update(msg)
-                raw_obi = calc_raw_obi()
-                normalized_obi = obi_normalizer.add(raw_obi)
-                now = time.time()
-
-                # ===== SIGNAL ERKENNEN =====
-                if normalized_obi >= OBI_THRESHOLD:
-                    new_lean = "buy"
-                elif normalized_obi <= -OBI_THRESHOLD:
-                    new_lean = "sell"
-                else:
-                    new_lean = None
-
-                # ===== NUR BEI SIGNALWECHSEL HANDELN! =====
-                if new_lean is not None:
-                    if last_signal != new_lean and last_trade_price is not None:
-                        await execute_signal(new_lean, last_trade_price)
-                    current_lean = new_lean
-                else:
-                    current_lean = None
-                    # last_signal bleibt erhalten! (Wichtig für Signalwechsel-Erkennung)
-
-                # ===== STATUS-LOG =====
-                if now - last_status_log >= STATUS_LOG_INTERVAL:
-                    last_status_log = now
-
-                    if normalized_obi > 0.05:
-                        richtung = "Käufer dominieren" if normalized_obi < OBI_THRESHOLD else "Käufer STARK"
-                    elif normalized_obi < -0.05:
-                        richtung = "Verkäufer dominieren" if normalized_obi > -OBI_THRESHOLD else "Verkäufer STARK"
-                    else:
-                        richtung = "ausgeglichen"
-
-                    debug_log(f"📊 Status {SYMBOL}", {
-                        "normalisierung": f"{NORMALIZE_SECONDS}s",
-                        "roh_OBI": round(raw_obi, 3),
-                        "normalisiert": round(normalized_obi, 3),
-                        "richtung": richtung,
-                        "schwelle": OBI_THRESHOLD,
-                        "buffer": obi_normalizer.get_raw_count(),
-                        "preis": last_trade_price,
-                        "position": current_position_side or "flach",
-                        "letztes_signal": last_signal or "keins",
-                        "lean": current_lean or "neutral",
-                    })
-
-            elif channel.startswith("trade"):
+            if channel.startswith("trade"):
                 trades = msg.get("trades", [])
-                if trades:
-                    last_trade_price = float(trades[-1]["price"])
+                if not trades:
+                    continue
+
+                for trade in trades:
+                    price = float(trade["price"])
+                    last_trade_price = price
+
+                    # EMAs updaten
+                    fast_ema.add_price(price)
+                    slow_ema.add_price(price)
+
+                    now = time.time()
+
+                    # ===== CROSSOVER PRÜFEN =====
+                    if fast_ema.is_initialized and slow_ema.is_initialized:
+                        if fast_ema.ema > slow_ema.ema and last_signal != "buy":
+                            debug_log(f"📈 CROSSOVER UP: EMA{EMA_FAST} ({fast_ema.ema:.3f}) > EMA{EMA_SLOW} ({slow_ema.ema:.3f})")
+                            await execute_signal("buy", price)
+                        elif fast_ema.ema < slow_ema.ema and last_signal != "sell":
+                            debug_log(f"📉 CROSSOVER DOWN: EMA{EMA_FAST} ({fast_ema.ema:.3f}) < EMA{EMA_SLOW} ({slow_ema.ema:.3f})")
+                            await execute_signal("sell", price)
+
+                    # ===== STATUS-LOG =====
+                    if now - last_status_log >= STATUS_LOG_INTERVAL:
+                        last_status_log = now
+                        debug_log(f"📊 Status {SYMBOL}", {
+                            "preis": price,
+                            f"ema_{EMA_FAST}": round(fast_ema.ema, 3) if fast_ema.ema else None,
+                            f"ema_{EMA_SLOW}": round(slow_ema.ema, 3) if slow_ema.ema else None,
+                            "position": current_position_side or "flach",
+                            "letztes_signal": last_signal or "keins",
+                        })
 
 async def main():
     global current_position_side, last_signal
 
     print("=" * 60)
-    print(f"🚀 OBI-Bot für {SYMBOL}")
-    print(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-    print(f"   SELL→Short | BUY→Long")
-    print(f"   ⚠️ NUR bei Signalwechsel handeln!")
+    print(f"🚀 EMA-Crossover-Bot für {SYMBOL}")
+    print(f"   EMA: {EMA_FAST}/{EMA_SLOW}")
+    print(f"   Kauft wenn EMA{EMA_FAST} > EMA{EMA_SLOW}")
+    print(f"   Verkauft wenn EMA{EMA_FAST} < EMA{EMA_SLOW}")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
