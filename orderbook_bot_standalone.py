@@ -368,21 +368,28 @@ def calc_obi(levels=OBI_LEVELS):
 
 
 async def execute_signal(direction, price):
-    global current_position_side, last_trade_time
+    global current_position_side, last_trade_time, position_opened_at
 
     now = time.time()
     if now - last_trade_time < COOLDOWN_SECONDS:
         return
     if current_position_side == direction:
         return
+    if current_position_side is not None and (now - position_opened_at) < MIN_HOLD_SECONDS:
+        debug_log(f"⏳ Reverse blockiert - Mindesthaltedauer noch nicht erreicht", {
+            "aktuelle_position_seit_sekunden": round(now - position_opened_at, 1),
+            "min_hold_seconds": MIN_HOLD_SECONDS,
+        })
+        return
 
-    debug_log(f"📡 OBI-Signal: {direction.upper()} {SYMBOL} @ {price}", {
-        "obi_history": list(obi_history)
+    debug_log(f"📡 OBI-Signal bestätigt: {direction.upper()} {SYMBOL} @ {price}", {
+        "bestaetigt_seit_sekunden": round(now - lean_since, 1) if lean_since else None,
     })
 
     if DRY_RUN:
         debug_log("🧪 DRY_RUN aktiv - keine echte Order ausgeführt")
         current_position_side = direction
+        position_opened_at = now
         last_trade_time = now
         return
 
@@ -390,6 +397,7 @@ async def execute_signal(direction, price):
     debug_log("Order-Ergebnis", result)
 
     current_position_side = direction
+    position_opened_at = now
     last_trade_time = now
 
 
@@ -427,31 +435,43 @@ async def listen():
                 obi = calc_obi()
                 obi_history.append(obi)
 
-                # ==== Regelmäßiges Status-Log, auch wenn kein Signal feuert ====
+                # ==== Zeit-basierte Bestätigung: OBI muss durchgehend über der Schwelle bleiben ====
+                global lean_direction, lean_since
                 now = time.time()
+
+                if obi >= OBI_THRESHOLD:
+                    current_lean = "buy"
+                elif obi <= -OBI_THRESHOLD:
+                    current_lean = "sell"
+                else:
+                    current_lean = None
+
+                if current_lean != lean_direction:
+                    # Richtung hat sich geändert (oder ist ins Neutrale gefallen) -> Timer neu starten
+                    lean_direction = current_lean
+                    lean_since = now if current_lean is not None else 0.0
+                elif current_lean is not None and (now - lean_since) >= OBI_CONFIRM_SECONDS and last_trade_price is not None:
+                    await execute_signal(current_lean, last_trade_price)
+
+                # ==== Regelmäßiges Status-Log, auch wenn kein Signal feuert ====
                 if now - last_status_log >= STATUS_LOG_INTERVAL:
                     last_status_log = now
                     if obi > 0.05:
-                        lean = "Käufer dominieren leicht" if obi < OBI_THRESHOLD else "Käufer dominieren STARK"
+                        richtung = "Käufer dominieren leicht" if obi < OBI_THRESHOLD else "Käufer dominieren STARK"
                     elif obi < -0.05:
-                        lean = "Verkäufer dominieren leicht" if obi > -OBI_THRESHOLD else "Verkäufer dominieren STARK"
+                        richtung = "Verkäufer dominieren leicht" if obi > -OBI_THRESHOLD else "Verkäufer dominieren STARK"
                     else:
-                        lean = "ausgeglichen"
+                        richtung = "ausgeglichen"
 
                     debug_log(f"📊 Status {SYMBOL}", {
                         "aktueller_OBI": round(obi, 3),
-                        "richtung": lean,
+                        "richtung": richtung,
                         "schwelle": OBI_THRESHOLD,
                         "letzter_preis": last_trade_price,
                         "bot_position": current_position_side or "flach (keine Position)",
-                        "obi_verlauf_letzte_ticks": [round(v, 3) for v in obi_history],
+                        "lean_haelt_seit_sekunden": round(now - lean_since, 1) if lean_direction else 0,
+                        "braucht_sekunden_fuer_signal": OBI_CONFIRM_SECONDS,
                     })
-
-                if len(obi_history) == OBI_CONFIRM_TICKS and last_trade_price is not None:
-                    if all(v >= OBI_THRESHOLD for v in obi_history):
-                        await execute_signal("buy", last_trade_price)
-                    elif all(v <= -OBI_THRESHOLD for v in obi_history):
-                        await execute_signal("sell", last_trade_price)
 
             elif channel.startswith("trade"):
                 trades = msg.get("trades", [])
