@@ -396,8 +396,8 @@ async def listen():
     RAW_DEBUG_LIMIT = 15  # so viele Rohnachrichten am Anfang komplett loggen
 
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
-        await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book:{MARKET_INDEX}"}))
-        await ws.send(json.dumps({"type": "subscribe", "channel": f"trade:{MARKET_INDEX}"}))
+        await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDEX}"}))
+        await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
 
         debug_log(f"✅ Verbunden, abonniert order_book:{MARKET_INDEX} und trade:{MARKET_INDEX}")
 
