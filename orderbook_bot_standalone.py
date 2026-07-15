@@ -390,6 +390,9 @@ async def execute_signal(direction, price):
 async def listen():
     global last_trade_price
 
+    last_status_log = 0.0
+    STATUS_LOG_INTERVAL = 10  # Sekunden
+
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
         await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book:{MARKET_INDEX}"}))
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade:{MARKET_INDEX}"}))
@@ -404,6 +407,26 @@ async def listen():
                 apply_order_book_update(msg)
                 obi = calc_obi()
                 obi_history.append(obi)
+
+                # ==== Regelmäßiges Status-Log, auch wenn kein Signal feuert ====
+                now = time.time()
+                if now - last_status_log >= STATUS_LOG_INTERVAL:
+                    last_status_log = now
+                    if obi > 0.05:
+                        lean = "Käufer dominieren leicht" if obi < OBI_THRESHOLD else "Käufer dominieren STARK"
+                    elif obi < -0.05:
+                        lean = "Verkäufer dominieren leicht" if obi > -OBI_THRESHOLD else "Verkäufer dominieren STARK"
+                    else:
+                        lean = "ausgeglichen"
+
+                    debug_log(f"📊 Status {SYMBOL}", {
+                        "aktueller_OBI": round(obi, 3),
+                        "richtung": lean,
+                        "schwelle": OBI_THRESHOLD,
+                        "letzter_preis": last_trade_price,
+                        "bot_position": current_position_side or "flach (keine Position)",
+                        "obi_verlauf_letzte_ticks": [round(v, 3) for v in obi_history],
+                    })
 
                 if len(obi_history) == OBI_CONFIRM_TICKS and last_trade_price is not None:
                     if all(v >= OBI_THRESHOLD for v in obi_history):
