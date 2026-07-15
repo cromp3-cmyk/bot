@@ -1,8 +1,8 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL (FIXED)
+Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL (MIT CACHE)
 ================================================================================
 KEIN unkontrolliertes Nachkaufen mehr!
-Alle Positionen werden zusammengefasst.
+Position wird gecached, damit der Bot weiß dass er schon eine Position hat.
 """
 
 import asyncio
@@ -107,8 +107,25 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
     )
     return tx, tx_hash, err
 
-async def get_current_position_from_exchange(symbol):
-    """Holt die aktuelle Position vom Exchange und fasst sie zusammen!"""
+# ===== POSITIONS-CACHE =====
+position_cache = {
+    "side": None,
+    "timestamp": 0,
+    "size": 0
+}
+CACHE_DURATION = 2.0  # 2 Sekunden gültig
+
+async def get_current_position_from_exchange(symbol, force_refresh=False):
+    """Holt die aktuelle Position vom Exchange (mit Cache)"""
+    global position_cache
+    
+    now = time.time()
+    
+    # Cache verwenden wenn noch gültig
+    if not force_refresh and position_cache["side"] is not None and (now - position_cache["timestamp"]) < CACHE_DURATION:
+        debug_log(f"📦 Cache verwendet: {position_cache['side']}")
+        return position_cache
+    
     try:
         import lighter
         account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
@@ -123,7 +140,6 @@ async def get_current_position_from_exchange(symbol):
         positions = getattr(accounts[0], "positions", []) or []
         market_index = MARKET_INDICES[symbol]
 
-        # ===== ALLE POSITIONEN FÜR DIESEN MARKT ZUSAMMENFASSEN =====
         total_size = 0.0
         total_base = 0
         weighted_price = 0.0
@@ -143,26 +159,35 @@ async def get_current_position_from_exchange(symbol):
             weighted_price += price * abs(size)
 
         if total_size == 0:
+            position_cache = {"side": None, "timestamp": now, "size": 0}
             return None
 
         side = "long" if total_size > 0 else "short"
         avg_price = weighted_price / abs(total_size)
 
-        debug_log(f"📊 Position zusammengefasst: {side} {abs(total_size)} SOL @ {avg_price:.3f}")
-
-        return {
+        result = {
             "side": side,
             "size": abs(total_size),
             "base_amount": total_base,
             "open_price": avg_price
         }
+        
+        # Cache aktualisieren
+        position_cache = {
+            "side": side,
+            "timestamp": now,
+            "size": abs(total_size)
+        }
+        
+        debug_log(f"📊 Position vom Exchange: {side} {abs(total_size)} SOL @ {avg_price:.3f}")
+        return result
 
     except Exception as e:
         debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
         return None
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
-    """Öffnet oder reversed eine Position - KEIN unkontrolliertes Nachkaufen!"""
+    """Öffnet oder reversed eine Position - MIT CACHE!"""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -172,7 +197,7 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         precision = get_precision(symbol)
         min_base_amount = get_min_base_amount(symbol)
 
-        # ===== 1. BESTEHENDE POSITION VOM EXCHANGE HOLEN (ZUSAMMENGEFASST!) =====
+        # ===== 1. BESTEHENDE POSITION VOM EXCHANGE HOLEN (MIT CACHE) =====
         current_pos = await get_current_position_from_exchange(symbol)
 
         # ===== 2. NEUE POSITIONSGRÖSSE BERECHNEN =====
@@ -194,7 +219,7 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         if current_pos:
             debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']} (Größe: {current_pos['size']} SOL)")
 
-            # ==== GLEICHE RICHTUNG → NICHTS TUN! (Verhindert unkontrolliertes Nachkaufen!) ====
+            # ==== GLEICHE RICHTUNG → NICHTS TUN! ====
             if current_pos["side"] == new_side:
                 debug_log(f"⏭️ Bereits {new_side}, ignoriere Signal! (Kein Nachkauf)")
                 return {"success": True, "action": "ignoriert", "side": new_side}
@@ -202,7 +227,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
             # ==== ANDERE RICHTUNG → Position schließen + neue öffnen ====
             debug_log(f"🔄 Wechsel von {current_pos['side']} zu {new_side}")
 
-            # Alte Position schließen
             close_is_ask = current_pos["side"] == "long"
             tx1, tx_hash1, err1 = await create_order_with_price(
                 client, market_index, current_pos["base_amount"], close_is_ask, symbol,
@@ -214,7 +238,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
             debug_log(f"✅ {current_pos['side']} geschlossen")
             await asyncio.sleep(1)
 
-            # Neue Position öffnen
             tx2, tx_hash2, err2 = await create_order_with_price(
                 client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
             )
@@ -222,6 +245,11 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
                 return {"error": f"Open fehlgeschlagen: {err2}"}
 
             debug_log(f"✅ {new_side} eröffnet")
+            
+            # Cache zurücksetzen (nach erfolgreichem Wechsel)
+            global position_cache
+            position_cache = {"side": new_side, "timestamp": time.time(), "size": base_amount / precision}
+            
             return {"success": True, "action": "reverse", "to_side": new_side, "tx_hash": str(tx_hash2)}
 
         # ===== 4. KEINE POSITION → Neu eröffnen =====
@@ -234,6 +262,10 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
                 return {"error": str(err)}
 
             debug_log(f"✅ {new_side} eröffnet")
+            
+            # Cache setzen
+            position_cache = {"side": new_side, "timestamp": time.time(), "size": base_amount / precision}
+            
             return {"success": True, "action": "open", "side": new_side, "tx_hash": str(tx_hash)}
 
     except Exception as e:
@@ -352,7 +384,7 @@ async def listen():
 
         debug_log(f"✅ Verbunden | NORMAL: SELL→Short, BUY→Long")
         debug_log(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-        debug_log(f"   ⚠️ KEIN unkontrolliertes Nachkaufen!")
+        debug_log(f"   ⚠️ KEIN unkontrolliertes Nachkaufen! (Cache aktiv)")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -416,7 +448,7 @@ async def main():
     print(f"   SELL → Short | BUY → Long")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-    print(f"   ⚠️ KEIN unkontrolliertes Nachkaufen!")
+    print(f"   ⚠️ KEIN unkontrolliertes Nachkaufen! (Cache aktiv)")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
