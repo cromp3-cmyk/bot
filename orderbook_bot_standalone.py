@@ -1,8 +1,10 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL (MIT CACHE FIX)
+Autonomer Orderbuch-Signal-Bot für Lighter - EINFACHER SIGNAL-FOLLOWER
 ================================================================================
-KEIN unkontrolliertes Nachkaufen mehr!
-Cache wird sofort nach dem Öffnen einer Position gesetzt.
+MERKT SICH DAS LETZTE SIGNAL:
+- SELL → Short (bleibt bis BUY kommt)
+- BUY → Long (bleibt bis SELL kommt)
+KEIN Cache, KEINE Positionsprüfung, KEIN Nachkaufen!
 """
 
 import asyncio
@@ -107,89 +109,8 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
     )
     return tx, tx_hash, err
 
-# ===== POSITIONS-CACHE =====
-position_cache = {
-    "side": None,
-    "timestamp": 0,
-    "size": 0
-}
-CACHE_DURATION = 2.0  # 2 Sekunden gültig
-
-async def get_current_position_from_exchange(symbol, force_refresh=False):
-    """Holt die aktuelle Position vom Exchange (mit Cache)"""
-    global position_cache
-    
-    now = time.time()
-    
-    # Cache verwenden wenn noch gültig
-    if not force_refresh and position_cache["side"] is not None and (now - position_cache["timestamp"]) < CACHE_DURATION:
-        debug_log(f"📦 Cache verwendet: {position_cache['side']}")
-        return position_cache
-    
-    try:
-        import lighter
-        account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
-        api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
-        account_api = lighter.AccountApi(api_client)
-
-        response = await account_api.account(by="index", value=str(account_index))
-        accounts = getattr(response, "accounts", None) or []
-        if not accounts:
-            return None
-
-        positions = getattr(accounts[0], "positions", []) or []
-        market_index = MARKET_INDICES[symbol]
-
-        total_size = 0.0
-        total_base = 0
-        weighted_price = 0.0
-
-        for pos in positions:
-            if getattr(pos, "market_index", None) != market_index:
-                continue
-            size = float(getattr(pos, "position", 0) or 0)
-            if size == 0:
-                continue
-
-            price = float(getattr(pos, "avg_entry_price", 0) or 0)
-            base = int(abs(size) * get_precision(symbol))
-
-            total_size += size
-            total_base += base
-            weighted_price += price * abs(size)
-
-        if total_size == 0:
-            position_cache = {"side": None, "timestamp": now, "size": 0}
-            return None
-
-        side = "long" if total_size > 0 else "short"
-        avg_price = weighted_price / abs(total_size)
-
-        result = {
-            "side": side,
-            "size": abs(total_size),
-            "base_amount": total_base,
-            "open_price": avg_price
-        }
-        
-        # Cache aktualisieren
-        position_cache = {
-            "side": side,
-            "timestamp": now,
-            "size": abs(total_size)
-        }
-        
-        debug_log(f"📊 Position vom Exchange: {side} {abs(total_size)} SOL @ {avg_price:.3f}")
-        return result
-
-    except Exception as e:
-        debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
-        return None
-
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
-    """Öffnet oder reversed eine Position - MIT CACHE (SOFORT SETZEN!)"""
-    global position_cache  # <-- GANZ AM ANFANG!
-    
+    """Öffnet oder reversed eine Position - NACH SIGNAL!"""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -199,10 +120,7 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         precision = get_precision(symbol)
         min_base_amount = get_min_base_amount(symbol)
 
-        # ===== 1. BESTEHENDE POSITION VOM EXCHANGE HOLEN (MIT CACHE) =====
-        current_pos = await get_current_position_from_exchange(symbol)
-
-        # ===== 2. NEUE POSITIONSGRÖSSE BERECHNEN =====
+        # ===== 1. NEUE POSITIONSGRÖSSE BERECHNEN =====
         position_usdc = margin * leverage
         coin_amount = position_usdc / current_price
         base_amount = int(coin_amount * precision)
@@ -217,9 +135,46 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         new_side = "long" if action == "buy" else "short"
         new_is_ask = action != "buy"
 
+        # ===== 2. BESTEHENDE POSITION VOM EXCHANGE HOLEN =====
+        try:
+            import lighter
+            account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
+            api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
+            account_api = lighter.AccountApi(api_client)
+
+            response = await account_api.account(by="index", value=str(account_index))
+            accounts = getattr(response, "accounts", None) or []
+            current_pos = None
+
+            if accounts:
+                positions = getattr(accounts[0], "positions", []) or []
+                market_index_local = MARKET_INDICES[symbol]
+
+                for pos in positions:
+                    if getattr(pos, "market_index", None) != market_index_local:
+                        continue
+                    size = float(getattr(pos, "position", 0) or 0)
+                    if size == 0:
+                        continue
+
+                    side = "long" if size > 0 else "short"
+                    open_price = float(getattr(pos, "avg_entry_price", 0) or 0)
+                    base = int(abs(size) * get_precision(symbol))
+
+                    current_pos = {
+                        "side": side,
+                        "base_amount": base,
+                        "open_price": open_price,
+                        "size": abs(size)
+                    }
+                    break  # Nur erste Position nehmen (sollte nur eine geben)
+        except Exception as e:
+            debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
+            current_pos = None
+
         # ===== 3. WENN POSITION EXISTIERT → Prüfen! =====
         if current_pos:
-            debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']} (Größe: {current_pos['size']} SOL)")
+            debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']}")
 
             # ==== GLEICHE RICHTUNG → NICHTS TUN! ====
             if current_pos["side"] == new_side:
@@ -247,15 +202,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
                 return {"error": f"Open fehlgeschlagen: {err2}"}
 
             debug_log(f"✅ {new_side} eröffnet")
-            
-            # ===== CACHE SOFORT SETZEN! =====
-            position_cache = {
-                "side": new_side,
-                "timestamp": time.time(),
-                "size": base_amount / precision
-            }
-            debug_log(f"📦 Cache aktualisiert: {new_side}")
-            
             return {"success": True, "action": "reverse", "to_side": new_side, "tx_hash": str(tx_hash2)}
 
         # ===== 4. KEINE POSITION → Neu eröffnen =====
@@ -268,15 +214,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
                 return {"error": str(err)}
 
             debug_log(f"✅ {new_side} eröffnet")
-            
-            # ===== CACHE SOFORT SETZEN! =====
-            position_cache = {
-                "side": new_side,
-                "timestamp": time.time(),
-                "size": base_amount / precision
-            }
-            debug_log(f"📦 Cache gesetzt: {new_side}")
-            
             return {"success": True, "action": "open", "side": new_side, "tx_hash": str(tx_hash)}
 
     except Exception as e:
@@ -294,7 +231,6 @@ MARKET_INDEX = MARKET_INDICES[SYMBOL]
 OBI_LEVELS = int(os.getenv("OBI_LEVELS", "15"))
 OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.12"))
 NORMALIZE_SECONDS = float(os.getenv("NORMALIZE_SECONDS", "10"))
-SIGNAL_COOLDOWN = float(os.getenv("SIGNAL_COOLDOWN", "1.0"))
 
 MARGIN = float(os.getenv("OB_MARGIN", "10"))
 LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
@@ -333,7 +269,7 @@ last_trade_price = None
 current_position_side = None
 obi_normalizer = OBINormalizer(window_seconds=NORMALIZE_SECONDS)
 current_lean = None
-last_signal_time = 0
+last_signal = None  # <-- DAS LETZTE SIGNAL MERKEN!
 
 def apply_order_book_update(msg):
     ob = msg.get("order_book", {})
@@ -355,19 +291,13 @@ def calc_raw_obi(levels=OBI_LEVELS):
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
 async def execute_signal(direction, price):
-    global current_position_side, last_signal_time
-
-    now = time.time()
-    if now - last_signal_time < SIGNAL_COOLDOWN:
-        debug_log(f"⏭️ Signal ignoriert (Cooldown: {now - last_signal_time:.2f}s)")
-        return
+    global current_position_side, last_signal
 
     if current_position_side == direction:
-        debug_log(f"⏭️ Bereits {direction}, ignoriere")
         return
 
     debug_log(f"📡 SIGNAL: {direction.upper()} {SYMBOL} @ {price}")
-    last_signal_time = now
+    last_signal = direction
 
     if DRY_RUN:
         debug_log("🧪 DRY_RUN - keine Order")
@@ -384,7 +314,7 @@ async def execute_signal(direction, price):
             current_position_side = result.get("side")
 
 async def listen():
-    global last_trade_price, current_lean, last_signal_time
+    global last_trade_price, current_lean, last_signal
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
@@ -395,7 +325,7 @@ async def listen():
 
         debug_log(f"✅ Verbunden | NORMAL: SELL→Short, BUY→Long")
         debug_log(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-        debug_log(f"   ⚠️ Cache wird sofort nach dem Öffnen gesetzt!")
+        debug_log(f"   ⚠️ Signal-Follower: Nur bei Wechsel handeln!")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -414,12 +344,12 @@ async def listen():
                 else:
                     new_lean = None
 
+                # ===== NUR BEI SIGNAL-WECHSEL HANDELN! =====
                 if new_lean != current_lean and new_lean is not None and last_trade_price is not None:
-                    if now - last_signal_time >= SIGNAL_COOLDOWN:
+                    # Prüfen ob sich das Signal geändert hat
+                    if last_signal != new_lean:
                         await execute_signal(new_lean, last_trade_price)
-                        current_lean = new_lean
-                    else:
-                        debug_log(f"⏭️ Lean-Änderung ignoriert (Cooldown)")
+                    current_lean = new_lean
                 else:
                     if new_lean is None:
                         current_lean = None
@@ -434,7 +364,7 @@ async def listen():
                     else:
                         richtung = "ausgeglichen"
 
-                    debug_log(f"📊 Status {SYMBOL} (NORMAL)", {
+                    debug_log(f"📊 Status {SYMBOL} (SIGNAL-FOLLOWER)", {
                         "normalisierung": f"{NORMALIZE_SECONDS}s",
                         "roh_OBI": round(raw_obi, 3),
                         "normalisiert": round(normalized_obi, 3),
@@ -443,6 +373,7 @@ async def listen():
                         "buffer": obi_normalizer.get_raw_count(),
                         "preis": last_trade_price,
                         "position": current_position_side or "flach",
+                        "letztes_signal": last_signal or "keins",
                         "lean": current_lean or "neutral",
                     })
 
@@ -452,22 +383,41 @@ async def listen():
                     last_trade_price = float(trades[-1]["price"])
 
 async def main():
-    global current_position_side
+    global current_position_side, last_signal
 
     print("=" * 60)
-    print(f"🚀 NORMALER Signal-Follower Bot für {SYMBOL}")
+    print(f"🚀 SIGNAL-FOLLOWER Bot für {SYMBOL}")
     print(f"   SELL → Short | BUY → Long")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-    print(f"   Cache wird sofort nach dem Öffnen gesetzt!")
+    print(f"   ⚠️ Nur bei Signal-Wechsel handeln!")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
     if not DRY_RUN:
-        pos = await get_current_position_from_exchange(SYMBOL)
-        if pos:
-            current_position_side = pos["side"]
-            debug_log(f"📌 Position: {current_position_side}")
+        try:
+            import lighter
+            account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
+            api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
+            account_api = lighter.AccountApi(api_client)
+
+            response = await account_api.account(by="index", value=str(account_index))
+            accounts = getattr(response, "accounts", None) or []
+            if accounts:
+                positions = getattr(accounts[0], "positions", []) or []
+                market_index = MARKET_INDICES[SYMBOL]
+                for pos in positions:
+                    if getattr(pos, "market_index", None) != market_index:
+                        continue
+                    size = float(getattr(pos, "position", 0) or 0)
+                    if size == 0:
+                        continue
+                    current_position_side = "long" if size > 0 else "short"
+                    last_signal = current_position_side
+                    debug_log(f"📌 Position: {current_position_side}")
+                    break
+        except Exception as e:
+            debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
 
     while True:
         try:
