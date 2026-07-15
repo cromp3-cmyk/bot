@@ -1,7 +1,7 @@
 """
-EMA-Crossover-Bot für Lighter - MIT FIXED DATE
+EMA-Crossover-Bot für Lighter - MIT WEBSOCKET CANDLES
 ================================================================================
-Holt 1-Minuten Candles direkt von der Lighter API
+Empfängt 1-Minuten Candles über WebSocket (mark_price_candle)
 EMA7 + EMA21 basierend auf Candle-Closes
 """
 
@@ -12,7 +12,7 @@ import time
 import os
 import traceback
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ========== BASE_URL ==========
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
@@ -241,65 +241,6 @@ class EMACalculator:
             multiplier = 2 / (self.period + 1)
             self.ema = (close_price - self.ema) * multiplier + self.ema
 
-# ========== CANDLES VON LIGHTER API (MIT FIXED DATE) ==========
-async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
-    """Holt Candles über das Lighter SDK - MIT FIXED DATE!"""
-    try:
-        import lighter
-        from lighter import CandlestickApi
-        
-        debug_log(f"📡 Hole Candles von Lighter API: market_id={market_id}, resolution={resolution}, count_back={count_back}")
-        
-        # ===== FIXED DATE (15. Dezember 2024) =====
-        fixed_date = datetime(2024, 12, 15, 12, 0, 0)
-        end_timestamp = int(fixed_date.timestamp() * 1000)
-        start_timestamp = end_timestamp - (count_back * 60 * 1000)
-        
-        debug_log(f"   start_timestamp={start_timestamp}, end_timestamp={end_timestamp}")
-        debug_log(f"   Datum: {fixed_date.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # API Client erstellen
-        client = lighter.ApiClient()
-        candle_api = CandlestickApi(client)
-        
-        # Candles abrufen
-        response = await candle_api.candles(
-            market_id=market_id,
-            resolution=resolution,
-            start_timestamp=start_timestamp,
-            end_timestamp=end_timestamp,
-            count_back=count_back,
-            set_timestamp_to_end=False
-        )
-        
-        await client.close()
-        
-        # Candles aus Response extrahieren
-        candles = getattr(response, 'candles', []) or []
-        
-        if not candles:
-            debug_log("⚠️ Keine Candles von Lighter API erhalten")
-            return []
-        
-        debug_log(f"✅ {len(candles)} Candles von Lighter API erhalten")
-        
-        result = []
-        for c in candles:
-            result.append({
-                "timestamp": getattr(c, 't', 0),
-                "open": float(getattr(c, 'o', 0)),
-                "high": float(getattr(c, 'h', 0)),
-                "low": float(getattr(c, 'l', 0)),
-                "close": float(getattr(c, 'c', 0)),
-                "volume": float(getattr(c, 'v', 0))
-            })
-        
-        return result
-        
-    except Exception as e:
-        debug_log("❌ Fehler beim Abrufen der Candles", {"error": str(e), "traceback": traceback.format_exc()})
-        return []
-
 # ========== KONFIGURATION ==========
 SYMBOL = os.getenv("OB_SYMBOL", "SOL").upper()
 if SYMBOL not in MARKET_INDICES:
@@ -315,35 +256,13 @@ MARGIN = float(os.getenv("OB_MARGIN", "10"))
 LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-# Candle Parameter
-CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "200"))
-
 # ========== LOKALER STATE ==========
 last_trade_price = None
 current_position_side = None
 fast_ema = EMACalculator(EMA_FAST)
 slow_ema = EMACalculator(EMA_SLOW)
 last_signal = None
-
-async def init_emas_from_lighter():
-    """Initialisiert EMAs mit Candles von Lighter API"""
-    debug_log(f"📊 Initialisiere EMAs mit historischen Candles...")
-    
-    candles = await get_candles_from_lighter(MARKET_INDEX, "1m", CANDLE_LIMIT)
-    
-    if not candles:
-        debug_log("⚠️ Keine Candles erhalten")
-        return False
-    
-    for candle in candles:
-        close_price = candle["close"]
-        fast_ema.add_candle(close_price)
-        slow_ema.add_candle(close_price)
-    
-    debug_log(f"✅ EMAs initialisiert mit {len(candles)} Candles")
-    debug_log(f"   EMA{EMA_FAST}: {fast_ema.ema:.3f}" if fast_ema.ema else "   EMA7: None")
-    debug_log(f"   EMA{EMA_SLOW}: {slow_ema.ema:.3f}" if slow_ema.ema else "   EMA21: None")
-    return True
+candle_buffer = []  # Für initiale Candles beim Verbinden
 
 async def execute_signal(direction, price):
     global current_position_side, last_signal
@@ -369,51 +288,89 @@ async def execute_signal(direction, price):
             current_position_side = result.get("side")
 
 async def listen():
-    global last_trade_price, last_signal
+    global last_trade_price, last_signal, candle_buffer
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
+    candle_count = 0
 
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
-        await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
+        # ===== CANDLE CHANNEL SUBSCRIBE =====
+        subscribe_msg = {
+            "type": "subscribe",
+            "channel": f"mark_price_candle/{MARKET_INDEX}/1m"
+        }
+        await ws.send(json.dumps(subscribe_msg))
+        debug_log(f"✅ Abonniert: mark_price_candle/{MARKET_INDEX}/1m")
 
-        debug_log(f"✅ Verbunden | EMA: {EMA_FAST}/{EMA_SLOW} (1-Minuten Candles von Lighter API)")
+        # ===== TRADE CHANNEL SUBSCRIBE (für Preis) =====
+        await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
+        debug_log(f"✅ Abonniert: trade/{MARKET_INDEX}")
 
         async for raw in ws:
             msg = json.loads(raw)
             channel = msg.get("channel", "")
+            msg_type = msg.get("type", "")
 
-            if channel.startswith("trade"):
-                trades = msg.get("trades", [])
-                if not trades:
+            # ===== CANDLE UPDATES =====
+            if "mark_price_candle" in channel:
+                candles = msg.get("candles", [])
+                if not candles:
                     continue
 
-                last_price = float(trades[-1]["price"])
-                last_trade_price = last_price
+                for candle in candles:
+                    close = candle.get("c")
+                    if close is None:
+                        continue
+                    
+                    # Debug für erste Candle
+                    if candle_count < 3:
+                        debug_log(f"🕐 Candle erhalten: Close={close}, t={candle.get('t')}")
+                        candle_count += 1
+                    
+                    # EMA updaten (NUR mit Candle-Closes!)
+                    fast_ema.add_candle(float(close))
+                    slow_ema.add_candle(float(close))
+                    
+                    # Crossover prüfen
+                    if fast_ema.is_initialized and slow_ema.is_initialized:
+                        if fast_ema.ema > slow_ema.ema and last_signal != "buy":
+                            debug_log(f"📈 CROSSOVER UP: EMA{EMA_FAST} ({fast_ema.ema:.3f}) > EMA{EMA_SLOW} ({slow_ema.ema:.3f})")
+                            if last_trade_price:
+                                await execute_signal("buy", last_trade_price)
+                        elif fast_ema.ema < slow_ema.ema and last_signal != "sell":
+                            debug_log(f"📉 CROSSOVER DOWN: EMA{EMA_FAST} ({fast_ema.ema:.3f}) < EMA{EMA_SLOW} ({slow_ema.ema:.3f})")
+                            if last_trade_price:
+                                await execute_signal("sell", last_trade_price)
 
-                now = time.time()
-                if now - last_status_log >= STATUS_LOG_INTERVAL:
-                    last_status_log = now
-                    debug_log(f"📊 Status {SYMBOL}", {
-                        "preis": last_price,
-                        f"ema_{EMA_FAST}": round(fast_ema.ema, 3) if fast_ema.ema else None,
-                        f"ema_{EMA_SLOW}": round(slow_ema.ema, 3) if slow_ema.ema else None,
-                        "position": current_position_side or "flach",
-                        "letztes_signal": last_signal or "keins",
-                        "candles": len(fast_ema.closes)
-                    })
+            # ===== TRADE UPDATES (für Preis) =====
+            elif "trade" in channel:
+                trades = msg.get("trades", [])
+                if trades:
+                    last_trade_price = float(trades[-1]["price"])
+
+            # ===== STATUS-LOG =====
+            now = time.time()
+            if now - last_status_log >= STATUS_LOG_INTERVAL:
+                last_status_log = now
+                debug_log(f"📊 Status {SYMBOL}", {
+                    "preis": last_trade_price,
+                    f"ema_{EMA_FAST}": round(fast_ema.ema, 3) if fast_ema.ema else None,
+                    f"ema_{EMA_SLOW}": round(slow_ema.ema, 3) if slow_ema.ema else None,
+                    "position": current_position_side or "flach",
+                    "letztes_signal": last_signal or "keins",
+                    "candles": len(fast_ema.closes)
+                })
 
 async def main():
     global current_position_side, last_signal
 
     print("=" * 60)
     print(f"🚀 EMA-Crossover-Bot für {SYMBOL}")
-    print(f"   EMA: {EMA_FAST}/{EMA_SLOW} (1-Minuten Candles von Lighter API)")
+    print(f"   EMA: {EMA_FAST}/{EMA_SLOW} (WebSocket Mark Price Candles)")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
-
-    await init_emas_from_lighter()
 
     if not DRY_RUN:
         pos = await get_current_position(SYMBOL)
@@ -430,4 +387,4 @@ async def main():
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())n(main())
