@@ -1,10 +1,10 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter (zkLighter) - MIT 2-MINUTEN EMA
+Autonomer EMA-Crossover-Bot für Lighter (zkLighter)
 ================================================================================
-Kombiniert Order Book Imbalance (OBI) mit 2-Minuten EMA-Trend-Filter
+Einfacher Bot der auf EMA-Crossover handelt (kein Orderbuch, kein OBI)
+Kauft wenn EMA(9) über EMA(21) kreuzt, verkauft wenn EMA(9) unter EMA(21) kreuzt
 """
 
-# ========== IMPORTS ==========
 import asyncio
 import websockets
 import json
@@ -92,110 +92,32 @@ def get_min_base_amount(symbol):
     }
     return min_amount_map.get(symbol, 0.001)
 
-# ========== 2-MINUTEN EMA TREND FILTER ==========
-class TimeBasedEMAFilter:
-    """
-    EMA basierend auf 2-Minuten Intervallen
-    """
-    def __init__(self, fast_minutes=1, slow_minutes=2):
-        self.fast_minutes = fast_minutes
-        self.slow_minutes = slow_minutes
-        self.price_history = []  # Liste von (timestamp, price)
-        self.fast_ema = None
-        self.slow_ema = None
-        self.last_update_time = 0
-        self.last_price = None
+# ========== EMA CALCULATOR ==========
+class EMACalculator:
+    """Berechnet EMA aus Preisen"""
+    def __init__(self, period):
+        self.period = period
+        self.prices = deque(maxlen=period * 2)
+        self.ema = None
         
     def add_price(self, price):
-        """Fügt Preis mit Zeitstempel hinzu"""
-        now = time.time()
-        self.price_history.append((now, price))
-        self.last_price = price
-        
-        # Alte Daten entfernen (älter als 10 Minuten)
-        cutoff = now - 600  # 10 Minuten
-        self.price_history = [(t, p) for t, p in self.price_history if t > cutoff]
-        
-        # EMAs berechnen
-        self.calculate_time_ema()
+        self.prices.append(price)
+        if len(self.prices) >= self.period:
+            self.calculate_ema()
     
-    def get_prices_in_last_minutes(self, minutes):
-        """Holt alle Preise der letzten X Minuten"""
-        now = time.time()
-        cutoff = now - (minutes * 60)
-        return [p for t, p in self.price_history if t > cutoff]
-    
-    def calculate_ema_from_prices(self, prices, period_in_minutes):
-        """Berechnet EMA aus Preisliste mit exponentieller Gewichtung"""
-        if len(prices) < 2:
-            return prices[-1] if prices else None
+    def calculate_ema(self):
+        if len(self.prices) < self.period:
+            return
         
-        # Exponentielle Gewichtung basierend auf Zeit
-        # Je neuer der Preis, desto höher die Gewichtung
-        multiplier = 2 / (period_in_minutes * 60 + 1)
-        ema = prices[0]
+        prices_list = list(self.prices)[-self.period:]
+        multiplier = 2 / (self.period + 1)
+        ema = prices_list[0]
         
-        for price in prices[1:]:
+        for price in prices_list[1:]:
             ema = (price - ema) * multiplier + ema
         
+        self.ema = ema
         return ema
-    
-    def calculate_time_ema(self):
-        """Berechnet EMAs basierend auf Zeit"""
-        # Hole Preise der letzten X Minuten
-        fast_prices = self.get_prices_in_last_minutes(self.fast_minutes)
-        slow_prices = self.get_prices_in_last_minutes(self.slow_minutes)
-        
-        if fast_prices:
-            self.fast_ema = self.calculate_ema_from_prices(fast_prices, self.fast_minutes)
-        else:
-            self.fast_ema = None
-            
-        if slow_prices:
-            self.slow_ema = self.calculate_ema_from_prices(slow_prices, self.slow_minutes)
-        else:
-            self.slow_ema = None
-    
-    def get_trend(self):
-        """
-        Gibt Trend zurück:
-        - "up": Aufwärtstrend
-        - "down": Abwärtstrend
-        - "neutral": Seitwärts
-        """
-        if self.fast_ema is None or self.slow_ema is None:
-            return "neutral", 0
-        
-        diff_percent = ((self.fast_ema - self.slow_ema) / self.slow_ema) * 100
-        
-        # 0.1% Puffer gegen Rauschen (niedriger für 2-Minuten EMA)
-        if diff_percent > 0.1:
-            return "up", abs(diff_percent) / 100
-        elif diff_percent < -0.1:
-            return "down", abs(diff_percent) / 100
-        else:
-            return "neutral", 0
-    
-    def get_trend_strength(self):
-        """Gibt Trendstärke zurück (0-1)"""
-        if self.fast_ema is None or self.slow_ema is None:
-            return 0
-        
-        diff = abs(self.fast_ema - self.slow_ema) / self.slow_ema
-        return min(diff * 20, 1)  # Skaliert auf 0-1 (höhere Empfindlichkeit)
-    
-    def get_status(self):
-        """Gibt kompletten Status zurück (für Debug)"""
-        trend, strength = self.get_trend()
-        return {
-            "fast_ema": round(self.fast_ema, 3) if self.fast_ema else None,
-            "slow_ema": round(self.slow_ema, 3) if self.slow_ema else None,
-            "trend": trend,
-            "strength": round(strength, 2),
-            "data_points": len(self.price_history),
-            "fast_period": f"{self.fast_minutes}m",
-            "slow_period": f"{self.slow_minutes}m"
-        }
 
 # ========== LIGHTER CLIENT ==========
 def get_lighter_client():
@@ -391,185 +313,123 @@ async def sync_open_position_from_exchange(symbol):
 OPEN_POSITIONS = {}
 
 # ========== KONFIGURATION ==========
-SYMBOL = os.getenv("OB_SYMBOL", "BTC").upper()
+SYMBOL = os.getenv("OB_SYMBOL", "SOL").upper()
 if SYMBOL not in MARKET_INDICES:
     raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES gefunden")
 
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-OBI_LEVELS = int(os.getenv("OBI_LEVELS", "15"))
-OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.12"))
-OBI_CONFIRM_SECONDS = float(os.getenv("OBI_CONFIRM_SECONDS", "5"))
-COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "30"))
-MIN_HOLD_SECONDS = float(os.getenv("MIN_HOLD_SECONDS", "120"))
+# EMA Parameter
+EMA_FAST = int(os.getenv("EMA_FAST", "9"))
+EMA_SLOW = int(os.getenv("EMA_SLOW", "21"))
 
+# Trading Parameter
 MARGIN = float(os.getenv("OB_MARGIN", "10"))
 LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-# ========== KONFIGURATION ==========
-# 2-Minuten EMA Parameter
-EMA_FAST_MINUTES = float(os.getenv("EMA_FAST_MINUTES", "1.0"))   # 1-Minute EMA
-EMA_SLOW_MINUTES = float(os.getenv("EMA_SLOW_MINUTES", "2.0"))   # 2-Minute EMA
-MIN_TREND_STRENGTH = float(os.getenv("MIN_TREND_STRENGTH", "0.05"))
-
 # ========== LOKALER STATE ==========
-order_book = {"bids": {}, "asks": {}}
 last_trade_price = None
 current_position_side = None
-position_opened_at = 0.0
 last_trade_time = 0.0
-obi_history = deque(maxlen=20)
-lean_direction = None
-lean_since = 0.0
 
-# ========== 2-MINUTEN EMA TREND FILTER INSTANZ ==========
-trend_filter = TimeBasedEMAFilter(
-    fast_minutes=EMA_FAST_MINUTES,
-    slow_minutes=EMA_SLOW_MINUTES
-)
-
-def apply_order_book_update(msg):
-    ob = msg.get("order_book", {})
-    for side_key, book in (("bids", order_book["bids"]), ("asks", order_book["asks"])):
-        for level in ob.get(side_key, []):
-            price = level["price"]
-            size = float(level["size"])
-            if size == 0:
-                book.pop(price, None)
-            else:
-                book[price] = size
-
-def calc_obi(levels=OBI_LEVELS):
-    bids_sorted = sorted(order_book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
-    asks_sorted = sorted(order_book["asks"].items(), key=lambda x: float(x[0]))[:levels]
-    bid_vol = sum(v for _, v in bids_sorted)
-    ask_vol = sum(v for _, v in asks_sorted)
-    total = bid_vol + ask_vol
-    return 0.0 if total == 0 else (bid_vol - ask_vol) / total
+# ========== EMA INSTANZEN ==========
+fast_ema = EMACalculator(EMA_FAST)
+slow_ema = EMACalculator(EMA_SLOW)
 
 async def execute_signal(direction, price):
-    global current_position_side, last_trade_time, position_opened_at
+    global current_position_side, last_trade_time
 
     now = time.time()
-    if now - last_trade_time < COOLDOWN_SECONDS:
-        return
-    if current_position_side == direction:
-        return
-    if current_position_side is not None and (now - position_opened_at) < MIN_HOLD_SECONDS:
-        debug_log(f"⏳ Reverse blockiert - Mindesthaltedauer noch nicht erreicht", {
-            "aktuelle_position_seit_sekunden": round(now - position_opened_at, 1),
-            "min_hold_seconds": MIN_HOLD_SECONDS,
-        })
-        return
-
-    debug_log(f"📡 OBI-Signal bestätigt: {direction.upper()} {SYMBOL} @ {price}", {
-        "bestaetigt_seit_sekunden": round(now - lean_since, 1) if lean_since else None,
-    })
+    
+    debug_log(f"📡 EMA-Signal: {direction.upper()} {SYMBOL} @ {price}")
 
     if DRY_RUN:
         debug_log("🧪 DRY_RUN aktiv - keine echte Order ausgeführt")
         current_position_side = direction
-        position_opened_at = now
         last_trade_time = now
         return
 
     result = await open_or_reverse_position(direction, SYMBOL, MARGIN, LEVERAGE, price)
     debug_log("Order-Ergebnis", result)
 
-    current_position_side = direction
-    position_opened_at = now
-    last_trade_time = now
+    if result.get("success"):
+        current_position_side = direction
+        last_trade_time = now
 
 async def listen():
-    global last_trade_price, lean_direction, lean_since
+    global last_trade_price, current_position_side
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
+    last_signal_time = 0
+    SIGNAL_COOLDOWN = 30  # 30 Sekunden zwischen Signalen
 
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
-        await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDEX}"}))
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
 
-        debug_log(f"✅ Verbunden, abonniert order_book:{MARKET_INDEX} und trade:{MARKET_INDEX}")
+        debug_log(f"✅ Verbunden, abonniert trade:{MARKET_INDEX}")
 
         async for raw in ws:
             msg = json.loads(raw)
             channel = msg.get("channel", "")
-            msg_type = msg.get("type", "")
 
-            if channel.startswith("order_book"):
-                apply_order_book_update(msg)
-                obi = calc_obi()
-                obi_history.append(obi)
-
-                now = time.time()
-
-                # ===== 2-MINUTEN TREND-CHECK MIT EMA =====
-                trend = "neutral"
-                trend_strength = 0
-                if last_trade_price is not None:
-                    trend_filter.add_price(last_trade_price)
-                    trend, trend_strength = trend_filter.get_trend()
-
-                # ===== SIGNAL MIT TREND-BESTÄTIGUNG =====
-                # Nur handeln wenn OBI und Trend übereinstimmen
-                if obi >= OBI_THRESHOLD and trend == "up" and trend_strength >= MIN_TREND_STRENGTH:
-                    current_lean = "buy"
-                elif obi <= -OBI_THRESHOLD and trend == "down" and trend_strength >= MIN_TREND_STRENGTH:
-                    current_lean = "sell"
-                else:
-                    current_lean = None
-
-                # ===== LEAN TIMER =====
-                if current_lean != lean_direction:
-                    if lean_direction is not None:
-                        debug_log(f"🔄 Lean-Richtung geändert (mit 2-Minuten EMA)", {
-                            "von": lean_direction,
-                            "zu": current_lean,
-                            "obi": round(obi, 3),
-                            "trend": trend,
-                            "trend_strength": round(trend_strength, 2)
-                        })
-                    lean_direction = current_lean
-                    lean_since = now if current_lean is not None else 0.0
-                elif current_lean is not None and (now - lean_since) >= OBI_CONFIRM_SECONDS and last_trade_price is not None:
-                    await execute_signal(current_lean, last_trade_price)
-
-                # ===== STATUS-LOG =====
-                if now - last_status_log >= STATUS_LOG_INTERVAL:
-                    last_status_log = now
-                    status = trend_filter.get_status()
-                    debug_log(f"📊 Status {SYMBOL} mit 2-Minuten EMA", {
-                        "aktueller_OBI": round(obi, 3),
-                        "schwelle": OBI_THRESHOLD,
-                        "trend": status["trend"],
-                        "trend_staerke": status["strength"],
-                        "fast_ema_1m": status["fast_ema"],
-                        "slow_ema_2m": status["slow_ema"],
-                        "letzter_preis": last_trade_price,
-                        "bot_position": current_position_side or "flach",
-                        "lean_seit": round(now - lean_since, 1) if lean_direction else 0,
-                        "braucht_fuer_signal": OBI_CONFIRM_SECONDS
-                    })
-
-            elif channel.startswith("trade"):
+            if channel.startswith("trade"):
                 trades = msg.get("trades", [])
-                if trades:
-                    last_trade_price = float(trades[-1]["price"])
-                    # Preis sofort in Trend-Filter geben
-                    trend_filter.add_price(last_trade_price)
+                if not trades:
+                    continue
+
+                for trade in trades:
+                    price = float(trade["price"])
+                    size = float(trade["size"])
+                    last_trade_price = price
+
+                    # EMA updaten
+                    fast_ema.add_price(price)
+                    slow_ema.add_price(price)
+
+                    now = time.time()
+
+                    # EMA-Crossover prüfen
+                    if fast_ema.ema is not None and slow_ema.ema is not None:
+                        fast = fast_ema.ema
+                        slow = slow_ema.ema
+
+                        # Cooldown prüfen
+                        if now - last_signal_time < SIGNAL_COOLDOWN:
+                            continue
+
+                        # Signal erkennen
+                        if fast > slow and current_position_side != "buy":
+                            debug_log(f"📈 EMA Crossover UP: {fast:.3f} > {slow:.3f}")
+                            await execute_signal("buy", price)
+                            last_signal_time = now
+                            
+                        elif fast < slow and current_position_side != "sell":
+                            debug_log(f"📉 EMA Crossover DOWN: {fast:.3f} < {slow:.3f}")
+                            await execute_signal("sell", price)
+                            last_signal_time = now
+
+                    # Status-Log
+                    if now - last_status_log >= STATUS_LOG_INTERVAL:
+                        last_status_log = now
+                        debug_log(f"📊 Status {SYMBOL} EMA", {
+                            "preis": price,
+                            f"ema_{EMA_FAST}": round(fast_ema.ema, 3) if fast_ema.ema else None,
+                            f"ema_{EMA_SLOW}": round(slow_ema.ema, 3) if slow_ema.ema else None,
+                            "position": current_position_side or "flach",
+                            "datenpunkte": len(fast_ema.prices)
+                        })
 
 async def main():
     global current_position_side
 
     print("=" * 70)
-    print(f"🚀 Orderbuch-Bot mit 2-Minuten EMA-Trend-Filter gestartet für {SYMBOL}")
+    print(f"🚀 EMA-Crossover-Bot für {SYMBOL}")
     print(f"   DRY_RUN: {DRY_RUN}")
-    print(f"   OBI Levels: {OBI_LEVELS} | Schwelle: {OBI_THRESHOLD} | Bestätigung: {OBI_CONFIRM_SECONDS}s")
-    print(f"   EMA: {EMA_FAST_MINUTES}m / {EMA_SLOW_MINUTES}m | Min Trend Stärke: {MIN_TREND_STRENGTH}")
-    print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x | Cooldown: {COOLDOWN_SECONDS}s")
+    print(f"   EMA: {EMA_FAST}/{EMA_SLOW}")
+    print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 70)
 
     if not DRY_RUN:
