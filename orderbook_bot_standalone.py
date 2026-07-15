@@ -1,8 +1,9 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter - INVERTIERTE SIGNALE
+Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL
 ================================================================================
-TEST: Bei SELL-Signal wird gekauft (LONG), bei BUY-Signal wird verkauft (SHORT)
-Nur zum Testen ob der Bot profitabler wird!
+SELL Signal → Short eröffnen (oder von Long wechseln)
+BUY Signal  → Long eröffnen  (oder von Short wechseln)
+Keine doppelten Positionen!
 """
 
 import asyncio
@@ -80,7 +81,7 @@ def get_lighter_client():
         PRIVATE_KEY = os.getenv("PRIVATE_KEY")
         ACCOUNT_INDEX = int(os.getenv("ACCOUNT_INDEX", "50960"))
         client = lighter.SignerClient(
-            url="https://mainnet.zklighter.elliot.ai",
+            url=BASE_URL,
             api_private_keys={API_KEY_INDEX: PRIVATE_KEY},
             account_index=ACCOUNT_INDEX
         )
@@ -112,145 +113,13 @@ async def get_current_position_from_exchange(symbol):
     try:
         import lighter
         account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
-        api_client = lighter.ApiClient(configuration=lighter.Configuration(host="https://mainnet.zklighter.elliot.ai"))
+        api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
         account_api = lighter.AccountApi(api_client)
 
         response = await account_api.account(by="index", value=str(account_index))
         accounts = getattr(response, "accounts", None) or []
         if not accounts:
             return None
-
-        positions = getattr(accounts[0], "positions", []) or []
-        market_index = MARKET_INDICES[symbol]
-
-        total_size = 0.0
-        avg_price = 0.0
-        side = None
-
-        for pos in positions:
-            if getattr(pos, "market_index", None) != market_index:
-                continue
-            size = float(getattr(pos, "position", 0) or 0)
-            if size == 0:
-                continue
-
-            total_size += size
-            price = float(getattr(pos, "avg_entry_price", 0) or 0)
-            
-            if side is None:
-                side = "long" if size > 0 else "short"
-                avg_price = price
-            else:
-                avg_price = (avg_price + price) / 2
-
-        if total_size == 0:
-            return None
-
-        return {
-            "side": side,
-            "size": abs(total_size),
-            "base_amount": int(abs(total_size) * get_precision(symbol)),
-            "open_price": avg_price
-        }
-        
-    except Exception as e:
-        debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
-        return None
-
-async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
-    """Öffnet oder reversed eine Position - MIT INVERTIERTER LOGIK!"""
-    client = get_lighter_client()
-    if client is None:
-        return {"error": "Client konnte nicht initialisiert werden"}
-
-    try:
-        market_index = MARKET_INDICES[symbol]
-        precision = get_precision(symbol)
-        min_base_amount = get_min_base_amount(symbol)
-
-        # ===== INVERTIERTE LOGIK: Bei SELL kaufen, bei BUY verkaufen! =====
-        # action kommt vom Signal: "buy" oder "sell"
-        # Wir drehen es um!
-        if action == "buy":
-            real_action = "sell"  # BUY Signal → SHORT gehen
-        else:
-            real_action = "buy"   # SELL Signal → LONG gehen
-        
-        debug_log(f"🔄 INVERTIERT: Signal {action} → Ausführung {real_action}")
-
-        position_usdc = margin * leverage
-        coin_amount = position_usdc / current_price
-        base_amount = int(coin_amount * precision)
-
-        if base_amount == 0:
-            min_margin_needed = (min_base_amount * current_price) / leverage
-            return {
-                "error": f"Base Amount ist 0 für {symbol}",
-                "suggestion": f"Erhöhe Margin auf mindestens {min_margin_needed:.2f} USDC"
-            }
-
-        new_side = "long" if real_action == "buy" else "short"
-        new_is_ask = real_action != "buy"
-
-        # ===== BESTEHENDE POSITION VOM EXCHANGE HOLEN =====
-        current_pos = await get_current_position_from_exchange(symbol)
-        
-        if current_pos:
-            debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']}")
-            
-            if current_pos["side"] == new_side:
-                debug_log(f"⏭️ Bereits {new_side}, keine Aktion")
-                return {"success": True, "action": "keine_änderung", "side": new_side}
-            
-            debug_log(f"🔄 Wechsel von {current_pos['side']} zu {new_side}")
-            
-            close_is_ask = current_pos["side"] == "long"
-            tx1, tx_hash1, err1 = await create_order_with_price(
-                client, market_index, current_pos["base_amount"], close_is_ask, symbol,
-                current_pos["open_price"], reduce_only=True
-            )
-            if err1:
-                return {"error": f"Close fehlgeschlagen: {err1}"}
-            
-            debug_log(f"✅ {current_pos['side']} geschlossen")
-            await asyncio.sleep(1)
-            
-            tx2, tx_hash2, err2 = await create_order_with_price(
-                client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
-            )
-            if err2:
-                return {"error": f"Open fehlgeschlagen: {err2}"}
-
-            debug_log(f"✅ {new_side} eröffnet (INVERTIERT!)")
-            return {"success": True, "action": "reverse", "to_side": new_side, "tx_hash": str(tx_hash2)}
-
-        else:
-            debug_log(f"🆕 Keine Position, eröffne {new_side} (INVERTIERT!)")
-            tx, tx_hash, err = await create_order_with_price(
-                client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
-            )
-            if err:
-                return {"error": str(err)}
-            
-            return {"success": True, "action": "open", "side": new_side, "tx_hash": str(tx_hash)}
-
-    except Exception as e:
-        debug_log("Exception", {"error": str(e), "traceback": traceback.format_exc()})
-        return {"error": str(e)}
-    finally:
-        await client.close()
-
-async def sync_open_position_from_exchange(symbol):
-    try:
-        import lighter
-        account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
-        api_client = lighter.ApiClient(configuration=lighter.Configuration(host="https://mainnet.zklighter.elliot.ai"))
-        account_api = lighter.AccountApi(api_client)
-
-        response = await account_api.account(by="index", value=str(account_index))
-        accounts = getattr(response, "accounts", None) or []
-        if not accounts:
-            return
 
         positions = getattr(accounts[0], "positions", []) or []
         market_index = MARKET_INDICES[symbol]
@@ -264,22 +133,99 @@ async def sync_open_position_from_exchange(symbol):
 
             side = "long" if size > 0 else "short"
             open_price = float(getattr(pos, "avg_entry_price", 0) or 0)
+            base_amount = int(abs(size) * get_precision(symbol))
 
-            OPEN_POSITIONS[symbol] = {
+            return {
                 "side": side,
-                "position_usdc": abs(size) * open_price,
-                "coin_amount": abs(size),
-                "base_amount": int(abs(size) * get_precision(symbol)),
-                "margin": abs(size) * open_price / max(int(os.getenv("OB_LEVERAGE", "10")), 1),
-                "leverage": int(os.getenv("OB_LEVERAGE", "10")),
+                "base_amount": base_amount,
                 "open_price": open_price,
-                "open_time": datetime.now().isoformat(),
+                "size": abs(size)
             }
-            debug_log(f"📌 Bestehende Position: {side}")
-            return
+        return None
+    except Exception as e:
+        debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
+        return None
+
+async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
+    """Öffnet oder reversed eine Position - NORMAL (KEIN doppeltes Öffnen!)"""
+    client = get_lighter_client()
+    if client is None:
+        return {"error": "Client konnte nicht initialisiert werden"}
+
+    try:
+        market_index = MARKET_INDICES[symbol]
+        precision = get_precision(symbol)
+        min_base_amount = get_min_base_amount(symbol)
+
+        # ===== 1. BESTEHENDE POSITION VOM EXCHANGE HOLEN =====
+        current_pos = await get_current_position_from_exchange(symbol)
+
+        # ===== 2. NEUE POSITIONSGRÖSSE BERECHNEN =====
+        position_usdc = margin * leverage
+        coin_amount = position_usdc / current_price
+        base_amount = int(coin_amount * precision)
+
+        if base_amount == 0:
+            min_margin_needed = (min_base_amount * current_price) / leverage
+            return {
+                "error": f"Base Amount ist 0 für {symbol}",
+                "suggestion": f"Erhöhe Margin auf mindestens {min_margin_needed:.2f} USDC"
+            }
+
+        new_side = "long" if action == "buy" else "short"
+        new_is_ask = action != "buy"
+
+        # ===== 3. WENN POSITION EXISTIERT → Prüfen! =====
+        if current_pos:
+            debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']}")
+
+            # ==== GLEICHE RICHTUNG → NICHTS TUN! (Verhindert doppelte Positionen!) ====
+            if current_pos["side"] == new_side:
+                debug_log(f"⏭️ Bereits {new_side}, ignoriere Signal! (Keine doppelte Position)")
+                return {"success": True, "action": "ignoriert", "side": new_side}
+
+            # ==== ANDERE RICHTUNG → Position schließen + neue öffnen ====
+            debug_log(f"🔄 Wechsel von {current_pos['side']} zu {new_side}")
+
+            # Alte Position schließen
+            close_is_ask = current_pos["side"] == "long"
+            tx1, tx_hash1, err1 = await create_order_with_price(
+                client, market_index, current_pos["base_amount"], close_is_ask, symbol,
+                current_pos["open_price"], reduce_only=True
+            )
+            if err1:
+                return {"error": f"Close fehlgeschlagen: {err1}"}
+
+            debug_log(f"✅ {current_pos['side']} geschlossen")
+            await asyncio.sleep(1)
+
+            # Neue Position öffnen
+            tx2, tx_hash2, err2 = await create_order_with_price(
+                client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
+            )
+            if err2:
+                return {"error": f"Open fehlgeschlagen: {err2}"}
+
+            debug_log(f"✅ {new_side} eröffnet")
+            return {"success": True, "action": "reverse", "to_side": new_side, "tx_hash": str(tx_hash2)}
+
+        # ===== 4. KEINE POSITION → Neu eröffnen =====
+        else:
+            debug_log(f"🆕 Keine Position, eröffne {new_side}")
+            tx, tx_hash, err = await create_order_with_price(
+                client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
+            )
+            if err:
+                return {"error": str(err)}
+
+            debug_log(f"✅ {new_side} eröffnet")
+            return {"success": True, "action": "open", "side": new_side, "tx_hash": str(tx_hash)}
 
     except Exception as e:
-        debug_log("⚠️ Positions-Sync fehlgeschlagen", {"error": str(e)})
+        debug_log("Exception", {"error": str(e), "traceback": traceback.format_exc()})
+        return {"error": str(e)}
+    finally:
+        await client.close()
 
 # ========== STATE ==========
 OPEN_POSITIONS = {}
@@ -304,24 +250,24 @@ class OBINormalizer:
         self.window_seconds = window_seconds
         self.buffer = deque()
         self.normalized_obi = 0.0
-        
+
     def add(self, raw_obi):
         now = time.time()
         self.buffer.append((now, raw_obi))
         cutoff = now - self.window_seconds
         while self.buffer and self.buffer[0][0] < cutoff:
             self.buffer.popleft()
-        
+
         if self.buffer:
             total = sum(v for _, v in self.buffer)
             self.normalized_obi = total / len(self.buffer)
         else:
             self.normalized_obi = 0.0
         return self.normalized_obi
-    
+
     def get(self):
         return self.normalized_obi
-    
+
     def get_raw_count(self):
         return len(self.buffer)
 
@@ -331,7 +277,6 @@ last_trade_price = None
 current_position_side = None
 obi_normalizer = OBINormalizer(window_seconds=NORMALIZE_SECONDS)
 current_lean = None
-last_signal_time = 0
 
 def apply_order_book_update(msg):
     ob = msg.get("order_book", {})
@@ -353,12 +298,12 @@ def calc_raw_obi(levels=OBI_LEVELS):
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
 async def execute_signal(direction, price):
-    global current_position_side, last_signal_time
+    global current_position_side
 
     if current_position_side == direction:
         return
 
-    debug_log(f"📡 SIGNAL: {direction.upper()} → INVERTIERT zu {'SHORT' if direction == 'buy' else 'LONG'} @ {price}")
+    debug_log(f"📡 SIGNAL: {direction.upper()} {SYMBOL} @ {price}")
 
     if DRY_RUN:
         debug_log("🧪 DRY_RUN - keine Order")
@@ -369,8 +314,10 @@ async def execute_signal(direction, price):
     debug_log("Order-Ergebnis", result)
 
     if result.get("success"):
-        current_position_side = direction
-        last_signal_time = time.time()
+        if result.get("to_side"):
+            current_position_side = result.get("to_side")
+        elif result.get("side"):
+            current_position_side = result.get("side")
 
 async def listen():
     global last_trade_price, current_lean
@@ -378,13 +325,13 @@ async def listen():
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
 
-    async with websockets.connect("wss://mainnet.zklighter.elliot.ai/stream", ping_interval=20) as ws:
+    async with websockets.connect(WS_URL, ping_interval=20) as ws:
         await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDEX}"}))
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
 
-        debug_log(f"✅ Verbunden | ⚠️ INVERTIERTE SIGNALE!")
-        debug_log(f"   SELL Signal → LONG | BUY Signal → SHORT")
+        debug_log(f"✅ Verbunden | NORMAL: SELL→Short, BUY→Long")
         debug_log(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
+        debug_log(f"   ⚠️ Keine doppelten Positionen!")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -404,8 +351,7 @@ async def listen():
                     new_lean = None
 
                 if new_lean != current_lean and new_lean is not None and last_trade_price is not None:
-                    if current_position_side != new_lean:
-                        await execute_signal(new_lean, last_trade_price)
+                    await execute_signal(new_lean, last_trade_price)
                     current_lean = new_lean
                 else:
                     if new_lean is None:
@@ -413,7 +359,7 @@ async def listen():
 
                 if now - last_status_log >= STATUS_LOG_INTERVAL:
                     last_status_log = now
-                    
+
                     if normalized_obi > 0.05:
                         richtung = "Käufer dominieren" if normalized_obi < OBI_THRESHOLD else "Käufer STARK"
                     elif normalized_obi < -0.05:
@@ -421,7 +367,7 @@ async def listen():
                     else:
                         richtung = "ausgeglichen"
 
-                    debug_log(f"📊 Status {SYMBOL} (INVERTIERT)", {
+                    debug_log(f"📊 Status {SYMBOL} (NORMAL)", {
                         "normalisierung": f"{NORMALIZE_SECONDS}s",
                         "roh_OBI": round(raw_obi, 3),
                         "normalisiert": round(normalized_obi, 3),
@@ -442,17 +388,17 @@ async def main():
     global current_position_side
 
     print("=" * 60)
-    print(f"🚀 INVERTIERTER Signal-Follower Bot für {SYMBOL}")
-    print(f"   ⚠️ SELL Signal → LONG | BUY Signal → SHORT")
+    print(f"🚀 NORMALER Signal-Follower Bot für {SYMBOL}")
+    print(f"   SELL → Short | BUY → Long")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
     if not DRY_RUN:
-        await sync_open_position_from_exchange(SYMBOL)
-        if SYMBOL in OPEN_POSITIONS:
-            current_position_side = OPEN_POSITIONS[SYMBOL]["side"]
+        pos = await get_current_position_from_exchange(SYMBOL)
+        if pos:
+            current_position_side = pos["side"]
             debug_log(f"📌 Position: {current_position_side}")
 
     while True:
