@@ -1,6 +1,6 @@
 """
 EMA-Crossover-Bot für Lighter
-- Holt 1-Minuten Candles von der Lighter API
+- Holt 1-Minuten Candles über Lighter SDK (CandlestickApi)
 - EMA7 + EMA21 basierend auf Candle-Closes
 - Kauft/Verkauft bei Crossover
 """
@@ -13,7 +13,6 @@ import os
 import traceback
 from collections import deque
 from datetime import datetime
-import aiohttp
 
 # ========== BASE URL ==========
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
@@ -100,65 +99,57 @@ class EMACalculator:
             multiplier = 2 / (self.period + 1)
             self.ema = (close_price - self.ema) * multiplier + self.ema
 
-# ========== CANDLES VON LIGHTER API ==========
-async def get_candles_from_api(market_id, resolution="1m", count_back=200):
-    """
-    Holt Candles direkt von der Lighter REST-API
-    """
+# ========== CANDLES VIA LIGHTER SDK ==========
+async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
+    """Holt Candles über das offizielle Lighter Python SDK"""
     try:
-        # Lighter Candlestick API Endpoint
-        url = f"{BASE_URL}/api/v1/candles"
-        params = {
-            "market_id": market_id,
-            "resolution": resolution,
-            "count_back": count_back
-        }
+        import lighter
+        from lighter import CandlestickApi
         
-        debug_log(f"📡 Hole Candles von API: {url}", params)
+        debug_log(f"📡 Hole Candles über Lighter SDK: market_id={market_id}, resolution={resolution}, count_back={count_back}")
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as response:
-                if response.status != 200:
-                    debug_log(f"❌ API Fehler: Status {response.status}")
-                    # Fallback: /candlesticks versuchen
-                    url2 = f"{BASE_URL}/api/v1/candlesticks"
-                    debug_log(f"📡 Versuche Fallback: {url2}")
-                    async with session.get(url2, params=params) as response2:
-                        if response2.status == 200:
-                            data = await response2.json()
-                            candles = data.get("candles", []) or data.get("result", []) or []
-                            if candles:
-                                debug_log(f"✅ {len(candles)} Candles von /candlesticks erhalten")
-                                return candles
-                        return []
-                
-                data = await response.json()
-                
-                # Candles aus Response extrahieren
-                candles = data.get("candles", []) or data.get("result", []) or []
-                
-                if not candles:
-                    debug_log("⚠️ Keine Candles von API erhalten")
-                    return []
-                
-                debug_log(f"✅ {len(candles)} Candles von API erhalten")
-                
-                # Candles als Liste von Dictionaries zurückgeben
-                result = []
-                for c in candles:
-                    result.append({
-                        "timestamp": c.get('t', 0),
-                        "open": float(c.get('o', 0)),
-                        "high": float(c.get('h', 0)),
-                        "low": float(c.get('l', 0)),
-                        "close": float(c.get('c', 0)),
-                        "volume": float(c.get('v', 0))
-                    })
-                
-                return result
+        # API Client erstellen
+        client = lighter.ApiClient()
+        candle_api = CandlestickApi(client)
+        
+        # Candles abrufen
+        response = await candle_api.candlesticks(
+            market_id=market_id,
+            resolution=resolution,
+            count_back=count_back
+        )
+        
+        # Client schließen
+        await client.close()
+        
+        # Candles aus Response extrahieren
+        candles = getattr(response, 'candles', []) or []
+        
+        if not candles:
+            debug_log("⚠️ Keine Candles von Lighter SDK erhalten")
+            return []
+        
+        debug_log(f"✅ {len(candles)} Candles von Lighter SDK erhalten")
+        
+        # Candles als Liste von Dictionaries zurückgeben
+        result = []
+        for c in candles:
+            result.append({
+                "timestamp": getattr(c, 't', 0),
+                "open": float(getattr(c, 'o', 0)),
+                "high": float(getattr(c, 'h', 0)),
+                "low": float(getattr(c, 'l', 0)),
+                "close": float(getattr(c, 'c', 0)),
+                "volume": float(getattr(c, 'v', 0))
+            })
+        
+        return result
         
     except Exception as e:
-        debug_log("❌ Fehler beim Abrufen der Candles", {"error": str(e), "traceback": traceback.format_exc()})
+        debug_log("❌ Fehler beim Abrufen der Candles über SDK", {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
         return []
 
 # ========== LIGHTER CLIENT ==========
@@ -348,9 +339,9 @@ if SYMBOL not in MARKET_INDICES:
 
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-# EMA Parameter (wie TradingView)
-EMA_FAST = int(os.getenv("EMA_FAST", "7"))     # EMA 7
-EMA_SLOW = int(os.getenv("EMA_SLOW", "21"))    # EMA 21
+# EMA Parameter
+EMA_FAST = int(os.getenv("EMA_FAST", "7"))
+EMA_SLOW = int(os.getenv("EMA_SLOW", "21"))
 
 # Trading Parameter
 MARGIN = float(os.getenv("OB_MARGIN", "10"))
@@ -358,7 +349,7 @@ LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 # Candle Parameter
-CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "200"))  # Wie viele Candles laden
+CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "200"))
 MIN_HOLD_SECONDS = float(os.getenv("MIN_HOLD_SECONDS", "120"))
 SIGNAL_COOLDOWN = float(os.getenv("SIGNAL_COOLDOWN", "30"))
 
@@ -368,7 +359,6 @@ slow_ema = EMACalculator(EMA_SLOW)
 current_position_side = None
 last_signal_time = 0
 position_opened_at = 0
-last_candle_close = None
 current_candle = None
 
 async def execute_signal(direction, price):
@@ -406,21 +396,22 @@ async def execute_signal(direction, price):
         position_opened_at = now
         last_signal_time = now
 
-async def init_emas_from_api():
-    """Initialisiert EMAs mit historischen Candles"""
-    debug_log(f"📊 Initialisiere EMAs mit historischen Candles...")
+async def init_emas_from_lighter():
+    """Initialisiert EMAs mit Candles vom Lighter SDK"""
+    debug_log(f"📊 Initialisiere EMAs mit Candles von Lighter SDK...")
     
-    candles = await get_candles_from_api(MARKET_INDEX, "1m", CANDLE_LIMIT)
+    candles = await get_candles_from_lighter(MARKET_INDEX, "1m", CANDLE_LIMIT)
     
     if not candles:
-        debug_log("⚠️ Keine Candles zum Initialisieren der EMAs")
+        debug_log("⚠️ Keine Candles von Lighter SDK erhalten")
         return False
     
     # Candles durchgehen und EMAs aufbauen (NUR CANDLE-CLOSES!)
     for candle in candles:
         close_price = candle["close"]
-        fast_ema.add_candle(close_price)
-        slow_ema.add_candle(close_price)
+        if close_price > 0:
+            fast_ema.add_candle(close_price)
+            slow_ema.add_candle(close_price)
     
     debug_log(f"✅ EMAs initialisiert mit {len(candles)} Candles")
     debug_log(f"   EMA{EMA_FAST}: {fast_ema.ema:.3f}" if fast_ema.ema else "   EMA7: None")
@@ -429,7 +420,7 @@ async def init_emas_from_api():
     return True
 
 async def listen():
-    global current_candle, last_candle_close, current_position_side
+    global current_candle
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
@@ -438,7 +429,7 @@ async def listen():
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
 
         debug_log(f"✅ Verbunden, abonniert trade:{MARKET_INDEX}")
-        debug_log(f"📊 EMA: {EMA_FAST}/{EMA_SLOW} auf 1-Minuten Candles (via API)")
+        debug_log(f"📊 EMA: {EMA_FAST}/{EMA_SLOW} auf 1-Minuten Candles (via Lighter SDK)")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -511,14 +502,14 @@ async def main():
 
     print("=" * 70)
     print(f"🚀 EMA-Crossover-Bot für {SYMBOL}")
-    print(f"   EMA: {EMA_FAST}/{EMA_SLOW} auf 1-Minuten Candles (via API)")
+    print(f"   EMA: {EMA_FAST}/{EMA_SLOW} auf 1-Minuten Candles (via Lighter SDK)")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print(f"   Min Hold: {MIN_HOLD_SECONDS}s | Cooldown: {SIGNAL_COOLDOWN}s")
     print("=" * 70)
 
-    # ===== INIT: EMAs mit historischen Candles =====
-    await init_emas_from_api()
+    # ===== INIT: EMAs mit Candles von Lighter SDK =====
+    await init_emas_from_lighter()
 
     if not DRY_RUN:
         await sync_open_position_from_exchange(SYMBOL)
