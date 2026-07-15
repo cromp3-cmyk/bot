@@ -485,7 +485,7 @@ async def main():
     print("=" * 60)
     print(f"🚀 Orderbuch-Bot gestartet für {SYMBOL} (Market Index {MARKET_INDEX})")
     print(f"   DRY_RUN: {DRY_RUN}")
-    print(f"   OBI Levels: {OBI_LEVELS} | Schwelle: {OBI_THRESHOLD} | Bestätigung: {OBI_CONFIRM_TICKS} Ticks")
+    print(f"   OBI Levels: {OBI_LEVELS} | Schwelle: {OBI_THRESHOLD} | Bestätigung: {OBI_CONFIRM_SECONDS} Seconds")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x | Cooldown: {COOLDOWN_SECONDS}s")
     print("=" * 60)
 
