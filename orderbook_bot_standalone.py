@@ -1,9 +1,9 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL
+Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL (FINAL)
 ================================================================================
 SELL Signal → Short eröffnen (oder von Long wechseln)
 BUY Signal  → Long eröffnen  (oder von Short wechseln)
-Keine doppelten Positionen!
+Keine doppelten Signale, keine doppelten Positionen!
 """
 
 import asyncio
@@ -179,15 +179,14 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         if current_pos:
             debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']}")
 
-            # ==== GLEICHE RICHTUNG → NICHTS TUN! (Verhindert doppelte Positionen!) ====
+            # ==== GLEICHE RICHTUNG → NICHTS TUN! ====
             if current_pos["side"] == new_side:
-                debug_log(f"⏭️ Bereits {new_side}, ignoriere Signal! (Keine doppelte Position)")
+                debug_log(f"⏭️ Bereits {new_side}, ignoriere Signal!")
                 return {"success": True, "action": "ignoriert", "side": new_side}
 
             # ==== ANDERE RICHTUNG → Position schließen + neue öffnen ====
             debug_log(f"🔄 Wechsel von {current_pos['side']} zu {new_side}")
 
-            # Alte Position schließen
             close_is_ask = current_pos["side"] == "long"
             tx1, tx_hash1, err1 = await create_order_with_price(
                 client, market_index, current_pos["base_amount"], close_is_ask, symbol,
@@ -199,7 +198,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
             debug_log(f"✅ {current_pos['side']} geschlossen")
             await asyncio.sleep(1)
 
-            # Neue Position öffnen
             tx2, tx_hash2, err2 = await create_order_with_price(
                 client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
             )
@@ -239,6 +237,7 @@ MARKET_INDEX = MARKET_INDICES[SYMBOL]
 OBI_LEVELS = int(os.getenv("OBI_LEVELS", "15"))
 OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.12"))
 NORMALIZE_SECONDS = float(os.getenv("NORMALIZE_SECONDS", "10"))
+SIGNAL_COOLDOWN = float(os.getenv("SIGNAL_COOLDOWN", "1.0"))  # 1 Sekunde zwischen Signalen
 
 MARGIN = float(os.getenv("OB_MARGIN", "10"))
 LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
@@ -277,6 +276,7 @@ last_trade_price = None
 current_position_side = None
 obi_normalizer = OBINormalizer(window_seconds=NORMALIZE_SECONDS)
 current_lean = None
+last_signal_time = 0
 
 def apply_order_book_update(msg):
     ob = msg.get("order_book", {})
@@ -298,12 +298,20 @@ def calc_raw_obi(levels=OBI_LEVELS):
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
 async def execute_signal(direction, price):
-    global current_position_side
+    global current_position_side, last_signal_time
+
+    # ===== COOLDOWN: Keine doppelten Signale! =====
+    now = time.time()
+    if now - last_signal_time < SIGNAL_COOLDOWN:
+        debug_log(f"⏭️ Signal ignoriert (Cooldown: {now - last_signal_time:.2f}s)")
+        return
 
     if current_position_side == direction:
+        debug_log(f"⏭️ Bereits {direction}, ignoriere")
         return
 
     debug_log(f"📡 SIGNAL: {direction.upper()} {SYMBOL} @ {price}")
+    last_signal_time = now
 
     if DRY_RUN:
         debug_log("🧪 DRY_RUN - keine Order")
@@ -320,7 +328,7 @@ async def execute_signal(direction, price):
             current_position_side = result.get("side")
 
 async def listen():
-    global last_trade_price, current_lean
+    global last_trade_price, current_lean, last_signal_time
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
@@ -331,7 +339,7 @@ async def listen():
 
         debug_log(f"✅ Verbunden | NORMAL: SELL→Short, BUY→Long")
         debug_log(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-        debug_log(f"   ⚠️ Keine doppelten Positionen!")
+        debug_log(f"   Signal-Cooldown: {SIGNAL_COOLDOWN}s | Keine doppelten Positionen!")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -350,9 +358,13 @@ async def listen():
                 else:
                     new_lean = None
 
+                # ===== NUR BEI LEAN-ÄNDERUNG UND COOLDOWN =====
                 if new_lean != current_lean and new_lean is not None and last_trade_price is not None:
-                    await execute_signal(new_lean, last_trade_price)
-                    current_lean = new_lean
+                    if now - last_signal_time >= SIGNAL_COOLDOWN:
+                        await execute_signal(new_lean, last_trade_price)
+                        current_lean = new_lean
+                    else:
+                        debug_log(f"⏭️ Lean-Änderung ignoriert (Cooldown)")
                 else:
                     if new_lean is None:
                         current_lean = None
@@ -392,6 +404,7 @@ async def main():
     print(f"   SELL → Short | BUY → Long")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
+    print(f"   Signal-Cooldown: {SIGNAL_COOLDOWN}s")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
