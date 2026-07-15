@@ -1,10 +1,10 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter - EINFACHER SIGNAL-FOLLOWER
+Autonomer Orderbuch-Signal-Bot für Lighter - FINAL
 ================================================================================
-MERKT SICH DAS LETZTE SIGNAL:
-- SELL → Short (bleibt bis BUY kommt)
-- BUY → Long (bleibt bis SELL kommt)
-KEIN Cache, KEINE Positionsprüfung, KEIN Nachkaufen!
+NUR OBI mit Normalisierung (einstellbar)
+Handelt NUR bei Signalwechsel: SELL→Short, BUY→Long
+Wenn schon Short, bleibt Short bis BUY kommt
+Wenn schon Long, bleibt Long bis SELL kommt
 """
 
 import asyncio
@@ -109,8 +109,46 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
     )
     return tx, tx_hash, err
 
+async def get_current_position(symbol):
+    """Holt die aktuelle Position vom Exchange"""
+    try:
+        import lighter
+        account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
+        api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
+        account_api = lighter.AccountApi(api_client)
+
+        response = await account_api.account(by="index", value=str(account_index))
+        accounts = getattr(response, "accounts", None) or []
+        if not accounts:
+            return None
+
+        positions = getattr(accounts[0], "positions", []) or []
+        market_index = MARKET_INDICES[symbol]
+
+        for pos in positions:
+            if getattr(pos, "market_index", None) != market_index:
+                continue
+            size = float(getattr(pos, "position", 0) or 0)
+            if size == 0:
+                continue
+
+            side = "long" if size > 0 else "short"
+            open_price = float(getattr(pos, "avg_entry_price", 0) or 0)
+            base_amount = int(abs(size) * get_precision(symbol))
+
+            return {
+                "side": side,
+                "base_amount": base_amount,
+                "open_price": open_price,
+                "size": abs(size)
+            }
+        return None
+    except Exception as e:
+        debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
+        return None
+
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
-    """Öffnet oder reversed eine Position - NACH SIGNAL!"""
+    """Öffnet oder reversed eine Position - NUR BEI SIGNALWECHSEL!"""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -135,42 +173,8 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         new_side = "long" if action == "buy" else "short"
         new_is_ask = action != "buy"
 
-        # ===== 2. BESTEHENDE POSITION VOM EXCHANGE HOLEN =====
-        try:
-            import lighter
-            account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
-            api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
-            account_api = lighter.AccountApi(api_client)
-
-            response = await account_api.account(by="index", value=str(account_index))
-            accounts = getattr(response, "accounts", None) or []
-            current_pos = None
-
-            if accounts:
-                positions = getattr(accounts[0], "positions", []) or []
-                market_index_local = MARKET_INDICES[symbol]
-
-                for pos in positions:
-                    if getattr(pos, "market_index", None) != market_index_local:
-                        continue
-                    size = float(getattr(pos, "position", 0) or 0)
-                    if size == 0:
-                        continue
-
-                    side = "long" if size > 0 else "short"
-                    open_price = float(getattr(pos, "avg_entry_price", 0) or 0)
-                    base = int(abs(size) * get_precision(symbol))
-
-                    current_pos = {
-                        "side": side,
-                        "base_amount": base,
-                        "open_price": open_price,
-                        "size": abs(size)
-                    }
-                    break  # Nur erste Position nehmen (sollte nur eine geben)
-        except Exception as e:
-            debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
-            current_pos = None
+        # ===== 2. BESTEHENDE POSITION ABFRAGEN =====
+        current_pos = await get_current_position(symbol)
 
         # ===== 3. WENN POSITION EXISTIERT → Prüfen! =====
         if current_pos:
@@ -269,7 +273,7 @@ last_trade_price = None
 current_position_side = None
 obi_normalizer = OBINormalizer(window_seconds=NORMALIZE_SECONDS)
 current_lean = None
-last_signal = None  # <-- DAS LETZTE SIGNAL MERKEN!
+last_signal = None  # Letztes ausgeführtes Signal
 
 def apply_order_book_update(msg):
     ob = msg.get("order_book", {})
@@ -323,9 +327,9 @@ async def listen():
         await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDEX}"}))
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
 
-        debug_log(f"✅ Verbunden | NORMAL: SELL→Short, BUY→Long")
+        debug_log(f"✅ Verbunden | SELL→Short, BUY→Long")
         debug_log(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-        debug_log(f"   ⚠️ Signal-Follower: Nur bei Wechsel handeln!")
+        debug_log(f"   ⚠️ NUR bei Signalwechsel handeln!")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -337,6 +341,7 @@ async def listen():
                 normalized_obi = obi_normalizer.add(raw_obi)
                 now = time.time()
 
+                # ===== SIGNAL ERKENNEN =====
                 if normalized_obi >= OBI_THRESHOLD:
                     new_lean = "buy"
                 elif normalized_obi <= -OBI_THRESHOLD:
@@ -344,16 +349,16 @@ async def listen():
                 else:
                     new_lean = None
 
-                # ===== NUR BEI SIGNAL-WECHSEL HANDELN! =====
-                if new_lean != current_lean and new_lean is not None and last_trade_price is not None:
-                    # Prüfen ob sich das Signal geändert hat
-                    if last_signal != new_lean:
+                # ===== NUR BEI SIGNALWECHSEL HANDELN! =====
+                if new_lean is not None:
+                    if last_signal != new_lean and last_trade_price is not None:
                         await execute_signal(new_lean, last_trade_price)
                     current_lean = new_lean
                 else:
-                    if new_lean is None:
-                        current_lean = None
+                    current_lean = None
+                    # last_signal bleibt erhalten! (Wichtig für Signalwechsel-Erkennung)
 
+                # ===== STATUS-LOG =====
                 if now - last_status_log >= STATUS_LOG_INTERVAL:
                     last_status_log = now
 
@@ -364,7 +369,7 @@ async def listen():
                     else:
                         richtung = "ausgeglichen"
 
-                    debug_log(f"📊 Status {SYMBOL} (SIGNAL-FOLLOWER)", {
+                    debug_log(f"📊 Status {SYMBOL}", {
                         "normalisierung": f"{NORMALIZE_SECONDS}s",
                         "roh_OBI": round(raw_obi, 3),
                         "normalisiert": round(normalized_obi, 3),
@@ -386,38 +391,20 @@ async def main():
     global current_position_side, last_signal
 
     print("=" * 60)
-    print(f"🚀 SIGNAL-FOLLOWER Bot für {SYMBOL}")
-    print(f"   SELL → Short | BUY → Long")
-    print(f"   DRY_RUN: {DRY_RUN}")
+    print(f"🚀 OBI-Bot für {SYMBOL}")
     print(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-    print(f"   ⚠️ Nur bei Signal-Wechsel handeln!")
+    print(f"   SELL→Short | BUY→Long")
+    print(f"   ⚠️ NUR bei Signalwechsel handeln!")
+    print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
     if not DRY_RUN:
-        try:
-            import lighter
-            account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
-            api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
-            account_api = lighter.AccountApi(api_client)
-
-            response = await account_api.account(by="index", value=str(account_index))
-            accounts = getattr(response, "accounts", None) or []
-            if accounts:
-                positions = getattr(accounts[0], "positions", []) or []
-                market_index = MARKET_INDICES[SYMBOL]
-                for pos in positions:
-                    if getattr(pos, "market_index", None) != market_index:
-                        continue
-                    size = float(getattr(pos, "position", 0) or 0)
-                    if size == 0:
-                        continue
-                    current_position_side = "long" if size > 0 else "short"
-                    last_signal = current_position_side
-                    debug_log(f"📌 Position: {current_position_side}")
-                    break
-        except Exception as e:
-            debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
+        pos = await get_current_position(SYMBOL)
+        if pos:
+            current_position_side = pos["side"]
+            last_signal = pos["side"]
+            debug_log(f"📌 Position: {current_position_side}")
 
     while True:
         try:
