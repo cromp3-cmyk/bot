@@ -9,3 +9,8 @@ pycryptodome==3.21.0
 python-dotenv==1.0.1
 typing-extensions==4.12.2
 colorama==0.4.6
+
+# WICHTIG - NOCH FEHLT: das Lighter-SDK-Paket selbst (z.B. "lighter-sdk==x.y.z"
+# oder "lighter @ git+https://...").
+# Bitte "pip freeze" (ohne grep) in deinem alten Repo laufen lassen und die
+# passende Zeile hier ergaenzen - ohne sie kann "import lighter" fehlschlagen.

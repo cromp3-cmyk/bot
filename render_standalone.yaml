@@ -1,0 +1,34 @@
+services:
+  - type: worker
+    name: lighter-orderbook-bot
+    runtime: python
+    repo: https://github.com/DEIN_USERNAME/bot
+    plan: starter
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python orderbook_bot.py
+    envVars:
+      - key: PRIVATE_KEY
+        sync: false
+      - key: API_KEY_INDEX
+        sync: false
+      - key: ACCOUNT_INDEX
+        sync: false
+      - key: DRY_RUN
+        value: "true"
+      - key: DEBUG_MODE
+        value: "true"
+      - key: OB_SYMBOL
+        value: "BTC"
+      - key: OBI_LEVELS
+        value: "10"
+      - key: OBI_THRESHOLD
+        value: "0.30"
+      - key: OBI_CONFIRM_TICKS
+        value: "5"
+      - key: COOLDOWN_SECONDS
+        value: "30"
+      - key: OB_MARGIN
+        value: "100"
+      - key: OB_LEVERAGE
+        value: "10"
