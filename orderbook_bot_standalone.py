@@ -392,6 +392,8 @@ async def listen():
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10  # Sekunden
+    raw_debug_count = 0
+    RAW_DEBUG_LIMIT = 15  # so viele Rohnachrichten am Anfang komplett loggen
 
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
         await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book:{MARKET_INDEX}"}))
@@ -402,6 +404,17 @@ async def listen():
         async for raw in ws:
             msg = json.loads(raw)
             channel = msg.get("channel", "")
+            msg_type = msg.get("type", "")
+
+            # ==== TEMPORÄR: erste Rohnachrichten komplett loggen zum Debuggen ====
+            if raw_debug_count < RAW_DEBUG_LIMIT:
+                raw_debug_count += 1
+                debug_log(f"🔎 RAW Nachricht #{raw_debug_count}", {
+                    "type": msg_type,
+                    "channel": channel,
+                    "keys": list(msg.keys()),
+                    "raw_gekuerzt": raw[:500],
+                })
 
             if channel.startswith("order_book"):
                 apply_order_book_update(msg)
