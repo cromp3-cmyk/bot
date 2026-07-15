@@ -1,9 +1,8 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL (FINAL)
+Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL (FIXED)
 ================================================================================
-SELL Signal → Short eröffnen (oder von Long wechseln)
-BUY Signal  → Long eröffnen  (oder von Short wechseln)
-Keine doppelten Signale, keine doppelten Positionen!
+KEIN unkontrolliertes Nachkaufen mehr!
+Alle Positionen werden zusammengefasst.
 """
 
 import asyncio
@@ -109,7 +108,7 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
     return tx, tx_hash, err
 
 async def get_current_position_from_exchange(symbol):
-    """Holt die aktuelle Position vom Exchange"""
+    """Holt die aktuelle Position vom Exchange und fasst sie zusammen!"""
     try:
         import lighter
         account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
@@ -124,6 +123,11 @@ async def get_current_position_from_exchange(symbol):
         positions = getattr(accounts[0], "positions", []) or []
         market_index = MARKET_INDICES[symbol]
 
+        # ===== ALLE POSITIONEN FÜR DIESEN MARKT ZUSAMMENFASSEN =====
+        total_size = 0.0
+        total_base = 0
+        weighted_price = 0.0
+
         for pos in positions:
             if getattr(pos, "market_index", None) != market_index:
                 continue
@@ -131,23 +135,34 @@ async def get_current_position_from_exchange(symbol):
             if size == 0:
                 continue
 
-            side = "long" if size > 0 else "short"
-            open_price = float(getattr(pos, "avg_entry_price", 0) or 0)
-            base_amount = int(abs(size) * get_precision(symbol))
+            price = float(getattr(pos, "avg_entry_price", 0) or 0)
+            base = int(abs(size) * get_precision(symbol))
 
-            return {
-                "side": side,
-                "base_amount": base_amount,
-                "open_price": open_price,
-                "size": abs(size)
-            }
-        return None
+            total_size += size
+            total_base += base
+            weighted_price += price * abs(size)
+
+        if total_size == 0:
+            return None
+
+        side = "long" if total_size > 0 else "short"
+        avg_price = weighted_price / abs(total_size)
+
+        debug_log(f"📊 Position zusammengefasst: {side} {abs(total_size)} SOL @ {avg_price:.3f}")
+
+        return {
+            "side": side,
+            "size": abs(total_size),
+            "base_amount": total_base,
+            "open_price": avg_price
+        }
+
     except Exception as e:
         debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
         return None
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
-    """Öffnet oder reversed eine Position - NORMAL (KEIN doppeltes Öffnen!)"""
+    """Öffnet oder reversed eine Position - KEIN unkontrolliertes Nachkaufen!"""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -157,7 +172,7 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         precision = get_precision(symbol)
         min_base_amount = get_min_base_amount(symbol)
 
-        # ===== 1. BESTEHENDE POSITION VOM EXCHANGE HOLEN =====
+        # ===== 1. BESTEHENDE POSITION VOM EXCHANGE HOLEN (ZUSAMMENGEFASST!) =====
         current_pos = await get_current_position_from_exchange(symbol)
 
         # ===== 2. NEUE POSITIONSGRÖSSE BERECHNEN =====
@@ -177,16 +192,17 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
 
         # ===== 3. WENN POSITION EXISTIERT → Prüfen! =====
         if current_pos:
-            debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']}")
+            debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']} (Größe: {current_pos['size']} SOL)")
 
-            # ==== GLEICHE RICHTUNG → NICHTS TUN! ====
+            # ==== GLEICHE RICHTUNG → NICHTS TUN! (Verhindert unkontrolliertes Nachkaufen!) ====
             if current_pos["side"] == new_side:
-                debug_log(f"⏭️ Bereits {new_side}, ignoriere Signal!")
+                debug_log(f"⏭️ Bereits {new_side}, ignoriere Signal! (Kein Nachkauf)")
                 return {"success": True, "action": "ignoriert", "side": new_side}
 
             # ==== ANDERE RICHTUNG → Position schließen + neue öffnen ====
             debug_log(f"🔄 Wechsel von {current_pos['side']} zu {new_side}")
 
+            # Alte Position schließen
             close_is_ask = current_pos["side"] == "long"
             tx1, tx_hash1, err1 = await create_order_with_price(
                 client, market_index, current_pos["base_amount"], close_is_ask, symbol,
@@ -198,6 +214,7 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
             debug_log(f"✅ {current_pos['side']} geschlossen")
             await asyncio.sleep(1)
 
+            # Neue Position öffnen
             tx2, tx_hash2, err2 = await create_order_with_price(
                 client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
             )
@@ -225,9 +242,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
     finally:
         await client.close()
 
-# ========== STATE ==========
-OPEN_POSITIONS = {}
-
 # ========== KONFIGURATION ==========
 SYMBOL = os.getenv("OB_SYMBOL", "SOL").upper()
 if SYMBOL not in MARKET_INDICES:
@@ -237,7 +251,7 @@ MARKET_INDEX = MARKET_INDICES[SYMBOL]
 OBI_LEVELS = int(os.getenv("OBI_LEVELS", "15"))
 OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.12"))
 NORMALIZE_SECONDS = float(os.getenv("NORMALIZE_SECONDS", "10"))
-SIGNAL_COOLDOWN = float(os.getenv("SIGNAL_COOLDOWN", "1.0"))  # 1 Sekunde zwischen Signalen
+SIGNAL_COOLDOWN = float(os.getenv("SIGNAL_COOLDOWN", "1.0"))
 
 MARGIN = float(os.getenv("OB_MARGIN", "10"))
 LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
@@ -300,7 +314,6 @@ def calc_raw_obi(levels=OBI_LEVELS):
 async def execute_signal(direction, price):
     global current_position_side, last_signal_time
 
-    # ===== COOLDOWN: Keine doppelten Signale! =====
     now = time.time()
     if now - last_signal_time < SIGNAL_COOLDOWN:
         debug_log(f"⏭️ Signal ignoriert (Cooldown: {now - last_signal_time:.2f}s)")
@@ -339,7 +352,7 @@ async def listen():
 
         debug_log(f"✅ Verbunden | NORMAL: SELL→Short, BUY→Long")
         debug_log(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-        debug_log(f"   Signal-Cooldown: {SIGNAL_COOLDOWN}s | Keine doppelten Positionen!")
+        debug_log(f"   ⚠️ KEIN unkontrolliertes Nachkaufen!")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -358,7 +371,6 @@ async def listen():
                 else:
                     new_lean = None
 
-                # ===== NUR BEI LEAN-ÄNDERUNG UND COOLDOWN =====
                 if new_lean != current_lean and new_lean is not None and last_trade_price is not None:
                     if now - last_signal_time >= SIGNAL_COOLDOWN:
                         await execute_signal(new_lean, last_trade_price)
@@ -404,7 +416,7 @@ async def main():
     print(f"   SELL → Short | BUY → Long")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-    print(f"   Signal-Cooldown: {SIGNAL_COOLDOWN}s")
+    print(f"   ⚠️ KEIN unkontrolliertes Nachkaufen!")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
