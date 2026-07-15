@@ -1,11 +1,7 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter (zkLighter) - EIGENSTÄNDIGE VERSION
+Autonomer Orderbuch-Signal-Bot für Lighter (zkLighter) - 10-Sekunden-Normalisierung
 ================================================================================
-Läuft komplett unabhängig, ohne Abhängigkeit zu einem anderen Bot/Repo.
-Verbindet sich per WebSocket mit Lighter, berechnet Order Book Imbalance (OBI)
-und tradet autonom bei bestätigtem Signal.
-
-10-Sekunden-Normalisierung: Der OBI wird über die letzten 10 Sekunden gemittelt.
+Der OBI wird über 10 Sekunden gemittelt – dadurch entfällt die separate Bestätigungszeit.
 """
 
 import asyncio
@@ -287,7 +283,6 @@ MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
 OBI_LEVELS = int(os.getenv("OBI_LEVELS", "15"))
 OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.12"))
-OBI_CONFIRM_SECONDS = float(os.getenv("OBI_CONFIRM_SECONDS", "5"))
 COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "15"))
 MIN_HOLD_SECONDS = float(os.getenv("MIN_HOLD_SECONDS", "30"))
 
@@ -342,9 +337,8 @@ last_trade_time = 0.0
 # 10-Sekunden-Normalisierer
 obi_normalizer = OBINormalizer(window_seconds=10)
 
-# Zeit-basierte Bestätigung
-lean_direction = None
-lean_since = 0.0
+# State für Richtungswechsel (vereinfacht)
+current_lean = None
 
 
 def apply_order_book_update(msg):
@@ -384,9 +378,8 @@ async def execute_signal(direction, price):
         })
         return
 
-    debug_log(f"📡 OBI-Signal bestätigt: {direction.upper()} {SYMBOL} @ {price}", {
+    debug_log(f"📡 OBI-Signal: {direction.upper()} {SYMBOL} @ {price}", {
         "normalisierter_OBI": round(obi_normalizer.get(), 3),
-        "bestaetigt_seit_sekunden": round(now - lean_since, 1) if lean_since else None,
     })
 
     if DRY_RUN:
@@ -405,7 +398,7 @@ async def execute_signal(direction, price):
 
 
 async def listen():
-    global last_trade_price, lean_direction, lean_since
+    global last_trade_price, current_lean
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
@@ -415,7 +408,7 @@ async def listen():
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
 
         debug_log(f"✅ Verbunden, abonniert order_book:{MARKET_INDEX} und trade:{MARKET_INDEX}")
-        debug_log(f"📊 10-Sekunden-Normalisierung aktiv | Schwelle: {OBI_THRESHOLD}")
+        debug_log(f"📊 10-Sekunden-Normalisierung | Schwelle: {OBI_THRESHOLD}")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -430,7 +423,9 @@ async def listen():
                 
                 now = time.time()
 
-                # ===== Signal mit normalisiertem OBI =====
+                # ===== Signal mit normalisiertem OBI (sofort, keine Bestätigung mehr!) =====
+                old_lean = current_lean
+                
                 if normalized_obi >= OBI_THRESHOLD:
                     current_lean = "buy"
                 elif normalized_obi <= -OBI_THRESHOLD:
@@ -438,10 +433,8 @@ async def listen():
                 else:
                     current_lean = None
 
-                if current_lean != lean_direction:
-                    lean_direction = current_lean
-                    lean_since = now if current_lean is not None else 0.0
-                elif current_lean is not None and (now - lean_since) >= OBI_CONFIRM_SECONDS and last_trade_price is not None:
+                # Bei Richtungswechsel → Signal ausführen
+                if current_lean != old_lean and current_lean is not None and last_trade_price is not None:
                     await execute_signal(current_lean, last_trade_price)
 
                 # ===== Status-Log =====
@@ -463,8 +456,7 @@ async def listen():
                         "buffer_groesse": obi_normalizer.get_raw_count(),
                         "letzter_preis": last_trade_price,
                         "bot_position": current_position_side or "flach",
-                        "lean_haelt_seit_sekunden": round(now - lean_since, 1) if lean_direction else 0,
-                        "braucht_sekunden_fuer_signal": OBI_CONFIRM_SECONDS,
+                        "aktuelles_lean": current_lean or "neutral",
                     })
 
             elif channel.startswith("trade"):
@@ -480,8 +472,8 @@ async def main():
     print(f"🚀 Orderbuch-Bot mit 10-Sekunden-Normalisierung für {SYMBOL}")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   OBI Levels: {OBI_LEVELS} | Schwelle: {OBI_THRESHOLD}")
-    print(f"   Bestätigung: {OBI_CONFIRM_SECONDS}s | Min. Haltedauer: {MIN_HOLD_SECONDS}s")
-    print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x | Cooldown: {COOLDOWN_SECONDS}s")
+    print(f"   Min. Haltedauer: {MIN_HOLD_SECONDS}s | Cooldown: {COOLDOWN_SECONDS}s")
+    print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
     if not DRY_RUN:
