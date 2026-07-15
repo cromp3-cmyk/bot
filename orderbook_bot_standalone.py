@@ -1,8 +1,8 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL (MIT CACHE)
+Autonomer Orderbuch-Signal-Bot für Lighter - NORMAL (MIT CACHE FIX)
 ================================================================================
 KEIN unkontrolliertes Nachkaufen mehr!
-Position wird gecached, damit der Bot weiß dass er schon eine Position hat.
+Cache wird sofort nach dem Öffnen einer Position gesetzt.
 """
 
 import asyncio
@@ -187,7 +187,7 @@ async def get_current_position_from_exchange(symbol, force_refresh=False):
         return None
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
-    """Öffnet oder reversed eine Position - MIT CACHE!"""
+    """Öffnet oder reversed eine Position - MIT CACHE (SOFORT SETZEN!)"""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -221,7 +221,7 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
 
             # ==== GLEICHE RICHTUNG → NICHTS TUN! ====
             if current_pos["side"] == new_side:
-                debug_log(f"⏭️ Bereits {new_side}, ignoriere Signal! (Kein Nachkauf)")
+                debug_log(f"⏭️ Bereits {new_side}, ignoriere Signal!")
                 return {"success": True, "action": "ignoriert", "side": new_side}
 
             # ==== ANDERE RICHTUNG → Position schließen + neue öffnen ====
@@ -246,9 +246,14 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
 
             debug_log(f"✅ {new_side} eröffnet")
             
-            # Cache zurücksetzen (nach erfolgreichem Wechsel)
+            # ===== CACHE SOFORT SETZEN! =====
             global position_cache
-            position_cache = {"side": new_side, "timestamp": time.time(), "size": base_amount / precision}
+            position_cache = {
+                "side": new_side,
+                "timestamp": time.time(),
+                "size": base_amount / precision
+            }
+            debug_log(f"📦 Cache aktualisiert: {new_side}")
             
             return {"success": True, "action": "reverse", "to_side": new_side, "tx_hash": str(tx_hash2)}
 
@@ -263,8 +268,14 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
 
             debug_log(f"✅ {new_side} eröffnet")
             
-            # Cache setzen
-            position_cache = {"side": new_side, "timestamp": time.time(), "size": base_amount / precision}
+            # ===== CACHE SOFORT SETZEN! =====
+            global position_cache
+            position_cache = {
+                "side": new_side,
+                "timestamp": time.time(),
+                "size": base_amount / precision
+            }
+            debug_log(f"📦 Cache gesetzt: {new_side}")
             
             return {"success": True, "action": "open", "side": new_side, "tx_hash": str(tx_hash)}
 
@@ -384,7 +395,7 @@ async def listen():
 
         debug_log(f"✅ Verbunden | NORMAL: SELL→Short, BUY→Long")
         debug_log(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-        debug_log(f"   ⚠️ KEIN unkontrolliertes Nachkaufen! (Cache aktiv)")
+        debug_log(f"   ⚠️ Cache wird sofort nach dem Öffnen gesetzt!")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -448,7 +459,7 @@ async def main():
     print(f"   SELL → Short | BUY → Long")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-    print(f"   ⚠️ KEIN unkontrolliertes Nachkaufen! (Cache aktiv)")
+    print(f"   Cache wird sofort nach dem Öffnen gesetzt!")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
