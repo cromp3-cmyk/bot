@@ -13,6 +13,7 @@ import os
 import traceback
 from collections import deque
 from datetime import datetime, timedelta
+import aiohttp
 
 # ========== BASE URL ==========
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
@@ -99,50 +100,52 @@ class EMACalculator:
             multiplier = 2 / (self.period + 1)
             self.ema = (close_price - self.ema) * multiplier + self.ema
 
-# ========== CANDLES VON LIGHTER API ==========
+# ========== CANDLES VON LIGHTER API (OHNE SDK) ==========
 async def get_candles_from_api(market_id, resolution="1m", limit=200):
     """
-    Holt Candles direkt von der Lighter REST-API
+    Holt Candles direkt von der Lighter REST-API (ohne SDK)
     """
     try:
-        import lighter
-        from lighter import ApiClient, CandlestickApi
+        # Lighter Candlestick API Endpoint
+        url = f"{BASE_URL}/api/v1/candles"
+        params = {
+            "market_id": market_id,
+            "resolution": resolution,
+            "count_back": limit
+        }
         
-        # API Client erstellen
-        api_client = ApiClient(configuration=ApiClient.Configuration(host=BASE_URL))
-        candle_api = CandlestickApi(api_client)
+        debug_log(f"📡 Hole Candles von API: {url} mit {params}")
         
-        # Candles abrufen
-        debug_log(f"📡 Hole Candles von API: market_id={market_id}, resolution={resolution}, limit={limit}")
-        
-        response = await candle_api.candlesticks(
-            market_id=market_id,
-            resolution=resolution,
-            count_back=limit
-        )
-        
-        # Candles aus Response extrahieren
-        candles = getattr(response, 'candles', []) or []
-        
-        if not candles:
-            debug_log("⚠️ Keine Candles von API erhalten")
-            return []
-        
-        debug_log(f"✅ {len(candles)} Candles von API erhalten")
-        
-        # Candles als Liste von Dictionaries zurückgeben
-        result = []
-        for c in candles:
-            result.append({
-                "timestamp": getattr(c, 't', 0),
-                "open": float(getattr(c, 'o', 0)),
-                "high": float(getattr(c, 'h', 0)),
-                "low": float(getattr(c, 'l', 0)),
-                "close": float(getattr(c, 'c', 0)),
-                "volume": float(getattr(c, 'v', 0))
-            })
-        
-        return result
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as response:
+                if response.status != 200:
+                    debug_log(f"❌ API Fehler: Status {response.status}")
+                    return []
+                
+                data = await response.json()
+                
+                # Candles aus Response extrahieren
+                candles = data.get("candles", []) or []
+                
+                if not candles:
+                    debug_log("⚠️ Keine Candles von API erhalten")
+                    return []
+                
+                debug_log(f"✅ {len(candles)} Candles von API erhalten")
+                
+                # Candles als Liste von Dictionaries zurückgeben
+                result = []
+                for c in candles:
+                    result.append({
+                        "timestamp": c.get('t', 0),
+                        "open": float(c.get('o', 0)),
+                        "high": float(c.get('h', 0)),
+                        "low": float(c.get('l', 0)),
+                        "close": float(c.get('c', 0)),
+                        "volume": float(c.get('v', 0))
+                    })
+                
+                return result
         
     except Exception as e:
         debug_log("❌ Fehler beim Abrufen der Candles", {"error": str(e), "traceback": traceback.format_exc()})
@@ -353,59 +356,7 @@ ema_21 = EMACalculator(EMA_SLOW)
 current_position_side = None
 last_signal_time = 0
 SIGNAL_COOLDOWN = 30  # 30 Sekunden zwischen Signalen
-last_candle_time = 0
-
-# ========== CANDLE UPDATER ==========
 last_candle_close = None
-
-async def update_emas_from_api():
-    """Holt neue Candles von API und updated EMAs"""
-    global last_candle_close
-    
-    candles = await get_candles_from_api(MARKET_INDEX, "1m", 2)  # Nur letzte 2 Candles
-    
-    if not candles:
-        return False
-    
-    # Letzte geschlossene Candle
-    if len(candles) >= 2:
-        # candles[0] = älteste, candles[-1] = neueste
-        latest_candle = candles[-1]
-        close_price = latest_candle["close"]
-        
-        # Prüfen ob neue Candle
-        if last_candle_close != close_price:
-            debug_log(f"🕐 Neue Candle von API: Close={close_price:.3f}")
-            ema_7.add_candle(close_price)
-            ema_21.add_candle(close_price)
-            last_candle_close = close_price
-            
-            # Crossover prüfen
-            check_crossover(close_price)
-            return True
-    
-    return False
-
-def check_crossover(price):
-    """Prüft Crossover und führt Trades aus"""
-    global current_position_side, last_signal_time
-    
-    if not ema_7.is_initialized or not ema_21.is_initialized:
-        return
-    
-    now = time.time()
-    if now - last_signal_time < SIGNAL_COOLDOWN:
-        return
-    
-    # Crossover Up: EMA7 > EMA21
-    if ema_7.ema > ema_21.ema and current_position_side != "buy":
-        debug_log(f"📈 CROSSOVER UP: EMA7 ({ema_7.ema:.3f}) > EMA21 ({ema_21.ema:.3f})")
-        asyncio.create_task(execute_signal("buy", price))
-    
-    # Crossover Down: EMA7 < EMA21
-    elif ema_7.ema < ema_21.ema and current_position_side != "sell":
-        debug_log(f"📉 CROSSOVER DOWN: EMA7 ({ema_7.ema:.3f}) < EMA21 ({ema_21.ema:.3f})")
-        asyncio.create_task(execute_signal("sell", price))
 
 async def execute_signal(direction, price):
     """Führt Signal aus"""
@@ -452,8 +403,44 @@ async def init_emas_from_api():
     
     return True
 
+async def update_emas_from_api():
+    """Holt neue Candles von API und updated EMAs"""
+    global last_candle_close
+    
+    candles = await get_candles_from_api(MARKET_INDEX, "1m", 2)  # Nur letzte 2 Candles
+    
+    if not candles:
+        return False
+    
+    # Letzte geschlossene Candle
+    if len(candles) >= 2:
+        # candles[0] = älteste, candles[-1] = neueste
+        latest_candle = candles[-1]
+        close_price = latest_candle["close"]
+        
+        # Prüfen ob neue Candle
+        if last_candle_close != close_price:
+            debug_log(f"🕐 Neue Candle von API: Close={close_price:.3f}")
+            ema_7.add_candle(close_price)
+            ema_21.add_candle(close_price)
+            last_candle_close = close_price
+            
+            # Crossover prüfen
+            if ema_7.is_initialized and ema_21.is_initialized:
+                now = time.time()
+                if now - last_signal_time >= SIGNAL_COOLDOWN:
+                    if ema_7.ema > ema_21.ema and current_position_side != "buy":
+                        debug_log(f"📈 CROSSOVER UP: EMA7 ({ema_7.ema:.3f}) > EMA21 ({ema_21.ema:.3f})")
+                        await execute_signal("buy", close_price)
+                    elif ema_7.ema < ema_21.ema and current_position_side != "sell":
+                        debug_log(f"📉 CROSSOVER DOWN: EMA7 ({ema_7.ema:.3f}) < EMA21 ({ema_21.ema:.3f})")
+                        await execute_signal("sell", close_price)
+            return True
+    
+    return False
+
 async def listen():
-    global last_signal_time, last_candle_close
+    global last_candle_close
 
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
@@ -514,15 +501,6 @@ async def main():
         if SYMBOL in OPEN_POSITIONS:
             current_position_side = OPEN_POSITIONS[SYMBOL]["side"]
             debug_log(f"📌 Bestehende Position: {current_position_side}")
-
-    # ===== PERIODISCHER CANDLE-UPDATE =====
-    async def periodic_candle_update():
-        while True:
-            await asyncio.sleep(30)  # Alle 30 Sekunden
-            await update_emas_from_api()
-    
-    # Candle-Updater im Hintergrund starten
-    asyncio.create_task(periodic_candle_update())
 
     # ===== WEBSOCKET LISTEN =====
     while True:
