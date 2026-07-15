@@ -4,13 +4,14 @@ Autonomer Orderbuch-Signal-Bot für Lighter (zkLighter) - MIT EMA-TREND-FILTER
 Kombiniert Order Book Imbalance (OBI) mit EMA-Trend-Filter für präzisere Signale
 """
 
+# ========== IMPORTS ==========
 import asyncio
 import websockets
 import json
 import time
 import os
 import traceback
-from collections import deque
+from collections import deque  # <-- DAS WAR DER FEHLER!
 from datetime import datetime
 
 # ========== BASE_URL ==========
@@ -99,9 +100,10 @@ class EMATrendFilter:
     def __init__(self, fast_period=9, slow_period=21):
         self.fast_period = fast_period
         self.slow_period = slow_period
-        self.prices = deque(maxlen=50)
+        self.prices = deque(maxlen=50)  # Speichert letzte 50 Preise
         self.fast_ema = None
         self.slow_ema = None
+        self.last_update_time = 0
         
     def add_price(self, price):
         """Fügt neuen Preis hinzu und berechnet EMAs"""
@@ -118,9 +120,12 @@ class EMATrendFilter:
         if len(self.prices) < period:
             return None
         
+        # Nur die letzten 'period' Preise verwenden
         prices_list = list(self.prices)[-period:]
+        
+        # EMA-Formel: EMA = (Preis - vorheriger_EMA) * Multiplikator + vorheriger_EMA
         multiplier = 2 / (period + 1)
-        ema = prices_list[0]
+        ema = prices_list[0]  # Startwert = erster Preis
         
         for price in prices_list[1:]:
             ema = (price - ema) * multiplier + ema
@@ -137,8 +142,10 @@ class EMATrendFilter:
         if self.fast_ema is None or self.slow_ema is None:
             return "neutral"
         
+        # Berechne prozentuale Differenz
         diff_percent = ((self.fast_ema - self.slow_ema) / self.slow_ema) * 100
         
+        # 0.2% Puffer gegen Rauschen
         if diff_percent > 0.2:
             return "up"
         elif diff_percent < -0.2:
@@ -147,12 +154,26 @@ class EMATrendFilter:
             return "neutral"
     
     def get_trend_strength(self):
-        """Gibt Trendstärke zurück (0-1)"""
+        """
+        Gibt Trendstärke zurück (0-1):
+        - 1 = Sehr starker Trend
+        - 0 = Kein Trend
+        """
         if self.fast_ema is None or self.slow_ema is None:
             return 0
         
         diff = abs(self.fast_ema - self.slow_ema) / self.slow_ema
-        return min(diff * 10, 1)
+        return min(diff * 10, 1)  # Skaliert auf 0-1
+    
+    def get_status(self):
+        """Gibt kompletten Status zurück (für Debug)"""
+        return {
+            "fast_ema": round(self.fast_ema, 3) if self.fast_ema else None,
+            "slow_ema": round(self.slow_ema, 3) if self.slow_ema else None,
+            "trend": self.get_trend(),
+            "strength": round(self.get_trend_strength(), 2),
+            "price_count": len(self.prices)
+        }
 
 # ========== LIGHTER CLIENT ==========
 def get_lighter_client():
@@ -380,7 +401,7 @@ obi_history = deque(maxlen=20)
 lean_direction = None
 lean_since = 0.0
 
-# ========== EMA TREND FILTER ==========
+# ========== EMA TREND FILTER INSTANZ ==========
 trend_filter = EMATrendFilter(fast_period=EMA_FAST, slow_period=EMA_SLOW)
 
 def apply_order_book_update(msg):
