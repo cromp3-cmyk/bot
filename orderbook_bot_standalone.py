@@ -99,7 +99,7 @@ class EMACalculator:
             multiplier = 2 / (self.period + 1)
             self.ema = (close_price - self.ema) * multiplier + self.ema
 
-# ========== CANDLES VIA LIGHTER SDK (KORREKT) ==========
+# ========== CANDLES VIA LIGHTER SDK (ENDGÜLTIG KORREKT) ==========
 async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
     """Holt Candles über das offizielle Lighter Python SDK"""
     try:
@@ -111,18 +111,19 @@ async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
         start_timestamp = end_timestamp - (count_back * 60)  # count_back Minuten zurück
         
         debug_log(f"📡 Hole Candles über Lighter SDK: market_id={market_id}, resolution={resolution}")
-        debug_log(f"   start_timestamp={start_timestamp}, end_timestamp={end_timestamp}")
+        debug_log(f"   start_timestamp={start_timestamp}, end_timestamp={end_timestamp}, count_back={count_back}")
         
         # API Client erstellen
         client = lighter.ApiClient()
         candle_api = CandlestickApi(client)
         
-        # Candles abrufen - MIT start_timestamp und end_timestamp!
+        # Candles abrufen - ALLE 4 Parameter!
         response = await candle_api.candles(
             market_id=market_id,
             resolution=resolution,
             start_timestamp=start_timestamp,
-            end_timestamp=end_timestamp
+            end_timestamp=end_timestamp,
+            count_back=count_back
         )
         
         # Client schließen
