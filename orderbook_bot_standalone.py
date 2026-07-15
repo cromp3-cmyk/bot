@@ -1,5 +1,11 @@
 """
-Autonomer Orderbuch-Signal-Bot - FIXED VERSION
+Autonomer Orderbuch-Signal-Bot für Lighter (zkLighter) - ULTRA-SCHNELL
+================================================================================
+- Sofort-Reaktion auf OBI (0 Ticks Bestätigung)
+- Preis-Momentum Erkennung
+- Stop-Loss bei 0.2%
+- Profit-Target bei $0.50
+- Korrekte Reverse-Logik (wechselt Richtung, statt nur zu adden)
 """
 
 import asyncio
@@ -15,6 +21,7 @@ from datetime import datetime
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
 WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 
+# ========== DEBUG ==========
 DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 
 def debug_log(msg, data=None):
@@ -122,6 +129,7 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
     return tx, tx_hash, err
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
+    """Öffnet, reversed oder addet zu einer Position"""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -149,14 +157,32 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
 
         if symbol in OPEN_POSITIONS:
             existing_pos = OPEN_POSITIONS[symbol]
+            
+            # ===== GLEICHE RICHTUNG =====
             if existing_pos["side"] == new_side:
                 tx, tx_hash, err = await create_order_with_price(
                     client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
                 )
                 if err:
                     return {"error": f"Nachkauf fehlgeschlagen: {err}"}
+                
+                # Position aktualisieren
+                old_coin = existing_pos["coin_amount"]
+                old_price = existing_pos["open_price"]
+                total_value = (old_price * old_coin) + (current_price * coin_amount)
+                avg_price = total_value / (old_coin + coin_amount)
+                
+                existing_pos["position_usdc"] += position_usdc
+                existing_pos["coin_amount"] += coin_amount
+                existing_pos["base_amount"] += base_amount
+                existing_pos["margin"] += margin
+                existing_pos["open_price"] = avg_price
+                
                 return {"success": True, "action": "add_to_position", "side": new_side, "tx_hash": str(tx_hash)}
+            
+            # ===== ANDERE RICHTUNG =====
             else:
+                # 1. Alte Position schließen
                 close_is_ask = existing_pos["side"] == "long"
                 tx1, tx_hash1, err1 = await create_order_with_price(
                     client, market_index, existing_pos["base_amount"], close_is_ask, symbol,
@@ -167,6 +193,7 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
 
                 await asyncio.sleep(1)
 
+                # 2. Neue Position eröffnen
                 tx2, tx_hash2, err2 = await create_order_with_price(
                     client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
                 )
@@ -174,12 +201,20 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
                     OPEN_POSITIONS.pop(symbol, None)
                     return {"error": f"Open fehlgeschlagen: {err2}"}
 
+                # 3. Position speichern
                 OPEN_POSITIONS[symbol] = {
-                    "side": new_side, "position_usdc": position_usdc, "coin_amount": coin_amount,
-                    "base_amount": base_amount, "margin": margin, "leverage": leverage,
-                    "open_price": current_price, "open_time": datetime.now().isoformat()
+                    "side": new_side,
+                    "position_usdc": position_usdc,
+                    "coin_amount": coin_amount,
+                    "base_amount": base_amount,
+                    "margin": margin,
+                    "leverage": leverage,
+                    "open_price": current_price,
+                    "open_time": datetime.now().isoformat()
                 }
                 return {"success": True, "action": "reverse", "to_side": new_side, "tx_hash": str(tx_hash2)}
+        
+        # ===== NEUE POSITION =====
         else:
             tx, tx_hash, err = await create_order_with_price(
                 client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
@@ -188,9 +223,14 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
                 return {"error": str(err)}
 
             OPEN_POSITIONS[symbol] = {
-                "side": new_side, "position_usdc": position_usdc, "coin_amount": coin_amount,
-                "base_amount": base_amount, "margin": margin, "leverage": leverage,
-                "open_price": current_price, "open_time": datetime.now().isoformat()
+                "side": new_side,
+                "position_usdc": position_usdc,
+                "coin_amount": coin_amount,
+                "base_amount": base_amount,
+                "margin": margin,
+                "leverage": leverage,
+                "open_price": current_price,
+                "open_time": datetime.now().isoformat()
             }
             return {"success": True, "action": "open", "side": new_side, "tx_hash": str(tx_hash)}
 
@@ -201,6 +241,7 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         await client.close()
 
 async def close_position(symbol, percent=100, current_price=None):
+    """Schließt eine Position"""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client nicht verfügbar"}
@@ -240,16 +281,15 @@ async def close_position(symbol, percent=100, current_price=None):
     finally:
         await client.close()
 
+# ========== GLOBAL STATE ==========
 OPEN_POSITIONS = {}
-
-# ========== STATE ==========
 order_book = {"bids": {}, "asks": {}}
 last_trade_price = None
-current_position_side = None
 last_trade_time = 0.0
 price_history = deque(maxlen=5)
 
 def apply_order_book_update(msg):
+    """Wendet Orderbuch-Update an"""
     ob = msg.get("order_book", {})
     for side_key, book in (("bids", order_book["bids"]), ("asks", order_book["asks"])):
         for level in ob.get(side_key, []):
@@ -261,6 +301,7 @@ def apply_order_book_update(msg):
                 book[price] = size
 
 def calc_obi(levels=OBI_LEVELS):
+    """Berechnet Order Book Imbalance"""
     bids_sorted = sorted(order_book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
     asks_sorted = sorted(order_book["asks"].items(), key=lambda x: float(x[0]))[:levels]
     bid_vol = sum(v for _, v in bids_sorted)
@@ -269,6 +310,7 @@ def calc_obi(levels=OBI_LEVELS):
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
 async def check_stop_loss_and_profit(symbol, current_price):
+    """Prüft Stop-Loss und Profit-Ziel"""
     if symbol not in OPEN_POSITIONS:
         return False
     
@@ -283,14 +325,22 @@ async def check_stop_loss_and_profit(symbol, current_price):
         profit_percent = (entry - current_price) / entry
         profit_usdc = (entry - current_price) * pos["coin_amount"]
     
+    # Stop-Loss
     if profit_percent < -STOP_LOSS_PERCENT:
-        debug_log(f"🛑 STOP-LOSS", {"loss": round(profit_usdc, 3)})
+        debug_log(f"🛑 STOP-LOSS", {
+            "loss": round(profit_usdc, 3),
+            "percent": round(profit_percent * 100, 2)
+        })
         if not DRY_RUN:
             await close_position(symbol, 100, current_price)
         return True
     
+    # Profit-Target
     if profit_usdc >= PROFIT_TARGET_USDC:
-        debug_log(f"🎯 PROFIT", {"profit": round(profit_usdc, 3)})
+        debug_log(f"🎯 PROFIT", {
+            "profit": round(profit_usdc, 3),
+            "percent": round(profit_percent * 100, 2)
+        })
         if not DRY_RUN:
             await close_position(symbol, 100, current_price)
         return True
@@ -298,35 +348,47 @@ async def check_stop_loss_and_profit(symbol, current_price):
     return False
 
 async def execute_signal(direction, price):
-    global current_position_side, last_trade_time
+    """Führt Trading-Signal aus"""
+    global last_trade_time
     
     now = time.time()
+    
+    # Cooldown
     if now - last_trade_time < COOLDOWN_SECONDS:
+        return
+    
+    # ===== PRÜFE AKTUELLE POSITION =====
+    current_side = None
+    if SYMBOL in OPEN_POSITIONS:
+        current_side = OPEN_POSITIONS[SYMBOL]["side"]
+    
+    # Schon in dieser Richtung? → Überspringen
+    if current_side == direction:
         return
     
     debug_log(f"⚡ TRADE: {direction.upper()} {SYMBOL} @ {price}")
     
     if DRY_RUN:
-        current_position_side = direction
         last_trade_time = now
         return
     
+    # Trade ausführen
     result = await open_or_reverse_position(direction, SYMBOL, MARGIN, LEVERAGE, price)
     debug_log("Order", result)
     
     if result.get("success"):
-        current_position_side = direction
         last_trade_time = now
 
 async def listen():
-    global last_trade_price, current_position_side
+    """Haupt-WebSocket-Loop"""
+    global last_trade_price, last_trade_time
     
     last_status_log = 0.0
     STATUS_INTERVAL = 5
     counter = 0
     
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
-        # ===== FIX: SLASH statt Doppelpunkt! =====
+        # Subscribe
         await ws.send(json.dumps({
             "type": "subscribe", 
             "channel": f"order_book/{MARKET_INDEX}"
@@ -342,38 +404,48 @@ async def listen():
             try:
                 msg = json.loads(raw)
                 channel = msg.get("channel", "")
-                msg_type = msg.get("type", "")
                 
                 counter += 1
-                if counter % 10 == 0:
+                if counter % 20 == 0:
                     debug_log(f"📨 Nachricht #{counter}", {
                         "channel": channel,
-                        "type": msg_type
+                        "type": msg.get("type", "")
                     })
                 
-                if "order_book" in channel or channel.startswith("order_book"):
+                # ===== ORDER BUCH =====
+                if "order_book" in channel:
                     apply_order_book_update(msg)
                     obi = calc_obi()
                     
                     if last_trade_price is not None:
+                        # Stop-Loss & Profit prüfen
                         await check_stop_loss_and_profit(SYMBOL, last_trade_price)
                         
+                        # OBI-Signal (Sofort-Reaktion!)
                         if obi > OBI_THRESHOLD:
                             await execute_signal("buy", last_trade_price)
                         elif obi < -OBI_THRESHOLD:
                             await execute_signal("sell", last_trade_price)
                         
+                        # Preis-Momentum
                         price_history.append(last_trade_price)
                         if len(price_history) >= 3:
                             price_change = (price_history[-1] - price_history[-3]) / price_history[-3]
-                            if price_change > 0.003:
+                            if price_change > 0.003:  # 0.3% Aufwärts
                                 await execute_signal("buy", last_trade_price)
-                            elif price_change < -0.003:
+                            elif price_change < -0.003:  # 0.3% Abwärts
                                 await execute_signal("sell", last_trade_price)
                     
+                    # Status-Log
                     now = time.time()
                     if now - last_status_log >= STATUS_INTERVAL:
                         last_status_log = now
+                        
+                        # Aktuelle Position
+                        current_side = None
+                        if SYMBOL in OPEN_POSITIONS:
+                            current_side = OPEN_POSITIONS[SYMBOL]["side"]
+                        
                         if obi > 0.05:
                             lean = "Käufer" if obi < OBI_THRESHOLD else "Käufer STARK"
                         elif obi < -0.05:
@@ -384,24 +456,27 @@ async def listen():
                         debug_log(f"📊 {SYMBOL}", {
                             "OBI": round(obi, 3),
                             "richtung": lean,
+                            "schwelle": OBI_THRESHOLD,
                             "preis": last_trade_price,
-                            "position": current_position_side or "flach",
+                            "position": current_side or "flach",
                             "offen": SYMBOL in OPEN_POSITIONS,
                             "bids": len(order_book["bids"]),
                             "asks": len(order_book["asks"])
                         })
                 
-                elif "trade" in channel or channel.startswith("trade"):
+                # ===== TRADES =====
+                elif "trade" in channel:
                     trades = msg.get("trades", [])
                     if trades:
                         last_trade_price = float(trades[-1]["price"])
                         
+            except json.JSONDecodeError:
+                pass
             except Exception as e:
-                debug_log("⚠️ Fehler", {"error": str(e), "raw": raw[:200]})
+                debug_log("⚠️ Fehler", {"error": str(e)})
 
 async def main():
-    global current_position_side
-    
+    """Main Loop"""
     print("=" * 60)
     print(f"⚡ ULTRA-SCHNELLER BOT für {SYMBOL}")
     print(f"   DRY_RUN: {DRY_RUN}")
@@ -409,6 +484,7 @@ async def main():
     print(f"   Cooldown: {COOLDOWN_SECONDS}s")
     print(f"   Stop-Loss: {STOP_LOSS_PERCENT*100}%")
     print(f"   Profit-Ziel: ${PROFIT_TARGET_USDC}")
+    print(f"   Margin: ${MARGIN} | Hebel: {LEVERAGE}x")
     print(f"   KEINE Bestätigungs-Ticks! Sofort-Reaktion!")
     print("=" * 60)
     
