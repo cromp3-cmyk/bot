@@ -409,8 +409,8 @@ LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 # 2-Minuten EMA Parameter
-EMA_FAST_MINUTES = int(os.getenv("EMA_FAST_MINUTES", "1"))   # 1-Minute EMA
-EMA_SLOW_MINUTES = int(os.getenv("EMA_SLOW_MINUTES", "2"))   # 2-Minute EMA
+EMA_FAST_MINUTES = int(os.getenv("EMA_FAST_MINUTES", "0.5"))   # 1-Minute EMA
+EMA_SLOW_MINUTES = int(os.getenv("EMA_SLOW_MINUTES", "1"))   # 2-Minute EMA
 MIN_TREND_STRENGTH = float(os.getenv("MIN_TREND_STRENGTH", "0.05"))
 
 # ========== LOKALER STATE ==========
