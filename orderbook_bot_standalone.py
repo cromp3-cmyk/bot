@@ -1,7 +1,7 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter (zkLighter) - MIT EMA-TREND-FILTER
+Autonomer Orderbuch-Signal-Bot für Lighter (zkLighter) - MIT 2-MINUTEN EMA
 ================================================================================
-Kombiniert Order Book Imbalance (OBI) mit EMA-Trend-Filter für präzisere Signale
+Kombiniert Order Book Imbalance (OBI) mit 2-Minuten EMA-Trend-Filter
 """
 
 # ========== IMPORTS ==========
@@ -11,7 +11,7 @@ import json
 import time
 import os
 import traceback
-from collections import deque  # <-- DAS WAR DER FEHLER!
+from collections import deque
 from datetime import datetime
 
 # ========== BASE_URL ==========
@@ -92,45 +92,69 @@ def get_min_base_amount(symbol):
     }
     return min_amount_map.get(symbol, 0.001)
 
-# ========== EMA TREND FILTER ==========
-class EMATrendFilter:
+# ========== 2-MINUTEN EMA TREND FILTER ==========
+class TimeBasedEMAFilter:
     """
-    EMA-basierter Trend-Filter für Trendbestätigung
+    EMA basierend auf 2-Minuten Intervallen
     """
-    def __init__(self, fast_period=9, slow_period=21):
-        self.fast_period = fast_period
-        self.slow_period = slow_period
-        self.prices = deque(maxlen=50)  # Speichert letzte 50 Preise
+    def __init__(self, fast_minutes=1, slow_minutes=2):
+        self.fast_minutes = fast_minutes
+        self.slow_minutes = slow_minutes
+        self.price_history = []  # Liste von (timestamp, price)
         self.fast_ema = None
         self.slow_ema = None
         self.last_update_time = 0
+        self.last_price = None
         
     def add_price(self, price):
-        """Fügt neuen Preis hinzu und berechnet EMAs"""
-        self.prices.append(price)
+        """Fügt Preis mit Zeitstempel hinzu"""
+        now = time.time()
+        self.price_history.append((now, price))
+        self.last_price = price
         
-        if len(self.prices) >= self.fast_period:
-            self.fast_ema = self.calculate_ema(self.fast_period)
+        # Alte Daten entfernen (älter als 10 Minuten)
+        cutoff = now - 600  # 10 Minuten
+        self.price_history = [(t, p) for t, p in self.price_history if t > cutoff]
         
-        if len(self.prices) >= self.slow_period:
-            self.slow_ema = self.calculate_ema(self.slow_period)
+        # EMAs berechnen
+        self.calculate_time_ema()
     
-    def calculate_ema(self, period):
-        """Berechnet EMA für angegebenen Zeitraum"""
-        if len(self.prices) < period:
-            return None
+    def get_prices_in_last_minutes(self, minutes):
+        """Holt alle Preise der letzten X Minuten"""
+        now = time.time()
+        cutoff = now - (minutes * 60)
+        return [p for t, p in self.price_history if t > cutoff]
+    
+    def calculate_ema_from_prices(self, prices, period_in_minutes):
+        """Berechnet EMA aus Preisliste mit exponentieller Gewichtung"""
+        if len(prices) < 2:
+            return prices[-1] if prices else None
         
-        # Nur die letzten 'period' Preise verwenden
-        prices_list = list(self.prices)[-period:]
+        # Exponentielle Gewichtung basierend auf Zeit
+        # Je neuer der Preis, desto höher die Gewichtung
+        multiplier = 2 / (period_in_minutes * 60 + 1)
+        ema = prices[0]
         
-        # EMA-Formel: EMA = (Preis - vorheriger_EMA) * Multiplikator + vorheriger_EMA
-        multiplier = 2 / (period + 1)
-        ema = prices_list[0]  # Startwert = erster Preis
-        
-        for price in prices_list[1:]:
+        for price in prices[1:]:
             ema = (price - ema) * multiplier + ema
         
         return ema
+    
+    def calculate_time_ema(self):
+        """Berechnet EMAs basierend auf Zeit"""
+        # Hole Preise der letzten X Minuten
+        fast_prices = self.get_prices_in_last_minutes(self.fast_minutes)
+        slow_prices = self.get_prices_in_last_minutes(self.slow_minutes)
+        
+        if fast_prices:
+            self.fast_ema = self.calculate_ema_from_prices(fast_prices, self.fast_minutes)
+        else:
+            self.fast_ema = None
+            
+        if slow_prices:
+            self.slow_ema = self.calculate_ema_from_prices(slow_prices, self.slow_minutes)
+        else:
+            self.slow_ema = None
     
     def get_trend(self):
         """
@@ -140,39 +164,37 @@ class EMATrendFilter:
         - "neutral": Seitwärts
         """
         if self.fast_ema is None or self.slow_ema is None:
-            return "neutral"
+            return "neutral", 0
         
-        # Berechne prozentuale Differenz
         diff_percent = ((self.fast_ema - self.slow_ema) / self.slow_ema) * 100
         
-        # 0.2% Puffer gegen Rauschen
-        if diff_percent > 0.2:
-            return "up"
-        elif diff_percent < -0.2:
-            return "down"
+        # 0.1% Puffer gegen Rauschen (niedriger für 2-Minuten EMA)
+        if diff_percent > 0.1:
+            return "up", abs(diff_percent) / 100
+        elif diff_percent < -0.1:
+            return "down", abs(diff_percent) / 100
         else:
-            return "neutral"
+            return "neutral", 0
     
     def get_trend_strength(self):
-        """
-        Gibt Trendstärke zurück (0-1):
-        - 1 = Sehr starker Trend
-        - 0 = Kein Trend
-        """
+        """Gibt Trendstärke zurück (0-1)"""
         if self.fast_ema is None or self.slow_ema is None:
             return 0
         
         diff = abs(self.fast_ema - self.slow_ema) / self.slow_ema
-        return min(diff * 10, 1)  # Skaliert auf 0-1
+        return min(diff * 20, 1)  # Skaliert auf 0-1 (höhere Empfindlichkeit)
     
     def get_status(self):
         """Gibt kompletten Status zurück (für Debug)"""
+        trend, strength = self.get_trend()
         return {
             "fast_ema": round(self.fast_ema, 3) if self.fast_ema else None,
             "slow_ema": round(self.slow_ema, 3) if self.slow_ema else None,
-            "trend": self.get_trend(),
-            "strength": round(self.get_trend_strength(), 2),
-            "price_count": len(self.prices)
+            "trend": trend,
+            "strength": round(strength, 2),
+            "data_points": len(self.price_history),
+            "fast_period": f"{self.fast_minutes}m",
+            "slow_period": f"{self.slow_minutes}m"
         }
 
 # ========== LIGHTER CLIENT ==========
@@ -375,21 +397,21 @@ if SYMBOL not in MARKET_INDICES:
 
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-OBI_LEVELS = int(os.getenv("OBI_LEVELS", "25"))
-OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.30"))
-OBI_CONFIRM_SECONDS = float(os.getenv("OBI_CONFIRM_SECONDS", "15"))
+OBI_LEVELS = int(os.getenv("OBI_LEVELS", "15"))
+OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.12"))
+OBI_CONFIRM_SECONDS = float(os.getenv("OBI_CONFIRM_SECONDS", "5"))
 COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "30"))
 MIN_HOLD_SECONDS = float(os.getenv("MIN_HOLD_SECONDS", "120"))
 
-MARGIN = float(os.getenv("OB_MARGIN", "100"))
-LEVERAGE = int(os.getenv("OB_LEVERAGE", "10"))
+MARGIN = float(os.getenv("OB_MARGIN", "10"))
+LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-# EMA Parameter
-EMA_FAST = int(os.getenv("EMA_FAST", "9"))
-EMA_SLOW = int(os.getenv("EMA_SLOW", "21"))
-MIN_TREND_STRENGTH = float(os.getenv("MIN_TREND_STRENGTH", "0.3"))
+# 2-Minuten EMA Parameter
+EMA_FAST_MINUTES = int(os.getenv("EMA_FAST_MINUTES", "1"))   # 1-Minute EMA
+EMA_SLOW_MINUTES = int(os.getenv("EMA_SLOW_MINUTES", "2"))   # 2-Minute EMA
+MIN_TREND_STRENGTH = float(os.getenv("MIN_TREND_STRENGTH", "0.05"))
 
 # ========== LOKALER STATE ==========
 order_book = {"bids": {}, "asks": {}}
@@ -401,8 +423,11 @@ obi_history = deque(maxlen=20)
 lean_direction = None
 lean_since = 0.0
 
-# ========== EMA TREND FILTER INSTANZ ==========
-trend_filter = EMATrendFilter(fast_period=EMA_FAST, slow_period=EMA_SLOW)
+# ========== 2-MINUTEN EMA TREND FILTER INSTANZ ==========
+trend_filter = TimeBasedEMAFilter(
+    fast_minutes=EMA_FAST_MINUTES,
+    slow_minutes=EMA_SLOW_MINUTES
+)
 
 def apply_order_book_update(msg):
     ob = msg.get("order_book", {})
@@ -480,13 +505,12 @@ async def listen():
 
                 now = time.time()
 
-                # ===== TREND-CHECK MIT EMA =====
+                # ===== 2-MINUTEN TREND-CHECK MIT EMA =====
                 trend = "neutral"
                 trend_strength = 0
                 if last_trade_price is not None:
                     trend_filter.add_price(last_trade_price)
-                    trend = trend_filter.get_trend()
-                    trend_strength = trend_filter.get_trend_strength()
+                    trend, trend_strength = trend_filter.get_trend()
 
                 # ===== SIGNAL MIT TREND-BESTÄTIGUNG =====
                 # Nur handeln wenn OBI und Trend übereinstimmen
@@ -500,7 +524,7 @@ async def listen():
                 # ===== LEAN TIMER =====
                 if current_lean != lean_direction:
                     if lean_direction is not None:
-                        debug_log(f"🔄 Lean-Richtung geändert (mit Trend-Filter)", {
+                        debug_log(f"🔄 Lean-Richtung geändert (mit 2-Minuten EMA)", {
                             "von": lean_direction,
                             "zu": current_lean,
                             "obi": round(obi, 3),
@@ -515,13 +539,14 @@ async def listen():
                 # ===== STATUS-LOG =====
                 if now - last_status_log >= STATUS_LOG_INTERVAL:
                     last_status_log = now
-                    debug_log(f"📊 Status {SYMBOL} mit Trend-Filter", {
+                    status = trend_filter.get_status()
+                    debug_log(f"📊 Status {SYMBOL} mit 2-Minuten EMA", {
                         "aktueller_OBI": round(obi, 3),
                         "schwelle": OBI_THRESHOLD,
-                        "trend": trend,
-                        "trend_staerke": round(trend_strength, 2),
-                        "fast_ema": round(trend_filter.fast_ema, 2) if trend_filter.fast_ema else None,
-                        "slow_ema": round(trend_filter.slow_ema, 2) if trend_filter.slow_ema else None,
+                        "trend": status["trend"],
+                        "trend_staerke": status["strength"],
+                        "fast_ema_1m": status["fast_ema"],
+                        "slow_ema_2m": status["slow_ema"],
                         "letzter_preis": last_trade_price,
                         "bot_position": current_position_side or "flach",
                         "lean_seit": round(now - lean_since, 1) if lean_direction else 0,
@@ -539,10 +564,10 @@ async def main():
     global current_position_side
 
     print("=" * 70)
-    print(f"🚀 Orderbuch-Bot mit EMA-Trend-Filter gestartet für {SYMBOL}")
+    print(f"🚀 Orderbuch-Bot mit 2-Minuten EMA-Trend-Filter gestartet für {SYMBOL}")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   OBI Levels: {OBI_LEVELS} | Schwelle: {OBI_THRESHOLD} | Bestätigung: {OBI_CONFIRM_SECONDS}s")
-    print(f"   EMA: {EMA_FAST}/{EMA_SLOW} | Min Trend Stärke: {MIN_TREND_STRENGTH}")
+    print(f"   EMA: {EMA_FAST_MINUTES}m / {EMA_SLOW_MINUTES}m | Min Trend Stärke: {MIN_TREND_STRENGTH}")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x | Cooldown: {COOLDOWN_SECONDS}s")
     print("=" * 70)
 
