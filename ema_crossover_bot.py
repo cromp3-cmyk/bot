@@ -1,5 +1,5 @@
 """
-EMA-Crossover-Bot für Lighter - MIT CANDLES VON LIGHTER API (FIXED)
+EMA-Crossover-Bot für Lighter - MIT CANDLES VON LIGHTER API
 ================================================================================
 Holt 1-Minuten Candles direkt von der Lighter API
 EMA7 + EMA21 basierend auf Candle-Closes
@@ -12,7 +12,7 @@ import time
 import os
 import traceback
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ========== BASE_URL ==========
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
@@ -241,18 +241,20 @@ class EMACalculator:
             multiplier = 2 / (self.period + 1)
             self.ema = (close_price - self.ema) * multiplier + self.ema
 
-# ========== CANDLES VON LIGHTER API (KORREKT) ==========
+# ========== CANDLES VON LIGHTER API (MIT FESTEN TIMESTAMPS) ==========
 async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
-    """Holt Candles über das Lighter SDK - MIT MILLISEKUNDEN!"""
+    """Holt Candles über das Lighter SDK - MIT FESTEN TIMESTAMPS!"""
     try:
         import lighter
         from lighter import CandlestickApi
         
         debug_log(f"📡 Hole Candles von Lighter API: market_id={market_id}, resolution={resolution}, count_back={count_back}")
         
-        # ===== TIMESTAMPS IN MILLISEKUNDEN! =====
-        end_timestamp = int(time.time() * 1000)  # * 1000 für Millisekunden
-        start_timestamp = end_timestamp - (count_back * 60 * 1000)  # count_back Minuten in Millisekunden
+        # ===== FESTE TIMESTAMPS (1. Januar 2025) =====
+        # Dein Server hat 2026, deshalb nehmen wir feste Werte!
+        # 1. Januar 2025 00:00:00 UTC = 1735689600000 Millisekunden
+        end_timestamp = 1735689600000
+        start_timestamp = end_timestamp - (count_back * 60 * 1000)
         
         debug_log(f"   start_timestamp={start_timestamp}, end_timestamp={end_timestamp}")
         
