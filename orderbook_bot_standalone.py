@@ -188,6 +188,8 @@ async def get_current_position_from_exchange(symbol, force_refresh=False):
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
     """Öffnet oder reversed eine Position - MIT CACHE (SOFORT SETZEN!)"""
+    global position_cache  # <-- GANZ AM ANFANG!
+    
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -247,7 +249,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
             debug_log(f"✅ {new_side} eröffnet")
             
             # ===== CACHE SOFORT SETZEN! =====
-            global position_cache
             position_cache = {
                 "side": new_side,
                 "timestamp": time.time(),
@@ -269,7 +270,6 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
             debug_log(f"✅ {new_side} eröffnet")
             
             # ===== CACHE SOFORT SETZEN! =====
-            global position_cache
             position_cache = {
                 "side": new_side,
                 "timestamp": time.time(),
