@@ -1,8 +1,8 @@
 """
-Autonomer Orderbuch-Signal-Bot für Lighter - EINSTELLBARE NORMALISIERUNG
+Autonomer Orderbuch-Signal-Bot für Lighter - INVERTIERTE SIGNALE
 ================================================================================
-Du kannst die Normalisierungs-Sekunden per Umgebungsvariable einstellen.
-Standard: 10 Sekunden
+TEST: Bei SELL-Signal wird gekauft (LONG), bei BUY-Signal wird verkauft (SHORT)
+Nur zum Testen ob der Bot profitabler wird!
 """
 
 import asyncio
@@ -21,14 +21,12 @@ WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 # ========== DEBUG ==========
 DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 
-
 def debug_log(msg, data=None):
     if DEBUG_MODE:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         print(f"[DEBUG {timestamp}] {msg}")
         if data:
             print(f"   DATA: {json.dumps(data, indent=2, default=str)}")
-
 
 # ========== MARKET INDICES ==========
 MARKET_INDICES = {
@@ -47,8 +45,6 @@ MARKET_INDICES = {
     "XLM": 119, "SOL2": 2,
 }
 
-
-# ========== COIN-PARAMETER ==========
 def get_precision(symbol):
     precision_map = {
         "BTC": 100000, "ETH": 10000, "SOL": 1000, "DOGE": 1,
@@ -57,7 +53,6 @@ def get_precision(symbol):
         "ARB": 10, "OP": 10, "XLM": 10,
     }
     return precision_map.get(symbol, 10000)
-
 
 def get_price_decimals(symbol):
     decimals_map = {
@@ -68,7 +63,6 @@ def get_price_decimals(symbol):
     }
     return decimals_map.get(symbol, 2)
 
-
 def get_min_base_amount(symbol):
     min_amount_map = {
         "BTC": 0.00020, "ETH": 0.005, "SOL": 0.05, "DOGE": 10,
@@ -78,7 +72,6 @@ def get_min_base_amount(symbol):
     }
     return min_amount_map.get(symbol, 0.001)
 
-
 # ========== LIGHTER CLIENT ==========
 def get_lighter_client():
     try:
@@ -87,7 +80,7 @@ def get_lighter_client():
         PRIVATE_KEY = os.getenv("PRIVATE_KEY")
         ACCOUNT_INDEX = int(os.getenv("ACCOUNT_INDEX", "50960"))
         client = lighter.SignerClient(
-            url=BASE_URL,
+            url="https://mainnet.zklighter.elliot.ai",
             api_private_keys={API_KEY_INDEX: PRIVATE_KEY},
             account_index=ACCOUNT_INDEX
         )
@@ -96,9 +89,7 @@ def get_lighter_client():
         debug_log("Lighter Client Fehler", {"error": str(e)})
         return None
 
-
 async def create_order_with_price(client, market_index, base_amount, is_ask, symbol, price, reduce_only=False):
-    """Erstellt eine Market-Order mit 5% Slippage-Puffer."""
     price_decimals = get_price_decimals(symbol)
     adjusted_price = price * 0.95 if is_ask else price * 1.05
     price_scaled = int(adjusted_price * (10 ** price_decimals))
@@ -116,9 +107,58 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
     )
     return tx, tx_hash, err
 
+async def get_current_position_from_exchange(symbol):
+    """Holt die aktuelle Position vom Exchange"""
+    try:
+        import lighter
+        account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
+        api_client = lighter.ApiClient(configuration=lighter.Configuration(host="https://mainnet.zklighter.elliot.ai"))
+        account_api = lighter.AccountApi(api_client)
+
+        response = await account_api.account(by="index", value=str(account_index))
+        accounts = getattr(response, "accounts", None) or []
+        if not accounts:
+            return None
+
+        positions = getattr(accounts[0], "positions", []) or []
+        market_index = MARKET_INDICES[symbol]
+
+        total_size = 0.0
+        avg_price = 0.0
+        side = None
+
+        for pos in positions:
+            if getattr(pos, "market_index", None) != market_index:
+                continue
+            size = float(getattr(pos, "position", 0) or 0)
+            if size == 0:
+                continue
+
+            total_size += size
+            price = float(getattr(pos, "avg_entry_price", 0) or 0)
+            
+            if side is None:
+                side = "long" if size > 0 else "short"
+                avg_price = price
+            else:
+                avg_price = (avg_price + price) / 2
+
+        if total_size == 0:
+            return None
+
+        return {
+            "side": side,
+            "size": abs(total_size),
+            "base_amount": int(abs(total_size) * get_precision(symbol)),
+            "open_price": avg_price
+        }
+        
+    except Exception as e:
+        debug_log("Fehler beim Abrufen der Position", {"error": str(e)})
+        return None
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
-    """Öffnet oder reversed eine Position - OHNE Timer!"""
+    """Öffnet oder reversed eine Position - MIT INVERTIERTER LOGIK!"""
     client = get_lighter_client()
     if client is None:
         return {"error": "Client konnte nicht initialisiert werden"}
@@ -127,6 +167,16 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         market_index = MARKET_INDICES[symbol]
         precision = get_precision(symbol)
         min_base_amount = get_min_base_amount(symbol)
+
+        # ===== INVERTIERTE LOGIK: Bei SELL kaufen, bei BUY verkaufen! =====
+        # action kommt vom Signal: "buy" oder "sell"
+        # Wir drehen es um!
+        if action == "buy":
+            real_action = "sell"  # BUY Signal → SHORT gehen
+        else:
+            real_action = "buy"   # SELL Signal → LONG gehen
+        
+        debug_log(f"🔄 INVERTIERT: Signal {action} → Ausführung {real_action}")
 
         position_usdc = margin * leverage
         coin_amount = position_usdc / current_price
@@ -139,87 +189,62 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
                 "suggestion": f"Erhöhe Margin auf mindestens {min_margin_needed:.2f} USDC"
             }
 
-        new_side = "long" if action == "buy" else "short"
-        new_is_ask = action != "buy"
+        new_side = "long" if real_action == "buy" else "short"
+        new_is_ask = real_action != "buy"
 
-        try:
-            await client.update_leverage(market_index=market_index, leverage=leverage, margin_mode=0)
-        except Exception as e:
-            debug_log("Hebel setzen fehlgeschlagen", {"error": str(e)})
-
-        await asyncio.sleep(1)
-
-        if symbol in OPEN_POSITIONS:
-            existing_pos = OPEN_POSITIONS[symbol]
+        # ===== BESTEHENDE POSITION VOM EXCHANGE HOLEN =====
+        current_pos = await get_current_position_from_exchange(symbol)
+        
+        if current_pos:
+            debug_log(f"📌 Bestehende Position: {current_pos['side']} @ {current_pos['open_price']}")
             
-            if existing_pos["side"] == new_side:
+            if current_pos["side"] == new_side:
                 debug_log(f"⏭️ Bereits {new_side}, keine Aktion")
                 return {"success": True, "action": "keine_änderung", "side": new_side}
             
-            debug_log(f"🔄 Wechsel von {existing_pos['side']} zu {new_side}")
+            debug_log(f"🔄 Wechsel von {current_pos['side']} zu {new_side}")
             
-            close_is_ask = existing_pos["side"] == "long"
+            close_is_ask = current_pos["side"] == "long"
             tx1, tx_hash1, err1 = await create_order_with_price(
-                client, market_index, existing_pos["base_amount"], close_is_ask, symbol,
-                existing_pos["open_price"], reduce_only=True
+                client, market_index, current_pos["base_amount"], close_is_ask, symbol,
+                current_pos["open_price"], reduce_only=True
             )
             if err1:
                 return {"error": f"Close fehlgeschlagen: {err1}"}
             
-            debug_log(f"✅ {existing_pos['side']} geschlossen")
+            debug_log(f"✅ {current_pos['side']} geschlossen")
             await asyncio.sleep(1)
             
             tx2, tx_hash2, err2 = await create_order_with_price(
                 client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
             )
             if err2:
-                OPEN_POSITIONS.pop(symbol, None)
-                return {"error": f"Position geschlossen, aber Open fehlgeschlagen: {err2}"}
+                return {"error": f"Open fehlgeschlagen: {err2}"}
 
-            OPEN_POSITIONS[symbol] = {
-                "side": new_side,
-                "position_usdc": position_usdc,
-                "coin_amount": coin_amount,
-                "base_amount": base_amount,
-                "margin": margin,
-                "leverage": leverage,
-                "open_price": current_price,
-                "open_time": datetime.now().isoformat()
-            }
+            debug_log(f"✅ {new_side} eröffnet (INVERTIERT!)")
             return {"success": True, "action": "reverse", "to_side": new_side, "tx_hash": str(tx_hash2)}
 
         else:
+            debug_log(f"🆕 Keine Position, eröffne {new_side} (INVERTIERT!)")
             tx, tx_hash, err = await create_order_with_price(
                 client, market_index, base_amount, new_is_ask, symbol, current_price, reduce_only=False
             )
             if err:
                 return {"error": str(err)}
-
-            OPEN_POSITIONS[symbol] = {
-                "side": new_side,
-                "position_usdc": position_usdc,
-                "coin_amount": coin_amount,
-                "base_amount": base_amount,
-                "margin": margin,
-                "leverage": leverage,
-                "open_price": current_price,
-                "open_time": datetime.now().isoformat()
-            }
+            
             return {"success": True, "action": "open", "side": new_side, "tx_hash": str(tx_hash)}
 
     except Exception as e:
-        debug_log("Exception in open_or_reverse_position", {"error": str(e), "traceback": traceback.format_exc()})
+        debug_log("Exception", {"error": str(e), "traceback": traceback.format_exc()})
         return {"error": str(e)}
     finally:
         await client.close()
 
-
 async def sync_open_position_from_exchange(symbol):
-    """Synchronisiert offene Positionen beim Start"""
     try:
         import lighter
         account_index = int(os.getenv("ACCOUNT_INDEX", "50960"))
-        api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
+        api_client = lighter.ApiClient(configuration=lighter.Configuration(host="https://mainnet.zklighter.elliot.ai"))
         account_api = lighter.AccountApi(api_client)
 
         response = await account_api.account(by="index", value=str(account_index))
@@ -250,12 +275,11 @@ async def sync_open_position_from_exchange(symbol):
                 "open_price": open_price,
                 "open_time": datetime.now().isoformat(),
             }
-            debug_log(f"📌 Bestehende Position geladen: {side}")
+            debug_log(f"📌 Bestehende Position: {side}")
             return
 
     except Exception as e:
         debug_log("⚠️ Positions-Sync fehlgeschlagen", {"error": str(e)})
-
 
 # ========== STATE ==========
 OPEN_POSITIONS = {}
@@ -268,19 +292,13 @@ MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
 OBI_LEVELS = int(os.getenv("OBI_LEVELS", "15"))
 OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.12"))
-
-# ===== NORMALISIERUNGS-SEKUNDEN (einstellbar!) =====
-# Standard: 10 Sekunden
-# Du kannst den Wert beliebig ändern: 1, 3, 5, 10, 20, 30, 60, ...
 NORMALIZE_SECONDS = float(os.getenv("NORMALIZE_SECONDS", "10"))
 
 MARGIN = float(os.getenv("OB_MARGIN", "10"))
 LEVERAGE = int(os.getenv("OB_LEVERAGE", "20"))
-
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-
-# ========== NORMALISIERUNG (einstellbare Sekunden) ==========
+# ========== NORMALISIERUNG ==========
 class OBINormalizer:
     def __init__(self, window_seconds=10):
         self.window_seconds = window_seconds
@@ -307,14 +325,13 @@ class OBINormalizer:
     def get_raw_count(self):
         return len(self.buffer)
 
-
 # ========== LOKALER STATE ==========
 order_book = {"bids": {}, "asks": {}}
 last_trade_price = None
 current_position_side = None
 obi_normalizer = OBINormalizer(window_seconds=NORMALIZE_SECONDS)
 current_lean = None
-
+last_signal_time = 0
 
 def apply_order_book_update(msg):
     ob = msg.get("order_book", {})
@@ -327,7 +344,6 @@ def apply_order_book_update(msg):
             else:
                 book[price] = size
 
-
 def calc_raw_obi(levels=OBI_LEVELS):
     bids_sorted = sorted(order_book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
     asks_sorted = sorted(order_book["asks"].items(), key=lambda x: float(x[0]))[:levels]
@@ -336,12 +352,13 @@ def calc_raw_obi(levels=OBI_LEVELS):
     total = bid_vol + ask_vol
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
-
 async def execute_signal(direction, price):
-    """Führt Signal sofort aus - OHNE Timer!"""
-    global current_position_side
+    global current_position_side, last_signal_time
 
-    debug_log(f"📡 SIGNAL: {direction.upper()} {SYMBOL} @ {price}")
+    if current_position_side == direction:
+        return
+
+    debug_log(f"📡 SIGNAL: {direction.upper()} → INVERTIERT zu {'SHORT' if direction == 'buy' else 'LONG'} @ {price}")
 
     if DRY_RUN:
         debug_log("🧪 DRY_RUN - keine Order")
@@ -353,7 +370,7 @@ async def execute_signal(direction, price):
 
     if result.get("success"):
         current_position_side = direction
-
+        last_signal_time = time.time()
 
 async def listen():
     global last_trade_price, current_lean
@@ -361,13 +378,13 @@ async def listen():
     last_status_log = 0.0
     STATUS_LOG_INTERVAL = 10
 
-    async with websockets.connect(WS_URL, ping_interval=20) as ws:
+    async with websockets.connect("wss://mainnet.zklighter.elliot.ai/stream", ping_interval=20) as ws:
         await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDEX}"}))
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
 
-        debug_log(f"✅ Verbunden")
-        debug_log(f"📊 Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-        debug_log(f"⚠️ KEIN Cooldown, KEINE Mindesthaltedauer!")
+        debug_log(f"✅ Verbunden | ⚠️ INVERTIERTE SIGNALE!")
+        debug_log(f"   SELL Signal → LONG | BUY Signal → SHORT")
+        debug_log(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -398,13 +415,13 @@ async def listen():
                     last_status_log = now
                     
                     if normalized_obi > 0.05:
-                        richtung = "Käufer dominieren leicht" if normalized_obi < OBI_THRESHOLD else "Käufer dominieren STARK"
+                        richtung = "Käufer dominieren" if normalized_obi < OBI_THRESHOLD else "Käufer STARK"
                     elif normalized_obi < -0.05:
-                        richtung = "Verkäufer dominieren leicht" if normalized_obi > -OBI_THRESHOLD else "Verkäufer dominieren STARK"
+                        richtung = "Verkäufer dominieren" if normalized_obi > -OBI_THRESHOLD else "Verkäufer STARK"
                     else:
                         richtung = "ausgeglichen"
 
-                    debug_log(f"📊 Status {SYMBOL}", {
+                    debug_log(f"📊 Status {SYMBOL} (INVERTIERT)", {
                         "normalisierung": f"{NORMALIZE_SECONDS}s",
                         "roh_OBI": round(raw_obi, 3),
                         "normalisiert": round(normalized_obi, 3),
@@ -421,15 +438,14 @@ async def listen():
                 if trades:
                     last_trade_price = float(trades[-1]["price"])
 
-
 async def main():
     global current_position_side
 
     print("=" * 60)
-    print(f"🚀 Signal-Follower Bot für {SYMBOL}")
+    print(f"🚀 INVERTIERTER Signal-Follower Bot für {SYMBOL}")
+    print(f"   ⚠️ SELL Signal → LONG | BUY Signal → SHORT")
     print(f"   DRY_RUN: {DRY_RUN}")
     print(f"   Normalisierung: {NORMALIZE_SECONDS}s | Schwelle: {OBI_THRESHOLD}")
-    print(f"   ⚠️ KEIN Cooldown | KEINE Mindesthaltedauer")
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
@@ -445,7 +461,6 @@ async def main():
         except Exception as e:
             debug_log("⚠️ Reconnect in 5s", {"error": str(e)})
             await asyncio.sleep(5)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
