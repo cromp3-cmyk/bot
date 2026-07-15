@@ -1,5 +1,5 @@
 """
-EMA-Crossover-Bot für Lighter - MIT CANDLES VON LIGHTER API
+EMA-Crossover-Bot für Lighter - MIT CANDLES VON LIGHTER API (FIXED)
 ================================================================================
 Holt 1-Minuten Candles direkt von der Lighter API
 EMA7 + EMA21 basierend auf Candle-Closes
@@ -241,24 +241,26 @@ class EMACalculator:
             multiplier = 2 / (self.period + 1)
             self.ema = (close_price - self.ema) * multiplier + self.ema
 
-# ========== CANDLES VON LIGHTER API ==========
+# ========== CANDLES VON LIGHTER API (KORREKT) ==========
 async def get_candles_from_lighter(market_id, resolution="1m", count_back=200):
-    """Holt Candles über das Lighter SDK"""
+    """Holt Candles über das Lighter SDK - MIT MILLISEKUNDEN!"""
     try:
         import lighter
         from lighter import CandlestickApi
         
         debug_log(f"📡 Hole Candles von Lighter API: market_id={market_id}, resolution={resolution}, count_back={count_back}")
         
-        # Timestamps berechnen
-        end_timestamp = int(time.time())
-        start_timestamp = end_timestamp - (count_back * 60)
+        # ===== TIMESTAMPS IN MILLISEKUNDEN! =====
+        end_timestamp = int(time.time() * 1000)  # * 1000 für Millisekunden
+        start_timestamp = end_timestamp - (count_back * 60 * 1000)  # count_back Minuten in Millisekunden
+        
+        debug_log(f"   start_timestamp={start_timestamp}, end_timestamp={end_timestamp}")
         
         # API Client erstellen
         client = lighter.ApiClient()
         candle_api = CandlestickApi(client)
         
-        # Candles abrufen (genau wie in der Signatur!)
+        # Candles abrufen
         response = await candle_api.candles(
             market_id=market_id,
             resolution=resolution,
@@ -384,11 +386,9 @@ async def listen():
                 if not trades:
                     continue
 
-                # Letzten Preis für Status-Log merken
                 last_price = float(trades[-1]["price"])
                 last_trade_price = last_price
 
-                # ===== STATUS-LOG =====
                 now = time.time()
                 if now - last_status_log >= STATUS_LOG_INTERVAL:
                     last_status_log = now
@@ -411,7 +411,6 @@ async def main():
     print(f"   Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
-    # ===== INIT: EMAs mit historischen Candles =====
     await init_emas_from_lighter()
 
     if not DRY_RUN:
