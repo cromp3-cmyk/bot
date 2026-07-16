@@ -1,7 +1,6 @@
 """
 Autonomer EMA 7/13 Crossover Bot für Lighter (zkLighter)
 ==================================================================================
-Holt Kerzendaten über die Lighter Candlestick-API und berechnet EMA(7) / EMA(13).
 """
 
 import asyncio
@@ -32,7 +31,6 @@ MARKET_INDICES = {
     "TRUMP": 15, "SUI": 16, "XLM": 119,
 }
 
-# ========== COIN-PARAMETER ==========
 def get_precision(symbol):
     precision_map = {
         "BTC": 100000, "ETH": 10000, "SOL": 1000, "AVAX": 100,
@@ -57,7 +55,6 @@ def get_min_base_amount(symbol):
     }
     return min_amount_map.get(symbol, 0.001)
 
-# ========== LIGHTER CLIENTS ==========
 def get_lighter_client():
     try:
         import lighter
@@ -75,24 +72,33 @@ def get_lighter_client():
         return None
 
 async def fetch_candles(market_id, resolution, count_back=100):
-    """Holt Kerzendaten über die öffentliche Candlestick-API (funktionierende Version)."""
+    """Holt Kerzendaten mit aktuellen Timestamps (basierend auf Server-Zeit)."""
     import lighter
     configuration = lighter.Configuration(host=BASE_URL)
     async with lighter.ApiClient(configuration) as api_client:
         candle_api = lighter.CandlestickApi(api_client)
+        
+        # Aktuelle Zeit (Server-Zeit ist 2026!)
         now = int(time.time())
-        start = now - 60 * 60 * 24 * 7
-        response = await candle_api.candles(
-            market_id=market_id,
-            resolution=resolution,
-            start_timestamp=start,
-            end_timestamp=now,
-            count_back=count_back,
-            set_timestamp_to_end=True,
-        )
-        return response
+        start = now - (60 * 60 * 24 * 7)  # 7 Tage zurück
+        
+        debug_log(f"📡 Hole Candles: market={market_id}, resolution={resolution}")
+        debug_log(f"   start={start}, end={now}")
+        
+        try:
+            response = await candle_api.candles(
+                market_id=market_id,
+                resolution=resolution,
+                start_timestamp=start,
+                end_timestamp=now,
+                count_back=count_back,
+                set_timestamp_to_end=True,
+            )
+            return response
+        except Exception as e:
+            debug_log("❌ API-Fehler", {"error": str(e)})
+            raise
 
-# ========== EMA-Berechnung ==========
 def calc_ema_series(closes, length):
     if not closes:
         return []
@@ -102,7 +108,6 @@ def calc_ema_series(closes, length):
         ema_values.append(price * k + ema_values[-1] * (1 - k))
     return ema_values
 
-# ========== Order-Ausführung ==========
 async def create_order_with_price(client, market_index, base_amount, is_ask, symbol, price, reduce_only=False):
     price_decimals = get_price_decimals(symbol)
     adjusted_price = price * 0.95 if is_ask else price * 1.05
@@ -204,7 +209,7 @@ if SYMBOL not in MARKET_INDICES:
     raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-RESOLUTION = os.getenv("EMA_RESOLUTION", "1m")  # "1m", "5m", "15m", "1h", etc.
+RESOLUTION = os.getenv("EMA_RESOLUTION", "1m")
 EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "7"))
 EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "13"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
@@ -249,7 +254,6 @@ async def check_for_signal():
         debug_log("⚠️ Zu wenig Kerzen", {"erhalten": len(closes), "benötigt": EMA_SLOW_LEN + 2})
         return
 
-    # Letzte Kerze ist noch nicht geschlossen → weglassen
     closed_ts = timestamps[:-1]
     closed_closes = closes[:-1]
 
