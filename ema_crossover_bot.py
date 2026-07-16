@@ -356,6 +356,7 @@ STATE = {
     "symbol": None, "resolution": None, "ema_fast_len": None, "ema_slow_len": None,
     "current": {}, "backtest": None, "backtest_last_run": None,
     "dry_run": None, "started_at": datetime.now().isoformat(),
+    "obi": {},
 }
 
 # ========== Konfiguration ==========
@@ -472,7 +473,8 @@ async def backtest_loop():
         await run_backtest_and_store()
 
 
-# ========== WEB-DASHBOARD ==========
+
+
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="de">
 <head>
@@ -501,6 +503,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="grid" id="status-grid"></div>
 <canvas id="priceChart" height="90"></canvas>
 <canvas id="equityChart" height="90"></canvas>
+
+<h2 style="margin-top:24px;">📊 Orderbuch-Druck (OBI) - reine Beobachtung, keine Auto-Trades</h2>
+<div class="grid" id="obi-grid"></div>
+<canvas id="obiChart" height="90"></canvas>
+
 <h2>Letzte Backtest-Trades</h2>
 <table id="trades-table"><thead><tr><th>Richtung</th><th>Entry</th><th>Exit</th><th>PnL %</th></tr></thead><tbody></tbody></table>
 
@@ -591,6 +598,7 @@ async def handle_status(request):
         "dry_run": DRY_RUN, "current": STATE["current"],
         "backtest": STATE["backtest"], "backtest_last_run": STATE["backtest_last_run"],
         "backtest_hours": BACKTEST_HOURS, "started_at": STATE["started_at"],
+        "obi": STATE["obi"],
     }
     return web.json_response(payload)
 
@@ -619,9 +627,9 @@ async def main():
     await asyncio.gather(
         trading_loop(),
         backtest_loop(),
+        obi_monitor_loop(),
     )
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-ain())
