@@ -257,18 +257,14 @@ def extract_close_prices_and_ts(raw_response):
     falls das nicht passt, zeigt das Debug-Log die Rohstruktur, dann passen
     wir das gezielt an.
     """
-    candles = getattr(raw_response, "candles", None)
-    if candles is None:
-        candles = getattr(raw_response, "candlesticks", None)
-    if candles is None and isinstance(raw_response, dict):
-        candles = raw_response.get("candles") or raw_response.get("candlesticks", [])
+    candles = getattr(raw_response, "c", None)
     if not candles:
         return [], []
 
     timestamps, closes = [], []
-    for c in candles:
-        ts = getattr(c, "timestamp", None) or getattr(c, "end_period_ts", None) or (c.get("timestamp") if isinstance(c, dict) else None)
-        close = getattr(c, "close", None) or (c.get("close") if isinstance(c, dict) else None)
+    for candle in candles:
+        ts = getattr(candle, "t", None)
+        close = getattr(candle, "c", None)
         if ts is not None and close is not None:
             timestamps.append(int(ts))
             closes.append(float(close))
