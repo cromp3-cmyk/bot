@@ -237,7 +237,8 @@ MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
 RESOLUTION = os.getenv("EMA_RESOLUTION", "5")  # z.B. "1", "5", "15", "60" - siehe Hinweis oben!
 EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "7"))
-EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "13"))
+EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "21"))
+CANDLE_COUNT_BACK = int(os.getenv("CANDLE_COUNT_BACK", "100"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
 
 MARGIN = float(os.getenv("EMA_MARGIN", "100"))
@@ -274,10 +275,20 @@ def extract_close_prices_and_ts(raw_response):
 async def check_for_signal():
     global last_processed_candle_ts, last_relation, current_position_side
 
-    try:
-        raw = await fetch_candles(MARKET_INDEX, RESOLUTION, count_back=max(EMA_SLOW_LEN * 5, 100))
-    except Exception as e:
-        debug_log("⚠️ Kerzen-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+    raw = None
+    for attempt in range(3):
+        try:
+            raw = await fetch_candles(MARKET_INDEX, RESOLUTION, count_back=CANDLE_COUNT_BACK)
+            timestamps, closes = extract_close_prices_and_ts(raw)
+            if closes:
+                break
+            debug_log(f"⚠️ Leere Kerzenantwort, Versuch {attempt + 1}/3 - retry in 2s")
+            await asyncio.sleep(2)
+        except Exception as e:
+            debug_log(f"⚠️ Kerzen-Abfrage fehlgeschlagen (Versuch {attempt + 1}/3)", {"error": str(e), "traceback": traceback.format_exc()})
+            await asyncio.sleep(2)
+    else:
+        debug_log("⚠️ Kerzen-Abfrage nach 3 Versuchen weiterhin ohne Daten - überspringe diese Runde")
         return
 
     timestamps, closes = extract_close_prices_and_ts(raw)
