@@ -72,13 +72,13 @@ def get_lighter_client():
         return None
 
 async def fetch_candles(market_id, resolution, count_back=100):
-    """Holt Kerzendaten mit aktuellen Timestamps (basierend auf Server-Zeit)."""
+    """Holt Kerzendaten über die öffentliche Candlestick-API."""
     import lighter
     configuration = lighter.Configuration(host=BASE_URL)
     async with lighter.ApiClient(configuration) as api_client:
         candle_api = lighter.CandlestickApi(api_client)
         
-        # Aktuelle Zeit (Server-Zeit ist 2026!)
+        # Aktuelle Zeit (Server-Zeit ist 2026)
         now = int(time.time())
         start = now - (60 * 60 * 24 * 7)  # 7 Tage zurück
         
@@ -209,7 +209,9 @@ if SYMBOL not in MARKET_INDICES:
     raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
+# ===== WICHTIG: resolution muss "1m", "5m", "15m", "1h" sein! =====
 RESOLUTION = os.getenv("EMA_RESOLUTION", "1m")
+
 EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "7"))
 EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "13"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
