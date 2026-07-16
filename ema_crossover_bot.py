@@ -349,6 +349,25 @@ async def run_backtest_and_store():
         debug_log("⚠️ Backtest fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
 
+# ========== OBI Monitor (Order Book Imbalance) ==========
+async def obi_monitor_loop():
+    """Überwacht das Orderbuch und berechnet die Imbalance."""
+    while True:
+        try:
+            # Hier OBI-Daten abrufen - Platzhalter für echte Implementierung
+            STATE["obi"] = {
+                "timestamp": datetime.now().isoformat(),
+                "imbalance": 0.0,  # Platzhalter
+                "bid_depth": 0,
+                "ask_depth": 0,
+                "updated_at": datetime.now().isoformat()
+            }
+            await asyncio.sleep(30)  # Alle 30 Sekunden aktualisieren
+        except Exception as e:
+            debug_log("⚠️ OBI-Monitor Fehler", {"error": str(e)})
+            await asyncio.sleep(30)
+
+
 # ========== State ==========
 OPEN_POSITIONS = {}
 STATE = {
@@ -471,8 +490,6 @@ async def backtest_loop():
     while True:
         await asyncio.sleep(BACKTEST_REFRESH_MINUTES * 60)
         await run_backtest_and_store()
-
-
 
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -624,11 +641,14 @@ async def main():
     print("=" * 60)
 
     await start_web_server()
-    await asyncio.gather(
+    
+    # Alle Loops parallel starten
+    tasks = [
         trading_loop(),
         backtest_loop(),
         obi_monitor_loop(),
-    )
+    ]
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
