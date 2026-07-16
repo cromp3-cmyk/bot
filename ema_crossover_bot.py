@@ -72,25 +72,26 @@ def get_lighter_client():
         return None
 
 async def fetch_candles(market_id, resolution, count_back=100):
-    """Holt Kerzendaten über die öffentliche Candlestick-API."""
+    """Holt Kerzendaten mit FESTEN Timestamps (Dezember 2024)."""
     import lighter
     configuration = lighter.Configuration(host=BASE_URL)
     async with lighter.ApiClient(configuration) as api_client:
         candle_api = lighter.CandlestickApi(api_client)
         
-        # Aktuelle Zeit (Server-Zeit ist 2026)
-        now = int(time.time())
-        start = now - (60 * 60 * 24 * 7)  # 7 Tage zurück
+        # ===== FESTE TIMESTAMPS (DEZEMBER 2024) =====
+        # 16. Dezember 2024, 00:00:00 UTC = 1734307200
+        end_timestamp = 1734307200
+        start_timestamp = end_timestamp - (60 * 60 * 24 * 7)  # 7 Tage zurück
         
         debug_log(f"📡 Hole Candles: market={market_id}, resolution={resolution}")
-        debug_log(f"   start={start}, end={now}")
+        debug_log(f"   start={start_timestamp}, end={end_timestamp}")
         
         try:
             response = await candle_api.candles(
                 market_id=market_id,
                 resolution=resolution,
-                start_timestamp=start,
-                end_timestamp=now,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
                 count_back=count_back,
                 set_timestamp_to_end=True,
             )
