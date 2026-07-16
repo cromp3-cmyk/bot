@@ -1,6 +1,19 @@
 """
-EMA 20/100 Crossover Bot für Lighter - MIT REST-API (holt Candles sofort!)
+Autonomer EMA 7/13 Crossover Bot für Lighter (zkLighter) - EIGENSTÄNDIGE VERSION
 ==================================================================================
+Holt sich echte Kerzendaten (OHLC) über die offizielle Lighter Candlestick-API
+und berechnet EMA(7) / EMA(13) auf Kerzenschluss-Basis (kein Repainting) -
+analog zu klassischen TradingView EMA-Crossover-Scripten.
+
+WICHTIG - BITTE VOR DEM ERSTEN START LESEN:
+- Ich kenne das exakte Format des "resolution"-Parameters der Candlestick-API
+  nicht mit 100%iger Sicherheit (Doku zeigt nur den Funktionsnamen, keine
+  Beispielwerte). Übliche Formate bei ähnlichen APIs sind "1", "5", "15", "60",
+  "240", "1D" (Minuten als String, "1D" für Tag). Das Skript loggt beim Start
+  die komplette Rohantwort der ersten Kerzen-Abfrage - schau dir das in den
+  Logs an. Falls ein Fehler kommt, probier andere RESOLUTION-Werte
+  (z.B. "5m" statt "5") und sag mir, was die Fehlermeldung genau sagt.
+- Erst mit DRY_RUN=true testen!
 """
 
 import asyncio
@@ -15,6 +28,7 @@ BASE_URL = "https://mainnet.zklighter.elliot.ai"
 # ========== DEBUG ==========
 DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 
+
 def debug_log(msg, data=None):
     if DEBUG_MODE:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -23,7 +37,8 @@ def debug_log(msg, data=None):
             import json
             print(f"   DATA: {json.dumps(data, indent=2, default=str)}", flush=True)
 
-# ========== MARKET INDICES ==========
+
+# ========== MARKET INDICES (Ausschnitt - bei Bedarf aus deinem alten Bot ergänzen) ==========
 MARKET_INDICES = {
     "ETH": 0, "BTC": 1, "SOL": 2, "DOGE": 3, "1000PEPE": 4,
     "WIF": 5, "WLD": 6, "XRP": 7, "LINK": 8, "AVAX": 9,
@@ -31,6 +46,7 @@ MARKET_INDICES = {
     "TRUMP": 15, "SUI": 16, "XLM": 119,
 }
 
+# ========== COIN-PARAMETER ==========
 def get_precision(symbol):
     precision_map = {
         "BTC": 100000, "ETH": 10000, "SOL": 1000, "AVAX": 100,
@@ -38,6 +54,7 @@ def get_precision(symbol):
         "DOGE": 1, "XRP": 1, "POL": 1,
     }
     return precision_map.get(symbol, 10000)
+
 
 def get_price_decimals(symbol):
     decimals_map = {
@@ -47,6 +64,7 @@ def get_price_decimals(symbol):
     }
     return decimals_map.get(symbol, 2)
 
+
 def get_min_base_amount(symbol):
     min_amount_map = {
         "BTC": 0.00020, "ETH": 0.005, "SOL": 0.05, "AVAX": 0.5,
@@ -55,7 +73,10 @@ def get_min_base_amount(symbol):
     }
     return min_amount_map.get(symbol, 0.001)
 
+
+# ========== LIGHTER CLIENTS ==========
 def get_lighter_client():
+    """Signer-Client für's Order-Platzieren (braucht Private Key)."""
     try:
         import lighter
         API_KEY_INDEX = int(os.getenv("API_KEY_INDEX", "5"))
@@ -71,48 +92,45 @@ def get_lighter_client():
         debug_log("Lighter Signer Client Fehler", {"error": str(e), "traceback": traceback.format_exc()})
         return None
 
-async def fetch_candles(market_id, resolution, count_back=200):
-    """Holt Candles SOFORT von der REST-API!"""
+
+async def fetch_candles(market_id, resolution, count_back=100):
+    """Holt Kerzendaten über die öffentliche Candlestick-API (kein Private Key nötig)."""
     import lighter
     configuration = lighter.Configuration(host=BASE_URL)
     async with lighter.ApiClient(configuration) as api_client:
         candle_api = lighter.CandlestickApi(api_client)
-        
-        now = int(time.time())
-        start = now - (60 * 60 * 24 * 7)  # 7 Tage zurück
-        
-        debug_log(f"📡 Hole Candles: market={market_id}, resolution={resolution}")
-        debug_log(f"   start={start}, end={now}, count_back={count_back}")
-        
-        try:
-            response = await candle_api.candles(
-                market_id=market_id,
-                resolution=resolution,
-                start_timestamp=start,
-                end_timestamp=now,
-                count_back=count_back,
-                set_timestamp_to_end=True,
-            )
-            return response
-        except Exception as e:
-            debug_log("❌ API-Fehler", {"error": str(e)})
-            raise
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - 60 * 60 * 24 * 7 * 1000  # 7 Tage Puffer zurück (in ms)
 
+        debug_log("🔎 Candle-API Request-Parameter", {
+            "market_id": market_id, "resolution": resolution,
+            "start_timestamp": start_ms, "end_timestamp": now_ms,
+            "count_back": min(count_back, 500),
+        })
+
+        response = await candle_api.candles(
+            market_id=market_id,
+            resolution=resolution,
+            start_timestamp=start_ms,
+            end_timestamp=now_ms,
+            count_back=min(count_back, 500),  # API-Limit: max 500 pro Call
+            set_timestamp_to_end=True,
+        )
+        return response
+
+
+# ========== EMA-Berechnung (Standard, wie TradingView ta.ema) ==========
 def calc_ema_series(closes, length):
-    if len(closes) < length:
+    if not closes:
         return []
-    
-    ema_values = []
-    sma = sum(closes[:length]) / length
-    ema_values.append(sma)
-    
     k = 2 / (length + 1)
-    for i in range(length, len(closes)):
-        ema = closes[i] * k + ema_values[-1] * (1 - k)
-        ema_values.append(ema)
-    
+    ema_values = [closes[0]]
+    for price in closes[1:]:
+        ema_values.append(price * k + ema_values[-1] * (1 - k))
     return ema_values
 
+
+# ========== Order-Ausführung (identisch zur Orderbuch-Bot-Version) ==========
 async def create_order_with_price(client, market_index, base_amount, is_ask, symbol, price, reduce_only=False):
     price_decimals = get_price_decimals(symbol)
     adjusted_price = price * 0.95 if is_ask else price * 1.05
@@ -130,6 +148,7 @@ async def create_order_with_price(client, market_index, base_amount, is_ask, sym
         order_expiry=client.DEFAULT_IOC_EXPIRY,
     )
     return tx, tx_hash, err
+
 
 async def open_or_reverse_position(action, symbol, margin, leverage, current_price):
     client = get_lighter_client()
@@ -206,51 +225,61 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
     finally:
         await client.close()
 
+
 # ========== State ==========
 OPEN_POSITIONS = {}
 
 # ========== Konfiguration ==========
-SYMBOL = os.getenv("EMA_SYMBOL", "SOL")
+SYMBOL = os.getenv("EMA_SYMBOL", "BTC")
 if SYMBOL not in MARKET_INDICES:
-    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES")
+    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES - Liste in dieser Datei ergänzen")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-RESOLUTION = os.getenv("EMA_RESOLUTION", "1m")
-EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "20"))
-EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "100"))
-MIN_CROSSOVER_DIFF = float(os.getenv("MIN_CROSSOVER_DIFF", "0.02"))
+RESOLUTION = os.getenv("EMA_RESOLUTION", "5")  # z.B. "1", "5", "15", "60" - siehe Hinweis oben!
+EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "7"))
+EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "13"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
 
-MARGIN = float(os.getenv("EMA_MARGIN", "10"))
-LEVERAGE = int(os.getenv("EMA_LEVERAGE", "20"))
+MARGIN = float(os.getenv("EMA_MARGIN", "100"))
+LEVERAGE = int(os.getenv("EMA_LEVERAGE", "10"))
+
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 current_position_side = None
 last_processed_candle_ts = None
-last_relation = None
+last_relation = None  # "above" (EMA7 > EMA13) / "below" / None
+
 
 def extract_close_prices_and_ts(raw_response):
-    """Extrahiert Close-Preise und Timestamps aus der API-Antwort."""
-    candles = getattr(raw_response, "candlesticks", None)
+    """
+    Extrahiert (timestamp, close_price)-Paare aus der Candlestick-API-Antwort.
+    WICHTIG: Feldnamen sind eine Annahme basierend auf typischen OHLC-APIs -
+    falls das nicht passt, zeigt das Debug-Log die Rohstruktur, dann passen
+    wir das gezielt an.
+    """
+    candles = getattr(raw_response, "candles", None)
+    if candles is None:
+        candles = getattr(raw_response, "candlesticks", None)
     if candles is None and isinstance(raw_response, dict):
-        candles = raw_response.get("candlesticks", [])
+        candles = raw_response.get("candles") or raw_response.get("candlesticks", [])
     if not candles:
         return [], []
 
     timestamps, closes = [], []
     for c in candles:
-        ts = getattr(c, "t", None) or getattr(c, "timestamp", None)
-        close = getattr(c, "c", None) or getattr(c, "close", None)
+        ts = getattr(c, "timestamp", None) or getattr(c, "end_period_ts", None) or (c.get("timestamp") if isinstance(c, dict) else None)
+        close = getattr(c, "close", None) or (c.get("close") if isinstance(c, dict) else None)
         if ts is not None and close is not None:
             timestamps.append(int(ts))
             closes.append(float(close))
     return timestamps, closes
 
+
 async def check_for_signal():
     global last_processed_candle_ts, last_relation, current_position_side
 
     try:
-        raw = await fetch_candles(MARKET_INDEX, RESOLUTION, count_back=max(EMA_SLOW_LEN * 2, 200))
+        raw = await fetch_candles(MARKET_INDEX, RESOLUTION, count_back=max(EMA_SLOW_LEN * 5, 100))
     except Exception as e:
         debug_log("⚠️ Kerzen-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return
@@ -258,40 +287,36 @@ async def check_for_signal():
     timestamps, closes = extract_close_prices_and_ts(raw)
 
     if len(closes) < EMA_SLOW_LEN + 2:
-        debug_log(f"⚠️ Zu wenig Kerzendaten: {len(closes)} < {EMA_SLOW_LEN + 2}")
+        debug_log("⚠️ Zu wenig Kerzendaten für EMA-Berechnung", {
+            "erhaltene_kerzen": len(closes),
+            "raw_antwort_typ": str(type(raw)),
+        })
         return
 
+    # Die letzte Kerze ist evtl. noch nicht geschlossen -> weglassen für die Cross-Prüfung
     closed_ts = timestamps[:-1]
     closed_closes = closes[:-1]
 
     ema_fast = calc_ema_series(closed_closes, EMA_FAST_LEN)
     ema_slow = calc_ema_series(closed_closes, EMA_SLOW_LEN)
 
-    if len(ema_fast) < 2 or len(ema_slow) < 2:
-        debug_log("⚠️ EMAs konnten nicht berechnet werden")
-        return
-
     latest_ts = closed_ts[-1]
     latest_fast = ema_fast[-1]
     latest_slow = ema_slow[-1]
     latest_close = closed_closes[-1]
-    diff = abs(latest_fast - latest_slow)
 
-    if diff >= MIN_CROSSOVER_DIFF:
-        current_relation = "above" if latest_fast > latest_slow else "below"
-    else:
-        current_relation = last_relation
-        debug_log(f"⏭️ EMAs zu nah: {diff:.4f} < {MIN_CROSSOVER_DIFF}")
+    current_relation = "above" if latest_fast > latest_slow else "below"
 
     debug_log(f"📊 EMA Status {SYMBOL}", {
-        "candles": len(closed_closes),
+        "letzte_geschlossene_kerze_ts": latest_ts,
+        "close_preis": latest_close,
         f"ema_{EMA_FAST_LEN}": round(latest_fast, 4),
         f"ema_{EMA_SLOW_LEN}": round(latest_slow, 4),
-        "differenz": round(diff, 4),
         "beziehung": current_relation,
-        "position": current_position_side or "flach",
+        "bot_position": current_position_side or "flach",
     })
 
+    # Nur reagieren, wenn's eine NEUE geschlossene Kerze ist (nicht bei jedem Poll neu bewerten)
     if last_processed_candle_ts == latest_ts:
         return
     last_processed_candle_ts = latest_ts
@@ -302,27 +327,27 @@ async def check_for_signal():
 
         if current_position_side != direction:
             if DRY_RUN:
-                debug_log("🧪 DRY_RUN - keine Order")
+                debug_log("🧪 DRY_RUN aktiv - keine echte Order ausgeführt")
                 current_position_side = direction
             else:
                 result = await open_or_reverse_position(direction, SYMBOL, MARGIN, LEVERAGE, latest_close)
                 debug_log("Order-Ergebnis", result)
-                if result.get("success"):
-                    current_position_side = direction
+                current_position_side = direction
 
     last_relation = current_relation
 
+
 async def main():
     print("=" * 60)
-    print(f"🚀 EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN} Crossover Bot für {SYMBOL}")
-    print(f"   Resolution: {RESOLUTION} | Poll: {POLL_INTERVAL_SECONDS}s")
-    print(f"   Mindestabstand: {MIN_CROSSOVER_DIFF}")
-    print(f"   DRY_RUN: {DRY_RUN} | Margin: {MARGIN} | Hebel: {LEVERAGE}x")
+    print(f"🚀 EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN} Crossover Bot gestartet für {SYMBOL}")
+    print(f"   Resolution: {RESOLUTION} | Poll-Intervall: {POLL_INTERVAL_SECONDS}s")
+    print(f"   DRY_RUN: {DRY_RUN} | Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print("=" * 60)
 
     while True:
         await check_for_signal()
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
