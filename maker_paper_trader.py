@@ -1,9 +1,7 @@
 """
-MOMENTUM SCALPING BOT - MIT TP/SL
+MOMENTUM SCALPING BOT - MIT DEBUG
 ==================================
-Signal: Preisbewegung in 1 Sekunde
-Exit: TP 0.02% / SL 0.01% / Timeout 5s
-FIX: Preis wird aus OrderBook und Trades geholt
+Zeigt alle Preisänderungen an damit wir sehen warum keine Trades kommen
 """
 
 import asyncio
@@ -30,25 +28,23 @@ SYMBOL = os.getenv("OB_SYMBOL", "BTC")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
 # 📊 MOMENTUM PARAMETER
-MOMENTUM_THRESHOLD = float(os.getenv("MOMENTUM_THRESHOLD", "0.02"))  # 0.02% in 1s
-SIGNAL_MODE = os.getenv("SIGNAL_MODE", "simple")  # simple, multi, obi_fallback
+MOMENTUM_THRESHOLD = float(os.getenv("MOMENTUM_THRESHOLD", "0.005"))  # SEHR NIEDRIG FÜR TESTS!
+SIGNAL_MODE = os.getenv("SIGNAL_MODE", "simple")
 
 # 🎯 TP/SL
-TP_PERCENT = float(os.getenv("TP_PERCENT", "0.02"))  # 0.02% = $0.10 bei $500
-SL_PERCENT = float(os.getenv("SL_PERCENT", "0.01"))  # 0.01% = $0.05 bei $500
-MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "5"))  # 5 Sekunden
+TP_PERCENT = float(os.getenv("TP_PERCENT", "0.02"))
+SL_PERCENT = float(os.getenv("SL_PERCENT", "0.01"))
+MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "5"))
 
 # 💰 HEBEL & POSITION
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "10"))  # $10 Einsatz
-LEVERAGE = float(os.getenv("LEVERAGE", "50"))  # 50x Hebel
+RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "10"))
+LEVERAGE = float(os.getenv("LEVERAGE", "50"))
 ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000"))
 
 # ========== STATE ==========
 order_book = {"bids": {}, "asks": {}}
 price_history = deque(maxlen=20)
-obi_avg_buffer = deque()
 
-last_signal_time = 0.0
 last_trade_time = 0.0
 start_time = time.time()
 
@@ -111,10 +107,11 @@ def calc_obi(levels=25):
     total = bid_vol + ask_vol
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
-# ========== MOMENTUM SIGNAL ==========
+# ========== MOMENTUM SIGNAL MIT DEBUG ==========
 def check_momentum_simple():
-    """Simple Momentum: 1 Sekunde Preisänderung"""
+    """Simple Momentum: 1 Sekunde Preisänderung - MIT DEBUG"""
     if len(price_history) < 3:
+        debug_log(f"⏳ Preis-Historie: {len(price_history)}/3 - warte auf mehr Daten...")
         return None
     
     price_now = price_history[-1]
@@ -125,62 +122,41 @@ def check_momentum_simple():
     
     change_pct = (price_now - price_1s_ago) / price_1s_ago * 100
     
+    # 🔥 DEBUG: Zeige jede Preisänderung
+    if abs(change_pct) > 0.001:  # Nur wenn mehr als 0.001%
+        debug_log(f"📊 Preis: {price_now:.2f} | Änderung: {change_pct:.3f}% | Threshold: {MOMENTUM_THRESHOLD}%")
+    
     if change_pct > MOMENTUM_THRESHOLD:
+        debug_log(f"🚀 BUY SIGNAL! {change_pct:.3f}% > {MOMENTUM_THRESHOLD}%")
         return "buy"
     elif change_pct < -MOMENTUM_THRESHOLD:
-        return "sell"
-    return None
-
-def check_momentum_multi():
-    """Multi-Timeframe: 1s + 3s Momentum"""
-    if len(price_history) < 5:
-        return None
-    
-    price_now = price_history[-1]
-    price_1s_ago = price_history[-2]
-    price_3s_ago = price_history[-4]
-    
-    if price_1s_ago == 0 or price_3s_ago == 0:
-        return None
-    
-    change_1s = (price_now - price_1s_ago) / price_1s_ago * 100
-    change_3s = (price_now - price_3s_ago) / price_3s_ago * 100
-    
-    if change_1s > 0.015 and change_3s > 0.03:
-        return "buy"
-    elif change_1s < -0.015 and change_3s < -0.03:
+        debug_log(f"🚀 SELL SIGNAL! {change_pct:.3f}% < -{MOMENTUM_THRESHOLD}%")
         return "sell"
     return None
 
 def check_obi_fallback():
-    """OBI als Fallback wenn kein Momentum"""
+    """OBI als Fallback"""
     raw_obi = calc_obi()
+    debug_log(f"📊 OBI: {raw_obi:.3f}")
     if raw_obi > 0.35:
+        debug_log(f"🚀 OBI BUY SIGNAL! {raw_obi:.3f} > 0.35")
         return "buy"
     elif raw_obi < -0.35:
+        debug_log(f"🚀 OBI SELL SIGNAL! {raw_obi:.3f} < -0.35")
         return "sell"
     return None
 
 def get_momentum_signal():
-    """Hauptsignal-Funktion mit verschiedenen Modi"""
+    """Hauptsignal-Funktion"""
     
     # 1. Momentum Signal
-    if SIGNAL_MODE == "simple":
-        signal = check_momentum_simple()
-    elif SIGNAL_MODE == "multi":
-        signal = check_momentum_multi()
-    else:
-        signal = check_momentum_simple()
+    signal = check_momentum_simple()
     
-    # 2. Wenn Signal da, zurückgeben
-    if signal:
-        return signal
+    # 2. Fallback: OBI
+    if not signal and SIGNAL_MODE == "obi_fallback":
+        signal = check_obi_fallback()
     
-    # 3. Fallback: OBI (nur im obi_fallback Mode)
-    if SIGNAL_MODE == "obi_fallback":
-        return check_obi_fallback()
-    
-    return None
+    return signal
 
 # ========== POSITION SIZING ==========
 def calculate_position_size(entry_price):
@@ -197,11 +173,11 @@ def calculate_position_size(entry_price):
 
 # ========== TRADING ==========
 def check_signal_and_execute():
-    global open_position, position_opened_at, last_signal_time, last_trade_time
+    global open_position, position_opened_at, last_trade_time
     
     now = time.time()
     
-    # Mindestabstand zwischen Trades (0.5s)
+    # Mindestabstand zwischen Trades
     if now - last_trade_time < 0.5:
         return
     
@@ -217,6 +193,7 @@ def check_signal_and_execute():
     # 💥 ENTRY AUSFÜHREN
     bb, ba = best_bid(), best_ask()
     if bb is None or ba is None:
+        debug_log("⚠️ Kein OrderBook für Entry")
         return
     
     entry_price = ba if signal == "buy" else bb
@@ -234,19 +211,16 @@ def check_signal_and_execute():
         "target_profit": position_info["target_profit"],
         "target_loss": position_info["target_loss"],
         "spread": spread_pct,
-        "signal": SIGNAL_MODE,
     }
     position_opened_at = now
-    last_signal_time = now
     last_trade_time = now
     stats["signals"] += 1
     
     debug_log(
-        f"⚡ MOMENTUM ENTRY: {signal.upper()} @ {entry_price}\n"
+        f"⚡ ENTRY: {signal.upper()} @ {entry_price}\n"
         f"   💰 Position: ${position_info['usd_size']} ({position_info['units']} {SYMBOL})\n"
         f"   💵 Margin: ${position_info['margin_used']} | Hebel: {position_info['leverage']}x\n"
-        f"   🎯 Ziel: +${position_info['target_profit']} | 🛑 Stop: -${position_info['target_loss']}\n"
-        f"   📊 Spread: {round(spread_pct, 3)}% | Mode: {SIGNAL_MODE}"
+        f"   🎯 Ziel: +${position_info['target_profit']} | 🛑 Stop: -${position_info['target_loss']}"
     )
 
 def check_position_exit(last_trade_price):
@@ -260,7 +234,6 @@ def check_position_exit(last_trade_price):
     now = time.time()
     hold_time = now - position_opened_at
     
-    # Exit-Preis
     if side == "buy":
         exit_price = best_bid()
         if exit_price is None:
@@ -276,17 +249,14 @@ def check_position_exit(last_trade_price):
     target_profit = open_position.get("target_profit", 0.10)
     target_loss = open_position.get("target_loss", 0.05)
     
-    # 🎯 TAKE-PROFIT
     if pnl_usd >= target_profit:
         close_position(exit_price, pnl_pct, pnl_usd, f"TP (+${target_profit:.2f})")
         return
     
-    # 🛑 STOP-LOSS
     if pnl_usd <= -target_loss:
         close_position(exit_price, pnl_pct, pnl_usd, f"SL (-${target_loss:.2f})")
         return
     
-    # ⏰ TIMEOUT
     if hold_time > MAX_POSITION_TIME:
         close_position(exit_price, pnl_pct, pnl_usd, f"TIMEOUT ({round(hold_time, 1)}s)")
         return
@@ -324,22 +294,14 @@ def close_position(price, pnl_pct, pnl_usd, reason):
         "pnl_pct": round(pnl_pct, 2),
         "reason": reason,
         "hold_time": round(hold_time, 2),
-        "signal_mode": open_position.get("signal", "unknown"),
         "leverage": open_position.get("leverage", 0),
         "size_usd": round(open_position.get("size_usd", 0), 2),
-        "margin": round(open_position.get("margin_used", 0), 2),
         "closed_at": datetime.now().isoformat()
     }
     trade_log.append(trade_entry)
     
     emoji = "✅" if pnl_usd > 0 else "❌"
-    debug_log(
-        f"{emoji} EXIT: {side.upper()} @ {price} | "
-        f"PnL: ${round(pnl_usd, 2)} ({round(pnl_pct, 2)}%) | "
-        f"Dauer: {round(hold_time, 2)}s | "
-        f"Grund: {reason} | "
-        f"Balance: ${round(stats['current_balance'], 2)}"
-    )
+    debug_log(f"{emoji} EXIT: {side.upper()} @ {price} | PnL: ${round(pnl_usd, 2)} | Dauer: {round(hold_time, 2)}s | Grund: {reason}")
     
     open_position = None
     position_opened_at = 0.0
@@ -349,17 +311,15 @@ def log_status():
     win_rate = stats["wins"] / stats["trades_completed"] * 100 if stats["trades_completed"] else 0
     trades_per_hour = stats["trades_completed"] / ((time.time() - start_time) / 3600) if start_time else 0
     
-    debug_log("📊 MOMENTUM STATUS", {
+    debug_log("📊 STATUS", {
         "mode": SIGNAL_MODE,
         "trades": stats["trades_completed"],
         "win_rate": round(win_rate, 1),
         "total_pnl": round(stats["total_pnl_usd"], 2),
         "balance": round(stats["current_balance"], 2),
         "trades/h": round(trades_per_hour, 1),
-        "avg_hold": round(stats["avg_hold_time"], 2),
-        "max_win": round(stats["max_win"], 2),
-        "max_loss": round(stats["max_loss"], 2),
         "open": open_position is not None,
+        "price_history": len(price_history),
         "last": trade_log[-1] if trade_log else None
     })
 
@@ -367,13 +327,13 @@ def log_status():
 async def listen():
     last_trade_price = None
     last_status_log = 0.0
+    last_price_log = 0.0
     
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
         await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDEX}"}))
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
         
-        debug_log(f"✅ Momentum Bot verbunden | Mode: {SIGNAL_MODE}")
-        debug_log(f"🎯 TP: {TP_PERCENT}% | SL: {SL_PERCENT}% | Max-Halt: {MAX_POSITION_TIME}s")
+        debug_log(f"✅ Verbunden | Mode: {SIGNAL_MODE} | Threshold: {MOMENTUM_THRESHOLD}%")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -382,7 +342,7 @@ async def listen():
             if channel.startswith("order_book"):
                 apply_order_book_update(msg)
                 
-                # 🔥 FIX: Preis aus OrderBook für Momentum
+                # 🔥 Preis aus OrderBook
                 mid = mid_price()
                 if mid:
                     price_history.append(mid)
@@ -400,7 +360,7 @@ async def listen():
                 trades = msg.get("trades", [])
                 if trades:
                     price = float(trades[-1]["price"])
-                    price_history.append(price)  # Trade-Preis als Backup
+                    price_history.append(price)
                     last_trade_price = price
                     
                     if open_position is not None:
@@ -409,22 +369,20 @@ async def listen():
 # ========== MAIN ==========
 async def main():
     print("=" * 70)
-    print(f"⚡ MOMENTUM SCALPING BOT - {LEVERAGE}x Hebel")
-    print(f"   📊 Signal: {SIGNAL_MODE} Momentum")
-    print(f"   🎯 TP: {TP_PERCENT}% (${RISK_PER_TRADE * LEVERAGE * TP_PERCENT / 100:.2f})")
-    print(f"   🛑 SL: {SL_PERCENT}% (${RISK_PER_TRADE * LEVERAGE * SL_PERCENT / 100:.2f})")
-    print(f"   ⏰ Max-Halt: {MAX_POSITION_TIME}s")
+    print(f"⚡ MOMENTUM BOT - MIT DEBUG")
+    print(f"   📊 Threshold: {MOMENTUM_THRESHOLD}%")
+    print(f"   🎯 TP: {TP_PERCENT}% | SL: {SL_PERCENT}%")
     print(f"   💰 Hebel: {LEVERAGE}x | Einsatz: ${RISK_PER_TRADE}")
     print("=" * 70)
-    print("   ✅ Preis wird aus OrderBook + Trades geholt")
-    print("   ✅ TP/SL sind aktiv")
+    print("   🔍 DEBUG: Zeigt alle Preisänderungen an")
+    print("   📊 Siehst du Preisänderungen?")
     print("=" * 70)
 
     while True:
         try:
             await listen()
         except Exception as e:
-            debug_log("⚠️ Reconnect...", {"error": str(e)})
+            debug_log(f"⚠️ Reconnect... {e}")
             await asyncio.sleep(3)
 
 if __name__ == "__main__":
