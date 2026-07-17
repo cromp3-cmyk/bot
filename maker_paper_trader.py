@@ -171,12 +171,15 @@ def check_signal_and_place_entry(avg_obi):
     debug_log(f"📝 Simulierte Entry-Order platziert: {direction.upper()} {SYMBOL} @ {price} (Ø-OBI {round(avg_obi,3)}, Maker, wartet auf Fill)")
 
 
-def check_entry_fill(last_trade_price, last_trade_ts):
-    """Simuliert Fill: ein Trade zum Order-Preis (oder besser fuer den Taker) fuellt uns."""
+def check_entry_fill(last_trade_price, last_trade_received_at):
+    """Simuliert Fill: ein Trade NACH Order-Platzierung zum Order-Preis (oder besser) fuellt uns."""
     global pending_entry, open_position
 
     if pending_entry is None or last_trade_price is None:
         return
+
+    if last_trade_received_at <= pending_entry["placed_at"]:
+        return  # Trade ist aelter als unsere Order - zaehlt nicht als Fill
 
     side = pending_entry["side"]
     price = pending_entry["price"]
@@ -216,11 +219,14 @@ def maybe_place_exit():
     debug_log(f"📝 Simulierte Exit-Order platziert: {exit_side.upper()} {SYMBOL} @ {round(target, 4)} (TP {TP_PERCENT}%)")
 
 
-def check_exit_fill(last_trade_price):
+def check_exit_fill(last_trade_price, last_trade_received_at):
     global pending_exit, open_position
 
     if pending_exit is None or last_trade_price is None:
         return
+
+    if last_trade_received_at <= pending_exit["placed_at"]:
+        return  # Trade ist aelter als unsere Exit-Order - zaehlt nicht als Fill
 
     side = pending_exit["side"]
     price = pending_exit["price"]
@@ -262,6 +268,7 @@ def check_exit_fill(last_trade_price):
 
 async def listen():
     last_trade_price = None
+    last_trade_received_at = 0.0
     last_status_log = 0.0
 
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
@@ -279,11 +286,11 @@ async def listen():
                 avg_obi = update_obi_average(raw_obi)
 
                 check_signal_and_place_entry(avg_obi)
-                check_entry_fill(last_trade_price, time.time())
+                check_entry_fill(last_trade_price, last_trade_received_at)
 
                 if open_position is not None:
                     maybe_place_exit()
-                    check_exit_fill(last_trade_price)
+                    check_exit_fill(last_trade_price, last_trade_received_at)
 
                 now = time.time()
                 if now - last_status_log >= 30:
@@ -307,6 +314,7 @@ async def listen():
                 trades = msg.get("trades", [])
                 if trades:
                     last_trade_price = float(trades[-1]["price"])
+                    last_trade_received_at = time.time()
 
 
 async def main():
