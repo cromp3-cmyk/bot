@@ -1,7 +1,7 @@
 """
-OBI Scalping Bot - 50x Hebel, $10 Einsatz, $1 Gewinn
-=====================================================
-Ziel: 100+ Trades/Tag mit kleinen Gewinnen
+OBI Scalping Bot - 50x Hebel, $10 Einsatz
+===========================================
+KORREKTE TP/SL: 0.20% / 0.10%
 """
 
 import asyncio
@@ -27,21 +27,21 @@ MARKET_INDICES = {"ETH": 0, "BTC": 1, "SOL": 2, "DOGE": 3, "AVAX": 9, "SUI": 16}
 SYMBOL = os.getenv("OB_SYMBOL", "BTC")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-# 📊 SCALPING PARAMETER
+# OBI
 OBI_LEVELS = int(os.getenv("OBI_LEVELS", "25"))
-OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.25"))  # Niedriger für viele Signale
-OBI_AVG_WINDOW_SECONDS = float(os.getenv("OBI_AVG_WINDOW_SECONDS", "2"))  # Sehr kurz
-COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "1"))  # 1 Sekunde zwischen Trades
+OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.25"))
+OBI_AVG_WINDOW_SECONDS = float(os.getenv("OBI_AVG_WINDOW_SECONDS", "2"))
+COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "1"))
 
-# 🎯 SCALPING TP/SL (0.2% = $1 bei $500 Position)
-TP_PERCENT = float(os.getenv("TP_PERCENT", "0.20"))  # 0.2% = $1 Gewinn
-SL_PERCENT = float(os.getenv("SL_PERCENT", "0.10"))  # 0.1% = $0.50 Verlust
-MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "3"))  # Max 3 Sekunden halten
+# 🔥 RICHTIGE SCALPING PARAMETER
+TP_PERCENT = float(os.getenv("TP_PERCENT", "0.20"))  # 0.20% = $1 bei $500
+SL_PERCENT = float(os.getenv("SL_PERCENT", "0.10"))  # 0.10% = $0.50 bei $500
+MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "3"))  # 3 Sekunden
 
 # 💰 HEBEL & POSITION
-ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000"))  # $1000 Kapital
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "10"))  # $10 Einsatz pro Trade
+RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "10"))  # $10 Einsatz
 LEVERAGE = float(os.getenv("LEVERAGE", "50"))  # 50x Hebel
+ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000"))
 
 # ========== STATE ==========
 order_book = {"bids": {}, "asks": {}}
@@ -115,19 +115,16 @@ def update_obi_average(raw_obi):
         return 0.0
     return sum(v for v, _ in obi_avg_buffer) / len(obi_avg_buffer)
 
-# ========== POSITION SIZING ==========
 def calculate_position_size(entry_price):
-    """$10 Einsatz mit 50x Hebel = $500 Position"""
-    position_usd = RISK_PER_TRADE * LEVERAGE  # $10 * 50 = $500
+    position_usd = RISK_PER_TRADE * LEVERAGE
     units = position_usd / entry_price if entry_price > 0 else 0
-    
     return {
         "usd_size": round(position_usd, 2),
         "units": round(units, 6),
         "leverage": LEVERAGE,
-        "margin_used": RISK_PER_TRADE,  # $10 Einsatz
-        "target_profit": round(position_usd * (TP_PERCENT / 100), 2),  # $1
-        "target_loss": round(position_usd * (SL_PERCENT / 100), 2),   # $0.50
+        "margin_used": RISK_PER_TRADE,
+        "target_profit": round(position_usd * (TP_PERCENT / 100), 2),
+        "target_loss": round(position_usd * (SL_PERCENT / 100), 2),
     }
 
 # ========== TRADING ==========
@@ -135,12 +132,9 @@ def check_signal_and_execute(avg_obi):
     global open_position, position_opened_at, last_signal_time, last_signal_direction, last_trade_time
     
     now = time.time()
-    
-    # Min 0.5s zwischen Trades (für Scalping)
     if now - last_trade_time < 0.5:
         return
     
-    # Signal erkennen (niedrigere Schwelle für viele Trades)
     if avg_obi >= OBI_THRESHOLD:
         direction = "buy"
     elif avg_obi <= -OBI_THRESHOLD:
@@ -149,7 +143,6 @@ def check_signal_and_execute(avg_obi):
         last_signal_direction = None
         return
     
-    # Cooldown (1s)
     if now - last_signal_time < COOLDOWN_SECONDS:
         return
     if direction == last_signal_direction:
@@ -161,14 +154,10 @@ def check_signal_and_execute(avg_obi):
     if bb is None or ba is None:
         return
     
-    # Entry zum besten Preis
     entry_price = ba if direction == "buy" else bb
-    
-    # Positionsgröße berechnen
     position_info = calculate_position_size(entry_price)
     spread_pct = calc_spread()
     
-    # Position öffnen
     open_position = {
         "side": direction,
         "entry_price": entry_price,
@@ -207,7 +196,6 @@ def check_position_exit(last_trade_price, last_trade_received_at):
     now = time.time()
     hold_time = now - position_opened_at
     
-    # Exit-Preis
     if side == "buy":
         exit_price = best_bid()
         if exit_price is None:
@@ -223,17 +211,17 @@ def check_position_exit(last_trade_price, last_trade_received_at):
     target_profit = open_position.get("target_profit", 1.0)
     target_loss = open_position.get("target_loss", 0.5)
     
-    # 🎯 TAKE-PROFIT ($1 Gewinn)
+    # 🎯 TAKE-PROFIT
     if pnl_usd >= target_profit:
         close_position(exit_price, pnl_pct, pnl_usd, f"TP (+${target_profit})")
         return
     
-    # 🛑 STOP-LOSS ($0.50 Verlust)
+    # 🛑 STOP-LOSS
     if pnl_usd <= -target_loss:
         close_position(exit_price, pnl_pct, pnl_usd, f"SL (-${target_loss})")
         return
     
-    # ⏰ TIMEOUT - nach 3 Sekunden schließen (auch bei kleinen Gewinn/Verlust)
+    # ⏰ TIMEOUT
     if hold_time > MAX_POSITION_TIME:
         close_position(exit_price, pnl_pct, pnl_usd, f"TIMEOUT ({round(hold_time, 1)}s)")
         return
@@ -248,7 +236,6 @@ def close_position(price, pnl_pct, pnl_usd, reason):
     entry_price = open_position["entry_price"]
     hold_time = time.time() - position_opened_at
     
-    # Stats
     stats["trades_completed"] += 1
     stats["total_pnl_usd"] += pnl_usd
     stats["total_hold_time"] += hold_time
@@ -264,7 +251,6 @@ def close_position(price, pnl_pct, pnl_usd, reason):
         if pnl_usd < stats["max_loss"]:
             stats["max_loss"] = pnl_usd
     
-    # Trade log
     trade_entry = {
         "side": side,
         "entry": round(entry_price, 2),
@@ -281,7 +267,6 @@ def close_position(price, pnl_pct, pnl_usd, reason):
     }
     trade_log.append(trade_entry)
     
-    # Log
     emoji = "✅" if pnl_usd > 0 else "❌"
     debug_log(
         f"{emoji} EXIT: {side.upper()} @ {price} | "
@@ -325,7 +310,7 @@ async def listen():
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
         
         debug_log(f"✅ Verbunden | Scalping Mode")
-        debug_log(f"💵 $10 Einsatz | 50x Hebel | $500 Position | Ziel: +$1 | Stop: -$0.50")
+        debug_log(f"💵 ${RISK_PER_TRADE} Einsatz | {LEVERAGE}x Hebel | ${RISK_PER_TRADE*LEVERAGE} Position")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -334,12 +319,12 @@ async def listen():
             if channel.startswith("order_book"):
                 apply_order_book_update(msg)
                 now = time.time()
-                if now - last_obi_check > 0.3:  # 3x pro Sekunde für schnelle Reaktion
+                if now - last_obi_check > 0.3:
                     raw_obi = calc_obi()
                     avg_obi = update_obi_average(raw_obi)
                     last_obi_check = now
                     check_signal_and_execute(avg_obi)
-                    if now - last_status_log >= 10:  # Status alle 10 Sekunden
+                    if now - last_status_log >= 10:
                         last_status_log = now
                         log_status(raw_obi, avg_obi)
 
@@ -354,16 +339,12 @@ async def listen():
 # ========== MAIN ==========
 async def main():
     print("=" * 70)
-    print(f"⚡ OBI SCALPING BOT - 50x Hebel")
+    print(f"⚡ OBI SCALPING BOT - {LEVERAGE}x Hebel")
     print(f"   💵 Einsatz: ${RISK_PER_TRADE} | Hebel: {LEVERAGE}x")
     print(f"   📊 Position: ${RISK_PER_TRADE * LEVERAGE}")
     print(f"   🎯 Ziel: +${RISK_PER_TRADE * LEVERAGE * TP_PERCENT / 100:.2f} pro Trade")
     print(f"   🛑 Stop: -${RISK_PER_TRADE * LEVERAGE * SL_PERCENT / 100:.2f} pro Trade")
     print(f"   ⚡ Ziel: 100+ Trades/Tag = ${RISK_PER_TRADE * LEVERAGE * TP_PERCENT / 100 * 100:.0f}/Tag")
-    print("=" * 70)
-    print("   ✅ Keine Gebühren auf Lighter!")
-    print("   ✅ 50x Hebel = kleine Einsätze, große Wirkung")
-    print("   ✅ 3 Sekunden pro Trade = viele Trades")
     print("=" * 70)
 
     while True:
