@@ -1,13 +1,22 @@
-web3==7.7.0
-lighter-sdk
+# ========== WEBSOCKET & NETWORK ==========
+websockets==12.0
+aiohttp==3.9.1
+aiohttp-retry==2.8.3
 
-aiohttp
-aiohttp-retry
-eth-account
-eth-keys
-eth-utils
-websockets
-pycryptodome
-python-dotenv
-typing-extensions
-colorama
+# ========== WEB3 & BLOCKCHAIN ==========
+web3==7.7.0
+eth-account==0.11.0
+eth-keys==0.5.0
+eth-utils==2.3.1
+
+# ========== CRYPTO ==========
+pycryptodome==3.20.0
+
+# ========== FLASK (Dashboard) ==========
+flask==3.0.0
+flask-cors==4.0.0
+
+# ========== UTILITIES ==========
+python-dotenv==1.0.0
+typing-extensions==4.9.0
+colorama==0.4.6
