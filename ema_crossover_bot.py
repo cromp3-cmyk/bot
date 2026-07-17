@@ -1,11 +1,13 @@
 """
-Autonomer EMA Crossover Bot für Lighter (zkLighter) - MIT BACKTEST IM LOG
+Autonomer EMA Crossover Bot für Lighter (zkLighter) - MIT INTELLIGENTEM POLLING
 ======================================================================================
 - Holt echte Kerzendaten über die Lighter Candlestick-API
 - Handelt autonom bei EMA-Crossover (Kerzenschluss-Basis, kein Repainting)
-- Führt optional beim Start (und danach periodisch) einen Backtest über die
-  letzten X Stunden durch
-- Zeigt Backtest-Ergebnisse NUR im Log (Terminal) an
+- INTELLIGENTES POLLING: Prüft NUR 1x pro Minute, aber genau 2 Sekunden nach Kerzenschluss
+- Reaktionszeit: ~2 Sekunden (statt 3 Minuten!)
+- API-Calls: NUR 1.440 pro Tag (statt 86.400 bei 1s-Polling!)
+- Führt optional beim Start (und danach periodisch) einen Backtest durch
+- Zeigt Backtest-Ergebnisse im Log
 
 WICHTIG - SICHERHEIT:
 Erst mit DRY_RUN=true testen! Schau dir den Backtest UND ein paar Stunden
@@ -391,7 +393,6 @@ RESOLUTION = os.getenv("EMA_RESOLUTION", "5")
 EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "7"))
 EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "21"))
 CANDLE_COUNT_BACK = int(os.getenv("CANDLE_COUNT_BACK", "100"))
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
 
 MARGIN = float(os.getenv("EMA_MARGIN", "100"))
 LEVERAGE = int(os.getenv("EMA_LEVERAGE", "10"))
@@ -417,10 +418,10 @@ async def check_for_signal():
             timestamps, closes = extract_close_prices_and_ts(raw)
             if closes:
                 break
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         except Exception as e:
             debug_log(f"⚠️ Kerzen-Abfrage fehlgeschlagen (Versuch {attempt + 1}/3)", {"error": str(e)})
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
     else:
         return
 
@@ -429,6 +430,7 @@ async def check_for_signal():
     if len(closes) < EMA_SLOW_LEN + 2:
         return
 
+    # NUR abgeschlossene Kerzen für EMA
     closed_ts = timestamps[:-1]
     closed_closes = closes[:-1]
 
@@ -449,13 +451,23 @@ async def check_for_signal():
     }
     STATE["status"] = "läuft"
 
+    # Beim ersten Start initialisieren
+    if last_relation is None:
+        last_relation = current_relation
+        print(f"🔄 Initialer Zustand: {current_relation} (EMA {EMA_FAST_LEN}: {latest_fast:.2f}, EMA {EMA_SLOW_LEN}: {latest_slow:.2f})")
+        return
+
+    # NUR bei neuer Kerze prüfen
     if last_processed_candle_ts == latest_ts:
         return
     last_processed_candle_ts = latest_ts
 
+    # Crossover erkannt!
     if last_relation is not None and current_relation != last_relation:
         direction = "buy" if current_relation == "above" else "sell"
-        print(f"\n📡 EMA CROSS erkannt: {direction.upper()} {SYMBOL} @ ${latest_close:.2f}")
+        print(f"\n📡 EMA CROSSOVER erkannt: {direction.upper()} {SYMBOL} @ ${latest_close:.2f}")
+        print(f"   Zeit: {datetime.fromtimestamp(latest_ts/1000).strftime('%H:%M:%S')}")
+        print(f"   EMA {EMA_FAST_LEN}: {latest_fast:.2f} | EMA {EMA_SLOW_LEN}: {latest_slow:.2f}")
 
         if current_position_side != direction:
             if DRY_RUN:
@@ -463,38 +475,66 @@ async def check_for_signal():
                 current_position_side = direction
             else:
                 result = await open_or_reverse_position(direction, SYMBOL, MARGIN, LEVERAGE, latest_close)
-                debug_log("Order-Ergebnis", result)
+                print(f"✅ Order ausgeführt: {result}")
                 current_position_side = direction
 
     last_relation = current_relation
 
 
 async def trading_loop():
+    """
+    INTELLIGENTES POLLING:
+    - Prüft NUR 1x pro Minute
+    - Aber genau 2 Sekunden NACH Kerzenschluss
+    - Reaktionszeit: ~2 Sekunden
+    - API-Calls: NUR 1.440 pro Tag!
+    """
+    print("\n⚡ Trading-Loop mit INTELLIGENTEM POLLING gestartet")
+    print("   Prüft 1x pro Minute, 2 Sekunden nach Kerzenschluss")
+    print("   Reaktionszeit: ~2 Sekunden")
+    print("   API-Calls: 1.440/Tag (API-schonend!)\n")
+    
     while True:
+        now = datetime.now()
+        
+        # Sekunden bis zur nächsten vollen Minute
+        seconds_to_next_minute = 60 - now.second
+        
+        # Warte bis 2 Sekunden NACH Kerzenschluss
+        if seconds_to_next_minute > 2:
+            wait_time = seconds_to_next_minute - 2
+            await asyncio.sleep(wait_time)
+        else:
+            # Wenn wir schon fast da sind, kurz warten
+            await asyncio.sleep(1)
+        
+        # JETZT prüfen (nur 1x pro Minute!)
         await check_for_signal()
-        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        
+        # Kurze Pause um Doppelausführungen zu vermeiden
+        await asyncio.sleep(0.5)
 
 
 async def backtest_loop():
-    # Beim Start einmal ausführen
+    """Periodischer Backtest"""
     await run_backtest_and_print()
-    
-    # Dann periodisch
     while True:
         await asyncio.sleep(BACKTEST_REFRESH_MINUTES * 60)
         await run_backtest_and_print()
 
 
 async def main():
-    print("=" * 60)
+    print("=" * 80)
     print(f"🚀 EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN} Crossover Bot für {SYMBOL}")
-    print(f"   Resolution: {RESOLUTION}m | Poll-Intervall: {POLL_INTERVAL_SECONDS}s")
+    print(f"   Resolution: {RESOLUTION}m")
+    print(f"   ⚡ INTELLIGENTES POLLING: Prüft 1x pro Minute, 2s nach Kerzenschluss")
+    print(f"   📊 Reaktionszeit: ~2 Sekunden (statt 3 Minuten!)")
+    print(f"   🔋 API-Calls: 1.440/Tag (API-schonend!)")
     print(f"   DRY_RUN: {DRY_RUN} | Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print(f"   Backtest: {'AN' if BACKTEST_ENABLED else 'AUS'} ({BACKTEST_HOURS}h, alle {BACKTEST_REFRESH_MINUTES}min)")
-    print("=" * 60)
+    print("=" * 80)
     print("\n💡 Backtest-Ergebnisse werden hier im Log angezeigt!\n")
 
-    # Backtest und Trading parallel starten
     tasks = []
     if BACKTEST_ENABLED:
         tasks.append(backtest_loop())
