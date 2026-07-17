@@ -56,7 +56,6 @@ MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
 OBI_LEVELS = int(os.getenv("OBI_LEVELS", "25"))
 OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.30"))
-OBI_CONFIRM_SECONDS = float(os.getenv("OBI_CONFIRM_SECONDS", "15"))
 COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "10"))
 
 TP_PERCENT = float(os.getenv("TP_PERCENT", "0.1"))  # Ziel-Gewinn als Maker, in %
@@ -64,10 +63,11 @@ ORDER_TIMEOUT_SECONDS = float(os.getenv("ORDER_TIMEOUT_SECONDS", "20"))  # wie l
 
 # ========== State ==========
 order_book = {"bids": {}, "asks": {}}
-obi_history = deque(maxlen=20)
+obi_avg_buffer = deque()  # [(value, timestamp), ...] fuer den gleitenden Durchschnitt
 
-lean_direction = None
-lean_since = 0.0
+OBI_AVG_WINDOW_SECONDS = float(os.getenv("OBI_AVG_WINDOW_SECONDS", "10"))
+
+last_signal_direction = None
 last_signal_time = 0.0
 
 # Simulierte offene "Order" (Entry, wartet auf Fill)
@@ -123,43 +123,52 @@ def calc_obi(levels=OBI_LEVELS):
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
 
-def check_signal_and_place_entry(obi):
-    """Prueft OBI-Bestaetigung und 'platziert' bei Bedarf eine simulierte Entry-Order."""
-    global lean_direction, lean_since, last_signal_time, pending_entry
+def update_obi_average(raw_obi):
+    """Gleitender Durchschnitt über OBI_AVG_WINDOW_SECONDS - glättet kurze Ausreißer."""
+    now = time.time()
+    obi_avg_buffer.append((raw_obi, now))
+    cutoff = now - OBI_AVG_WINDOW_SECONDS
+    while obi_avg_buffer and obi_avg_buffer[0][1] < cutoff:
+        obi_avg_buffer.popleft()
+    if not obi_avg_buffer:
+        return 0.0
+    return sum(v for v, _ in obi_avg_buffer) / len(obi_avg_buffer)
+
+
+def check_signal_and_place_entry(avg_obi):
+    """Prueft den geglätteten OBI-Durchschnitt und 'platziert' bei Bedarf eine simulierte Entry-Order."""
+    global last_signal_direction, last_signal_time, pending_entry
 
     now = time.time()
 
-    if obi >= OBI_THRESHOLD:
-        current_lean = "buy"
-    elif obi <= -OBI_THRESHOLD:
-        current_lean = "sell"
+    if avg_obi >= OBI_THRESHOLD:
+        direction = "buy"
+    elif avg_obi <= -OBI_THRESHOLD:
+        direction = "sell"
     else:
-        current_lean = None
-
-    if current_lean != lean_direction:
-        lean_direction = current_lean
-        lean_since = now if current_lean is not None else 0.0
-        return
-
-    if current_lean is None or (now - lean_since) < OBI_CONFIRM_SECONDS:
+        last_signal_direction = None  # zurueck im neutralen Bereich - naechstes Signal darf wieder feuern
         return
 
     if now - last_signal_time < COOLDOWN_SECONDS:
         return
 
+    if direction == last_signal_direction:
+        return  # gleiche Richtung wie zuletzt, kein erneutes Signal noetig
+
     if pending_entry is not None or open_position is not None:
-        return  # schon eine Order/Position aktiv, kein neues Signal noetig
+        return
 
     bb, ba = best_bid(), best_ask()
     if bb is None or ba is None:
         return
 
-    price = bb if current_lean == "buy" else ba
-    pending_entry = {"side": current_lean, "price": price, "placed_at": now}
+    price = bb if direction == "buy" else ba
+    pending_entry = {"side": direction, "price": price, "placed_at": now}
     last_signal_time = now
+    last_signal_direction = direction
     stats["signals"] += 1
 
-    debug_log(f"📝 Simulierte Entry-Order platziert: {current_lean.upper()} {SYMBOL} @ {price} (Maker, wartet auf Fill)")
+    debug_log(f"📝 Simulierte Entry-Order platziert: {direction.upper()} {SYMBOL} @ {price} (Ø-OBI {round(avg_obi,3)}, Maker, wartet auf Fill)")
 
 
 def check_entry_fill(last_trade_price, last_trade_ts):
@@ -266,10 +275,10 @@ async def listen():
 
             if channel.startswith("order_book"):
                 apply_order_book_update(msg)
-                obi = calc_obi()
-                obi_history.append(obi)
+                raw_obi = calc_obi()
+                avg_obi = update_obi_average(raw_obi)
 
-                check_signal_and_place_entry(obi)
+                check_signal_and_place_entry(avg_obi)
                 check_entry_fill(last_trade_price, time.time())
 
                 if open_position is not None:
@@ -282,7 +291,8 @@ async def listen():
                     win_rate = round(stats["wins"] / stats["completed_trades"] * 100, 1) if stats["completed_trades"] else 0
                     fill_rate = round(stats["entries_filled"] / stats["signals"] * 100, 1) if stats["signals"] else 0
                     debug_log("📊 Maker-Strategie Status", {
-                        "obi_aktuell": round(obi, 3),
+                        "obi_roh": round(raw_obi, 3),
+                        "obi_avg": round(avg_obi, 3),
                         "signale_gesamt": stats["signals"],
                         "entry_fill_rate_pct": fill_rate,
                         "abgeschlossene_trades": stats["completed_trades"],
@@ -302,7 +312,7 @@ async def listen():
 async def main():
     print("=" * 60)
     print(f"🚀 Maker-Strategie Paper-Trader für {SYMBOL}")
-    print(f"   OBI Schwelle: {OBI_THRESHOLD} | Bestätigung: {OBI_CONFIRM_SECONDS}s")
+    print(f"   OBI Schwelle: {OBI_THRESHOLD} | Ø-Fenster: {OBI_AVG_WINDOW_SECONDS}s | Cooldown: {COOLDOWN_SECONDS}s")
     print(f"   TP: {TP_PERCENT}% | Order-Timeout: {ORDER_TIMEOUT_SECONDS}s")
     print("   NUR SIMULATION - keine echten Orders")
     print("=" * 60)
