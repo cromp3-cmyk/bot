@@ -4,19 +4,7 @@ OBI Market-Trader für Lighter (zkLighter) mit Margin/Leverage
 Schnelle Market-Order Ausführung für OBI-basierte Signale.
 Unterstützt Hebel von 1x bis 10x mit Risikomanagement.
 
-STRATEGIE:
-- OBI-Signal → Sofortiger Market-Entry
-- Take-Profit bei 0.1-0.2% → Market-Exit
-- Stop-Loss bei 0.1-0.15% → Market-Exit
-- Max 5 Sekunden halten → Timeout-Exit
-- Positionsgröße basierend auf Hebel und Risiko
-
-FEATURES:
-- 💰 Margin/Leverage Unterstützung (1x - 10x)
-- 📊 Eingebautes Web-Dashboard
-- 📈 Live-Statistiken
-- 🔄 Auto-Refresh
-- 💾 Trade-History
+OHNE Dashboard - Nur Trading!
 """
 
 import asyncio
@@ -24,11 +12,8 @@ import websockets
 import json
 import time
 import os
-import threading
 from collections import deque
 from datetime import datetime
-from flask import Flask, jsonify, send_from_directory
-from flask_cors import CORS
 
 # ========== WEBSOCKET KONFIGURATION ==========
 WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
@@ -56,15 +41,15 @@ COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "3"))
 TP_PERCENT = float(os.getenv("TP_PERCENT", "0.10"))  # 0.1% Gewinn
 SL_PERCENT = float(os.getenv("SL_PERCENT", "0.10"))  # 0.1% Verlust
 MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "5"))  # Max 5 Sekunden halten
-MIN_TRADE_INTERVAL = float(os.getenv("MIN_TRADE_INTERVAL", "3"))  # Mindestens 3s zwischen Trades
+MIN_TRADE_INTERVAL = float(os.getenv("MIN_TRADE_INTERVAL", "3"))
 
 # ========== MARGIN KONFIGURATION ==========
-ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))  # Kontostand in USD
-LEVERAGE = float(os.getenv("LEVERAGE", "1.0"))  # Hebel (1x = kein Hebel)
-POSITION_SIZE_PCT = float(os.getenv("POSITION_SIZE_PCT", "100"))  # % des Kapitals pro Trade
-MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", "10000"))  # Max USD pro Trade
-MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "10"))  # Min USD pro Trade
-MAX_RISK_PER_TRADE = float(os.getenv("MAX_RISK_PER_TRADE", "2"))  # Max 2% Verlust pro Trade
+ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
+LEVERAGE = float(os.getenv("LEVERAGE", "1.0"))
+POSITION_SIZE_PCT = float(os.getenv("POSITION_SIZE_PCT", "100"))
+MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", "10000"))
+MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "10"))
+MAX_RISK_PER_TRADE = float(os.getenv("MAX_RISK_PER_TRADE", "2"))
 
 # ========== STATE ==========
 order_book = {"bids": {}, "asks": {}}
@@ -75,11 +60,9 @@ last_signal_time = 0.0
 last_trade_time = 0.0
 start_time = time.time()
 
-# Offene Position
 open_position = None
 position_opened_at = 0.0
 
-# Statistik
 stats = {
     "signals": 0,
     "trades_completed": 0,
@@ -94,126 +77,6 @@ stats = {
     "current_balance": ACCOUNT_BALANCE,
 }
 trade_log = []
-
-# ========== API STATE ==========
-api_state = {
-    "status": "Offline",
-    "stats": {},
-    "trades": [],
-    "position": {"open": False},
-    "obi": {"current": 0, "avg": 0},
-    "margin": {
-        "leverage": LEVERAGE,
-        "balance": ACCOUNT_BALANCE,
-        "margin_used": 0,
-        "exposure": 0,
-        "available_margin": ACCOUNT_BALANCE,
-        "position_size": 0
-    }
-}
-
-# ========== FLASK API ==========
-app = Flask(__name__, static_folder='.')
-CORS(app)
-
-@app.route('/')
-def index():
-    """Dashboard HTML Seite"""
-    return send_from_directory('.', 'dashboard.html')
-
-@app.route('/api/trader-status')
-def get_status():
-    """API Endpoint für Live-Daten"""
-    return jsonify(api_state)
-
-def update_api_state():
-    """Aktualisiert den API-State"""
-    global api_state, open_position, position_opened_at
-    
-    # Stats
-    win_rate = stats["wins"] / stats["trades_completed"] * 100 if stats["trades_completed"] else 0
-    avg_pnl = stats["total_pnl_pct"] / stats["trades_completed"] if stats["trades_completed"] else 0
-    
-    api_state["status"] = "Online"
-    api_state["stats"] = {
-        "totalPnl": round(stats["total_pnl_pct"], 2),
-        "totalPnlUsd": round(stats["total_pnl_usd"], 2),
-        "trades": stats["trades_completed"],
-        "wins": stats["wins"],
-        "losses": stats["losses"],
-        "avgPnl": round(avg_pnl, 4),
-        "maxWin": round(stats["max_win"], 2),
-        "maxLoss": round(stats["max_loss"], 2),
-        "avgHoldTime": round(stats["avg_hold_time"], 2),
-        "tradesPerHour": round(stats["trades_completed"] / ((time.time() - start_time) / 3600), 1) if start_time else 0,
-        "winRate": round(win_rate, 1),
-        "performance": round(stats["total_pnl_pct"], 2),
-        "currentBalance": round(stats["current_balance"], 2)
-    }
-    
-    # Trades (letzte 50)
-    api_state["trades"] = []
-    for trade in trade_log[-50:]:
-        api_state["trades"].append({
-            "side": trade.get("side"),
-            "entry": trade.get("entry"),
-            "exit": trade.get("exit"),
-            "pnl_pct": trade.get("pnl_pct"),
-            "pnl_usd": trade.get("pnl_usd"),
-            "hold_time": trade.get("hold_time"),
-            "reason": trade.get("reason"),
-            "closed_at": trade.get("closed_at"),
-            "leverage": trade.get("leverage", 1.0),
-            "size_usd": trade.get("size_usd", 0)
-        })
-    
-    # Position
-    if open_position:
-        bb, ba = best_bid(), best_ask()
-        current = None
-        if open_position["side"] == "buy":
-            current = bb if bb else open_position["entry_price"]
-        else:
-            current = ba if ba else open_position["entry_price"]
-        
-        if current:
-            if open_position["side"] == "buy":
-                pnl_pct = (current - open_position["entry_price"]) / open_position["entry_price"] * 100
-                pnl_usd = pnl_pct / 100 * open_position["size_usd"]
-            else:
-                pnl_pct = (open_position["entry_price"] - current) / open_position["entry_price"] * 100
-                pnl_usd = pnl_pct / 100 * open_position["size_usd"]
-            
-            api_state["position"] = {
-                "open": True,
-                "side": open_position["side"],
-                "entry": round(open_position["entry_price"], 2),
-                "current": round(current, 2),
-                "pnl": round(pnl_pct, 2),
-                "pnlUsd": round(pnl_usd, 2),
-                "holdTime": round(time.time() - position_opened_at, 1),
-                "size_usd": round(open_position.get("size_usd", 0), 2),
-                "units": round(open_position.get("units", 0), 6),
-                "leverage": open_position.get("leverage", 1.0)
-            }
-        else:
-            api_state["position"] = {"open": False}
-    else:
-        api_state["position"] = {"open": False}
-    
-    # Margin
-    api_state["margin"] = {
-        "leverage": LEVERAGE,
-        "balance": round(stats["current_balance"], 2),
-        "margin_used": round(open_position.get("margin_used", 0), 2) if open_position else 0,
-        "exposure": round(open_position.get("size_usd", 0), 2) if open_position else 0,
-        "available_margin": round(stats["current_balance"] - (open_position.get("margin_used", 0) if open_position else 0), 2),
-        "position_size": round(open_position.get("units", 0), 6) if open_position else 0
-    }
-
-def start_api_server():
-    """Startet den Flask API Server"""
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
 # ========== ORDERBOOK FUNKTIONEN ==========
 def apply_order_book_update(msg):
@@ -237,12 +100,6 @@ def best_ask():
         return None
     return min(float(p) for p in order_book["asks"].keys())
 
-def mid_price():
-    bb, ba = best_bid(), best_ask()
-    if bb is None or ba is None:
-        return None
-    return (bb + ba) / 2
-
 def calc_obi(levels=OBI_LEVELS):
     bids_sorted = sorted(order_book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
     asks_sorted = sorted(order_book["asks"].items(), key=lambda x: float(x[0]))[:levels]
@@ -263,20 +120,11 @@ def update_obi_average(raw_obi):
 
 # ========== MARGIN & POSITION SIZING ==========
 def calculate_position_size(entry_price, stop_loss_price=None):
-    """
-    Berechnet die Positionsgröße basierend auf Hebel und Risiko
-    """
-    # Basisposition: % des Kontos
     base_size = stats["current_balance"] * (POSITION_SIZE_PCT / 100)
-    
-    # Mit Hebel multiplizieren
     leveraged_size = base_size * LEVERAGE
-    
-    # Auf Max begrenzen
     final_size = min(leveraged_size, MAX_POSITION_SIZE)
     final_size = max(final_size, MIN_POSITION_SIZE)
     
-    # Risikobasiertes Sizing (wenn SL angegeben)
     if stop_loss_price and entry_price:
         risk_per_unit = abs(entry_price - stop_loss_price)
         max_loss_usd = stats["current_balance"] * (MAX_RISK_PER_TRADE / 100)
@@ -284,7 +132,6 @@ def calculate_position_size(entry_price, stop_loss_price=None):
             risk_based_size = max_loss_usd / (risk_per_unit / entry_price)
             final_size = min(final_size, risk_based_size)
     
-    # In Einheiten umrechnen
     units = final_size / entry_price if entry_price > 0 else 0
     
     return {
@@ -301,11 +148,9 @@ def check_signal_and_execute(avg_obi):
     
     now = time.time()
     
-    # Mindestabstand zwischen Trades
     if now - last_trade_time < MIN_TRADE_INTERVAL:
         return
     
-    # Signal erkennen
     if avg_obi >= OBI_THRESHOLD:
         direction = "buy"
     elif avg_obi <= -OBI_THRESHOLD:
@@ -314,40 +159,27 @@ def check_signal_and_execute(avg_obi):
         last_signal_direction = None
         return
     
-    # Cooldown prüfen
     if now - last_signal_time < COOLDOWN_SECONDS:
         return
-    
-    # Keine doppelten Signale
     if direction == last_signal_direction:
         return
-    
-    # Nur handeln wenn keine Position offen
     if open_position is not None:
         return
     
-    # 💥 MARKT-PREIS FÜR ENTRY
     bb, ba = best_bid(), best_ask()
     if bb is None or ba is None:
         debug_log("⚠️ Kein OrderBook für Entry verfügbar")
         return
     
-    if direction == "buy":
-        entry_price = ba
-    else:
-        entry_price = bb
-    
-    # 💰 POSITIONSGRÖSSE BERECHNEN
+    entry_price = ba if direction == "buy" else bb
     position_info = calculate_position_size(entry_price)
     
-    # Prüfen ob genug Margin vorhanden
     if position_info["margin_used"] > stats["current_balance"]:
         debug_log(f"⚠️ Nicht genug Margin! Benötigt: ${position_info['margin_used']}, Verfügbar: ${stats['current_balance']}")
         return
     
     spread_pct = (ba - bb) / bb * 100 if bb > 0 else 0
     
-    # 💥 POSITION ERÖFFNEN
     open_position = {
         "side": direction,
         "entry_price": entry_price,
@@ -364,7 +196,6 @@ def check_signal_and_execute(avg_obi):
     last_signal_time = now
     last_signal_direction = direction
     last_trade_time = now
-    
     stats["signals"] += 1
     
     debug_log(
@@ -384,7 +215,6 @@ def check_position_exit(last_trade_price, last_trade_received_at):
     side = open_position["side"]
     now = time.time()
     
-    # Marktpreis für Exit
     bb, ba = best_bid(), best_ask()
     if side == "buy":
         exit_price = bb if bb else last_trade_price
@@ -393,7 +223,6 @@ def check_position_exit(last_trade_price, last_trade_received_at):
         exit_price = ba if ba else last_trade_price
         pnl_pct = (entry_price - exit_price) / entry_price * 100
     
-    # Wenn kein Market-Preis verfügbar, Trade-Preis verwenden
     if exit_price is None:
         exit_price = last_trade_price
         if side == "buy":
@@ -401,23 +230,18 @@ def check_position_exit(last_trade_price, last_trade_received_at):
         else:
             pnl_pct = (entry_price - exit_price) / entry_price * 100
     
-    # 🎯 TAKE-PROFIT
     if pnl_pct >= TP_PERCENT:
         close_position(exit_price, pnl_pct, "TP")
         return
-    
-    # 🛑 STOP-LOSS
     if pnl_pct <= -SL_PERCENT:
         close_position(exit_price, pnl_pct, "SL")
         return
     
-    # ⏰ TIMEOUT
     hold_time = now - position_opened_at
     if hold_time > MAX_POSITION_TIME:
         close_position(exit_price, pnl_pct, f"TIMEOUT ({round(hold_time, 1)}s)")
         return
     
-    # 📉 Frühzeitiger Exit bei Verlust
     if pnl_pct < -0.05 and hold_time > 3:
         close_position(exit_price, pnl_pct, "EARLY_SL")
 
@@ -430,11 +254,8 @@ def close_position(price, pnl_pct, reason):
     side = open_position["side"]
     entry_price = open_position["entry_price"]
     hold_time = time.time() - position_opened_at
-    
-    # 💰 PnL in USD berechnen
     pnl_usd = pnl_pct / 100 * open_position["size_usd"]
     
-    # 💥 STATISTIK AKTUALISIEREN
     stats["trades_completed"] += 1
     stats["total_pnl_pct"] += pnl_pct
     stats["total_pnl_usd"] += pnl_usd
@@ -451,7 +272,6 @@ def close_position(price, pnl_pct, reason):
         if pnl_pct < stats["max_loss"]:
             stats["max_loss"] = pnl_pct
     
-    # 📋 TRADE LOG
     trade_entry = {
         "side": side,
         "entry": round(entry_price, 2),
@@ -468,7 +288,6 @@ def close_position(price, pnl_pct, reason):
     }
     trade_log.append(trade_entry)
     
-    # 📊 LOG
     emoji = "✅" if pnl_pct > 0 else "❌"
     debug_log(
         f"{emoji} MARKET-EXIT: {side.upper()} @ {price} | "
@@ -478,27 +297,30 @@ def close_position(price, pnl_pct, reason):
         f"Balance: ${round(stats['current_balance'], 2)}"
     )
     
-    # Position zurücksetzen
     open_position = None
     position_opened_at = 0.0
     last_trade_time = time.time()
 
 def log_status(raw_obi, avg_obi):
-    win_rate = round(stats["wins"] / stats["trades_completed"] * 100, 1) if stats["trades_completed"] else 0
-    avg_pnl = round(stats["total_pnl_pct"] / stats["trades_completed"], 4) if stats["trades_completed"] else 0
+    win_rate = stats["wins"] / stats["trades_completed"] * 100 if stats["trades_completed"] else 0
+    avg_pnl = stats["total_pnl_pct"] / stats["trades_completed"] if stats["trades_completed"] else 0
     
     debug_log("📊 OBI Market-Trader Status", {
         "obi": round(raw_obi, 3),
         "obi_avg": round(avg_obi, 3),
         "signale": stats["signals"],
         "trades": stats["trades_completed"],
-        "win_rate": win_rate,
-        "total_pnl": round(stats["total_pnl_pct"], 2),
+        "win_rate": round(win_rate, 1),
+        "avg_pnl_pct": round(avg_pnl, 4),
+        "total_pnl_pct": round(stats["total_pnl_pct"], 2),
         "total_pnl_usd": round(stats["total_pnl_usd"], 2),
         "balance": round(stats["current_balance"], 2),
         "leverage": LEVERAGE,
         "avg_hold": round(stats["avg_hold_time"], 2),
-        "open_position": open_position is not None
+        "max_win": round(stats["max_win"], 2),
+        "max_loss": round(stats["max_loss"], 2),
+        "open_position": open_position is not None,
+        "last_trade": trade_log[-1] if trade_log else None
     })
 
 # ========== WEBSOCKET VERBINDUNG ==========
@@ -531,14 +353,9 @@ async def listen():
                     
                     check_signal_and_execute(avg_obi)
                     
-                    # OBI für API
-                    api_state["obi"]["current"] = round(raw_obi, 3)
-                    api_state["obi"]["avg"] = round(avg_obi, 3)
-                    
                     if now - last_status_log >= 30:
                         last_status_log = now
                         log_status(raw_obi, avg_obi)
-                        update_api_state()
 
             elif channel.startswith("trade"):
                 trades = msg.get("trades", [])
@@ -548,7 +365,6 @@ async def listen():
                     
                     if open_position is not None:
                         check_position_exit(last_trade_price, last_trade_received_at)
-                        update_api_state()
 
 # ========== MAIN ==========
 async def main():
@@ -558,13 +374,7 @@ async def main():
     print(f"   🎯 TP: {TP_PERCENT}% | 🛑 SL: {SL_PERCENT}% | ⏰ Max-Halt: {MAX_POSITION_TIME}s")
     print(f"   💰 Hebel: {LEVERAGE}x | Balance: ${ACCOUNT_BALANCE} | Size: {POSITION_SIZE_PCT}%")
     print(f"   🚀 Ausführung: SOFORTIGE MARKET-ORDERS")
-    print(f"   🌐 Dashboard: http://localhost:5000")
     print("=" * 70)
-
-    # API Server in eigenem Thread starten
-    api_thread = threading.Thread(target=start_api_server, daemon=True)
-    api_thread.start()
-    debug_log("🌐 API Server gestartet auf Port 5000")
 
     while True:
         try:
