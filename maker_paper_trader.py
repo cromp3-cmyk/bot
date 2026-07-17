@@ -1,7 +1,8 @@
 """
-OBI Scalping Bot - 50x Hebel, $10 Einsatz
-===========================================
-KORREKTE TP/SL: 0.20% / 0.10%
+MOMENTUM SCALPING BOT - MIT TP/SL
+==================================
+Signal: Preisbewegung in 1 Sekunde
+Exit: TP 0.02% / SL 0.02% / Timeout 5s
 """
 
 import asyncio
@@ -10,7 +11,6 @@ import json
 import time
 import os
 from collections import deque
-from datetime import datetime
 
 WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
@@ -27,16 +27,14 @@ MARKET_INDICES = {"ETH": 0, "BTC": 1, "SOL": 2, "DOGE": 3, "AVAX": 9, "SUI": 16}
 SYMBOL = os.getenv("OB_SYMBOL", "BTC")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
-# OBI
-OBI_LEVELS = int(os.getenv("OBI_LEVELS", "25"))
-OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.25"))
-OBI_AVG_WINDOW_SECONDS = float(os.getenv("OBI_AVG_WINDOW_SECONDS", "2"))
-COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "1"))
+# 📊 MOMENTUM PARAMETER
+MOMENTUM_THRESHOLD = float(os.getenv("MOMENTUM_THRESHOLD", "0.04"))  # 0.04% in 1s
+SIGNAL_MODE = os.getenv("SIGNAL_MODE", "simple")  # simple, multi, volume
 
-# 🔥 RICHTIGE SCALPING PARAMETER
-TP_PERCENT = float(os.getenv("TP_PERCENT", "0.20"))  # 0.20% = $1 bei $500
-SL_PERCENT = float(os.getenv("SL_PERCENT", "0.10"))  # 0.10% = $0.50 bei $500
-MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "3"))  # 3 Sekunden
+# 🎯 TP/SL (wie gewünscht)
+TP_PERCENT = float(os.getenv("TP_PERCENT", "0.02"))  # 0.02% = $0.10 bei $500
+SL_PERCENT = float(os.getenv("SL_PERCENT", "0.02"))  # 0.02% = $0.10 bei $500
+MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "5"))  # 5 Sekunden
 
 # 💰 HEBEL & POSITION
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "10"))  # $10 Einsatz
@@ -45,9 +43,8 @@ ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000"))
 
 # ========== STATE ==========
 order_book = {"bids": {}, "asks": {}}
-obi_avg_buffer = deque()
+price_history = deque(maxlen=20)
 
-last_signal_direction = None
 last_signal_time = 0.0
 last_trade_time = 0.0
 start_time = time.time()
@@ -97,24 +94,63 @@ def calc_spread():
         return 0.0
     return (ba - bb) / bb * 100
 
-def calc_obi(levels=OBI_LEVELS):
-    bids_sorted = sorted(order_book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
-    asks_sorted = sorted(order_book["asks"].items(), key=lambda x: float(x[0]))[:levels]
-    bid_vol = sum(v for _, v in bids_sorted)
-    ask_vol = sum(v for _, v in asks_sorted)
-    total = bid_vol + ask_vol
-    return 0.0 if total == 0 else (bid_vol - ask_vol) / total
+# ========== MOMENTUM SIGNAL ==========
+def check_momentum_simple():
+    """Simple Momentum: 1 Sekunde Preisänderung"""
+    if len(price_history) < 3:
+        return None
+    
+    price_now = price_history[-1]
+    price_1s_ago = price_history[-2]
+    
+    change_pct = (price_now - price_1s_ago) / price_1s_ago * 100
+    
+    if change_pct > MOMENTUM_THRESHOLD:
+        return "buy"
+    elif change_pct < -MOMENTUM_THRESHOLD:
+        return "sell"
+    return None
 
-def update_obi_average(raw_obi):
-    now = time.time()
-    obi_avg_buffer.append((raw_obi, now))
-    cutoff = now - OBI_AVG_WINDOW_SECONDS
-    while obi_avg_buffer and obi_avg_buffer[0][1] < cutoff:
-        obi_avg_buffer.popleft()
-    if not obi_avg_buffer:
-        return 0.0
-    return sum(v for v, _ in obi_avg_buffer) / len(obi_avg_buffer)
+def check_momentum_multi():
+    """Multi-Timeframe: 1s + 3s Momentum"""
+    if len(price_history) < 5:
+        return None
+    
+    price_now = price_history[-1]
+    price_1s_ago = price_history[-2]
+    price_3s_ago = price_history[-4]
+    
+    change_1s = (price_now - price_1s_ago) / price_1s_ago * 100
+    change_3s = (price_now - price_3s_ago) / price_3s_ago * 100
+    
+    # Beide zeigen gleiche Richtung
+    if change_1s > 0.03 and change_3s > 0.05:
+        return "buy"
+    elif change_1s < -0.03 and change_3s < -0.05:
+        return "sell"
+    return None
 
+def check_momentum_volume():
+    """Momentum + Spread (Volumen-Indikator)"""
+    spread = calc_spread()
+    signal = check_momentum_simple()
+    
+    # Nur bei niedrigem Spread (hohe Liquidität)
+    if signal and spread < 0.01:
+        return signal
+    return None
+
+def get_momentum_signal():
+    if SIGNAL_MODE == "simple":
+        return check_momentum_simple()
+    elif SIGNAL_MODE == "multi":
+        return check_momentum_multi()
+    elif SIGNAL_MODE == "volume":
+        return check_momentum_volume()
+    else:
+        return check_momentum_simple()
+
+# ========== POSITION SIZING ==========
 def calculate_position_size(entry_price):
     position_usd = RISK_PER_TRADE * LEVERAGE
     units = position_usd / entry_price if entry_price > 0 else 0
@@ -128,41 +164,37 @@ def calculate_position_size(entry_price):
     }
 
 # ========== TRADING ==========
-def check_signal_and_execute(avg_obi):
-    global open_position, position_opened_at, last_signal_time, last_signal_direction, last_trade_time
+def check_signal_and_execute():
+    global open_position, position_opened_at, last_signal_time, last_trade_time
     
     now = time.time()
-    if now - last_trade_time < 0.5:
+    
+    # Mindestabstand zwischen Trades
+    if now - last_trade_time < 1.0:
         return
     
-    if avg_obi >= OBI_THRESHOLD:
-        direction = "buy"
-    elif avg_obi <= -OBI_THRESHOLD:
-        direction = "sell"
-    else:
-        last_signal_direction = None
-        return
-    
-    if now - last_signal_time < COOLDOWN_SECONDS:
-        return
-    if direction == last_signal_direction:
-        return
+    # Keine Position offen
     if open_position is not None:
         return
     
+    # 🚀 SIGNAL PRÜFEN
+    signal = get_momentum_signal()
+    if not signal:
+        return
+    
+    # 💥 ENTRY AUSFÜHREN
     bb, ba = best_bid(), best_ask()
     if bb is None or ba is None:
         return
     
-    entry_price = ba if direction == "buy" else bb
+    entry_price = ba if signal == "buy" else bb
     position_info = calculate_position_size(entry_price)
     spread_pct = calc_spread()
     
     open_position = {
-        "side": direction,
+        "side": signal,
         "entry_price": entry_price,
         "entry_time": now,
-        "entry_obi": avg_obi,
         "size_usd": position_info["usd_size"],
         "units": position_info["units"],
         "leverage": position_info["leverage"],
@@ -173,19 +205,18 @@ def check_signal_and_execute(avg_obi):
     }
     position_opened_at = now
     last_signal_time = now
-    last_signal_direction = direction
     last_trade_time = now
     stats["signals"] += 1
     
     debug_log(
-        f"⚡ ENTRY: {direction.upper()} @ {entry_price}\n"
+        f"⚡ MOMENTUM ENTRY: {signal.upper()} @ {entry_price}\n"
         f"   💰 Position: ${position_info['usd_size']} ({position_info['units']} {SYMBOL})\n"
         f"   💵 Margin: ${position_info['margin_used']} | Hebel: {position_info['leverage']}x\n"
         f"   🎯 Ziel: +${position_info['target_profit']} | 🛑 Stop: -${position_info['target_loss']}\n"
-        f"   📈 OBI: {round(avg_obi, 3)} | Spread: {round(spread_pct, 3)}%"
+        f"   📊 Spread: {round(spread_pct, 3)}% | Mode: {SIGNAL_MODE}"
     )
 
-def check_position_exit(last_trade_price, last_trade_received_at):
+def check_position_exit(last_trade_price):
     global open_position, position_opened_at
     
     if open_position is None or last_trade_price is None:
@@ -196,6 +227,7 @@ def check_position_exit(last_trade_price, last_trade_received_at):
     now = time.time()
     hold_time = now - position_opened_at
     
+    # Exit-Preis
     if side == "buy":
         exit_price = best_bid()
         if exit_price is None:
@@ -208,17 +240,17 @@ def check_position_exit(last_trade_price, last_trade_received_at):
         pnl_pct = (entry_price - exit_price) / entry_price * 100
     
     pnl_usd = pnl_pct / 100 * open_position["size_usd"]
-    target_profit = open_position.get("target_profit", 1.0)
-    target_loss = open_position.get("target_loss", 0.5)
+    target_profit = open_position.get("target_profit", 0.10)
+    target_loss = open_position.get("target_loss", 0.10)
     
     # 🎯 TAKE-PROFIT
     if pnl_usd >= target_profit:
-        close_position(exit_price, pnl_pct, pnl_usd, f"TP (+${target_profit})")
+        close_position(exit_price, pnl_pct, pnl_usd, f"TP (+${target_profit:.2f})")
         return
     
     # 🛑 STOP-LOSS
     if pnl_usd <= -target_loss:
-        close_position(exit_price, pnl_pct, pnl_usd, f"SL (-${target_loss})")
+        close_position(exit_price, pnl_pct, pnl_usd, f"SL (-${target_loss:.2f})")
         return
     
     # ⏰ TIMEOUT
@@ -259,7 +291,6 @@ def close_position(price, pnl_pct, pnl_usd, reason):
         "pnl_pct": round(pnl_pct, 2),
         "reason": reason,
         "hold_time": round(hold_time, 2),
-        "entry_obi": round(open_position.get("entry_obi", 0), 3),
         "leverage": open_position.get("leverage", 0),
         "size_usd": round(open_position.get("size_usd", 0), 2),
         "margin": round(open_position.get("margin_used", 0), 2),
@@ -280,37 +311,17 @@ def close_position(price, pnl_pct, pnl_usd, reason):
     position_opened_at = 0.0
     last_trade_time = time.time()
 
-def log_status(raw_obi, avg_obi):
-    win_rate = stats["wins"] / stats["trades_completed"] * 100 if stats["trades_completed"] else 0
-    trades_per_hour = stats["trades_completed"] / ((time.time() - start_time) / 3600) if start_time else 0
-    
-    debug_log("📊 SCALPING STATUS", {
-        "trades": stats["trades_completed"],
-        "win_rate": round(win_rate, 1),
-        "total_pnl": round(stats["total_pnl_usd"], 2),
-        "balance": round(stats["current_balance"], 2),
-        "trades/h": round(trades_per_hour, 1),
-        "avg_hold": round(stats["avg_hold_time"], 2),
-        "max_win": round(stats["max_win"], 2),
-        "max_loss": round(stats["max_loss"], 2),
-        "open": open_position is not None,
-        "obi": round(avg_obi, 3),
-        "last": trade_log[-1] if trade_log else None
-    })
-
 # ========== WEBSOCKET ==========
 async def listen():
     last_trade_price = None
-    last_trade_received_at = 0.0
     last_status_log = 0.0
-    last_obi_check = 0.0
     
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
         await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDEX}"}))
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
         
-        debug_log(f"✅ Verbunden | Scalping Mode")
-        debug_log(f"💵 ${RISK_PER_TRADE} Einsatz | {LEVERAGE}x Hebel | ${RISK_PER_TRADE*LEVERAGE} Position")
+        debug_log(f"✅ Momentum Bot verbunden | Mode: {SIGNAL_MODE}")
+        debug_log(f"🎯 TP: {TP_PERCENT}% | SL: {SL_PERCENT}% | Max-Halt: {MAX_POSITION_TIME}s")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -318,33 +329,52 @@ async def listen():
 
             if channel.startswith("order_book"):
                 apply_order_book_update(msg)
+                
+                # Signal prüfen (nur bei OrderBook Updates)
+                check_signal_and_execute()
+                
+                # Status alle 30s
                 now = time.time()
-                if now - last_obi_check > 0.3:
-                    raw_obi = calc_obi()
-                    avg_obi = update_obi_average(raw_obi)
-                    last_obi_check = now
-                    check_signal_and_execute(avg_obi)
-                    if now - last_status_log >= 10:
-                        last_status_log = now
-                        log_status(raw_obi, avg_obi)
+                if now - last_status_log >= 30:
+                    last_status_log = now
+                    log_status()
 
             elif channel.startswith("trade"):
                 trades = msg.get("trades", [])
                 if trades:
-                    last_trade_price = float(trades[-1]["price"])
-                    last_trade_received_at = time.time()
+                    price = float(trades[-1]["price"])
+                    price_history.append(price)
+                    last_trade_price = price
+                    
                     if open_position is not None:
-                        check_position_exit(last_trade_price, last_trade_received_at)
+                        check_position_exit(last_trade_price)
+
+# ========== STATUS ==========
+def log_status():
+    win_rate = stats["wins"] / stats["trades_completed"] * 100 if stats["trades_completed"] else 0
+    trades_per_hour = stats["trades_completed"] / ((time.time() - start_time) / 3600) if start_time else 0
+    
+    debug_log("📊 MOMENTUM STATUS", {
+        "mode": SIGNAL_MODE,
+        "trades": stats["trades_completed"],
+        "win_rate": round(win_rate, 1),
+        "total_pnl": round(stats["total_pnl_usd"], 2),
+        "balance": round(stats["current_balance"], 2),
+        "trades/h": round(trades_per_hour, 1),
+        "avg_hold": round(stats["avg_hold_time"], 2),
+        "open": open_position is not None,
+        "last": trade_log[-1] if trade_log else None
+    })
 
 # ========== MAIN ==========
 async def main():
     print("=" * 70)
-    print(f"⚡ OBI SCALPING BOT - {LEVERAGE}x Hebel")
-    print(f"   💵 Einsatz: ${RISK_PER_TRADE} | Hebel: {LEVERAGE}x")
-    print(f"   📊 Position: ${RISK_PER_TRADE * LEVERAGE}")
-    print(f"   🎯 Ziel: +${RISK_PER_TRADE * LEVERAGE * TP_PERCENT / 100:.2f} pro Trade")
-    print(f"   🛑 Stop: -${RISK_PER_TRADE * LEVERAGE * SL_PERCENT / 100:.2f} pro Trade")
-    print(f"   ⚡ Ziel: 100+ Trades/Tag = ${RISK_PER_TRADE * LEVERAGE * TP_PERCENT / 100 * 100:.0f}/Tag")
+    print(f"⚡ MOMENTUM SCALPING BOT - {LEVERAGE}x Hebel")
+    print(f"   📊 Signal: {SIGNAL_MODE} Momentum")
+    print(f"   🎯 TP: {TP_PERCENT}% (${RISK_PER_TRADE * LEVERAGE * TP_PERCENT / 100:.2f})")
+    print(f"   🛑 SL: {SL_PERCENT}% (${RISK_PER_TRADE * LEVERAGE * SL_PERCENT / 100:.2f})")
+    print(f"   ⏰ Max-Halt: {MAX_POSITION_TIME}s")
+    print(f"   💰 Hebel: {LEVERAGE}x | Einsatz: ${RISK_PER_TRADE}")
     print("=" * 70)
 
     while True:
@@ -355,4 +385,5 @@ async def main():
             await asyncio.sleep(3)
 
 if __name__ == "__main__":
+    from datetime import datetime
     asyncio.run(main())
