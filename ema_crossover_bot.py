@@ -1,11 +1,11 @@
 """
-Autonomer EMA Crossover Bot für Lighter (zkLighter) - MIT BACKTEST & SOFORT-REAKTION
+Autonomer EMA Crossover Bot für Lighter (zkLighter) - MIT BACKTEST IM LOG
 ======================================================================================
 - Holt echte Kerzendaten über die Lighter Candlestick-API
 - Handelt autonom bei EMA-Crossover (Kerzenschluss-Basis, kein Repainting)
-- REAGIERT SOFORT nach Kerzenschluss (keine 3 Minuten Verzögerung!)
-- Führt optional beim Start (und danach periodisch) einen Backtest durch
-- Zeigt Backtest-Ergebnisse im Log
+- Führt optional beim Start (und danach periodisch) einen Backtest über die
+  letzten X Stunden durch
+- Zeigt Backtest-Ergebnisse NUR im Log (Terminal) an
 
 WICHTIG - SICHERHEIT:
 Erst mit DRY_RUN=true testen! Schau dir den Backtest UND ein paar Stunden
@@ -68,13 +68,6 @@ def get_min_base_amount(symbol):
         "DOGE": 10, "XRP": 20,
     }
     return min_amount_map.get(symbol, 0.001)
-
-
-# ========== RESOLUTION HELPER ==========
-def get_resolution_int():
-    """Holt die Resolution als Integer (entfernt 'm' etc.)"""
-    res = os.getenv("EMA_RESOLUTION", "5")
-    return int(str(res).replace('m', '').replace('in', '').strip())
 
 
 # ========== LIGHTER CLIENTS ==========
@@ -361,7 +354,7 @@ async def run_backtest_and_print():
     try:
         print(f"\n🔄 Backtest wird gestartet... ({BACKTEST_HOURS}h, {SYMBOL}, EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN})")
         
-        timestamps, closes = await fetch_candles_paginated(MARKET_INDEX, get_resolution_int(), BACKTEST_HOURS)
+        timestamps, closes = await fetch_candles_paginated(MARKET_INDEX, RESOLUTION, BACKTEST_HOURS)
         
         if len(closes) < EMA_SLOW_LEN + 2:
             print(f"⚠️ Zu wenig Daten für Backtest (nur {len(closes)} Kerzen)")
@@ -369,6 +362,7 @@ async def run_backtest_and_print():
         
         result = run_backtest(timestamps, closes, EMA_FAST_LEN, EMA_SLOW_LEN)
         
+        # Ergebnisse im Log anzeigen
         print_backtest_results(result, BACKTEST_HOURS, SYMBOL, EMA_FAST_LEN, EMA_SLOW_LEN)
         
         STATE["backtest_last_run"] = datetime.now().isoformat()
@@ -378,7 +372,7 @@ async def run_backtest_and_print():
         debug_log("⚠️ Backtest fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
 
-# ========== LIVE TRADING - SOFORT-REAKTION ==========
+# ========== State ==========
 OPEN_POSITIONS = {}
 STATE = {
     "status": "startet...",
@@ -387,123 +381,7 @@ STATE = {
     "dry_run": None, "started_at": datetime.now().isoformat(),
 }
 
-current_position_side = None
-last_processed_candle_ts = None
-last_relation = None
-
-
-async def get_latest_candle(market_id, resolution):
-    """Holt NUR die neueste geschlossene Kerze - für SOFORT-REAKTION"""
-    import lighter
-    configuration = lighter.Configuration(host=BASE_URL)
-    async with lighter.ApiClient(configuration) as api_client:
-        candle_api = lighter.CandlestickApi(api_client)
-        
-        now_ms = int(time.time() * 1000)
-        # Nur die letzten 5 Minuten für Geschwindigkeit
-        start_ms = now_ms - 5 * 60 * 1000
-        
-        response = await candle_api.candles(
-            market_id=market_id,
-            resolution=resolution,
-            start_timestamp=start_ms,
-            end_timestamp=now_ms,
-            count_back=10,  # Nur die letzten 10 Kerzen
-            set_timestamp_to_end=True,
-        )
-        return response
-
-
-async def check_for_signal():
-    global last_processed_candle_ts, last_relation, current_position_side
-
-    try:
-        # HOL DIE NEUESTEN KERZEN - SCHNELL!
-        raw = await get_latest_candle(MARKET_INDEX, get_resolution_int())
-        timestamps, closes = extract_close_prices_and_ts(raw)
-        
-        if len(closes) < EMA_SLOW_LEN + 2:
-            return
-
-        # ALLE Kerzen für EMA-Berechnung
-        ema_fast = calc_ema_series(closes, EMA_FAST_LEN)
-        ema_slow = calc_ema_series(closes, EMA_SLOW_LEN)
-        
-        # LETZTE geschlossene Kerze
-        latest_ts = timestamps[-1]
-        latest_close = closes[-1]
-        latest_fast = ema_fast[-1]
-        latest_slow = ema_slow[-1]
-        
-        current_relation = "above" if latest_fast > latest_slow else "below"
-
-        # NUR bei NEUER Kerze reagieren
-        if last_processed_candle_ts == latest_ts:
-            return
-        last_processed_candle_ts = latest_ts
-
-        # Beim ersten Start nur initialisieren
-        if last_relation is None:
-            last_relation = current_relation
-            print(f"🔄 Initialer Zustand: {current_relation} (EMA {EMA_FAST_LEN}: {latest_fast:.2f}, EMA {EMA_SLOW_LEN}: {latest_slow:.2f})")
-            return
-
-        # CROSSOVER erkannt! SOFORT handeln!
-        if current_relation != last_relation:
-            direction = "buy" if current_relation == "above" else "sell"
-            print(f"\n📡 EMA CROSSOVER erkannt: {direction.upper()} {SYMBOL} @ ${latest_close:.2f}")
-            print(f"   Zeit: {datetime.fromtimestamp(latest_ts/1000).strftime('%H:%M:%S')}")
-            print(f"   EMA {EMA_FAST_LEN}: {latest_fast:.2f} | EMA {EMA_SLOW_LEN}: {latest_slow:.2f}")
-
-            if current_position_side != direction:
-                if DRY_RUN:
-                    print(f"🧪 DRY_RUN: {direction.upper()} (keine echte Order)")
-                    current_position_side = direction
-                else:
-                    # SOFORT Order ausführen!
-                    result = await open_or_reverse_position(direction, SYMBOL, MARGIN, LEVERAGE, latest_close)
-                    print(f"✅ Order ausgeführt: {result}")
-                    current_position_side = direction
-
-        last_relation = current_relation
-        
-    except Exception as e:
-        debug_log("⚠️ check_for_signal Fehler", {"error": str(e), "traceback": traceback.format_exc()})
-
-
-async def trading_loop():
-    """Trading-Loop mit SOFORT-REAKTION auf Kerzenschluss"""
-    print("🚀 Trading-Loop mit Sofort-Reaktion gestartet")
-    
-    while True:
-        # Prüfe auf neue Kerze
-        await check_for_signal()
-        
-        # Warte bis zur nächsten vollen Minute + 2 Sekunden
-        # So reagiert der Bot SOFORT nach Kerzenschluss!
-        now = datetime.now()
-        seconds_to_next_minute = 60 - now.second
-        
-        if seconds_to_next_minute <= 2:
-            # Kurz vor Kerzenschluss - ganz kurz warten
-            await asyncio.sleep(1)
-        elif seconds_to_next_minute <= 5:
-            # Direkt nach Kerzenschluss - sofort prüfen
-            await asyncio.sleep(1)
-        else:
-            # Normaler Poll-Intervall
-            await asyncio.sleep(min(POLL_INTERVAL_SECONDS, seconds_to_next_minute - 2))
-
-
-async def backtest_loop():
-    """Periodischer Backtest"""
-    await run_backtest_and_print()
-    while True:
-        await asyncio.sleep(BACKTEST_REFRESH_MINUTES * 60)
-        await run_backtest_and_print()
-
-
-# ========== KONFIGURATION ==========
+# ========== Konfiguration ==========
 SYMBOL = os.getenv("EMA_SYMBOL", "BTC")
 if SYMBOL not in MARKET_INDICES:
     raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES")
@@ -513,7 +391,7 @@ RESOLUTION = os.getenv("EMA_RESOLUTION", "5")
 EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "7"))
 EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "21"))
 CANDLE_COUNT_BACK = int(os.getenv("CANDLE_COUNT_BACK", "100"))
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))  # ⬅️ Auf 5 Sekunden reduziert!
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
 
 MARGIN = float(os.getenv("EMA_MARGIN", "100"))
 LEVERAGE = int(os.getenv("EMA_LEVERAGE", "10"))
@@ -524,18 +402,99 @@ BACKTEST_ENABLED = os.getenv("BACKTEST_ENABLED", "true").lower() == "true"
 BACKTEST_HOURS = int(os.getenv("BACKTEST_HOURS", "48"))
 BACKTEST_REFRESH_MINUTES = int(os.getenv("BACKTEST_REFRESH_MINUTES", "60"))
 
+current_position_side = None
+last_processed_candle_ts = None
+last_relation = None
+
+
+async def check_for_signal():
+    global last_processed_candle_ts, last_relation, current_position_side
+
+    raw = None
+    for attempt in range(3):
+        try:
+            raw = await fetch_candles(MARKET_INDEX, RESOLUTION, count_back=CANDLE_COUNT_BACK)
+            timestamps, closes = extract_close_prices_and_ts(raw)
+            if closes:
+                break
+            await asyncio.sleep(2)
+        except Exception as e:
+            debug_log(f"⚠️ Kerzen-Abfrage fehlgeschlagen (Versuch {attempt + 1}/3)", {"error": str(e)})
+            await asyncio.sleep(2)
+    else:
+        return
+
+    timestamps, closes = extract_close_prices_and_ts(raw)
+
+    if len(closes) < EMA_SLOW_LEN + 2:
+        return
+
+    closed_ts = timestamps[:-1]
+    closed_closes = closes[:-1]
+
+    ema_fast = calc_ema_series(closed_closes, EMA_FAST_LEN)
+    ema_slow = calc_ema_series(closed_closes, EMA_SLOW_LEN)
+
+    latest_ts = closed_ts[-1]
+    latest_fast = ema_fast[-1]
+    latest_slow = ema_slow[-1]
+    latest_close = closed_closes[-1]
+
+    current_relation = "above" if latest_fast > latest_slow else "below"
+
+    STATE["current"] = {
+        "letzte_kerze_ts": latest_ts, "close": latest_close,
+        "ema_fast": round(latest_fast, 4), "ema_slow": round(latest_slow, 4),
+        "beziehung": current_relation, "updated_at": datetime.now().isoformat(),
+    }
+    STATE["status"] = "läuft"
+
+    if last_processed_candle_ts == latest_ts:
+        return
+    last_processed_candle_ts = latest_ts
+
+    if last_relation is not None and current_relation != last_relation:
+        direction = "buy" if current_relation == "above" else "sell"
+        print(f"\n📡 EMA CROSS erkannt: {direction.upper()} {SYMBOL} @ ${latest_close:.2f}")
+
+        if current_position_side != direction:
+            if DRY_RUN:
+                print(f"🧪 DRY_RUN: {direction.upper()} (keine echte Order)")
+                current_position_side = direction
+            else:
+                result = await open_or_reverse_position(direction, SYMBOL, MARGIN, LEVERAGE, latest_close)
+                debug_log("Order-Ergebnis", result)
+                current_position_side = direction
+
+    last_relation = current_relation
+
+
+async def trading_loop():
+    while True:
+        await check_for_signal()
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+async def backtest_loop():
+    # Beim Start einmal ausführen
+    await run_backtest_and_print()
+    
+    # Dann periodisch
+    while True:
+        await asyncio.sleep(BACKTEST_REFRESH_MINUTES * 60)
+        await run_backtest_and_print()
+
 
 async def main():
-    print("=" * 80)
+    print("=" * 60)
     print(f"🚀 EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN} Crossover Bot für {SYMBOL}")
     print(f"   Resolution: {RESOLUTION}m | Poll-Intervall: {POLL_INTERVAL_SECONDS}s")
-    print(f"   ⚡ Sofort-Reaktion: Ja (prüft bei jeder neuen Kerze)")
     print(f"   DRY_RUN: {DRY_RUN} | Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
     print(f"   Backtest: {'AN' if BACKTEST_ENABLED else 'AUS'} ({BACKTEST_HOURS}h, alle {BACKTEST_REFRESH_MINUTES}min)")
-    print("=" * 80)
-    print("\n💡 Backtest-Ergebnisse werden hier im Log angezeigt!")
-    print("⚡ Bot reagiert SOFORT nach Kerzenschluss!\n")
+    print("=" * 60)
+    print("\n💡 Backtest-Ergebnisse werden hier im Log angezeigt!\n")
 
+    # Backtest und Trading parallel starten
     tasks = []
     if BACKTEST_ENABLED:
         tasks.append(backtest_loop())
