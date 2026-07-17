@@ -1,7 +1,7 @@
 """
-Market-Making Bot für Lighter (zkLighter)
-============================================
-Sicherer Market-Maker mit strengen Positionslimits
+Market-Making Bot für Lighter (zkLighter) - FLEXIBLE VERSION
+============================================================
+ALLE Parameter über Umgebungsvariablen steuerbar
 """
 
 import asyncio
@@ -46,23 +46,21 @@ def get_min_base_amount(symbol):
     return MIN_BASE_AMOUNT_MAP.get(symbol, 0.001)
 
 
-# ========== KONFIGURATION (alles per Env-Variable) ==========
-SYMBOL = os.getenv("MM_SYMBOL", "BTC")
+# ========== KONFIGURATION (ALLE per Env-Variable) ==========
+SYMBOL = os.getenv("MM_SYMBOL", "SOL")  # Default SOL
 if SYMBOL not in MARKET_INDICES:
-    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES - hier ergänzen")
+    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-# === DEINE KORREKTEN PARAMETER ===
-MARGIN = float(os.getenv("MM_MARGIN", "10"))              # 10 USDC Margin
-LEVERAGE = int(os.getenv("MM_LEVERAGE", "2"))             # 2x Hebel (dein Wunsch)
-MAX_POSITION_USDC = float(os.getenv("MM_MAX_POSITION_USDC", "10"))  # HARTES LIMIT: 10 USDC
+# === ALLE PARAMETER ÜBER ENV-VARIABLEN ===
+MARGIN = float(os.getenv("MM_MARGIN", "10"))                    # 10 USDC
+LEVERAGE = int(os.getenv("MM_LEVERAGE", "2"))                   # 2x
+MAX_POSITION_USDC = float(os.getenv("MM_MAX_POSITION_USDC", "10"))  # 10 USDC
+ORDER_SIZE_USDC = float(os.getenv("MM_ORDER_SIZE_USDC", "7.0"))    # 7.0 USDC (SOL Minimum)
 
-# Order-Größe: 5% der Max-Position = 0.5 USDC
-ORDER_SIZE_USDC = float(os.getenv("MM_ORDER_SIZE_USDC", "0.5"))
-
-SPREAD_PCT = float(os.getenv("MM_SPREAD_PCT", "0.05"))       # 0.05%
+SPREAD_PCT = float(os.getenv("MM_SPREAD_PCT", "0.08"))          # 0.08%
 REQUOTE_SECONDS = float(os.getenv("MM_REQUOTE_SECONDS", "5"))  
 REQUOTE_MOVE_THRESHOLD_PCT = float(os.getenv("MM_REQUOTE_MOVE_PCT", "0.03"))
 
@@ -73,8 +71,8 @@ OBI_SKEW_FACTOR = float(os.getenv("MM_OBI_SKEW_FACTOR", "0.02"))
 ACCOUNT_SYNC_SECONDS = float(os.getenv("MM_ACCOUNT_SYNC_SECONDS", "120"))
 
 # === SCHUTZPARAMETER ===
-MAX_LOSS_USDC = float(os.getenv("MM_MAX_LOSS_USDC", "3.0"))   # Stop-Loss bei -3 USDC
-ORDER_TIMEOUT_SECONDS = float(os.getenv("MM_ORDER_TIMEOUT", "30"))  # 30s Timeout
+MAX_LOSS_USDC = float(os.getenv("MM_MAX_LOSS_USDC", "3.0"))
+ORDER_TIMEOUT_SECONDS = float(os.getenv("MM_ORDER_TIMEOUT", "30"))
 
 
 # ========== LIGHTER CLIENT ==========
@@ -120,7 +118,6 @@ async def cancel_all_real_orders(client):
 
 
 async def sync_real_position():
-    """Synchronisiert mit echtem Kontostand."""
     if DRY_RUN:
         return
     try:
@@ -142,7 +139,6 @@ async def sync_real_position():
                         "unsere_buchhaltung": STATE["inventory"],
                         "differenz": round(real_size - STATE["inventory"], 6),
                     })
-                    # Korrigiere wenn nötig
                     if abs(real_size - STATE["inventory"]) > 0.0001:
                         STATE["inventory"] = real_size
                     return
@@ -160,7 +156,7 @@ STATE = {
     "resting_bid": None,
     "resting_ask": None,
     "last_mid": None,
-    "is_stopped": False,  # Stop-Loss Flag
+    "is_stopped": False,
 }
 last_trade_price = None
 last_trade_received_at = 0.0
@@ -194,27 +190,22 @@ def calc_obi(levels=OBI_LEVELS):
 
 
 def check_safety_conditions(mid):
-    """Prüft alle Sicherheitsbedingungen."""
-    # 1. Stop-Loss
     if STATE["realized_pnl_usdc"] < -MAX_LOSS_USDC:
         debug_log(f"🚨 STOP-LOSS AUSGELÖST: {STATE['realized_pnl_usdc']:.2f} USDC")
         STATE["is_stopped"] = True
         return False
     
-    # 2. Max Position
     current_position_usdc = abs(STATE["inventory"]) * mid
-    if current_position_usdc >= MAX_POSITION_USDC * 1.1:  # 10% Toleranz
+    if current_position_usdc >= MAX_POSITION_USDC * 1.1:
         debug_log(f"🚨 MAX POSITION ÜBERSCHRITTEN: {current_position_usdc:.2f} USDC")
         STATE["is_stopped"] = True
         return False
     
-    # 3. Preis-Validierung
-    if mid < 1000 or mid > 200000:
+    if mid < 1 or mid > 1000000:
         debug_log(f"🚨 UNGÜLTIGER PREIS: {mid}")
         STATE["is_stopped"] = True
         return False
     
-    # 4. Order-Timeouts
     now = time.time()
     for side, key in [("bid", "resting_bid"), ("ask", "resting_ask")]:
         order = STATE.get(key)
@@ -228,62 +219,43 @@ def check_safety_conditions(mid):
 
 
 def compute_target_quotes(mid, obi):
-    """Berechnet Ziel-Bid/Ask mit Sicherheitschecks."""
     if STATE["is_stopped"]:
         return None, None
     
-    # 1. Prüfe Sicherheit
     if not check_safety_conditions(mid):
         return None, None
     
-    # 2. Berechne aktuelle Position
     position_usdc = STATE["inventory"] * mid
     position_pct = abs(position_usdc) / MAX_POSITION_USDC if MAX_POSITION_USDC > 0 else 0
     
-    # 3. Basis-Spread
     skew = (obi * OBI_SKEW_FACTOR * mid) if OBI_SKEW_ENABLED else 0.0
     
     bid_price = mid * (1 - SPREAD_PCT / 100) + skew
     ask_price = mid * (1 + SPREAD_PCT / 100) + skew
     
-    # 4. Inventory-Limits
     quote_bid = True
     quote_ask = True
     
     if position_usdc >= MAX_POSITION_USDC:
         quote_bid = False
-        debug_log("⚠️ Nur ASK (Position zu Long)")
     elif position_usdc <= -MAX_POSITION_USDC:
         quote_ask = False
-        debug_log("⚠️ Nur BID (Position zu Short)")
     
-    # 5. Bei >80% Position nur noch reduzierende Seite
     if position_pct > 0.8:
-        if position_usdc > 0:  # Long
+        if position_usdc > 0:
             quote_bid = False
-        else:  # Short
+        else:
             quote_ask = False
-    
-    # 6. Wenn PnL negativ, reduziere Risiko
-    if STATE["realized_pnl_usdc"] < -1.0:
-        # Nur noch halbe Order-Größe
-        global ORDER_SIZE_USDC_HALVED
-        ORDER_SIZE_USDC_HALVED = ORDER_SIZE_USDC * 0.5
-    else:
-        ORDER_SIZE_USDC_HALVED = ORDER_SIZE_USDC
     
     return (bid_price if quote_bid else None), (ask_price if quote_ask else None)
 
 
 def record_fill(side, price, base_amount):
-    """Aktualisiert Inventory + PnL."""
     if STATE["is_stopped"]:
         return
     
     old_inventory = STATE["inventory"]
-    position_usdc_before = abs(old_inventory) * price
     
-    # Prüfe ob Fill die Max-Position überschreitet
     if side == "buy":
         new_inventory = old_inventory + base_amount
         if new_inventory * price > MAX_POSITION_USDC:
@@ -295,7 +267,6 @@ def record_fill(side, price, base_amount):
             debug_log(f"⚠️ FILL würde Max-Position überschreiten - ignoriert")
             return
     
-    # PnL Berechnung
     if side == "buy":
         if old_inventory < 0:
             closed_amount = min(base_amount, -old_inventory)
@@ -307,7 +278,6 @@ def record_fill(side, price, base_amount):
             pnl = (price - STATE["avg_entry_price"]) * closed_amount
             STATE["realized_pnl_usdc"] += pnl
     
-    # Update avg_entry_price
     if (old_inventory >= 0 and side == "buy") or (old_inventory <= 0 and side == "sell"):
         total_value = STATE["avg_entry_price"] * abs(old_inventory) + price * base_amount
         new_total = abs(old_inventory) + base_amount
@@ -323,38 +293,35 @@ def record_fill(side, price, base_amount):
         "inventory_usdc": round(new_inventory * price, 2),
         "avg_entry_price": round(STATE["avg_entry_price"], 4),
         "realized_pnl_usdc": round(STATE["realized_pnl_usdc"], 4),
-        "max_position": MAX_POSITION_USDC,
         "position_pct": f"{abs(new_inventory * price) / MAX_POSITION_USDC * 100:.1f}%"
     })
 
 
 def get_order_size_btc(mid):
-    """Berechnet Order-Größe in BTC (sicher)"""
-    # 1. Basis-Größe: 0.5 USDC (oder reduziert bei Verlust)
-    order_size_usdc = min(ORDER_SIZE_USDC, ORDER_SIZE_USDC_HALVED)
+    """Berechnet Order-Größe mit Exchange Minimum Check"""
+    # 1. Basis-Größe
+    order_size_usdc = ORDER_SIZE_USDC
+    size_coin = order_size_usdc / mid if mid > 0 else 0
     
-    # 2. Prüfe verfügbaren Platz bis zum Limit
-    current_position_usdc = abs(STATE["inventory"]) * mid
-    remaining_usdc = max(0, MAX_POSITION_USDC - current_position_usdc)
+    # 2. Prüfe Exchange Minimum
+    min_size_coin = get_min_base_amount(SYMBOL)
     
-    # 3. Order-Größe = min(Basis, verfügbarer Platz)
-    safe_order_usdc = min(order_size_usdc, remaining_usdc * 0.9)
+    if size_coin < min_size_coin:
+        # Auf Minimum erhöhen
+        size_coin = min_size_coin
+        actual_usdc = size_coin * mid
+        debug_log(f"⚠️ Order auf Minimum erhöht: {size_coin:.8f} {SYMBOL} ({actual_usdc:.2f} USDC)")
+        
+        # Prüfe ob das noch ins Limit passt
+        current_position_usdc = abs(STATE["inventory"]) * mid
+        if current_position_usdc + actual_usdc > MAX_POSITION_USDC:
+            debug_log(f"🚨 MINIMUM Order überschreitet Max-Position!")
+            return 0
     
-    # 4. In BTC umrechnen
-    size_btc = safe_order_usdc / mid if mid > 0 else 0
-    
-    # 5. Minimum Exchange Size
-    min_size_btc = get_min_base_amount(SYMBOL)
-    
-    if size_btc < min_size_btc:
-        debug_log(f"⚠️ Order-Größe zu klein: {size_btc:.8f} < {min_size_btc}")
-        return 0
-    
-    return size_btc
+    return size_coin
 
 
 async def manage_quotes(client, mid, obi):
-    """Requoting-Logik mit Sicherheitschecks."""
     if STATE["is_stopped"]:
         if not DRY_RUN:
             await cancel_all_real_orders(client)
@@ -365,7 +332,6 @@ async def manage_quotes(client, mid, obi):
     target_bid, target_ask = compute_target_quotes(mid, obi)
     now = time.time()
     
-    # Prüfe ob Requote nötig
     need_requote = STATE["last_mid"] is None or abs(mid - STATE["last_mid"]) / mid * 100 >= REQUOTE_MOVE_THRESHOLD_PCT
     time_based = (STATE["resting_bid"] is None or now - STATE["resting_bid"]["placed_at"] >= REQUOTE_SECONDS) and \
                  (STATE["resting_ask"] is None or now - STATE["resting_ask"]["placed_at"] >= REQUOTE_SECONDS)
@@ -410,20 +376,18 @@ async def manage_quotes(client, mid, obi):
     debug_log("🔄 Requote", {
         "bid": target_bid, 
         "ask": target_ask, 
-        "size_btc": base_amount,
+        "size_coin": base_amount,
         "size_usdc": base_amount * mid,
-        "inventory": STATE["inventory"],
         "inventory_usdc": STATE["inventory"] * mid,
         "position_pct": f"{abs(STATE['inventory'] * mid) / MAX_POSITION_USDC * 100:.1f}%"
     })
 
 
 def check_fills_from_trade_tape(trade_price, trade_received_at):
-    """Approximierte Fill-Erkennung."""
     if STATE["is_stopped"] or not trade_price:
         return
     
-    order_size_usdc = ORDER_SIZE_USDC_HALVED
+    order_size_usdc = ORDER_SIZE_USDC
     coin_size = order_size_usdc / trade_price if trade_price else 0
     
     if coin_size <= 0:
@@ -441,9 +405,8 @@ def check_fills_from_trade_tape(trade_price, trade_received_at):
 
 
 async def listen():
-    global last_trade_price, last_trade_received_at, ORDER_SIZE_USDC_HALVED
+    global last_trade_price, last_trade_received_at
     
-    ORDER_SIZE_USDC_HALVED = ORDER_SIZE_USDC
     last_status_log = 0.0
     last_account_sync = 0.0
     
@@ -492,10 +455,10 @@ async def listen():
                     last_account_sync = now
                     await sync_real_position()
                 
-                # Wenn gestoppt, nichts weiter tun
                 if STATE["is_stopped"]:
                     debug_log("🛑 BOT GESTOPPT - Keine neuen Orders")
-                    await cancel_all_real_orders(client)
+                    if not DRY_RUN:
+                        await cancel_all_real_orders(client)
                     continue
                 
             elif channel.startswith("trade"):
