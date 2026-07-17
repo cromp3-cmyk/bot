@@ -1,15 +1,13 @@
 """
-Autonomer EMA Crossover Bot für Lighter (zkLighter) - MIT KONFIGURIERBAREM BACKTEST
-======================================================================================
+Autonomer EMA Crossover Bot für Lighter (zkLighter) - MIT BACKTEST
+================================================================================
 - Holt echte Kerzendaten über die Lighter Candlestick-API
 - Handelt autonom bei EMA-Crossover (Kerzenschluss-Basis, kein Repainting)
-- Führt beim Start einen MULTI-TIMEFRAME Backtest durch:
-  - Testet alle konfigurierten Zeitrahmen
-  - Konfigurierbare Backtest-Dauer (Standard: 7 Tage = 168h)
-  - Du entscheidest, welche Zeitrahmen getestet werden
+- Führt beim Start einen Backtest über die letzten X Stunden durch
+- Zeigt Backtest-Ergebnisse im Log
 
 WICHTIG - SICHERHEIT:
-Erst mit DRY_RUN=true testen! Schau dir den Backtest an, bevor du auf DRY_RUN=false stellst.
+Erst mit DRY_RUN=true testen!
 """
 
 import asyncio
@@ -95,7 +93,7 @@ async def fetch_candles(market_id, resolution, count_back=100, end_ms=None):
     async with lighter.ApiClient(configuration) as api_client:
         candle_api = lighter.CandlestickApi(api_client)
         now_ms = end_ms if end_ms is not None else int(time.time() * 1000)
-        start_ms = now_ms - 60 * 60 * 24 * 30 * 1000  # 30 Tage Puffer
+        start_ms = now_ms - 60 * 60 * 24 * 30 * 1000
 
         response = await candle_api.candles(
             market_id=market_id,
@@ -242,160 +240,75 @@ def run_backtest(timestamps, closes, fast_len, slow_len):
     }
 
 
-async def run_backtest_for_timeframe(symbol, resolution, fast_len, slow_len, hours_back):
-    """Führt Backtest für einen Zeitrahmen durch"""
+async def run_backtest_and_print():
+    """Führt Backtest durch und gibt Ergebnisse im Log aus."""
+    if not BACKTEST_ENABLED:
+        return
+    
     try:
-        # Mehr Daten für längere Zeitrahmen holen
-        if resolution in ["60", "240"]:  # 1h, 4h
-            count_back = 1000
-        else:
-            count_back = 500
+        print(f"\n🔄 Backtest wird gestartet... ({BACKTEST_HOURS}h, {SYMBOL}, {RESOLUTION}m, EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN})")
         
-        raw = await fetch_candles(MARKET_INDICES[symbol], resolution, count_back=count_back)
+        # HOL DIR DIE KERZEN - GENAU WIE BEIM LIVE-TRADING
+        raw = await fetch_candles(
+            MARKET_INDEX, 
+            int(RESOLUTION),  # Als Integer!
+            count_back=CANDLE_COUNT_BACK
+        )
+        
         timestamps, closes = extract_close_prices_and_ts(raw)
         
-        if len(closes) < slow_len + 2:
-            return None
+        if len(closes) < EMA_SLOW_LEN + 2:
+            print(f"⚠️ Zu wenig Daten für Backtest (nur {len(closes)} Kerzen)")
+            return
         
         # Auf die letzten X Stunden begrenzen
-        if hours_back > 0:
-            cutoff_ts = int(time.time() * 1000) - hours_back * 3600 * 1000
+        if BACKTEST_HOURS > 0:
+            cutoff_ts = int(time.time() * 1000) - BACKTEST_HOURS * 3600 * 1000
             filtered = [(t, c) for t, c in zip(timestamps, closes) if t >= cutoff_ts]
-            if len(filtered) < slow_len + 2:
-                return None
+            if len(filtered) < EMA_SLOW_LEN + 2:
+                print(f"⚠️ Zu wenig Daten für {BACKTEST_HOURS}h (nur {len(filtered)} Kerzen)")
+                return
             timestamps, closes = zip(*filtered)
             timestamps = list(timestamps)
             closes = list(closes)
         
-        result = run_backtest(timestamps, closes, fast_len, slow_len)
+        result = run_backtest(timestamps, closes, EMA_FAST_LEN, EMA_SLOW_LEN)
+        
         if result:
-            result["resolution"] = resolution
-            result["data_points"] = len(closes)
-        return result
+            print_backtest_results(result, BACKTEST_HOURS, SYMBOL, EMA_FAST_LEN, EMA_SLOW_LEN, RESOLUTION)
+        else:
+            print("❌ Backtest fehlgeschlagen")
         
     except Exception as e:
-        debug_log(f"Backtest Fehler für {resolution}", {"error": str(e)})
-        return None
+        print(f"❌ Backtest fehlgeschlagen: {e}")
+        debug_log("⚠️ Backtest fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
 
-def print_multi_timeframe_results(results, symbol, fast_len, slow_len, hours_back, timeframes_to_test):
-    """Zeigt Multi-Timeframe Backtest Ergebnisse im Log"""
-    print("\n" + "=" * 100)
-    print(f"📊 MULTI-TIMEFRAME BACKTEST - {symbol} | EMA {fast_len}/{slow_len} | {hours_back}h")
-    print(f"   Getestete Zeitrahmen: {', '.join(timeframes_to_test)}")
-    print("=" * 100)
-    
-    # Kopfzeile
-    print(f"{'Zeitrahmen':<10} {'Trades':<8} {'Gewinne':<8} {'Verluste':<8} {'Quote':<8} {'Total PnL':<15} {'Avg Win':<10} {'Avg Loss':<10} {'Daten':<8}")
-    print("-" * 100)
-    
-    best_result = None
-    best_pnl = -999999
-    
-    # Sortierung nach definierter Reihenfolge
-    order = ["1m", "2m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "24h"]
-    sorted_timeframes = sorted(timeframes_to_test, key=lambda x: order.index(x) if x in order else 999)
-    
-    for res in sorted_timeframes:
-        r = results.get(res)
-        if r is None:
-            print(f"{res:<10} {'⚠️ KEINE DATEN':<50}")
-            continue
-        
-        pnl = r["total_pnl_pct"]
-        if pnl > 0:
-            pnl_str = f"🟢 {pnl:+.2f}%"
-        elif pnl < 0:
-            pnl_str = f"🔴 {pnl:+.2f}%"
-        else:
-            pnl_str = f"⚪ {pnl:+.2f}%"
-        
-        print(f"{res:<10} {r['num_trades']:<8} {r['num_wins']:<8} {r['num_losses']:<8} {r['win_rate_pct']:>6.1f}%  {pnl_str:<15} {r['avg_win_pct']:>+8.2f}%  {r['avg_loss_pct']:>+8.2f}%  {r['data_points']:<8}")
-        
-        if r["num_trades"] > 0 and pnl > best_pnl:
-            best_pnl = pnl
-            best_result = (res, r)
-    
-    print("-" * 100)
-    
-    if best_result:
-        res, r = best_result
-        print(f"🏆 BESTES ERGEBNIS: {res} | PnL: {r['total_pnl_pct']:+.2f}% | Trades: {r['num_trades']} | Quote: {r['win_rate_pct']}%")
-    
-    print("=" * 100 + "\n")
-    
-    # Detaillierte Trades für den besten Zeitrahmen anzeigen
-    if best_result:
-        res, r = best_result
-        print(f"\n📋 DETAILS FÜR BESTEN ZEITRAHMEN ({res}):")
-        print("-" * 80)
-        
-        if r['trades']:
-            for i, trade in enumerate(r['trades'][-10:], 1):
-                direction = "📈 LONG" if trade['direction'] == 'long' else "📉 SHORT"
-                pnl = trade['pnl_pct']
-                pnl_str = f"{pnl:+.2f}%"
-                print(f"  {i:2}. {direction} | Entry: ${trade['entry']:.2f} | Exit: ${trade['exit']:.2f} | PnL: {pnl_str}")
-        else:
-            print("  📭 Keine Trades")
-        print("-" * 80 + "\n")
-
-
-async def run_multi_timeframe_backtest():
-    """Führt Backtest für alle konfigurierten Zeitrahmen durch"""
-    
-    # Zeitrahmen aus Umgebungsvariable oder Default
-    timeframe_config = os.getenv("BACKTEST_TIMEFRAMES", "1m,2m,3m,5m,10m,15m,1h,4h")
-    
-    # Mapping für Zeitrahmen
-    timeframe_map = {
-        "1m": "1", "2m": "2", "3m": "3", "5m": "5", "10m": "10", 
-        "15m": "15", "30m": "30", "1h": "60", "2h": "120", "4h": "240",
-        "6h": "360", "8h": "480", "12h": "720", "24h": "1440"
-    }
-    
-    # Parse die konfigurierten Zeitrahmen
-    timeframes_to_test = [tf.strip() for tf in timeframe_config.split(",")]
-    valid_timeframes = []
-    for tf in timeframes_to_test:
-        if tf in timeframe_map:
-            valid_timeframes.append(tf)
-        else:
-            print(f"⚠️ Ungültiger Zeitrahmen: {tf} - wird übersprungen")
-    
-    if not valid_timeframes:
-        print("❌ Keine gültigen Zeitrahmen konfiguriert!")
-        print(f"   Verwende: {', '.join(timeframe_map.keys())}")
-        return
-    
-    print(f"\n🔄 Multi-Timeframe Backtest wird gestartet...")
-    print(f"   Symbol: {SYMBOL}")
-    print(f"   EMA: {EMA_FAST_LEN}/{EMA_SLOW_LEN}")
-    print(f"   Zeitraum: {BACKTEST_HOURS}h ({BACKTEST_HOURS/24:.1f} Tage)")
-    print(f"   Teste: {', '.join(valid_timeframes)}")
+def print_backtest_results(result, hours_back, symbol, fast_len, slow_len, resolution):
+    """Zeigt Backtest-Ergebnisse schön formatiert im Log an."""
+    print("\n" + "=" * 80)
+    print(f"📊 BACKTEST ERGEBNISSE - {symbol} | {resolution}m | EMA {fast_len}/{slow_len} | {hours_back}h")
+    print("=" * 80)
+    print(f"  📈 Anzahl Trades:      {result['num_trades']}")
+    print(f"  ✅ Gewinne:            {result['num_wins']}")
+    print(f"  ❌ Verluste:           {result['num_losses']}")
+    print(f"  🎯 Trefferquote:       {result['win_rate_pct']}%")
+    print(f"  💰 Total PnL:          {result['total_pnl_pct']:+.2f}%")
+    print(f"  📊 Avg. Gewinn:        {result['avg_win_pct']:+.2f}%")
+    print(f"  📉 Avg. Verlust:       {result['avg_loss_pct']:+.2f}%")
     print("-" * 80)
     
-    results = {}
+    if result['trades']:
+        print("  📋 Letzte 10 Trades:")
+        for i, trade in enumerate(result['trades'][-10:], 1):
+            direction = "📈 LONG" if trade['direction'] == 'long' else "📉 SHORT"
+            pnl = trade['pnl_pct']
+            pnl_str = f"{pnl:+.2f}%"
+            print(f"    {i:2}. {direction} | Entry: ${trade['entry']:.2f} | Exit: ${trade['exit']:.2f} | PnL: {pnl_str}")
+    else:
+        print("  📭 Keine Trades")
     
-    for tf_label in valid_timeframes:
-        tf_value = timeframe_map[tf_label]
-        print(f"  🔄 Teste {tf_label}...", end=" ", flush=True)
-        result = await run_backtest_for_timeframe(
-            SYMBOL, tf_value, EMA_FAST_LEN, EMA_SLOW_LEN, BACKTEST_HOURS
-        )
-        if result:
-            results[tf_label] = result
-            print(f"✅ {result['num_trades']} Trades, PnL: {result['total_pnl_pct']:+.2f}%")
-        else:
-            results[tf_label] = None
-            print(f"❌ Keine Daten")
-        
-        await asyncio.sleep(0.5)
-    
-    print("-" * 80)
-    print_multi_timeframe_results(results, SYMBOL, EMA_FAST_LEN, EMA_SLOW_LEN, BACKTEST_HOURS, valid_timeframes)
-    
-    return results
+    print("=" * 80 + "\n")
 
 
 # ========== LIVE TRADING ==========
@@ -506,7 +419,7 @@ async def check_for_signal():
     raw = None
     for attempt in range(3):
         try:
-            raw = await fetch_candles(MARKET_INDEX, RESOLUTION, count_back=CANDLE_COUNT_BACK)
+            raw = await fetch_candles(MARKET_INDEX, int(RESOLUTION), count_back=CANDLE_COUNT_BACK)
             timestamps, closes = extract_close_prices_and_ts(raw)
             if closes:
                 break
@@ -585,20 +498,20 @@ LEVERAGE = int(os.getenv("EMA_LEVERAGE", "10"))
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 BACKTEST_ENABLED = os.getenv("BACKTEST_ENABLED", "true").lower() == "true"
-BACKTEST_HOURS = int(os.getenv("BACKTEST_HOURS", "168"))  # 7 Tage = 168 Stunden
+BACKTEST_HOURS = int(os.getenv("BACKTEST_HOURS", "48"))
 
 
 async def main():
     print("=" * 80)
     print(f"🚀 EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN} Crossover Bot für {SYMBOL}")
-    print(f"   Live-Resolution: {RESOLUTION}m | Poll-Intervall: {POLL_INTERVAL_SECONDS}s")
+    print(f"   Resolution: {RESOLUTION}m | Poll-Intervall: {POLL_INTERVAL_SECONDS}s")
     print(f"   DRY_RUN: {DRY_RUN} | Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
-    print(f"   Backtest: {'AN' if BACKTEST_ENABLED else 'AUS'} ({BACKTEST_HOURS}h = {BACKTEST_HOURS/24:.1f} Tage)")
+    print(f"   Backtest: {'AN' if BACKTEST_ENABLED else 'AUS'} ({BACKTEST_HOURS}h)")
     print("=" * 80)
 
-    # Multi-Timeframe Backtest beim Start
+    # Backtest beim Start
     if BACKTEST_ENABLED:
-        await run_multi_timeframe_backtest()
+        await run_backtest_and_print()
     
     print("\n🚀 Starte Live-Trading...")
     print("-" * 80)
