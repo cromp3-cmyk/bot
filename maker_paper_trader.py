@@ -2,7 +2,8 @@
 MOMENTUM SCALPING BOT - MIT TP/SL
 ==================================
 Signal: Preisbewegung in 1 Sekunde
-Exit: TP 0.02% / SL 0.02% / Timeout 5s
+Exit: TP 0.02% / SL 0.01% / Timeout 5s
+FIX: Preis wird aus OrderBook und Trades geholt
 """
 
 import asyncio
@@ -11,6 +12,7 @@ import json
 import time
 import os
 from collections import deque
+from datetime import datetime
 
 WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
@@ -28,12 +30,12 @@ SYMBOL = os.getenv("OB_SYMBOL", "BTC")
 MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
 # 📊 MOMENTUM PARAMETER
-MOMENTUM_THRESHOLD = float(os.getenv("MOMENTUM_THRESHOLD", "0.04"))  # 0.04% in 1s
-SIGNAL_MODE = os.getenv("SIGNAL_MODE", "simple")  # simple, multi, volume
+MOMENTUM_THRESHOLD = float(os.getenv("MOMENTUM_THRESHOLD", "0.02"))  # 0.02% in 1s
+SIGNAL_MODE = os.getenv("SIGNAL_MODE", "simple")  # simple, multi, obi_fallback
 
-# 🎯 TP/SL (wie gewünscht)
+# 🎯 TP/SL
 TP_PERCENT = float(os.getenv("TP_PERCENT", "0.02"))  # 0.02% = $0.10 bei $500
-SL_PERCENT = float(os.getenv("SL_PERCENT", "0.02"))  # 0.02% = $0.10 bei $500
+SL_PERCENT = float(os.getenv("SL_PERCENT", "0.01"))  # 0.01% = $0.05 bei $500
 MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "5"))  # 5 Sekunden
 
 # 💰 HEBEL & POSITION
@@ -44,6 +46,7 @@ ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000"))
 # ========== STATE ==========
 order_book = {"bids": {}, "asks": {}}
 price_history = deque(maxlen=20)
+obi_avg_buffer = deque()
 
 last_signal_time = 0.0
 last_trade_time = 0.0
@@ -88,11 +91,25 @@ def best_ask():
         return None
     return min(float(p) for p in order_book["asks"].keys())
 
+def mid_price():
+    bb, ba = best_bid(), best_ask()
+    if bb is None or ba is None:
+        return None
+    return (bb + ba) / 2
+
 def calc_spread():
     bb, ba = best_bid(), best_ask()
     if bb is None or ba is None or bb == 0:
         return 0.0
     return (ba - bb) / bb * 100
+
+def calc_obi(levels=25):
+    bids_sorted = sorted(order_book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
+    asks_sorted = sorted(order_book["asks"].items(), key=lambda x: float(x[0]))[:levels]
+    bid_vol = sum(v for _, v in bids_sorted)
+    ask_vol = sum(v for _, v in asks_sorted)
+    total = bid_vol + ask_vol
+    return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
 # ========== MOMENTUM SIGNAL ==========
 def check_momentum_simple():
@@ -102,6 +119,9 @@ def check_momentum_simple():
     
     price_now = price_history[-1]
     price_1s_ago = price_history[-2]
+    
+    if price_1s_ago == 0:
+        return None
     
     change_pct = (price_now - price_1s_ago) / price_1s_ago * 100
     
@@ -120,35 +140,47 @@ def check_momentum_multi():
     price_1s_ago = price_history[-2]
     price_3s_ago = price_history[-4]
     
+    if price_1s_ago == 0 or price_3s_ago == 0:
+        return None
+    
     change_1s = (price_now - price_1s_ago) / price_1s_ago * 100
     change_3s = (price_now - price_3s_ago) / price_3s_ago * 100
     
-    # Beide zeigen gleiche Richtung
-    if change_1s > 0.03 and change_3s > 0.05:
+    if change_1s > 0.015 and change_3s > 0.03:
         return "buy"
-    elif change_1s < -0.03 and change_3s < -0.05:
+    elif change_1s < -0.015 and change_3s < -0.03:
         return "sell"
     return None
 
-def check_momentum_volume():
-    """Momentum + Spread (Volumen-Indikator)"""
-    spread = calc_spread()
-    signal = check_momentum_simple()
-    
-    # Nur bei niedrigem Spread (hohe Liquidität)
-    if signal and spread < 0.01:
-        return signal
+def check_obi_fallback():
+    """OBI als Fallback wenn kein Momentum"""
+    raw_obi = calc_obi()
+    if raw_obi > 0.35:
+        return "buy"
+    elif raw_obi < -0.35:
+        return "sell"
     return None
 
 def get_momentum_signal():
+    """Hauptsignal-Funktion mit verschiedenen Modi"""
+    
+    # 1. Momentum Signal
     if SIGNAL_MODE == "simple":
-        return check_momentum_simple()
+        signal = check_momentum_simple()
     elif SIGNAL_MODE == "multi":
-        return check_momentum_multi()
-    elif SIGNAL_MODE == "volume":
-        return check_momentum_volume()
+        signal = check_momentum_multi()
     else:
-        return check_momentum_simple()
+        signal = check_momentum_simple()
+    
+    # 2. Wenn Signal da, zurückgeben
+    if signal:
+        return signal
+    
+    # 3. Fallback: OBI (nur im obi_fallback Mode)
+    if SIGNAL_MODE == "obi_fallback":
+        return check_obi_fallback()
+    
+    return None
 
 # ========== POSITION SIZING ==========
 def calculate_position_size(entry_price):
@@ -169,8 +201,8 @@ def check_signal_and_execute():
     
     now = time.time()
     
-    # Mindestabstand zwischen Trades
-    if now - last_trade_time < 1.0:
+    # Mindestabstand zwischen Trades (0.5s)
+    if now - last_trade_time < 0.5:
         return
     
     # Keine Position offen
@@ -202,6 +234,7 @@ def check_signal_and_execute():
         "target_profit": position_info["target_profit"],
         "target_loss": position_info["target_loss"],
         "spread": spread_pct,
+        "signal": SIGNAL_MODE,
     }
     position_opened_at = now
     last_signal_time = now
@@ -241,7 +274,7 @@ def check_position_exit(last_trade_price):
     
     pnl_usd = pnl_pct / 100 * open_position["size_usd"]
     target_profit = open_position.get("target_profit", 0.10)
-    target_loss = open_position.get("target_loss", 0.10)
+    target_loss = open_position.get("target_loss", 0.05)
     
     # 🎯 TAKE-PROFIT
     if pnl_usd >= target_profit:
@@ -291,6 +324,7 @@ def close_position(price, pnl_pct, pnl_usd, reason):
         "pnl_pct": round(pnl_pct, 2),
         "reason": reason,
         "hold_time": round(hold_time, 2),
+        "signal_mode": open_position.get("signal", "unknown"),
         "leverage": open_position.get("leverage", 0),
         "size_usd": round(open_position.get("size_usd", 0), 2),
         "margin": round(open_position.get("margin_used", 0), 2),
@@ -311,6 +345,24 @@ def close_position(price, pnl_pct, pnl_usd, reason):
     position_opened_at = 0.0
     last_trade_time = time.time()
 
+def log_status():
+    win_rate = stats["wins"] / stats["trades_completed"] * 100 if stats["trades_completed"] else 0
+    trades_per_hour = stats["trades_completed"] / ((time.time() - start_time) / 3600) if start_time else 0
+    
+    debug_log("📊 MOMENTUM STATUS", {
+        "mode": SIGNAL_MODE,
+        "trades": stats["trades_completed"],
+        "win_rate": round(win_rate, 1),
+        "total_pnl": round(stats["total_pnl_usd"], 2),
+        "balance": round(stats["current_balance"], 2),
+        "trades/h": round(trades_per_hour, 1),
+        "avg_hold": round(stats["avg_hold_time"], 2),
+        "max_win": round(stats["max_win"], 2),
+        "max_loss": round(stats["max_loss"], 2),
+        "open": open_position is not None,
+        "last": trade_log[-1] if trade_log else None
+    })
+
 # ========== WEBSOCKET ==========
 async def listen():
     last_trade_price = None
@@ -330,7 +382,12 @@ async def listen():
             if channel.startswith("order_book"):
                 apply_order_book_update(msg)
                 
-                # Signal prüfen (nur bei OrderBook Updates)
+                # 🔥 FIX: Preis aus OrderBook für Momentum
+                mid = mid_price()
+                if mid:
+                    price_history.append(mid)
+                
+                # Signal prüfen
                 check_signal_and_execute()
                 
                 # Status alle 30s
@@ -343,28 +400,11 @@ async def listen():
                 trades = msg.get("trades", [])
                 if trades:
                     price = float(trades[-1]["price"])
-                    price_history.append(price)
+                    price_history.append(price)  # Trade-Preis als Backup
                     last_trade_price = price
                     
                     if open_position is not None:
                         check_position_exit(last_trade_price)
-
-# ========== STATUS ==========
-def log_status():
-    win_rate = stats["wins"] / stats["trades_completed"] * 100 if stats["trades_completed"] else 0
-    trades_per_hour = stats["trades_completed"] / ((time.time() - start_time) / 3600) if start_time else 0
-    
-    debug_log("📊 MOMENTUM STATUS", {
-        "mode": SIGNAL_MODE,
-        "trades": stats["trades_completed"],
-        "win_rate": round(win_rate, 1),
-        "total_pnl": round(stats["total_pnl_usd"], 2),
-        "balance": round(stats["current_balance"], 2),
-        "trades/h": round(trades_per_hour, 1),
-        "avg_hold": round(stats["avg_hold_time"], 2),
-        "open": open_position is not None,
-        "last": trade_log[-1] if trade_log else None
-    })
 
 # ========== MAIN ==========
 async def main():
@@ -376,6 +416,9 @@ async def main():
     print(f"   ⏰ Max-Halt: {MAX_POSITION_TIME}s")
     print(f"   💰 Hebel: {LEVERAGE}x | Einsatz: ${RISK_PER_TRADE}")
     print("=" * 70)
+    print("   ✅ Preis wird aus OrderBook + Trades geholt")
+    print("   ✅ TP/SL sind aktiv")
+    print("=" * 70)
 
     while True:
         try:
@@ -385,5 +428,4 @@ async def main():
             await asyncio.sleep(3)
 
 if __name__ == "__main__":
-    from datetime import datetime
     asyncio.run(main())
