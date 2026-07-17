@@ -1,13 +1,15 @@
 """
-Autonomer EMA Crossover Bot für Lighter (zkLighter) - MIT BACKTEST
-================================================================================
+Autonomer EMA Crossover Bot für Lighter (zkLighter) - MIT BACKTEST IM LOG
+======================================================================================
 - Holt echte Kerzendaten über die Lighter Candlestick-API
 - Handelt autonom bei EMA-Crossover (Kerzenschluss-Basis, kein Repainting)
-- Führt beim Start einen Backtest über die letzten X Stunden durch
-- Zeigt Backtest-Ergebnisse im Log
+- Führt optional beim Start (und danach periodisch) einen Backtest über die
+  letzten X Stunden durch
+- Zeigt Backtest-Ergebnisse NUR im Log (Terminal) an
 
 WICHTIG - SICHERHEIT:
-Erst mit DRY_RUN=true testen!
+Erst mit DRY_RUN=true testen! Schau dir den Backtest UND ein paar Stunden
+Live-Beobachtung an, bevor du auf DRY_RUN=false stellst.
 """
 
 import asyncio
@@ -93,7 +95,7 @@ async def fetch_candles(market_id, resolution, count_back=100, end_ms=None):
     async with lighter.ApiClient(configuration) as api_client:
         candle_api = lighter.CandlestickApi(api_client)
         now_ms = end_ms if end_ms is not None else int(time.time() * 1000)
-        start_ms = now_ms - 60 * 60 * 24 * 30 * 1000
+        start_ms = now_ms - 60 * 60 * 24 * 7 * 1000
 
         response = await candle_api.candles(
             market_id=market_id,
@@ -132,192 +134,7 @@ def calc_ema_series(closes, length):
     return ema_values
 
 
-# ========== BACKTEST ==========
-def run_backtest(timestamps, closes, fast_len, slow_len):
-    """Backtest: Bei jedem Crossover wird die Position gewechselt"""
-    if len(closes) < slow_len + 2:
-        return None
-    
-    ema_fast = calc_ema_series(closes, fast_len)
-    ema_slow = calc_ema_series(closes, slow_len)
-
-    trades = []
-    position = None
-    entry_price = 0
-    entry_ts = 0
-    last_relation = None
-    cumulative_pnl = 0.0
-
-    for i in range(len(closes)):
-        relation = "above" if ema_fast[i] > ema_slow[i] else "below"
-        
-        if last_relation is None:
-            last_relation = relation
-            continue
-
-        if relation != last_relation:
-            current_price = closes[i]
-            current_ts = timestamps[i]
-            
-            if relation == "above":  # BUY -> LONG
-                if position is not None:
-                    if position == "long":
-                        pnl_pct = (current_price - entry_price) / entry_price * 100
-                    else:
-                        pnl_pct = (entry_price - current_price) / entry_price * 100
-                    
-                    cumulative_pnl += pnl_pct
-                    trades.append({
-                        "direction": position,
-                        "entry": entry_price,
-                        "exit": current_price,
-                        "pnl_pct": round(pnl_pct, 4),
-                        "entry_ts": entry_ts,
-                        "exit_ts": current_ts,
-                    })
-                
-                position = "long"
-                entry_price = current_price
-                entry_ts = current_ts
-            
-            else:  # SELL -> SHORT
-                if position is not None:
-                    if position == "long":
-                        pnl_pct = (current_price - entry_price) / entry_price * 100
-                    else:
-                        pnl_pct = (entry_price - current_price) / entry_price * 100
-                    
-                    cumulative_pnl += pnl_pct
-                    trades.append({
-                        "direction": position,
-                        "entry": entry_price,
-                        "exit": current_price,
-                        "pnl_pct": round(pnl_pct, 4),
-                        "entry_ts": entry_ts,
-                        "exit_ts": current_ts,
-                    })
-                
-                position = "short"
-                entry_price = current_price
-                entry_ts = current_ts
-
-            last_relation = relation
-
-    # Letzte Position schließen
-    if position is not None:
-        last_price = closes[-1]
-        last_ts = timestamps[-1]
-        
-        if position == "long":
-            pnl_pct = (last_price - entry_price) / entry_price * 100
-        else:
-            pnl_pct = (entry_price - last_price) / entry_price * 100
-        
-        cumulative_pnl += pnl_pct
-        trades.append({
-            "direction": position,
-            "entry": entry_price,
-            "exit": last_price,
-            "pnl_pct": round(pnl_pct, 4),
-            "entry_ts": entry_ts,
-            "exit_ts": last_ts,
-        })
-
-    completed_trades = [t for t in trades if t.get("exit") is not None]
-    wins = [t for t in completed_trades if t["pnl_pct"] > 0]
-    losses = [t for t in completed_trades if t["pnl_pct"] <= 0]
-    total_pnl = sum(t["pnl_pct"] for t in completed_trades)
-
-    return {
-        "trades": completed_trades,
-        "num_trades": len(completed_trades),
-        "num_wins": len(wins),
-        "num_losses": len(losses),
-        "win_rate_pct": round(len(wins) / len(completed_trades) * 100, 1) if completed_trades else 0,
-        "total_pnl_pct": round(total_pnl, 4),
-        "avg_win_pct": round(sum(t["pnl_pct"] for t in wins) / len(wins), 4) if wins else 0,
-        "avg_loss_pct": round(sum(t["pnl_pct"] for t in losses) / len(losses), 4) if losses else 0,
-    }
-
-
-async def run_backtest_and_print():
-    """Führt Backtest durch und gibt Ergebnisse im Log aus."""
-    if not BACKTEST_ENABLED:
-        return
-    
-    try:
-        print(f"\n🔄 Backtest wird gestartet... ({BACKTEST_HOURS}h, {SYMBOL}, {RESOLUTION}m, EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN})")
-        
-        # HOL DIR DIE KERZEN - GENAU WIE BEIM LIVE-TRADING
-        raw = await fetch_candles(
-            MARKET_INDEX, 
-            int(RESOLUTION),  # Als Integer!
-            count_back=CANDLE_COUNT_BACK
-        )
-        
-        timestamps, closes = extract_close_prices_and_ts(raw)
-        
-        if len(closes) < EMA_SLOW_LEN + 2:
-            print(f"⚠️ Zu wenig Daten für Backtest (nur {len(closes)} Kerzen)")
-            return
-        
-        # Auf die letzten X Stunden begrenzen
-        if BACKTEST_HOURS > 0:
-            cutoff_ts = int(time.time() * 1000) - BACKTEST_HOURS * 3600 * 1000
-            filtered = [(t, c) for t, c in zip(timestamps, closes) if t >= cutoff_ts]
-            if len(filtered) < EMA_SLOW_LEN + 2:
-                print(f"⚠️ Zu wenig Daten für {BACKTEST_HOURS}h (nur {len(filtered)} Kerzen)")
-                return
-            timestamps, closes = zip(*filtered)
-            timestamps = list(timestamps)
-            closes = list(closes)
-        
-        result = run_backtest(timestamps, closes, EMA_FAST_LEN, EMA_SLOW_LEN)
-        
-        if result:
-            print_backtest_results(result, BACKTEST_HOURS, SYMBOL, EMA_FAST_LEN, EMA_SLOW_LEN, RESOLUTION)
-        else:
-            print("❌ Backtest fehlgeschlagen")
-        
-    except Exception as e:
-        print(f"❌ Backtest fehlgeschlagen: {e}")
-        debug_log("⚠️ Backtest fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-
-def print_backtest_results(result, hours_back, symbol, fast_len, slow_len, resolution):
-    """Zeigt Backtest-Ergebnisse schön formatiert im Log an."""
-    print("\n" + "=" * 80)
-    print(f"📊 BACKTEST ERGEBNISSE - {symbol} | {resolution}m | EMA {fast_len}/{slow_len} | {hours_back}h")
-    print("=" * 80)
-    print(f"  📈 Anzahl Trades:      {result['num_trades']}")
-    print(f"  ✅ Gewinne:            {result['num_wins']}")
-    print(f"  ❌ Verluste:           {result['num_losses']}")
-    print(f"  🎯 Trefferquote:       {result['win_rate_pct']}%")
-    print(f"  💰 Total PnL:          {result['total_pnl_pct']:+.2f}%")
-    print(f"  📊 Avg. Gewinn:        {result['avg_win_pct']:+.2f}%")
-    print(f"  📉 Avg. Verlust:       {result['avg_loss_pct']:+.2f}%")
-    print("-" * 80)
-    
-    if result['trades']:
-        print("  📋 Letzte 10 Trades:")
-        for i, trade in enumerate(result['trades'][-10:], 1):
-            direction = "📈 LONG" if trade['direction'] == 'long' else "📉 SHORT"
-            pnl = trade['pnl_pct']
-            pnl_str = f"{pnl:+.2f}%"
-            print(f"    {i:2}. {direction} | Entry: ${trade['entry']:.2f} | Exit: ${trade['exit']:.2f} | PnL: {pnl_str}")
-    else:
-        print("  📭 Keine Trades")
-    
-    print("=" * 80 + "\n")
-
-
-# ========== LIVE TRADING ==========
-OPEN_POSITIONS = {}
-current_position_side = None
-last_processed_candle_ts = None
-last_relation = None
-
-
+# ========== Order-Ausführung ==========
 async def create_order_with_price(client, market_index, base_amount, is_ask, symbol, price, reduce_only=False):
     price_decimals = get_price_decimals(symbol)
     adjusted_price = price * 0.95 if is_ask else price * 1.05
@@ -413,13 +230,190 @@ async def open_or_reverse_position(action, symbol, margin, leverage, current_pri
         await client.close()
 
 
+# ========== BACKTEST-MODUL ==========
+async def fetch_candles_paginated(market_id, resolution, hours_back):
+    """Holt Kerzen in mehreren 500er-Haeppchen rueckwaerts."""
+    all_ts, all_closes = [], []
+    now_ms = int(time.time() * 1000)
+    target_start_ms = now_ms - hours_back * 3600 * 1000 - 3600 * 1000
+    end_ms = now_ms
+
+    for _ in range(30):
+        raw = await fetch_candles(market_id, resolution, count_back=500, end_ms=end_ms)
+        ts, closes = extract_close_prices_and_ts(raw)
+        if not ts:
+            break
+
+        combined = sorted(zip(ts, closes), key=lambda x: x[0])
+        batch_ts = [t for t, _ in combined]
+        batch_closes = [c for _, c in combined]
+
+        all_ts = batch_ts + all_ts
+        all_closes = batch_closes + all_closes
+
+        oldest_ts = batch_ts[0]
+        if oldest_ts <= target_start_ms or len(batch_ts) < 2:
+            break
+        end_ms = oldest_ts - 1
+        await asyncio.sleep(0.2)
+
+    seen = set()
+    dedup_ts, dedup_closes = [], []
+    for t, c in zip(all_ts, all_closes):
+        if t not in seen:
+            seen.add(t)
+            dedup_ts.append(t)
+            dedup_closes.append(c)
+    combined = sorted(zip(dedup_ts, dedup_closes), key=lambda x: x[0])
+    return [t for t, _ in combined], [c for _, c in combined]
+
+
+def print_backtest_results(result, hours_back, symbol, fast_len, slow_len):
+    """Zeigt Backtest-Ergebnisse schön formatiert im Log an."""
+    print("\n" + "=" * 80)
+    print(f"📊 BACKTEST ERGEBNISSE - {symbol} | EMA {fast_len}/{slow_len} | {hours_back}h")
+    print("=" * 80)
+    print(f"  📈 Anzahl Trades:      {result['num_trades']}")
+    print(f"  ✅ Gewinne:            {result['num_wins']}")
+    print(f"  ❌ Verluste:           {result['num_losses']}")
+    print(f"  🎯 Trefferquote:       {result['win_rate_pct']}%")
+    print(f"  💰 Total PnL:          {result['total_pnl_pct']:+.2f}%")
+    print(f"  📊 Avg. Gewinn:        {result['avg_win_pct']:+.2f}%")
+    print(f"  📉 Avg. Verlust:       {result['avg_loss_pct']:+.2f}%")
+    print("-" * 80)
+    
+    if result['trades']:
+        print("  📋 Letzte 10 Trades:")
+        for i, trade in enumerate(result['trades'][-10:], 1):
+            direction = "📈 LONG" if trade['direction'] == 'buy' else "📉 SHORT"
+            pnl = trade['pnl_pct']
+            pnl_str = f"{pnl:+.2f}%"
+            print(f"    {i:2}. {direction} | Entry: ${trade['entry']:.2f} | Exit: ${trade['exit']:.2f} | PnL: {pnl_str}")
+    else:
+        print("  📭 Keine Trades")
+    
+    print("=" * 80 + "\n")
+
+
+def run_backtest(timestamps, closes, fast_len, slow_len):
+    ema_fast = calc_ema_series(closes, fast_len)
+    ema_slow = calc_ema_series(closes, slow_len)
+
+    trades = []
+    position = None
+    last_relation = None
+    equity_curve = []
+    cumulative_pnl = 0.0
+
+    for i in range(len(closes)):
+        relation = "above" if ema_fast[i] > ema_slow[i] else "below"
+
+        if last_relation is not None and relation != last_relation:
+            direction = "buy" if relation == "above" else "sell"
+            price = closes[i]
+
+            if position is not None:
+                entry = position["entry_price"]
+                if position["direction"] == "buy":
+                    pnl_pct = (price - entry) / entry * 100
+                else:
+                    pnl_pct = (entry - price) / entry * 100
+                cumulative_pnl += pnl_pct
+                trades.append({
+                    "direction": position["direction"], "entry": entry, "exit": price,
+                    "pnl_pct": round(pnl_pct, 4), "entry_ts": position["entry_ts"], "exit_ts": timestamps[i],
+                })
+                equity_curve.append({"ts": timestamps[i], "cum_pnl_pct": round(cumulative_pnl, 4)})
+
+            position = {"direction": direction, "entry_price": price, "entry_ts": timestamps[i]}
+
+        last_relation = relation
+
+    wins = [t for t in trades if t["pnl_pct"] > 0]
+    losses = [t for t in trades if t["pnl_pct"] <= 0]
+    total_pnl = sum(t["pnl_pct"] for t in trades)
+
+    return {
+        "trades": trades,
+        "equity_curve": equity_curve,
+        "num_trades": len(trades),
+        "num_wins": len(wins),
+        "num_losses": len(losses),
+        "win_rate_pct": round(len(wins) / len(trades) * 100, 1) if trades else 0,
+        "total_pnl_pct": round(total_pnl, 4),
+        "avg_win_pct": round(sum(t["pnl_pct"] for t in wins) / len(wins), 4) if wins else 0,
+        "avg_loss_pct": round(sum(t["pnl_pct"] for t in losses) / len(losses), 4) if losses else 0,
+    }
+
+
+async def run_backtest_and_print():
+    """Führt Backtest durch und gibt Ergebnisse im Log aus."""
+    if not BACKTEST_ENABLED:
+        return
+    
+    try:
+        print(f"\n🔄 Backtest wird gestartet... ({BACKTEST_HOURS}h, {SYMBOL}, EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN})")
+        
+        timestamps, closes = await fetch_candles_paginated(MARKET_INDEX, RESOLUTION, BACKTEST_HOURS)
+        
+        if len(closes) < EMA_SLOW_LEN + 2:
+            print(f"⚠️ Zu wenig Daten für Backtest (nur {len(closes)} Kerzen)")
+            return
+        
+        result = run_backtest(timestamps, closes, EMA_FAST_LEN, EMA_SLOW_LEN)
+        
+        # Ergebnisse im Log anzeigen
+        print_backtest_results(result, BACKTEST_HOURS, SYMBOL, EMA_FAST_LEN, EMA_SLOW_LEN)
+        
+        STATE["backtest_last_run"] = datetime.now().isoformat()
+        
+    except Exception as e:
+        print(f"❌ Backtest fehlgeschlagen: {e}")
+        debug_log("⚠️ Backtest fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+
+# ========== State ==========
+OPEN_POSITIONS = {}
+STATE = {
+    "status": "startet...",
+    "symbol": None, "resolution": None, "ema_fast_len": None, "ema_slow_len": None,
+    "current": {}, "backtest_last_run": None,
+    "dry_run": None, "started_at": datetime.now().isoformat(),
+}
+
+# ========== Konfiguration ==========
+SYMBOL = os.getenv("EMA_SYMBOL", "BTC")
+if SYMBOL not in MARKET_INDICES:
+    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES")
+MARKET_INDEX = MARKET_INDICES[SYMBOL]
+
+RESOLUTION = os.getenv("EMA_RESOLUTION", "5")
+EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "7"))
+EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "21"))
+CANDLE_COUNT_BACK = int(os.getenv("CANDLE_COUNT_BACK", "100"))
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
+
+MARGIN = float(os.getenv("EMA_MARGIN", "100"))
+LEVERAGE = int(os.getenv("EMA_LEVERAGE", "10"))
+
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+
+BACKTEST_ENABLED = os.getenv("BACKTEST_ENABLED", "true").lower() == "true"
+BACKTEST_HOURS = int(os.getenv("BACKTEST_HOURS", "48"))
+BACKTEST_REFRESH_MINUTES = int(os.getenv("BACKTEST_REFRESH_MINUTES", "60"))
+
+current_position_side = None
+last_processed_candle_ts = None
+last_relation = None
+
+
 async def check_for_signal():
     global last_processed_candle_ts, last_relation, current_position_side
 
     raw = None
     for attempt in range(3):
         try:
-            raw = await fetch_candles(MARKET_INDEX, int(RESOLUTION), count_back=CANDLE_COUNT_BACK)
+            raw = await fetch_candles(MARKET_INDEX, RESOLUTION, count_back=CANDLE_COUNT_BACK)
             timestamps, closes = extract_close_prices_and_ts(raw)
             if closes:
                 break
@@ -448,27 +442,28 @@ async def check_for_signal():
 
     current_relation = "above" if latest_fast > latest_slow else "below"
 
-    if last_relation is None:
-        last_relation = current_relation
-        print(f"🔄 Initialer Zustand: {current_relation} (EMA {EMA_FAST_LEN}: {latest_fast:.2f}, EMA {EMA_SLOW_LEN}: {latest_slow:.2f})")
-        return
+    STATE["current"] = {
+        "letzte_kerze_ts": latest_ts, "close": latest_close,
+        "ema_fast": round(latest_fast, 4), "ema_slow": round(latest_slow, 4),
+        "beziehung": current_relation, "updated_at": datetime.now().isoformat(),
+    }
+    STATE["status"] = "läuft"
 
     if last_processed_candle_ts == latest_ts:
         return
     last_processed_candle_ts = latest_ts
 
-    if current_relation != last_relation:
+    if last_relation is not None and current_relation != last_relation:
         direction = "buy" if current_relation == "above" else "sell"
-        print(f"\n📡 EMA CROSSOVER erkannt: {direction.upper()} {SYMBOL} @ ${latest_close:.2f}")
-        print(f"   EMA {EMA_FAST_LEN}: {latest_fast:.2f} | EMA {EMA_SLOW_LEN}: {latest_slow:.2f}")
+        print(f"\n📡 EMA CROSS erkannt: {direction.upper()} {SYMBOL} @ ${latest_close:.2f}")
 
         if current_position_side != direction:
             if DRY_RUN:
-                print(f"🧪 DRY_RUN: {direction.upper()} (keine echte Order ausgeführt)")
+                print(f"🧪 DRY_RUN: {direction.upper()} (keine echte Order)")
                 current_position_side = direction
             else:
                 result = await open_or_reverse_position(direction, SYMBOL, MARGIN, LEVERAGE, latest_close)
-                print(f"✅ Order-Ergebnis: {result}")
+                debug_log("Order-Ergebnis", result)
                 current_position_side = direction
 
     last_relation = current_relation
@@ -480,43 +475,32 @@ async def trading_loop():
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
-# ========== KONFIGURATION ==========
-SYMBOL = os.getenv("EMA_SYMBOL", "BTC")
-if SYMBOL not in MARKET_INDICES:
-    raise ValueError(f"Symbol {SYMBOL} nicht in MARKET_INDICES")
-MARKET_INDEX = MARKET_INDICES[SYMBOL]
-
-RESOLUTION = os.getenv("EMA_RESOLUTION", "5")
-EMA_FAST_LEN = int(os.getenv("EMA_FAST_LEN", "7"))
-EMA_SLOW_LEN = int(os.getenv("EMA_SLOW_LEN", "21"))
-CANDLE_COUNT_BACK = int(os.getenv("CANDLE_COUNT_BACK", "100"))
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
-
-MARGIN = float(os.getenv("EMA_MARGIN", "100"))
-LEVERAGE = int(os.getenv("EMA_LEVERAGE", "10"))
-
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
-
-BACKTEST_ENABLED = os.getenv("BACKTEST_ENABLED", "true").lower() == "true"
-BACKTEST_HOURS = int(os.getenv("BACKTEST_HOURS", "48"))
+async def backtest_loop():
+    # Beim Start einmal ausführen
+    await run_backtest_and_print()
+    
+    # Dann periodisch
+    while True:
+        await asyncio.sleep(BACKTEST_REFRESH_MINUTES * 60)
+        await run_backtest_and_print()
 
 
 async def main():
-    print("=" * 80)
+    print("=" * 60)
     print(f"🚀 EMA {EMA_FAST_LEN}/{EMA_SLOW_LEN} Crossover Bot für {SYMBOL}")
     print(f"   Resolution: {RESOLUTION}m | Poll-Intervall: {POLL_INTERVAL_SECONDS}s")
     print(f"   DRY_RUN: {DRY_RUN} | Margin: {MARGIN} USDC | Hebel: {LEVERAGE}x")
-    print(f"   Backtest: {'AN' if BACKTEST_ENABLED else 'AUS'} ({BACKTEST_HOURS}h)")
-    print("=" * 80)
+    print(f"   Backtest: {'AN' if BACKTEST_ENABLED else 'AUS'} ({BACKTEST_HOURS}h, alle {BACKTEST_REFRESH_MINUTES}min)")
+    print("=" * 60)
+    print("\n💡 Backtest-Ergebnisse werden hier im Log angezeigt!\n")
 
-    # Backtest beim Start
+    # Backtest und Trading parallel starten
+    tasks = []
     if BACKTEST_ENABLED:
-        await run_backtest_and_print()
+        tasks.append(backtest_loop())
+    tasks.append(trading_loop())
     
-    print("\n🚀 Starte Live-Trading...")
-    print("-" * 80)
-    
-    await trading_loop()
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
