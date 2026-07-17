@@ -50,15 +50,20 @@ MARKET_INDEX = MARKET_INDICES[SYMBOL]
 
 # OBI Konfiguration
 OBI_LEVELS = int(os.getenv("OBI_LEVELS", "25"))
-OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.30"))
-OBI_AVG_WINDOW_SECONDS = float(os.getenv("OBI_AVG_WINDOW_SECONDS", "5"))  # Kürzer für schnellere Signale
-COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "5"))  # Kürzer für mehr Trades
+OBI_THRESHOLD = float(os.getenv("OBI_THRESHOLD", "0.35"))  # 🆕 Erhöht für bessere Signale
+OBI_AVG_WINDOW_SECONDS = float(os.getenv("OBI_AVG_WINDOW_SECONDS", "3"))  # 🆕 Kürzer für schnellere Reaktion
+COOLDOWN_SECONDS = float(os.getenv("COOLDOWN_SECONDS", "3"))  # 🆕 Kürzer für mehr Trades
 
-# 📊 TRADING PARAMETER
-TP_PERCENT = float(os.getenv("TP_PERCENT", "0.10"))  # 0.1% Gewinn
-SL_PERCENT = float(os.getenv("SL_PERCENT", "0.10"))  # 0.1% Verlust
-MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "5"))  # Max 5 Sekunden halten
-MIN_TRADE_INTERVAL = float(os.getenv("MIN_TRADE_INTERVAL", "3"))  # Mindestens 3s zwischen Trades
+# 📊 TRADING PARAMETER - OPTIMIERT
+TP_PERCENT = float(os.getenv("TP_PERCENT", "0.08"))  # 🆕 0.08% Gewinn (realistischer)
+SL_PERCENT = float(os.getenv("SL_PERCENT", "0.06"))  # 🆕 0.06% Verlust (engerer SL)
+MAX_POSITION_TIME = float(os.getenv("MAX_POSITION_TIME", "6"))  # 🆕 6 Sekunden halten
+MIN_TRADE_INTERVAL = float(os.getenv("MIN_TRADE_INTERVAL", "2"))  # 🆕 2s zwischen Trades
+
+# 🆕 MARGIN KONFIGURATION
+ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
+LEVERAGE = float(os.getenv("LEVERAGE", "1.0"))
+POSITION_SIZE_PCT = float(os.getenv("POSITION_SIZE_PCT", "100"))
 
 # ========== STATE ==========
 order_book = {"bids": {}, "asks": {}}
@@ -69,7 +74,7 @@ last_signal_time = 0.0
 last_trade_time = 0.0
 
 # Offene Position
-open_position = None  # {"side": "buy"/"sell", "entry_price": x, "entry_time": ts, "entry_trade_id": x}
+open_position = None
 position_opened_at = 0.0
 
 # Statistik
@@ -79,10 +84,12 @@ stats = {
     "wins": 0,
     "losses": 0,
     "total_pnl_pct": 0.0,
+    "total_pnl_usd": 0.0,  # 🆕 USD PnL
     "avg_hold_time": 0.0,
     "total_hold_time": 0.0,
     "max_win": 0.0,
     "max_loss": 0.0,
+    "current_balance": ACCOUNT_BALANCE,  # 🆕 Aktueller Kontostand
 }
 trade_log = []
 
@@ -119,6 +126,14 @@ def mid_price():
     return (bb + ba) / 2
 
 
+def calc_spread():
+    """🆕 Berechnet den Spread in %"""
+    bb, ba = best_bid(), best_ask()
+    if bb is None or ba is None or bb == 0:
+        return 0.0
+    return (ba - bb) / bb * 100
+
+
 def calc_obi(levels=OBI_LEVELS):
     bids_sorted = sorted(order_book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
     asks_sorted = sorted(order_book["asks"].items(), key=lambda x: float(x[0]))[:levels]
@@ -138,6 +153,21 @@ def update_obi_average(raw_obi):
     if not obi_avg_buffer:
         return 0.0
     return sum(v for v, _ in obi_avg_buffer) / len(obi_avg_buffer)
+
+
+# 🆕 POSITION SIZING
+def calculate_position_size(entry_price):
+    """Berechnet die Positionsgröße basierend auf Hebel"""
+    base_size = stats["current_balance"] * (POSITION_SIZE_PCT / 100)
+    leveraged_size = base_size * LEVERAGE
+    units = leveraged_size / entry_price if entry_price > 0 else 0
+    
+    return {
+        "usd_size": round(leveraged_size, 2),
+        "units": round(units, 6),
+        "leverage": LEVERAGE,
+        "margin_used": round(leveraged_size / LEVERAGE if LEVERAGE > 0 else leveraged_size, 2)
+    }
 
 
 # ========== TRADING LOGIK ==========
@@ -181,11 +211,17 @@ def check_signal_and_execute(avg_obi):
         debug_log("⚠️ Kein OrderBook für Entry verfügbar")
         return
     
-    # Market-Preis = Best Ask (für Buy) oder Best Bid (für Sell)
+    # 🔥 KORREKTE ENTRY-PREISE
     if direction == "buy":
-        entry_price = ba  # Kaufe zum besten Ask
+        entry_price = ba  # Kaufe zum Ask
     else:
-        entry_price = bb  # Verkaufe zum besten Bid
+        entry_price = bb  # Verkaufe zum Bid
+    
+    # 🆕 Positionsgröße berechnen
+    position_info = calculate_position_size(entry_price)
+    
+    # Spread berechnen
+    spread_pct = calc_spread()
     
     # Position eröffnen
     open_position = {
@@ -194,7 +230,12 @@ def check_signal_and_execute(avg_obi):
         "entry_time": now,
         "entry_obi": avg_obi,
         "entry_bb": bb,
-        "entry_ba": ba
+        "entry_ba": ba,
+        "spread": spread_pct,
+        "size_usd": position_info["usd_size"],
+        "units": position_info["units"],
+        "leverage": position_info["leverage"],
+        "margin_used": position_info["margin_used"]
     }
     position_opened_at = now
     last_signal_time = now
@@ -203,13 +244,12 @@ def check_signal_and_execute(avg_obi):
     
     stats["signals"] += 1
     
-    # Spread-Log
-    spread_pct = (ba - bb) / bb * 100 if bb > 0 else 0
-    
     debug_log(
-        f"💥 MARKET-ENTRY: {direction.upper()} @ {entry_price} "
-        f"(OBI: {round(avg_obi, 3)}, Spread: {round(spread_pct, 2)}%, "
-        f"Bid: {bb}, Ask: {ba})"
+        f"💥 MARKET-ENTRY: {direction.upper()} @ {entry_price}\n"
+        f"   📊 Spread: {round(spread_pct, 3)}% | Bid: {bb} | Ask: {ba}\n"
+        f"   📊 Size: ${position_info['usd_size']} ({position_info['units']} {SYMBOL})\n"
+        f"   🔧 Hebel: {position_info['leverage']}x | Margin: ${position_info['margin_used']}\n"
+        f"   📈 OBI: {round(avg_obi, 3)}"
     )
 
 
@@ -227,46 +267,41 @@ def check_position_exit(last_trade_price, last_trade_received_at):
     side = open_position["side"]
     now = time.time()
     
-    # Berechne aktuellen PnL
+    # 🔥 KORREKTE PnL BERECHNUNG
     if side == "buy":
-        pnl_pct = (last_trade_price - entry_price) / entry_price * 100
-        # Für Buy: Verkaufen zum besten Bid (nicht zum Trade-Preis)
+        # Bei Buy: Verkaufen zum besten Bid
         exit_price = best_bid()
+        if exit_price is None:
+            exit_price = last_trade_price
+        pnl_pct = (exit_price - entry_price) / entry_price * 100
     else:
-        pnl_pct = (entry_price - last_trade_price) / entry_price * 100
-        # Für Sell: Kaufen zum besten Ask (nicht zum Trade-Preis)
+        # Bei Sell: Kaufen zum besten Ask
         exit_price = best_ask()
+        if exit_price is None:
+            exit_price = last_trade_price
+        pnl_pct = (entry_price - exit_price) / entry_price * 100
     
-    # Falls kein Market-Preis verfügbar, Trade-Preis verwenden
-    if exit_price is None:
-        exit_price = last_trade_price
-        debug_log(f"⚠️ Kein Market-Preis, verwende Trade-Price: {exit_price}")
+    # 🆕 PnL in USD
+    pnl_usd = pnl_pct / 100 * open_position["size_usd"]
     
     # 🎯 TAKE-PROFIT erreicht?
     if pnl_pct >= TP_PERCENT:
-        close_position(exit_price, pnl_pct, "TP")
+        close_position(exit_price, pnl_pct, pnl_usd, "TP")
         return
     
     # 🛑 STOP-LOSS erreicht?
     if pnl_pct <= -SL_PERCENT:
-        close_position(exit_price, pnl_pct, "SL")
+        close_position(exit_price, pnl_pct, pnl_usd, "SL")
         return
     
     # ⏰ TIMEOUT - zu lange offen
     hold_time = now - position_opened_at
     if hold_time > MAX_POSITION_TIME:
-        close_position(exit_price, pnl_pct, f"TIMEOUT ({round(hold_time, 1)}s)")
+        close_position(exit_price, pnl_pct, pnl_usd, f"TIMEOUT ({round(hold_time, 1)}s)")
         return
-    
-    # 📉 Bei negativem PnL und > 3 Sekunden: Vorsichtiger Exit
-    if pnl_pct < -0.02 and hold_time > 3:
-        debug_log(f"⚠️ Leichter Verlust ({round(pnl_pct, 2)}%) nach {round(hold_time, 1)}s - erwäge Exit")
-        # Wenn der Verlust wächst, früher aussteigen
-        if pnl_pct < -0.05:
-            close_position(exit_price, pnl_pct, "EARLY_SL")
 
 
-def close_position(price, pnl_pct, reason):
+def close_position(price, pnl_pct, pnl_usd, reason):
     """
     Schließt Position mit Market-Order.
     💥 Sofortige Ausführung!
@@ -283,8 +318,10 @@ def close_position(price, pnl_pct, reason):
     # 💥 MARKET-EXIT
     stats["trades_completed"] += 1
     stats["total_pnl_pct"] += pnl_pct
+    stats["total_pnl_usd"] += pnl_usd
     stats["total_hold_time"] += hold_time
     stats["avg_hold_time"] = stats["total_hold_time"] / stats["trades_completed"]
+    stats["current_balance"] += pnl_usd
     
     if pnl_pct > 0:
         stats["wins"] += 1
@@ -301,10 +338,13 @@ def close_position(price, pnl_pct, reason):
         "entry": round(entry_price, 2),
         "exit": round(price, 2),
         "pnl_pct": round(pnl_pct, 4),
-        "pnl_abs": round((price - entry_price) if side == "buy" else (entry_price - price), 2),
+        "pnl_usd": round(pnl_usd, 2),
         "reason": reason,
         "hold_time": round(hold_time, 2),
         "entry_obi": round(open_position.get("entry_obi", 0), 3),
+        "leverage": open_position.get("leverage", 1.0),
+        "size_usd": round(open_position.get("size_usd", 0), 2),
+        "spread": round(open_position.get("spread", 0), 3),
         "closed_at": datetime.now().isoformat()
     }
     trade_log.append(trade_entry)
@@ -313,9 +353,10 @@ def close_position(price, pnl_pct, reason):
     emoji = "✅" if pnl_pct > 0 else "❌"
     debug_log(
         f"{emoji} MARKET-EXIT: {side.upper()} @ {price} | "
-        f"PnL: {round(pnl_pct, 2)}% | "
+        f"PnL: {round(pnl_pct, 2)}% (${round(pnl_usd, 2)}) | "
         f"Dauer: {round(hold_time, 2)}s | "
-        f"Grund: {reason}"
+        f"Grund: {reason} | "
+        f"Balance: ${round(stats['current_balance'], 2)}"
     )
     
     # Position zurücksetzen
@@ -337,10 +378,13 @@ def log_status(raw_obi, avg_obi):
         "win_rate": win_rate,
         "avg_pnl_pct": avg_pnl,
         "total_pnl_pct": round(stats["total_pnl_pct"], 4),
+        "total_pnl_usd": round(stats["total_pnl_usd"], 2),
+        "balance": round(stats["current_balance"], 2),
+        "leverage": LEVERAGE,
         "max_win": round(stats["max_win"], 2),
         "max_loss": round(stats["max_loss"], 2),
         "avg_hold_time": round(stats["avg_hold_time"], 2),
-        "offene_position": open_position,
+        "offene_position": open_position is not None,
         "last_trade": trade_log[-1] if trade_log else None
     }
     
@@ -354,6 +398,7 @@ def log_status(raw_obi, avg_obi):
             else:
                 unrealized = (open_position["entry_price"] - ba) / open_position["entry_price"] * 100
             status_data["unrealized_pnl"] = round(unrealized, 2)
+            status_data["spread"] = round(calc_spread(), 3)
     
     debug_log("📊 OBI Market-Trader Status", status_data)
 
@@ -370,6 +415,7 @@ async def listen():
         await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDEX}"}))
         debug_log(f"✅ Verbunden für {SYMBOL} (Market Index {MARKET_INDEX})")
         debug_log(f"⚡ Strategie: Market-Execution | TP: {TP_PERCENT}% | SL: {SL_PERCENT}% | Max-Halt: {MAX_POSITION_TIME}s")
+        debug_log(f"💰 Hebel: {LEVERAGE}x | Balance: ${ACCOUNT_BALANCE}")
 
         async for raw in ws:
             msg = json.loads(raw)
@@ -410,8 +456,9 @@ async def main():
     print(f"⚡ OBI MARKET-TRADER für {SYMBOL}")
     print(f"   📊 OBI Schwelle: {OBI_THRESHOLD} | Ø-Fenster: {OBI_AVG_WINDOW_SECONDS}s")
     print(f"   🎯 TP: {TP_PERCENT}% | 🛑 SL: {SL_PERCENT}% | ⏰ Max-Halt: {MAX_POSITION_TIME}s")
+    print(f"   💰 Hebel: {LEVERAGE}x | Balance: ${ACCOUNT_BALANCE}")
     print(f"   🚀 Ausführung: SOFORTIGE MARKET-ORDERS")
-    print(f"   ⚡ Ziel: 20-30 Trades/Stunde | Positionen < 5 Sekunden")
+    print(f"   ⚡ Ziel: 20-30 Trades/Stunde | Positionen < 6 Sekunden")
     print("=" * 70)
     print("   💰 Vorteile: Blitzschnell, nutzt OBI-Signale optimal")
     print("   💸 Nachteile: Zahlt Spread (0.05-0.1%)")
