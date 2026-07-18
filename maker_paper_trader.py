@@ -83,7 +83,7 @@ MAX_POSITION_USDC = float(os.getenv("MM_MAX_POSITION_USDC", "50"))  # max. Netto
 
 OBI_SKEW_ENABLED = os.getenv("MM_OBI_SKEW_ENABLED", "true").lower() == "true"
 OBI_LEVELS = int(os.getenv("MM_OBI_LEVELS", "15"))
-OBI_SKEW_FACTOR = float(os.getenv("MM_OBI_SKEW_FACTOR", "0.02"))  # wie stark OBI die Quotes verschiebt
+MM_SKEW_RATIO = float(os.getenv("MM_SKEW_RATIO", "0.3"))  # Anteil des halben Spreads, max. Verschiebung (0.3 = max 30%)
 
 ACCOUNT_SYNC_SECONDS = float(os.getenv("MM_ACCOUNT_SYNC_SECONDS", "120"))
 
@@ -205,10 +205,18 @@ def calc_obi(levels=OBI_LEVELS):
 
 def compute_target_quotes(mid, obi):
     """Berechnet Ziel-Bid/Ask-Preise inkl. optionalem OBI-Skew und Inventory-Limit."""
-    skew = (obi * OBI_SKEW_FACTOR * mid) if OBI_SKEW_ENABLED else 0.0
+    half_spread = mid * (SPREAD_PCT / 100)
+    # Skew ist jetzt an den Spread gekoppelt (max. MM_SKEW_RATIO Anteil des halben Spreads),
+    # statt ein unabhaengiger, potenziell riesiger Prozentsatz vom Preis - verhindert, dass
+    # die Quotes bei starkem OBI wild vom Mid wegspringen.
+    skew = (obi * half_spread * MM_SKEW_RATIO) if OBI_SKEW_ENABLED else 0.0
 
-    bid_price = mid * (1 - SPREAD_PCT / 100) + skew
-    ask_price = mid * (1 + SPREAD_PCT / 100) + skew
+    bid_price = mid - half_spread + skew
+    ask_price = mid + half_spread + skew
+
+    # Sicherheits-Clamp: bid darf nie >= mid sein, ask nie <= mid (auch bei extremem Skew nicht)
+    bid_price = min(bid_price, mid - half_spread * 0.1)
+    ask_price = max(ask_price, mid + half_spread * 0.1)
 
     position_usdc = STATE["inventory"] * mid
     quote_bid = True
