@@ -75,7 +75,7 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 MARGIN = float(os.getenv("MM_MARGIN", "10"))         # z.B. 10 USDC pro Order-Seite
 LEVERAGE = int(os.getenv("MM_LEVERAGE", "20"))        # z.B. 20x
 
-SPREAD_PCT = float(os.getenv("MM_SPREAD_PCT", "0.05"))       # Abstand jeder Quote vom Mid, in %
+SPREAD_PCT = float(os.getenv("MM_SPREAD_PCT", "0.02"))       # Abstand jeder Quote vom Mid, in %
 REQUOTE_SECONDS = float(os.getenv("MM_REQUOTE_SECONDS", "5"))  # wie oft Quotes ueberpruefen/nachziehen
 REQUOTE_MOVE_THRESHOLD_PCT = float(os.getenv("MM_REQUOTE_MOVE_PCT", "0.03"))  # ab wie viel Mid-Bewegung requoten
 
@@ -371,8 +371,13 @@ async def listen():
                 now = time.time()
                 if now - last_status_log >= 30:
                     last_status_log = now
+                    market_spread_pct = round((ba - bb) / mid * 100, 4)
                     debug_log("📊 Market-Maker Status", {
                         "mid_preis": round(mid, 4),
+                        "best_bid": bb,
+                        "best_ask": ba,
+                        "markt_spread_pct": market_spread_pct,
+                        "unser_spread_pct": SPREAD_PCT,
                         "obi": round(obi, 3),
                         "inventory": round(STATE["inventory"], 6),
                         "inventory_usdc": round(STATE["inventory"] * mid, 2),
