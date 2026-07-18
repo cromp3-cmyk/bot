@@ -112,7 +112,10 @@ async def place_post_only_limit(client, is_ask, price, base_amount):
 
 async def cancel_all_real_orders(client):
     try:
-        await client.cancel_all_orders(market_index=MARKET_INDEX)
+        await client.cancel_all_orders(
+            market_index=MARKET_INDEX,
+            time_in_force=client.ORDER_TIME_IN_FORCE_POST_ONLY
+        )
     except Exception as e:
         debug_log("⚠️ cancel_all_orders fehlgeschlagen", {"error": str(e)})
 
