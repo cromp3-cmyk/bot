@@ -213,7 +213,6 @@ async def manage_open_position(client, current_price):
 
     side = open_position["side"]
     entry = open_position["entry_price"]
-    now = time.time()
 
     if side == "buy":
         pnl_pct = (current_price - entry) / entry * 100
@@ -222,12 +221,11 @@ async def manage_open_position(client, current_price):
 
     hit_tp = pnl_pct >= TP_PCT
     hit_sl = pnl_pct <= -SL_PCT
-    timeout = (now - open_position["opened_at"]) >= MAX_HOLD_SECONDS
 
-    if not (hit_tp or hit_sl or timeout):
+    if not (hit_tp or hit_sl):
         return
 
-    reason = "TP" if hit_tp else ("SL" if hit_sl else "TIMEOUT")
+    reason = "TP" if hit_tp else "SL"
 
     if not DRY_RUN:
         position_usdc = MARGIN * LEVERAGE
