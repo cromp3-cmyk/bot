@@ -73,7 +73,10 @@ CONFIG = {
     "grid_step_pct": float(os.getenv("GRID_STEP_PCT", "0.25")),
     "tp_step_pct": float(os.getenv("TP_STEP_PCT", "0.25")),
     "max_nachkauf": int(os.getenv("MAX_NACHKAUF", "5")),
+    "bot_active": True,
 }
+
+price_history = []  # [{"ts": ..., "price": ...}, ...] fuers Chart, letzte ~200 Punkte
 
 
 # ========== LIGHTER CLIENT ==========
@@ -102,6 +105,7 @@ async def place_market_order(client, is_ask, base_amount, reference_price):
         base_amount=base_amount, price=price_scaled, is_ask=is_ask,
         order_type=client.ORDER_TYPE_MARKET,
         time_in_force=client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL, reduce_only=False,
+        order_expiry=client.DEFAULT_IOC_EXPIRY,
     )
     return tx, tx_hash, err
 
@@ -211,12 +215,19 @@ async def on_price_update(price):
     if price is None:
         return
 
+    price_history.append({"ts": int(time.time() * 1000), "price": price})
+    if len(price_history) > 200:
+        price_history.pop(0)
+
     if anchor_price is None:
         anchor_price = price
-        debug_log(f"⚓ Anker gesetzt bei {price}")
         return
 
+    bot_active = CONFIG["bot_active"]
+
     if position is None:
+        if not bot_active:
+            return  # gestoppt und flach -> nichts tun
         grid_step_abs = anchor_price * (CONFIG["grid_step_pct"] / 100)
         if price <= anchor_price - grid_step_abs:
             await execute_entry("long", price, is_add_on=False)
@@ -224,6 +235,8 @@ async def on_price_update(price):
             await execute_entry("short", price, is_add_on=False)
         return
 
+    # Eine offene Position wird auch im gestoppten Zustand weiter auf TP hin ueberwacht
+    # (Sicherheit) - nur NEUE Einstiege/Nachkaeufe werden bei bot_active=false blockiert
     tp_step_abs = avg_entry_price * (CONFIG["tp_step_pct"] / 100)
     grid_step_abs = avg_entry_price * (CONFIG["grid_step_pct"] / 100)
     max_nachkauf = CONFIG["max_nachkauf"]
@@ -231,12 +244,12 @@ async def on_price_update(price):
     if position == "long":
         if price >= avg_entry_price + tp_step_abs:
             await execute_exit(price, "TP")
-        elif price <= avg_entry_price - grid_step_abs and (max_nachkauf == 0 or entry_count < max_nachkauf):
+        elif bot_active and price <= avg_entry_price - grid_step_abs and (max_nachkauf == 0 or entry_count < max_nachkauf):
             await execute_entry("long", price, is_add_on=True)
     elif position == "short":
         if price <= avg_entry_price - tp_step_abs:
             await execute_exit(price, "TP")
-        elif price >= avg_entry_price + grid_step_abs and (max_nachkauf == 0 or entry_count < max_nachkauf):
+        elif bot_active and price >= avg_entry_price + grid_step_abs and (max_nachkauf == 0 or entry_count < max_nachkauf):
             await execute_entry("short", price, is_add_on=True)
 
 
@@ -274,9 +287,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="UTF-8"><title>Grid-Bot Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   body { font-family: -apple-system, sans-serif; background:#0f1117; color:#e5e7eb; margin:0; padding:20px; }
-  h1 { font-size: 20px; } h2 { font-size: 15px; color:#9ca3af; margin-top: 24px; }
+  h1 { font-size: 20px; display:flex; align-items:center; gap:12px; } h2 { font-size: 15px; color:#9ca3af; margin-top: 24px; }
   .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:12px; margin-bottom:16px; }
   .card { background:#1a1d29; border-radius:10px; padding:12px; }
   .card .label { font-size:11px; color:#9ca3af; text-transform:uppercase; }
@@ -284,20 +298,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .green { color:#4ade80; } .red { color:#f87171; } .yellow { color:#fbbf24; }
   .badge { display:inline-block; padding:2px 10px; border-radius:12px; font-size:12px; font-weight:600; }
   .badge.dry { background:#3730a3; color:#c7d2fe; } .badge.live { background:#7f1d1d; color:#fecaca; }
+  .badge.active { background:#14532d; color:#bbf7d0; } .badge.paused { background:#78350f; color:#fde68a; }
   form { background:#1a1d29; border-radius:10px; padding:16px; display:grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap:12px; align-items:end; }
   label { display:block; font-size:12px; color:#9ca3af; margin-bottom:4px; }
   input, select { width:100%; padding:6px 8px; background:#0f1117; border:1px solid #2a2e3f; border-radius:6px; color:#e5e7eb; box-sizing:border-box; }
-  button { grid-column: span 1; padding:8px 16px; background:#4f46e5; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:600; }
+  button { padding:8px 16px; background:#4f46e5; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:600; }
   button:hover { background:#4338ca; }
+  button.stop { background:#b91c1c; } button.stop:hover { background:#991b1b; }
+  button.start { background:#15803d; } button.start:hover { background:#166534; }
   table { width:100%; border-collapse:collapse; font-size:13px; margin-top:10px; }
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #2a2e3f; }
   th { color:#9ca3af; font-weight:500; }
   .warn { background:#7f1d1d; color:#fecaca; padding:8px 12px; border-radius:8px; font-size:13px; margin-top:10px; display:none; }
+  canvas { background:#1a1d29; border-radius:10px; padding:10px; margin-top:10px; }
 </style>
 </head>
 <body>
-<h1>📡 Grid-Bot <span id="mode-badge"></span></h1>
+<h1>📡 Grid-Bot <span id="mode-badge"></span><span id="active-badge"></span></h1>
+
+<div style="margin-bottom:16px;">
+  <button id="btn-start" class="start">▶️ Start</button>
+  <button id="btn-stop" class="stop">⏸️ Stop</button>
+</div>
+
 <div class="grid" id="status-grid"></div>
+
+<canvas id="priceChart" height="90"></canvas>
 
 <h2>Einstellungen ändern</h2>
 <form id="config-form">
@@ -320,25 +346,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <table id="trades-table"><thead><tr><th>Seite</th><th>Ø-Einstieg</th><th>Exit</th><th>Stufen</th><th>PnL $</th></tr></thead><tbody></tbody></table>
 
 <script>
+let priceChart;
+
+document.getElementById('btn-start').addEventListener('click', async () => {
+  await fetch('/api/control', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_active:true}) });
+});
+document.getElementById('btn-stop').addEventListener('click', async () => {
+  await fetch('/api/control', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_active:false}) });
+});
+
 async function refresh() {
   const res = await fetch('/api/status');
   const data = await res.json();
 
   document.getElementById('mode-badge').innerHTML =
     data.config.dry_run ? '<span class="badge dry">DRY RUN</span>' : '<span class="badge live">LIVE</span>';
+  document.getElementById('active-badge').innerHTML =
+    data.config.bot_active ? '<span class="badge active">AKTIV</span>' : '<span class="badge paused">GESTOPPT</span>';
   document.getElementById('live-warn').style.display = data.config.dry_run ? 'none' : 'block';
 
+  const gl = data.grid_levels || {};
   document.getElementById('status-grid').innerHTML = `
     <div class="card"><div class="label">Symbol</div><div class="value">${data.symbol}</div></div>
     <div class="card"><div class="label">Preis</div><div class="value">${data.last_price ?? '-'}</div></div>
-    <div class="card"><div class="label">Anker</div><div class="value">${data.anchor_price ?? '-'}</div></div>
     <div class="card"><div class="label">Position</div><div class="value ${data.position==='long'?'green':data.position==='short'?'red':'yellow'}">${data.position || 'flach'}</div></div>
     <div class="card"><div class="label">Ø-Einstieg</div><div class="value">${data.avg_entry_price ?? '-'}</div></div>
+    <div class="card"><div class="label">Unrealisiert $</div><div class="value ${data.unrealized_pnl_usd>=0?'green':'red'}">${data.unrealized_pnl_usd}</div></div>
     <div class="card"><div class="label">Nachkauf-Stufe</div><div class="value">${data.entry_count} / ${data.config.max_nachkauf || '∞'}</div></div>
     <div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>
-    <div class="card"><div class="label">Trades gesamt</div><div class="value">${data.stats.trades}</div></div>
-    <div class="card"><div class="label">Trefferquote</div><div class="value">${data.stats.win_rate_pct}%</div></div>
-    <div class="card"><div class="label">Gesamt-PnL $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
+    <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
+    <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
 
   if (!window.formTouched) {
@@ -348,6 +385,30 @@ async function refresh() {
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
     document.getElementById('max_nachkauf').value = data.config.max_nachkauf;
     document.getElementById('dry_run').value = String(data.config.dry_run);
+  }
+
+  const hist = data.price_history || [];
+  const labels = hist.map(p => new Date(p.ts).toLocaleTimeString());
+  const prices = hist.map(p => p.price);
+  const n = labels.length;
+
+  const datasets = [{ label: 'Preis', data: prices, borderColor:'#60a5fa', pointRadius:0, borderWidth:2 }];
+  if (gl.anchor) datasets.push({ label:'Anker', data: Array(n).fill(gl.anchor), borderColor:'#9ca3af', borderDash:[4,4], pointRadius:0, borderWidth:1 });
+  if (gl.tp_price) datasets.push({ label:'TP', data: Array(n).fill(gl.tp_price), borderColor:'#4ade80', borderDash:[6,3], pointRadius:0, borderWidth:1 });
+  if (gl.next_nachkauf_price) datasets.push({ label:'Nächster Nachkauf', data: Array(n).fill(gl.next_nachkauf_price), borderColor:'#f87171', borderDash:[6,3], pointRadius:0, borderWidth:1 });
+  if (gl.next_entry_long) datasets.push({ label:'Entry Long ab', data: Array(n).fill(gl.next_entry_long), borderColor:'#4ade80', borderDash:[2,2], pointRadius:0, borderWidth:1 });
+  if (gl.next_entry_short) datasets.push({ label:'Entry Short ab', data: Array(n).fill(gl.next_entry_short), borderColor:'#f87171', borderDash:[2,2], pointRadius:0, borderWidth:1 });
+
+  if (!priceChart) {
+    priceChart = new Chart(document.getElementById('priceChart'), {
+      type: 'line',
+      data: { labels, datasets },
+      options: { responsive:true, animation:false, scales:{ x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } }, plugins:{legend:{labels:{color:'#e5e7eb'}}} }
+    });
+  } else {
+    priceChart.data.labels = labels;
+    priceChart.data.datasets = datasets;
+    priceChart.update('none');
   }
 
   const trades = (data.trade_log || []).slice(-15).reverse();
@@ -388,17 +449,57 @@ async def handle_index(request):
     return web.Response(text=DASHBOARD_HTML, content_type="text/html")
 
 
+def calc_unrealized_pnl():
+    if position is None or avg_entry_price is None or last_price is None:
+        return 0.0
+    if position == "long":
+        return round((last_price - avg_entry_price) * total_coin_size, 4)
+    else:
+        return round((avg_entry_price - last_price) * total_coin_size, 4)
+
+
+def calc_grid_levels():
+    """Aktuelle relevante Preis-Levels fuers Chart (Anker/TP/naechster Nachkauf)."""
+    levels = {"anchor": anchor_price, "tp_price": None, "next_nachkauf_price": None}
+    if position is None:
+        if anchor_price is not None:
+            step = anchor_price * (CONFIG["grid_step_pct"] / 100)
+            levels["next_entry_long"] = round(anchor_price - step, 4)
+            levels["next_entry_short"] = round(anchor_price + step, 4)
+    elif avg_entry_price is not None:
+        tp_step = avg_entry_price * (CONFIG["tp_step_pct"] / 100)
+        grid_step = avg_entry_price * (CONFIG["grid_step_pct"] / 100)
+        if position == "long":
+            levels["tp_price"] = round(avg_entry_price + tp_step, 4)
+            levels["next_nachkauf_price"] = round(avg_entry_price - grid_step, 4)
+        else:
+            levels["tp_price"] = round(avg_entry_price - tp_step, 4)
+            levels["next_nachkauf_price"] = round(avg_entry_price + grid_step, 4)
+    return levels
+
+
 async def handle_status(request):
     win_rate = round(stats["wins"] / stats["trades"] * 100, 1) if stats["trades"] else 0
     payload = {
         "symbol": SYMBOL, "last_price": last_price, "anchor_price": anchor_price,
         "position": position, "avg_entry_price": round(avg_entry_price, 2) if avg_entry_price else None,
         "entry_count": entry_count, "liquidation_price": estimate_liquidation_price(),
+        "unrealized_pnl_usd": calc_unrealized_pnl(),
+        "grid_levels": calc_grid_levels(),
         "config": CONFIG,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": trade_log[-20:],
+        "price_history": price_history[-200:],
     }
     return web.json_response(payload)
+
+
+async def handle_control(request):
+    body = await request.json()
+    if "bot_active" in body:
+        CONFIG["bot_active"] = bool(body["bot_active"])
+        debug_log(f"{'▶️ Bot gestartet' if CONFIG['bot_active'] else '⏸️ Bot gestoppt (offene Position bleibt überwacht)'}")
+    return web.json_response({"success": True, "bot_active": CONFIG["bot_active"]})
 
 
 async def handle_config_update(request):
@@ -415,6 +516,7 @@ async def start_web_server():
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/status", handle_status)
     app.router.add_post("/api/config", handle_config_update)
+    app.router.add_post("/api/control", handle_control)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
