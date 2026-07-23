@@ -40,10 +40,26 @@ def debug_log(msg, data=None):
 
 
 # ========== MARKET / COIN CONFIG ==========
-MARKET_INDICES = {"ETH": 0, "BTC": 1, "SOL": 2, "DOGE": 3, "AVAX": 9, "SUI": 16}
-PRECISION_MAP = {"BTC": 100000, "ETH": 10000, "SOL": 1000, "AVAX": 100, "SUI": 10}
-PRICE_DECIMALS_MAP = {"BTC": 1, "ETH": 2, "SOL": 3, "AVAX": 3, "SUI": 5}
-MIN_BASE_AMOUNT_MAP = {"BTC": 0.00020, "ETH": 0.005, "SOL": 0.05, "AVAX": 0.5, "SUI": 3.0}
+MARKET_INDICES = {
+    "ETH": 0, "BTC": 1, "SOL": 2, "DOGE": 3, "AVAX": 9, "SUI": 16,
+    "EURUSD": 96, "GBPUSD": 97, "USDJPY": 98, "USDCHF": 99, "USDCAD": 100,
+    "AUDUSD": 106, "NZDUSD": 107, "USDKRW": 105,
+}
+PRECISION_MAP = {
+    "BTC": 100000, "ETH": 10000, "SOL": 1000, "AVAX": 100, "SUI": 10,
+    "EURUSD": 10, "GBPUSD": 10, "USDJPY": 1000, "USDCHF": 10, "USDCAD": 10,
+    "AUDUSD": 10, "NZDUSD": 10, "USDKRW": 10,
+}
+PRICE_DECIMALS_MAP = {
+    "BTC": 1, "ETH": 2, "SOL": 3, "AVAX": 3, "SUI": 5,
+    "EURUSD": 5, "GBPUSD": 5, "USDJPY": 3, "USDCHF": 5, "USDCAD": 5,
+    "AUDUSD": 5, "NZDUSD": 5, "USDKRW": 5,
+}
+MIN_BASE_AMOUNT_MAP = {
+    "BTC": 0.00020, "ETH": 0.005, "SOL": 0.05, "AVAX": 0.5, "SUI": 3.0,
+    "EURUSD": 10.0, "GBPUSD": 10.0, "USDJPY": 0.05, "USDCHF": 8.0, "USDCAD": 10.0,
+    "AUDUSD": 10.0, "NZDUSD": 10.0, "USDKRW": 10.0,
+}
 
 
 def get_precision(symbol):
