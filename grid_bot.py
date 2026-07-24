@@ -43,7 +43,7 @@ def debug_log(msg, data=None):
 MARKET_INDICES = {
     "ETH": 0, "BTC": 1, "SOL": 2, "DOGE": 3, "XRP": 7, "LINK": 8, "AVAX": 9,
     "NEAR": 10, "DOT": 11, "TON": 12, "SUI": 16, "BNB": 25, "UNI": 30, "APT": 31,
-    "ADA": 39, "TRX": 43, "LTC": 35, "BCH": 58, "HBAR": 59, "ICP": 102,
+    "ADA": 39, "TRX": 43, "LTC": 35, "BCH": 58, "HBAR": 59, "ICP": 102, "HYPE": 24,
     "EURUSD": 96, "GBPUSD": 97, "USDJPY": 98, "USDCHF": 99, "USDCAD": 100,
     "AUDUSD": 106, "NZDUSD": 107, "USDKRW": 105,
 }
@@ -102,8 +102,11 @@ def default_config():
         "dry_run": os.getenv("DRY_RUN", "true").lower() == "true",
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
+        "grid_mode": os.getenv("GRID_MODE", "pct"),  # "pct" oder "usd"
         "grid_step_pct": float(os.getenv("GRID_STEP_PCT", "0.25")),
         "tp_step_pct": float(os.getenv("TP_STEP_PCT", "0.25")),
+        "grid_step_usd": float(os.getenv("GRID_STEP_USD", "150")),
+        "tp_step_usd": float(os.getenv("TP_STEP_USD", "150")),
         "max_nachkauf": int(os.getenv("MAX_NACHKAUF", "5")),
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
@@ -177,6 +180,14 @@ def calc_unrealized_pnl(symbol):
         return round((st["avg_entry_price"] - st["last_price"]) * st["total_coin_size"], 4)
 
 
+def compute_step_abs(reference_price, cfg, which):
+    """which: 'grid' oder 'tp' - liefert den Abstand in Preiseinheiten, je nach grid_mode."""
+    if cfg["grid_mode"] == "usd":
+        return cfg["grid_step_usd"] if which == "grid" else cfg["tp_step_usd"]
+    pct = cfg["grid_step_pct"] if which == "grid" else cfg["tp_step_pct"]
+    return reference_price * (pct / 100)
+
+
 def calc_grid_levels(symbol):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -184,13 +195,13 @@ def calc_grid_levels(symbol):
               "grid_step_abs": None, "tp_step_abs": None}
     if st["position"] is None:
         if st["anchor_price"] is not None:
-            step = st["anchor_price"] * (cfg["grid_step_pct"] / 100)
+            step = compute_step_abs(st["anchor_price"], cfg, "grid")
             levels["next_entry_long"] = round(st["anchor_price"] - step, 4)
             levels["next_entry_short"] = round(st["anchor_price"] + step, 4)
             levels["grid_step_abs"] = round(step, 4)
     elif st["avg_entry_price"] is not None:
-        tp_step = st["avg_entry_price"] * (cfg["tp_step_pct"] / 100)
-        grid_step = st["avg_entry_price"] * (cfg["grid_step_pct"] / 100)
+        tp_step = compute_step_abs(st["avg_entry_price"], cfg, "tp")
+        grid_step = compute_step_abs(st["avg_entry_price"], cfg, "grid")
         levels["tp_step_abs"] = round(tp_step, 4)
         levels["grid_step_abs"] = round(grid_step, 4)
         if st["position"] == "long":
@@ -294,7 +305,7 @@ async def on_price_update(symbol, price):
     st["last_price"] = price
 
     st["price_history"].append({"ts": int(time.time() * 1000), "price": price})
-    if len(st["price_history"]) > 200:
+    if len(st["price_history"]) > 500:
         st["price_history"].pop(0)
 
     if st["anchor_price"] is None:
@@ -306,15 +317,15 @@ async def on_price_update(symbol, price):
     if st["position"] is None:
         if not bot_active:
             return
-        grid_step_abs = st["anchor_price"] * (cfg["grid_step_pct"] / 100)
+        grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
         if price <= st["anchor_price"] - grid_step_abs:
             await execute_entry(symbol, "long", price, is_add_on=False)
         elif price >= st["anchor_price"] + grid_step_abs:
             await execute_entry(symbol, "short", price, is_add_on=False)
         return
 
-    tp_step_abs = st["avg_entry_price"] * (cfg["tp_step_pct"] / 100)
-    grid_step_abs = st["avg_entry_price"] * (cfg["grid_step_pct"] / 100)
+    tp_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "tp")
+    grid_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "grid")
     max_nachkauf = cfg["max_nachkauf"]
 
     if st["position"] == "long":
@@ -397,9 +408,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   th { color:#9ca3af; font-weight:500; }
   .warn { background:#7f1d1d; color:#fecaca; padding:8px 12px; border-radius:8px; font-size:13px; margin-top:10px; display:none; }
   canvas { background:#1a1d29; border-radius:10px; padding:10px; margin-top:10px; }
+  #priceChart { max-height: 420px; }
   .coin-overview { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
   .coin-pill { background:#1a1d29; border:1px solid #2a2e3f; border-radius:20px; padding:4px 14px; font-size:13px; cursor:pointer; }
   .coin-pill.selected { border-color:#4f46e5; background:#1e1b4b; }
+  button.danger { background:#dc2626; } button.danger:hover { background:#b91c1c; }
+  button.neutral { background:#374151; } button.neutral:hover { background:#4b5563; }
 </style>
 </head>
 <body>
@@ -410,18 +424,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div style="margin-bottom:16px;">
   <button id="btn-start" class="start">▶️ Start</button>
   <button id="btn-stop" class="stop">⏸️ Stop</button>
+  <button id="btn-close" class="danger">✖️ Position jetzt schließen</button>
+  <button id="btn-reset" class="neutral">🔄 Reset (Statistik)</button>
 </div>
 
 <div class="grid" id="status-grid"></div>
 
-<canvas id="priceChart" height="90"></canvas>
+<canvas id="priceChart" height="400"></canvas>
 
 <h2>Einstellungen ändern (nur für den ausgewählten Coin)</h2>
 <form id="config-form">
   <div><label>Margin (USDC)</label><input type="number" step="1" id="margin"></div>
   <div><label>Hebel</label><input type="number" step="1" id="leverage"></div>
+  <div><label>Grid-Modus</label>
+    <select class="cfg" id="grid_mode">
+      <option value="pct">Prozent (%)</option>
+      <option value="usd">Fester $-Betrag</option>
+    </select>
+  </div>
   <div><label>Grid-Stufe (%)</label><input type="number" step="0.01" id="grid_step_pct"></div>
   <div><label>TP-Stufe (%)</label><input type="number" step="0.01" id="tp_step_pct"></div>
+  <div><label>Grid-Stufe ($)</label><input type="number" step="1" id="grid_step_usd"></div>
+  <div><label>TP-Stufe ($)</label><input type="number" step="1" id="tp_step_usd"></div>
   <div><label>Max. Nachkauf</label><input type="number" step="1" id="max_nachkauf"></div>
   <div><label>Nach TP sofort drehen</label>
     <select class="cfg" id="auto_reverse">
@@ -465,6 +489,20 @@ document.getElementById('btn-start').addEventListener('click', async () => {
 document.getElementById('btn-stop').addEventListener('click', async () => {
   await fetch(`/api/control?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_active:false}) });
 });
+document.getElementById('btn-close').addEventListener('click', async () => {
+  if (!confirm(`Position für ${currentSymbol} jetzt zum aktuellen Preis schließen?`)) return;
+  const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method:'POST' });
+  const data = await res.json();
+  if (data.error) alert(data.error);
+  refresh();
+});
+document.getElementById('btn-reset').addEventListener('click', async () => {
+  if (!confirm(`Statistik/Trade-Log für ${currentSymbol} zurücksetzen? (nur möglich wenn flach)`)) return;
+  const res = await fetch(`/api/reset?symbol=${currentSymbol}`, { method:'POST' });
+  const data = await res.json();
+  if (data.error) alert(data.error);
+  refresh();
+});
 
 async function refresh() {
   if (!currentSymbol) return;
@@ -502,8 +540,11 @@ async function refresh() {
   if (!window.formTouched) {
     document.getElementById('margin').value = data.config.margin;
     document.getElementById('leverage').value = data.config.leverage;
+    document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
+    document.getElementById('grid_step_usd').value = data.config.grid_step_usd;
+    document.getElementById('tp_step_usd').value = data.config.tp_step_usd;
     document.getElementById('max_nachkauf').value = data.config.max_nachkauf;
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('auto_reverse').value = String(data.config.auto_reverse);
@@ -528,7 +569,7 @@ async function refresh() {
   priceChart = new Chart(document.getElementById('priceChart'), {
     type: 'line',
     data: { labels, datasets },
-    options: { responsive:true, animation:false, scales:{ x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } }, plugins:{legend:{labels:{color:'#e5e7eb'}}} }
+    options: { responsive:true, maintainAspectRatio:false, animation:false, scales:{ x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } }, plugins:{legend:{labels:{color:'#e5e7eb'}}} }
   });
 
   const trades = (data.trade_log || []).slice(-15).reverse();
@@ -543,8 +584,11 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   const payload = {
     margin: parseFloat(document.getElementById('margin').value),
     leverage: parseInt(document.getElementById('leverage').value),
+    grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
+    grid_step_usd: parseFloat(document.getElementById('grid_step_usd').value),
+    tp_step_usd: parseFloat(document.getElementById('tp_step_usd').value),
     max_nachkauf: parseInt(document.getElementById('max_nachkauf').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     auto_reverse: document.getElementById('auto_reverse').value === 'true',
@@ -554,7 +598,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','grid_step_pct','tp_step_pct','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', () => { window.formTouched = true; });
 });
 
@@ -612,7 +656,8 @@ async def handle_config_update(request):
         return web.json_response({"error": "unknown symbol"}, status=404)
     body = await request.json()
     cfg = BOTS[symbol]["config"]
-    for key in ["margin", "leverage", "grid_step_pct", "tp_step_pct", "max_nachkauf", "dry_run", "auto_reverse"]:
+    for key in ["margin", "leverage", "grid_mode", "grid_step_pct", "tp_step_pct",
+                "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -631,6 +676,36 @@ async def handle_control(request):
     return web.json_response({"success": True, "bot_active": cfg["bot_active"]})
 
 
+async def handle_close_position(request):
+    """Manuelles sofortiges Schliessen der offenen Position (Market-Order, egal ob TP/SL erreicht)."""
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    st = BOTS[symbol]["state"]
+    if st["position"] is None:
+        return web.json_response({"error": "keine offene Position"}, status=400)
+    if st["last_price"] is None:
+        return web.json_response({"error": "kein aktueller Preis bekannt"}, status=400)
+    await execute_exit(symbol, st["last_price"], "MANUAL")
+    return web.json_response({"success": True})
+
+
+async def handle_reset(request):
+    """Setzt Statistik/Trade-Log/Anker zurueck - nur erlaubt wenn der Bot gerade flach ist."""
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    st = BOTS[symbol]["state"]
+    if st["position"] is not None:
+        return web.json_response({"error": "Position ist noch offen - erst schliessen, dann reset"}, status=400)
+    st["stats"] = {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0}
+    st["trade_log"] = []
+    st["anchor_price"] = st["last_price"]
+    st["entry_count"] = 0
+    debug_log(f"🔄 [{symbol}] Zurückgesetzt (Statistik, Trade-Log, neuer Anker)")
+    return web.json_response({"success": True})
+
+
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_index)
@@ -639,6 +714,8 @@ async def start_web_server():
     app.router.add_get("/api/status", handle_status)
     app.router.add_post("/api/config", handle_config_update)
     app.router.add_post("/api/control", handle_control)
+    app.router.add_post("/api/close", handle_close_position)
+    app.router.add_post("/api/reset", handle_reset)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
