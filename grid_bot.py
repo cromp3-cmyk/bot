@@ -191,11 +191,11 @@ async def fetch_candles_for_psar(symbol, resolution, count_back=100):
     async with lighter.ApiClient(configuration) as api_client:
         candle_api = lighter.CandlestickApi(api_client)
         now_ms = int(time.time() * 1000)
-        start_ms = now_ms - 60 * 60 * 24 * 7 * 1000
         response = await candle_api.candles(
-            market_id=MARKET_INDICES[symbol], resolution=resolution,
-            start_timestamp=start_ms, end_timestamp=now_ms,
-            count_back=min(count_back, 500), set_timestamp_to_end=True,
+            market_id=MARKET_INDICES[symbol],
+            resolution=resolution,
+            count_back=min(count_back, 500),
+            set_timestamp_to_end=True,
         )
         candles = getattr(response, "c", None)
         if not candles:
@@ -208,8 +208,8 @@ async def fetch_candles_for_psar(symbol, resolution, count_back=100):
             if None in (h_, l_, c_):
                 continue
             highs.append(float(h_)); lows.append(float(l_)); closes.append(float(c_))
-        return highs, lows, closes
-
+        return highs, lows, closes   
+        
 
 def calc_psar(highs, lows, af_step=0.02, af_max=0.2):
     """Standard Parabolic SAR (Wilder). Gibt (sar_werte, ist_uptrend) pro Kerze zurueck."""
