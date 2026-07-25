@@ -283,11 +283,18 @@ async def psar_poll_loop(symbol):
                         st = b["state"]
                         if (flipped_bullish or flipped_bearish) and last_signal_ts != signal_key:
                             last_signal_ts = signal_key
-                            if st["position"] is None and cfg["bot_active"]:
-                                direction = "long" if flipped_bullish else "short"
+                            if cfg["bot_active"]:
+                                new_direction = "long" if flipped_bullish else "short"
                                 price = closes[-1]
-                                debug_log(f"📡 [{symbol}] PSAR-Flip erkannt: {direction.upper()} @ {price}")
-                                await execute_entry(symbol, direction, price, is_add_on=False)
+                                debug_log(f"📡 [{symbol}] PSAR-Flip erkannt: {new_direction.upper()} @ {price}")
+
+                                if st["position"] is not None and st["position"] != new_direction:
+                                    # Reiner Buy/Sell-Bot: alte Position schliessen, sofort neue in
+                                    # Gegenrichtung eroeffnen - kein Grid, kein Durchschnittseinstieg
+                                    await execute_exit(symbol, price, "SAR-REVERSE")
+                                    await execute_entry(symbol, new_direction, price, is_add_on=False)
+                                elif st["position"] is None:
+                                    await execute_entry(symbol, new_direction, price, is_add_on=False)
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] PSAR-Abfrage fehlgeschlagen", {"error": str(e)})
 
@@ -408,7 +415,7 @@ async def execute_exit(symbol, price, reason):
     st["entry_count"] = 0
     st["anchor_price"] = price
 
-    if cfg.get("auto_reverse", True) and cfg["bot_active"]:
+    if cfg.get("auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid":
         opposite = "short" if closing_side == "long" else "long"
         await execute_entry(symbol, opposite, price, is_add_on=False)
 
@@ -437,6 +444,9 @@ async def on_price_update(symbol, price):
         elif price >= st["anchor_price"] + grid_step_abs:
             await execute_entry(symbol, "short", price, is_add_on=False)
         return
+
+    if cfg["entry_mode"] != "grid":
+        return  # PSAR-Positionen werden ausschliesslich durch den naechsten Flip beendet, kein %-TP/SL hier
 
     tp_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "tp")
     grid_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "grid")
@@ -550,6 +560,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <form id="config-form">
   <div><label>Margin (USDC)</label><input type="number" step="1" id="margin"></div>
   <div><label>Hebel</label><input type="number" step="1" id="leverage"></div>
+  <div><label>Strategie</label>
+    <select class="cfg" id="entry_mode">
+      <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
+      <option value="psar">Parabolic SAR (reiner Buy/Sell-Wechsel)</option>
+    </select>
+  </div>
+  <div><label>PSAR Zeitrahmen</label>
+    <select class="cfg" id="psar_resolution">
+      <option value="1">1 Minute</option>
+      <option value="2">2 Minuten</option>
+      <option value="5">5 Minuten</option>
+      <option value="10">10 Minuten</option>
+      <option value="15">15 Minuten</option>
+      <option value="30">30 Minuten</option>
+      <option value="60">1 Stunde</option>
+      <option value="240">4 Stunden</option>
+    </select>
+  </div>
   <div><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -647,6 +675,7 @@ async function refresh() {
     <div class="card"><div class="label">Unrealisiert $</div><div class="value ${data.unrealized_pnl_usd>=0?'green':'red'}">${data.unrealized_pnl_usd}</div></div>
     <div class="card"><div class="label">Nachkauf-Stufe</div><div class="value">${data.entry_count} / ${data.config.max_nachkauf || '∞'}</div></div>
     <div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>
+    <div class="card"><div class="label">PSAR (${data.config.entry_mode==='psar'?'aktiv':'inaktiv'})</div><div class="value ${data.psar_uptrend?'green':'red'}">${data.psar_value ?? '-'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -654,6 +683,8 @@ async function refresh() {
   if (!window.formTouched) {
     document.getElementById('margin').value = data.config.margin;
     document.getElementById('leverage').value = data.config.leverage;
+    document.getElementById('entry_mode').value = data.config.entry_mode;
+    document.getElementById('psar_resolution').value = data.config.psar_resolution;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -698,6 +729,8 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   const payload = {
     margin: parseFloat(document.getElementById('margin').value),
     leverage: parseInt(document.getElementById('leverage').value),
+    entry_mode: document.getElementById('entry_mode').value,
+    psar_resolution: document.getElementById('psar_resolution').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -712,7 +745,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','psar_resolution','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -761,6 +794,7 @@ async def handle_status(request):
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),
         "unrealized_pnl_usd": calc_unrealized_pnl(symbol),
         "grid_levels": calc_grid_levels(symbol),
+        "psar_value": st.get("psar_value"), "psar_uptrend": st.get("psar_uptrend"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
