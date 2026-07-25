@@ -184,17 +184,18 @@ def calc_unrealized_pnl(symbol):
     else:
         return round((st["avg_entry_price"] - st["last_price"]) * st["total_coin_size"], 4)
 
-
 async def fetch_candles_for_psar(symbol, resolution, count_back=100):
     import lighter
     configuration = lighter.Configuration(host=BASE_URL)
     async with lighter.ApiClient(configuration) as api_client:
         candle_api = lighter.CandlestickApi(api_client)
         now_ms = int(time.time() * 1000)
+        start_ms = now_ms - 60 * 60 * 24 * 7 * 1000  # 7 Tage
         response = await candle_api.candles(
             market_id=MARKET_INDICES[symbol],
             resolution=resolution,
-            count_back=min(count_back, 500),
+            start_timestamp=start_ms,
+            end_timestamp=now_ms,
             set_timestamp_to_end=True,
         )
         candles = getattr(response, "c", None)
@@ -208,8 +209,8 @@ async def fetch_candles_for_psar(symbol, resolution, count_back=100):
             if None in (h_, l_, c_):
                 continue
             highs.append(float(h_)); lows.append(float(l_)); closes.append(float(c_))
-        return highs, lows, closes   
-        
+        return highs, lows, closes     
+           
 
 def calc_psar(highs, lows, af_step=0.02, af_max=0.2):
     """Standard Parabolic SAR (Wilder). Gibt (sar_werte, ist_uptrend) pro Kerze zurueck."""
