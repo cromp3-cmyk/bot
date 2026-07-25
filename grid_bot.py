@@ -46,26 +46,27 @@ MARKET_INDICES = {
     "ADA": 39, "TRX": 43, "LTC": 35, "BCH": 58, "HBAR": 59, "ICP": 102, "HYPE": 24,
     "EURUSD": 96, "GBPUSD": 97, "USDJPY": 98, "USDCHF": 99, "USDCAD": 100,
     "AUDUSD": 106, "NZDUSD": 107, "USDKRW": 105,
+    "XAU": 92, "XAG": 93, "WTI": 145,
 }
 PRECISION_MAP = {
     "BTC": 100000, "ETH": 10000, "SOL": 1000, "LTC": 1000,
-    "AVAX": 100, "BNB": 100, "UNI": 100, "APT": 100,
+    "AVAX": 100, "BNB": 100, "UNI": 100, "APT": 100, "XAG": 100,
     "LINK": 10, "NEAR": 10, "DOT": 10, "SUI": 10, "ADA": 10, "EURUSD": 10, "GBPUSD": 10, "USDCHF": 10, "USDCAD": 10,
     "DOGE": 1, "XRP": 1, "TRX": 1,
-    "USDJPY": 1000, "AUDUSD": 10, "NZDUSD": 10, "USDKRW": 10,
-    # BCH, HBAR, ICP, TON: keine explizite Angabe in der Quelle - Standardwert (10000) greift,
-    # bitte vor dem Live-Handel dieser Coins unbedingt mit kleiner Größe testen!
+    "USDJPY": 1000, "AUDUSD": 10, "NZDUSD": 10, "USDKRW": 10, "XAU": 10000,
+    # BCH, HBAR, ICP, TON, WTI: keine explizite Angabe in der Quelle - Standardwert (10000) greift,
+    # bitte vor dem Live-Handel dieser Coins/Rohstoffe unbedingt mit kleiner Größe testen!
 }
 PRICE_DECIMALS_MAP = {
-    "BTC": 1, "ETH": 2, "SOL": 3, "LTC": 3,
+    "BTC": 1, "ETH": 2, "SOL": 3, "LTC": 3, "XAU": 1,
     "AVAX": 3, "BNB": 4, "UNI": 4, "APT": 4,
     "LINK": 5, "NEAR": 5, "DOT": 5, "SUI": 5, "ADA": 5, "EURUSD": 5, "GBPUSD": 5, "USDCHF": 5, "USDCAD": 5,
-    "DOGE": 6, "XRP": 6,
+    "DOGE": 6, "XRP": 6, "XAG": 6,
     "USDJPY": 3, "AUDUSD": 5, "NZDUSD": 5, "USDKRW": 5,
 }
 MIN_BASE_AMOUNT_MAP = {
     "BTC": 0.00020, "ETH": 0.005, "SOL": 0.05, "LTC": 0.1, "BCH": 0.01,
-    "AVAX": 0.5, "BNB": 0.02, "UNI": 1.0, "APT": 2.0,
+    "AVAX": 0.5, "BNB": 0.02, "UNI": 1.0, "APT": 2.0, "XAU": 0.003, "XAG": 0.15,
     "LINK": 1.0, "NEAR": 2.0, "DOT": 2.0, "SUI": 3.0, "ADA": 10.0,
     "DOGE": 10, "XRP": 20, "HBAR": 20.0,
     "EURUSD": 10.0, "GBPUSD": 10.0, "USDJPY": 0.05, "USDCHF": 8.0, "USDCAD": 10.0,
@@ -102,6 +103,7 @@ def default_config():
         "dry_run": os.getenv("DRY_RUN", "true").lower() == "true",
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
+        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid" oder "psar"
         "grid_mode": os.getenv("GRID_MODE", "pct"),  # "pct" oder "usd"
         "grid_step_pct": float(os.getenv("GRID_STEP_PCT", "0.25")),
         "tp_step_pct": float(os.getenv("TP_STEP_PCT", "0.25")),
@@ -110,6 +112,9 @@ def default_config():
         "max_nachkauf": int(os.getenv("MAX_NACHKAUF", "5")),
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
+        "psar_resolution": os.getenv("PSAR_RESOLUTION", "5"),
+        "psar_step": float(os.getenv("PSAR_STEP", "0.02")),
+        "psar_max_step": float(os.getenv("PSAR_MAX_STEP", "0.2")),
     }
 
 
@@ -117,7 +122,7 @@ def default_state():
     return {
         "position": None, "avg_entry_price": None, "total_coin_size": 0.0,
         "entry_count": 0, "anchor_price": None, "last_price": None,
-        "price_history": [],
+        "price_history": [], "psar_value": None, "psar_uptrend": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -178,6 +183,115 @@ def calc_unrealized_pnl(symbol):
         return round((st["last_price"] - st["avg_entry_price"]) * st["total_coin_size"], 4)
     else:
         return round((st["avg_entry_price"] - st["last_price"]) * st["total_coin_size"], 4)
+
+
+async def fetch_candles_for_psar(symbol, resolution, count_back=100):
+    import lighter
+    configuration = lighter.Configuration(host=BASE_URL)
+    async with lighter.ApiClient(configuration) as api_client:
+        candle_api = lighter.CandlestickApi(api_client)
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - 60 * 60 * 24 * 7 * 1000
+        response = await candle_api.candles(
+            market_id=MARKET_INDICES[symbol], resolution=resolution,
+            start_timestamp=start_ms, end_timestamp=now_ms,
+            count_back=min(count_back, 500), set_timestamp_to_end=True,
+        )
+        candles = getattr(response, "c", None)
+        if not candles:
+            return None
+        highs, lows, closes = [], [], []
+        for candle in candles:
+            h_ = getattr(candle, "h", None)
+            l_ = getattr(candle, "l", None)
+            c_ = getattr(candle, "c", None)
+            if None in (h_, l_, c_):
+                continue
+            highs.append(float(h_)); lows.append(float(l_)); closes.append(float(c_))
+        return highs, lows, closes
+
+
+def calc_psar(highs, lows, af_step=0.02, af_max=0.2):
+    """Standard Parabolic SAR (Wilder). Gibt (sar_werte, ist_uptrend) pro Kerze zurueck."""
+    n = len(highs)
+    if n < 3:
+        return [], []
+
+    sar = [0.0] * n
+    uptrend = [True] * n
+
+    is_up = highs[1] >= highs[0]
+    uptrend[0] = is_up
+    sar[0] = lows[0] if is_up else highs[0]
+    ep = highs[0] if is_up else lows[0]
+    af = af_step
+
+    for i in range(1, n):
+        prior_sar = sar[i - 1]
+        if is_up:
+            cur_sar = prior_sar + af * (ep - prior_sar)
+            cur_sar = min(cur_sar, lows[i - 1], lows[i - 2] if i >= 2 else lows[i - 1])
+            if lows[i] < cur_sar:
+                is_up = False
+                cur_sar = ep
+                ep = lows[i]
+                af = af_step
+            else:
+                if highs[i] > ep:
+                    ep = highs[i]
+                    af = min(af + af_step, af_max)
+        else:
+            cur_sar = prior_sar - af * (prior_sar - ep)
+            cur_sar = max(cur_sar, highs[i - 1], highs[i - 2] if i >= 2 else highs[i - 1])
+            if highs[i] > cur_sar:
+                is_up = True
+                cur_sar = ep
+                ep = highs[i]
+                af = af_step
+            else:
+                if lows[i] < ep:
+                    ep = lows[i]
+                    af = min(af + af_step, af_max)
+
+        sar[i] = cur_sar
+        uptrend[i] = is_up
+
+    return sar, uptrend
+
+
+async def psar_poll_loop(symbol):
+    """Laeuft dauerhaft im Hintergrund - prueft bei entry_mode='psar' auf einen SAR-Flip."""
+    b = BOTS[symbol]
+    last_signal_ts = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "psar":
+                data = await fetch_candles_for_psar(symbol, cfg["psar_resolution"])
+                if data:
+                    highs, lows, closes = data
+                    # letzte Kerze evtl. noch nicht geschlossen -> weglassen
+                    sar, uptrend = calc_psar(highs[:-1], lows[:-1], cfg["psar_step"], cfg["psar_max_step"])
+                    if len(uptrend) >= 2:
+                        flipped_bullish = uptrend[-1] and not uptrend[-2]
+                        flipped_bearish = (not uptrend[-1]) and uptrend[-2]
+                        b["state"]["psar_value"] = round(sar[-1], 6)
+                        b["state"]["psar_uptrend"] = uptrend[-1]
+
+                        signal_key = len(closes)  # simple Dedupe-Schutz pro neuer Kerze
+                        st = b["state"]
+                        if (flipped_bullish or flipped_bearish) and last_signal_ts != signal_key:
+                            last_signal_ts = signal_key
+                            if st["position"] is None and cfg["bot_active"]:
+                                direction = "long" if flipped_bullish else "short"
+                                price = closes[-1]
+                                debug_log(f"📡 [{symbol}] PSAR-Flip erkannt: {direction.upper()} @ {price}")
+                                await execute_entry(symbol, direction, price, is_add_on=False)
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] PSAR-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(20)
 
 
 def compute_step_abs(reference_price, cfg, which):
@@ -315,8 +429,8 @@ async def on_price_update(symbol, price):
     bot_active = cfg["bot_active"]
 
     if st["position"] is None:
-        if not bot_active:
-            return
+        if not bot_active or cfg["entry_mode"] != "grid":
+            return  # im PSAR-Modus übernimmt psar_poll_loop() den Einstieg
         grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
         if price <= st["anchor_price"] - grid_step_abs:
             await execute_entry(symbol, "long", price, is_add_on=False)
@@ -444,8 +558,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div><label>Grid-Stufe (%)</label><input type="number" step="0.01" id="grid_step_pct"></div>
   <div><label>TP-Stufe (%)</label><input type="number" step="0.01" id="tp_step_pct"></div>
-  <div><label>Grid-Stufe ($)</label><input type="number" step="1" id="grid_step_usd"></div>
-  <div><label>TP-Stufe ($)</label><input type="number" step="1" id="tp_step_usd"></div>
+  <div><label>Grid-Stufe ($)</label><input type="number" step="0.01" id="grid_step_usd"></div>
+  <div><label>TP-Stufe ($)</label><input type="number" step="0.01" id="tp_step_usd"></div>
   <div><label>Max. Nachkauf</label><input type="number" step="1" id="max_nachkauf"></div>
   <div><label>Nach TP sofort drehen</label>
     <select class="cfg" id="auto_reverse">
@@ -599,7 +713,12 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
 });
 
 ['margin','leverage','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
-  document.getElementById(id).addEventListener('input', () => { window.formTouched = true; });
+  document.getElementById(id).addEventListener('input', (e) => {
+    window.formTouched = true;
+    if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
+      e.target.value = e.target.value.replace(',', '.');
+    }
+  });
 });
 
 (async () => {
@@ -656,8 +775,9 @@ async def handle_config_update(request):
         return web.json_response({"error": "unknown symbol"}, status=404)
     body = await request.json()
     cfg = BOTS[symbol]["config"]
-    for key in ["margin", "leverage", "grid_mode", "grid_step_pct", "tp_step_pct",
-                "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse"]:
+    for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_step_pct", "tp_step_pct",
+                "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse",
+                "psar_resolution", "psar_step", "psar_max_step"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -733,7 +853,7 @@ async def main():
     print("=" * 60)
 
     await start_web_server()
-    await trading_loop()
+    await asyncio.gather(trading_loop(), *[psar_poll_loop(s) for s in SYMBOLS])
 
 
 if __name__ == "__main__":
