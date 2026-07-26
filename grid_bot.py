@@ -112,7 +112,7 @@ def default_config():
         "max_nachkauf": int(os.getenv("MAX_NACHKAUF", "5")),
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
-        "psar_resolution": os.getenv("PSAR_RESOLUTION", "5"),
+        "psar_resolution": os.getenv("PSAR_RESOLUTION", "5m"),
         "psar_step": float(os.getenv("PSAR_STEP", "0.02")),
         "psar_max_step": float(os.getenv("PSAR_MAX_STEP", "0.2")),
     }
@@ -568,14 +568,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div><label>PSAR Zeitrahmen</label>
     <select class="cfg" id="psar_resolution">
-      <option value="1">1 Minute</option>
-      <option value="2">2 Minuten</option>
-      <option value="5">5 Minuten</option>
-      <option value="10">10 Minuten</option>
-      <option value="15">15 Minuten</option>
-      <option value="30">30 Minuten</option>
-      <option value="60">1 Stunde</option>
-      <option value="240">4 Stunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
     </select>
   </div>
   <div><label>Grid-Modus</label>
