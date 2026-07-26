@@ -704,6 +704,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <canvas id="priceChart" height="400"></canvas>
 
+<h2>TradingView (Referenz-Chart, eigene Marktdaten von TradingView)</h2>
+<div id="tv-widget-container" style="height:500px;"></div>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+  let tvWidget = null;
+  function renderTradingViewWidget(symbol) {
+    document.getElementById('tv-widget-container').innerHTML = '';
+    // Heuristische Zuordnung - falls das Symbol nicht passt, oben links im Widget selbst per Suche anpassen
+    const tvSymbolMap = {
+      EURUSD: 'FX:EURUSD', GBPUSD: 'FX:GBPUSD', USDJPY: 'FX:USDJPY', USDCHF: 'FX:USDCHF',
+      USDCAD: 'FX:USDCAD', AUDUSD: 'FX:AUDUSD', NZDUSD: 'FX:NZDUSD', USDKRW: 'FX:USDKRW',
+      XAU: 'TVC:GOLD', XAG: 'TVC:SILVER', WTI: 'TVC:USOIL',
+    };
+    const tvSymbol = tvSymbolMap[symbol] || `BINANCE:${symbol}USDT`;
+    new TradingView.widget({
+      autosize: true,
+      symbol: tvSymbol,
+      interval: "1",
+      timezone: "Etc/UTC",
+      theme: "dark",
+      style: "1",
+      locale: "de_DE",
+      toolbar_bg: "#1a1d29",
+      enable_publishing: false,
+      allow_symbol_change: true,
+      container_id: "tv-widget-container"
+    });
+  }
+</script>
+
 <h2>Einstellungen ändern (nur für den ausgewählten Coin)</h2>
 <form id="config-form">
   <div><label>Margin (USDC)</label><input type="number" step="1" id="margin"></div>
@@ -717,7 +747,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div><label>HA-Supertrend Zeitrahmen</label>
     <select class="cfg" id="ha_st_resolution">
+      <option value="30s">30 Sekunden (⚠️ ungetestet)</option>
       <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (⚠️ ungetestet)</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
@@ -729,7 +761,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div><label>HA-ATR Multiplikator</label><input type="number" step="0.1" id="ha_st_atr_mult"></div>
   <div><label>PSAR Zeitrahmen</label>
     <select class="cfg" id="psar_resolution">
+      <option value="30s">30 Sekunden (⚠️ ungetestet)</option>
       <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (⚠️ ungetestet)</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
@@ -781,7 +815,7 @@ async function loadSymbols() {
   sel.innerHTML = allSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
   currentSymbol = allSymbols[0];
   sel.value = currentSymbol;
-  sel.addEventListener('change', () => { currentSymbol = sel.value; window.formTouched = false; refresh(); });
+  sel.addEventListener('change', () => { currentSymbol = sel.value; window.formTouched = false; refresh(); renderTradingViewWidget(currentSymbol); });
 }
 
 document.getElementById('btn-start').addEventListener('click', async () => {
@@ -922,6 +956,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
 
 (async () => {
   await loadSymbols();
+  renderTradingViewWidget(currentSymbol);
   refresh();
   setInterval(refresh, 3000);
 })();
