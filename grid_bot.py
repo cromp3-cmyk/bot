@@ -424,13 +424,16 @@ async def ha_supertrend_poll_loop(symbol):
 
                         if (flipped_bullish or flipped_bearish) and last_signal_ts != signal_key:
                             last_signal_ts = signal_key
+                            candle_age_seconds = round(time.time() - signal_key / 1000, 1)
                             if cfg["bot_active"]:
                                 price = closed_c[-1]
                                 new_direction = "long" if flipped_bullish else "short"
                                 # SL an der auslösenden Kerze: unter ihrem Low (long) bzw. über ihrem High (short)
                                 new_sl = closed_l[-1] if new_direction == "long" else closed_h[-1]
 
-                                debug_log(f"📡 [{symbol}] HA-Supertrend-Flip: {new_direction.upper()} @ {price} | SL {new_sl}")
+                                debug_log(f"📡 [{symbol}] HA-Supertrend-Flip: {new_direction.upper()} @ {price} | SL {new_sl}", {
+                                    "kerze_alter_sekunden": candle_age_seconds,
+                                })
 
                                 if st["position"] is not None and st["position"] != new_direction:
                                     await execute_exit(symbol, price, "HA-REVERSE")
@@ -442,7 +445,7 @@ async def ha_supertrend_poll_loop(symbol):
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] HA-Supertrend-Abfrage fehlgeschlagen", {"error": str(e)})
 
-        await asyncio.sleep(20)
+        await asyncio.sleep(5)
 
 
 async def fetch_candles_predicta(symbol, resolution, count_back=150):
@@ -985,6 +988,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div><label>Predicta Zeitrahmen</label>
     <select class="cfg" id="predicta_resolution">
       <option value="1m">1 Minute</option>
+      <option value="3m">3 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
     </select>
@@ -1000,6 +1004,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div><label>HA-Supertrend Zeitrahmen</label>
     <select class="cfg" id="ha_st_resolution">
       <option value="1m">1 Minute</option>
+      <option value="3m">3 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
@@ -1012,6 +1017,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div><label>PSAR Zeitrahmen</label>
     <select class="cfg" id="psar_resolution">
       <option value="1m">1 Minute</option>
+      <option value="3m">3 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
