@@ -925,57 +925,113 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8"><title>Grid-Bot Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-  body { font-family: -apple-system, sans-serif; background:#0f1117; color:#e5e7eb; margin:0; padding:20px; }
-  h1 { font-size: 20px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-  h2 { font-size: 15px; color:#9ca3af; margin-top: 24px; }
-  select#symbol-select { font-size:16px; padding:6px 12px; background:#1a1d29; color:#e5e7eb; border:1px solid #2a2e3f; border-radius:8px; }
-  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:12px; margin-bottom:16px; }
-  .card { background:#1a1d29; border-radius:10px; padding:12px; }
-  .card .label { font-size:11px; color:#9ca3af; text-transform:uppercase; }
-  .card .value { font-size:20px; font-weight:600; margin-top:4px; }
-  .green { color:#4ade80; } .red { color:#f87171; } .yellow { color:#fbbf24; }
-  .badge { display:inline-block; padding:2px 10px; border-radius:12px; font-size:12px; font-weight:600; }
-  .badge.dry { background:#3730a3; color:#c7d2fe; } .badge.live { background:#7f1d1d; color:#fecaca; }
-  .badge.active { background:#14532d; color:#bbf7d0; } .badge.paused { background:#78350f; color:#fde68a; }
-  form { background:#1a1d29; border-radius:10px; padding:16px; display:grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap:12px; align-items:end; }
-  label { display:block; font-size:12px; color:#9ca3af; margin-bottom:4px; }
-  input, select.cfg { width:100%; padding:6px 8px; background:#0f1117; border:1px solid #2a2e3f; border-radius:6px; color:#e5e7eb; box-sizing:border-box; }
-  button { padding:8px 16px; background:#4f46e5; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:600; }
-  button:hover { background:#4338ca; }
-  button.stop { background:#b91c1c; } button.stop:hover { background:#991b1b; }
-  button.start { background:#15803d; } button.start:hover { background:#166534; }
-  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:10px; }
-  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #2a2e3f; }
-  th { color:#9ca3af; font-weight:500; }
-  .warn { background:#7f1d1d; color:#fecaca; padding:8px 12px; border-radius:8px; font-size:13px; margin-top:10px; display:none; }
-  canvas { background:#1a1d29; border-radius:10px; padding:10px; margin-top:10px; }
+  :root {
+    --bg: #060a18;
+    --panel: #0e1526;
+    --panel-border: rgba(96, 165, 250, 0.14);
+    --accent: #3b82f6;
+    --accent2: #8b5cf6;
+    --text: #e8ecf5;
+    --text-dim: #7c8aa8;
+    --green: #22c55e;
+    --red: #f0526b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif;
+    background:
+      radial-gradient(ellipse 800px 500px at 90% -5%, rgba(59,130,246,0.16), transparent 60%),
+      radial-gradient(ellipse 700px 500px at -5% 15%, rgba(139,92,246,0.12), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 0 0 40px 0;
+    min-height: 100vh;
+  }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 28px; background: rgba(10,14,28,0.85); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--panel-border); margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+  }
+  .brand { display:flex; align-items:center; gap:10px; font-size:19px; font-weight:700; color:#fff; }
+  .brand .dot { width:10px; height:10px; border-radius:50%; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 0 12px var(--accent); }
+  .topbar-right { display:flex; align-items:center; gap:10px; flex-wrap: wrap; }
+  select#symbol-select {
+    font-size:14px; font-weight:600; padding:8px 16px; background:var(--panel); color:var(--text);
+    border:1px solid var(--panel-border); border-radius:10px; cursor:pointer;
+  }
+  .container { padding: 0 28px; }
+  h2.section-title { font-size: 13px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 28px 0 12px; font-weight: 600; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap:14px; margin-bottom:18px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--panel-border); border-radius: 18px;
+    padding: 18px 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+  }
+  .card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .value { font-size: 22px; font-weight: 700; margin-top: 6px; color: #fff; }
+  .green { color: var(--green) !important; } .red { color: var(--red) !important; } .yellow { color: #fbbf24 !important; }
+  .badge { display:inline-block; padding:4px 14px; border-radius:20px; font-size:12px; font-weight:700; letter-spacing:0.03em; }
+  .badge.dry { background:rgba(99,102,241,0.18); color:#a5b4fc; border:1px solid rgba(99,102,241,0.35); }
+  .badge.live { background:rgba(240,82,107,0.15); color:#fca5b1; border:1px solid rgba(240,82,107,0.4); }
+  .badge.active { background:rgba(34,197,94,0.15); color:#86efac; border:1px solid rgba(34,197,94,0.35); }
+  .badge.paused { background:rgba(251,191,36,0.15); color:#fde68a; border:1px solid rgba(251,191,36,0.35); }
+  .panel-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 20px; padding: 22px; margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
+  form { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap:14px; align-items:end; }
+  label { display:block; font-size:11px; color: var(--text-dim); text-transform:uppercase; letter-spacing:0.03em; margin-bottom:6px; }
+  input, select.cfg {
+    width:100%; padding:9px 10px; background:#080d1c; border:1px solid var(--panel-border);
+    border-radius:8px; color:var(--text); box-sizing:border-box; font-size:13px;
+  }
+  input:focus, select.cfg:focus { outline:none; border-color: var(--accent); }
+  button {
+    padding:10px 20px; background:linear-gradient(135deg,var(--accent),#2563eb); color:white; border:none;
+    border-radius:10px; cursor:pointer; font-weight:700; font-size:13px; transition: transform 0.1s;
+  }
+  button:hover { transform: translateY(-1px); filter: brightness(1.1); }
+  button.stop { background:linear-gradient(135deg,#f0526b,#dc2626); }
+  button.start { background:linear-gradient(135deg,#22c55e,#15803d); }
+  button.danger { background:linear-gradient(135deg,#ef4444,#b91c1c); }
+  button.neutral { background:linear-gradient(135deg,#475569,#334155); }
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
+  th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--panel-border); }
+  th { color: var(--text-dim); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.03em; }
+  tr:hover td { background: rgba(59,130,246,0.05); }
+  .warn { background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.35); color:#fca5b1; padding:10px 14px; border-radius:10px; font-size:13px; margin-top:10px; display:none; }
+  canvas { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 18px; padding: 14px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
   #priceChart { max-height: 420px; }
-  .coin-overview { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
-  .coin-pill { background:#1a1d29; border:1px solid #2a2e3f; border-radius:20px; padding:4px 14px; font-size:13px; cursor:pointer; }
-  .coin-pill.selected { border-color:#4f46e5; background:#1e1b4b; }
-  button.danger { background:#dc2626; } button.danger:hover { background:#b91c1c; }
-  button.neutral { background:#374151; } button.neutral:hover { background:#4b5563; }
+  .coin-overview { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
+  .coin-pill { background: var(--panel); border:1px solid var(--panel-border); border-radius:20px; padding:6px 16px; font-size:13px; cursor:pointer; transition: border-color 0.15s; }
+  .coin-pill:hover { border-color: rgba(96,165,250,0.4); }
+  .coin-pill.selected { border-color: var(--accent); background: rgba(59,130,246,0.12); }
 </style>
 </head>
 <body>
-<h1>📡 Grid-Bot <select id="symbol-select"></select><span id="mode-badge"></span><span id="active-badge"></span></h1>
+<div class="topbar">
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select></div>
+  <div class="topbar-right"><span id="mode-badge"></span><span id="active-badge"></span></div>
+</div>
+<div class="container">
 
 <div class="coin-overview" id="coin-overview"></div>
 
-<div style="margin-bottom:16px;">
+<div style="margin-bottom:20px;">
   <button id="btn-start" class="start">▶️ Start</button>
   <button id="btn-stop" class="stop">⏸️ Stop</button>
   <button id="btn-close" class="danger">✖️ Position jetzt schließen</button>
   <button id="btn-reset" class="neutral">🔄 Reset (Statistik)</button>
 </div>
 
+<h2 class="section-title">Übersicht</h2>
 <div class="grid" id="status-grid"></div>
 
+<h2 class="section-title">Kursverlauf</h2>
 <canvas id="priceChart" height="400"></canvas>
 
-<h2>Einstellungen ändern (nur für den ausgewählten Coin)</h2>
+<h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
+<div class="panel-card">
 <form id="config-form">
   <div><label>Margin (USDC)</label><input type="number" step="1" id="margin"></div>
+
   <div><label>Hebel</label><input type="number" step="1" id="leverage"></div>
   <div><label>Strategie</label>
     <select class="cfg" id="entry_mode">
@@ -985,7 +1041,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="predicta">Predicta-Score (Einstieg >59%, Ausstieg <50%)</option>
     </select>
   </div>
-  <div><label>Predicta Zeitrahmen</label>
+  <div data-mode="predicta"><label>Predicta Zeitrahmen</label>
     <select class="cfg" id="predicta_resolution">
       <option value="1m">1 Minute</option>
       <option value="3m">3 Minuten</option>
@@ -993,15 +1049,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="15m">15 Minuten</option>
     </select>
   </div>
-  <div><label>Predicta Einstieg (%)</label><input type="number" step="1" id="predicta_entry_threshold"></div>
-  <div><label>Predicta Ausstieg (%)</label><input type="number" step="1" id="predicta_exit_threshold"></div>
-  <div><label>Predicta sofort drehen</label>
+  <div data-mode="predicta"><label>Predicta Einstieg (%)</label><input type="number" step="1" id="predicta_entry_threshold"></div>
+  <div data-mode="predicta"><label>Predicta Ausstieg (%)</label><input type="number" step="1" id="predicta_exit_threshold"></div>
+  <div data-mode="predicta"><label>Predicta sofort drehen</label>
     <select class="cfg" id="predicta_auto_reverse">
       <option value="true">Ja</option>
       <option value="false">Nein</option>
     </select>
   </div>
-  <div><label>HA-Supertrend Zeitrahmen</label>
+  <div data-mode="ha_st"><label>HA-Supertrend Zeitrahmen</label>
     <select class="cfg" id="ha_st_resolution">
       <option value="1m">1 Minute</option>
       <option value="3m">3 Minuten</option>
@@ -1012,9 +1068,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="4h">4 Stunden</option>
     </select>
   </div>
-  <div><label>HA-ATR Periode</label><input type="number" step="1" id="ha_st_atr_period"></div>
-  <div><label>HA-ATR Multiplikator</label><input type="number" step="0.1" id="ha_st_atr_mult"></div>
-  <div><label>PSAR Zeitrahmen</label>
+  <div data-mode="ha_st"><label>HA-ATR Periode</label><input type="number" step="1" id="ha_st_atr_period"></div>
+  <div data-mode="ha_st"><label>HA-ATR Multiplikator</label><input type="number" step="0.1" id="ha_st_atr_mult"></div>
+  <div data-mode="psar"><label>PSAR Zeitrahmen</label>
     <select class="cfg" id="psar_resolution">
       <option value="1m">1 Minute</option>
       <option value="3m">3 Minuten</option>
@@ -1025,18 +1081,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="4h">4 Stunden</option>
     </select>
   </div>
-  <div><label>Grid-Modus</label>
+  <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
       <option value="usd">Fester $-Betrag</option>
     </select>
   </div>
-  <div><label>Grid-Stufe (%)</label><input type="number" step="0.01" id="grid_step_pct"></div>
-  <div><label>TP-Stufe (%)</label><input type="number" step="0.01" id="tp_step_pct"></div>
-  <div><label>Grid-Stufe ($)</label><input type="number" step="0.01" id="grid_step_usd"></div>
-  <div><label>TP-Stufe ($)</label><input type="number" step="0.01" id="tp_step_usd"></div>
-  <div><label>Max. Nachkauf</label><input type="number" step="1" id="max_nachkauf"></div>
-  <div><label>Nach TP sofort drehen</label>
+  <div data-mode="grid"><label>Grid-Stufe (%)</label><input type="number" step="0.01" id="grid_step_pct"></div>
+  <div data-mode="grid"><label>TP-Stufe (%)</label><input type="number" step="0.01" id="tp_step_pct"></div>
+  <div data-mode="grid"><label>Grid-Stufe ($)</label><input type="number" step="0.01" id="grid_step_usd"></div>
+  <div data-mode="grid"><label>TP-Stufe ($)</label><input type="number" step="0.01" id="tp_step_usd"></div>
+  <div data-mode="grid"><label>Max. Nachkauf</label><input type="number" step="1" id="max_nachkauf"></div>
+  <div data-mode="grid"><label>Nach TP sofort drehen</label>
     <select class="cfg" id="auto_reverse">
       <option value="true">Ja - sofort Gegenposition</option>
       <option value="false">Nein - warten auf neues Gitter-Signal</option>
@@ -1051,15 +1107,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <button type="submit">Speichern</button>
 </form>
 <div class="warn" id="live-warn">⚠️ LIVE-Modus aktiv - echte Orders werden platziert!</div>
-<div style="font-size:12px; color:#9ca3af; margin-top:8px;" id="abs-distances"></div>
+<div style="font-size:12px; color:var(--text-dim); margin-top:8px;" id="abs-distances"></div>
+</div>
 
-<h2>Letzte abgeschlossene Trades</h2>
+<h2 class="section-title">Letzte abgeschlossene Trades</h2>
+<div class="panel-card">
 <table id="trades-table"><thead><tr><th>Eröffnet</th><th>Geschlossen</th><th>Seite</th><th>Ø-Einstieg</th><th>Exit</th><th>Stufen</th><th>Grund</th><th>PnL $</th></tr></thead><tbody></tbody></table>
+</div>
+</div>
 
 <script>
 let priceChart;
 let currentSymbol = null;
 let allSymbols = [];
+
+function updateModeFields() {
+  const mode = document.getElementById('entry_mode').value;
+  document.querySelectorAll('[data-mode]').forEach(el => {
+    el.style.display = (el.dataset.mode === mode) ? '' : 'none';
+  });
+}
+document.getElementById('entry_mode').addEventListener('change', () => {
+  window.formTouched = true;
+  updateModeFields();
+});
 
 async function loadSymbols() {
   const res = await fetch('/api/symbols');
@@ -1150,6 +1221,7 @@ async function refresh() {
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('auto_reverse').value = String(data.config.auto_reverse);
   }
+  updateModeFields();
 
   document.getElementById('abs-distances').innerText =
     `Aktuelle Abstände in $: Grid-Stufe ≈ ${gl.grid_step_abs ?? '-'} | TP-Stufe ≈ ${gl.tp_step_abs ?? '-'}`;
