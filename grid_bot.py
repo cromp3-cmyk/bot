@@ -115,6 +115,9 @@ def default_config():
         "psar_resolution": os.getenv("PSAR_RESOLUTION", "5m"),
         "psar_step": float(os.getenv("PSAR_STEP", "0.02")),
         "psar_max_step": float(os.getenv("PSAR_MAX_STEP", "0.2")),
+        "ha_st_resolution": os.getenv("HA_ST_RESOLUTION", "5m"),
+        "ha_st_atr_period": int(os.getenv("HA_ST_ATR_PERIOD", "5")),
+        "ha_st_atr_mult": float(os.getenv("HA_ST_ATR_MULT", "1.5")),
     }
 
 
@@ -123,6 +126,7 @@ def default_state():
         "position": None, "avg_entry_price": None, "total_coin_size": 0.0,
         "entry_count": 0, "anchor_price": None, "last_price": None,
         "price_history": [], "psar_value": None, "psar_uptrend": None,
+        "ha_st_stop_price": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -303,6 +307,140 @@ async def psar_poll_loop(symbol):
         await asyncio.sleep(20)
 
 
+async def fetch_candles_ohlc(symbol, resolution, count_back=150):
+    """Wie fetch_candles_for_psar, aber inkl. Open (fuer Heikin Ashi noetig)."""
+    import lighter
+    configuration = lighter.Configuration(host=BASE_URL)
+    async with lighter.ApiClient(configuration) as api_client:
+        candle_api = lighter.CandlestickApi(api_client)
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - 60 * 60 * 24 * 7 * 1000
+        response = await candle_api.candles(
+            market_id=MARKET_INDICES[symbol], resolution=resolution,
+            start_timestamp=start_ms, end_timestamp=now_ms,
+            count_back=min(count_back, 500), set_timestamp_to_end=True,
+        )
+        candles = getattr(response, "c", None)
+        if not candles:
+            return None
+        timestamps, opens, highs, lows, closes = [], [], [], [], []
+        for candle in candles:
+            t_ = getattr(candle, "t", None)
+            o_ = getattr(candle, "o", None)
+            h_ = getattr(candle, "h", None)
+            l_ = getattr(candle, "l", None)
+            c_ = getattr(candle, "c", None)
+            if None in (t_, o_, h_, l_, c_):
+                continue
+            timestamps.append(int(t_)); opens.append(float(o_)); highs.append(float(h_))
+            lows.append(float(l_)); closes.append(float(c_))
+        return timestamps, opens, highs, lows, closes
+
+
+def compute_ha_supertrend(opens, highs, lows, closes, period=5, multiplier=1.5):
+    """Portiert aus dem Pine-Script: Heikin-Ashi-Kerzen + Custom-ATR-Baender/Trend."""
+    n = len(closes)
+    if n < period + 2:
+        return None, None
+
+    ha_close = [(opens[i] + highs[i] + lows[i] + closes[i]) / 4 for i in range(n)]
+    ha_open = [0.0] * n
+    ha_open[0] = (opens[0] + closes[0]) / 2
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2
+
+    # ATR auf den ECHTEN Kerzen (wie im Pine-Script: ta.atr nutzt die realen high/low/close)
+    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
+    for i in range(1, n):
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+    atr = [tr[0]] * n
+    for i in range(1, n):
+        if i < period:
+            atr[i] = sum(tr[:i + 1]) / (i + 1)
+        else:
+            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+
+    up = [0.0] * n
+    dn = [0.0] * n
+    trend = [1] * n
+
+    up[0] = ha_close[0] - multiplier * atr[0]
+    dn[0] = ha_close[0] + multiplier * atr[0]
+    last_up1 = up[0]
+    last_dn1 = dn[0]
+
+    for i in range(1, n):
+        basic_up = ha_close[i] - multiplier * atr[i]
+        basic_dn = ha_close[i] + multiplier * atr[i]
+
+        if ha_close[i - 1] > up[i - 1]:
+            last_up1 = up[i - 1]
+        up1 = last_up1
+        up[i] = max(basic_up, up1) if ha_close[i - 1] > up1 else basic_up
+
+        if ha_close[i - 1] < dn[i - 1]:
+            last_dn1 = dn[i - 1]
+        dn1 = last_dn1
+        dn[i] = min(basic_dn, dn1) if ha_close[i - 1] < dn1 else basic_dn
+
+        prev_trend = trend[i - 1]
+        if prev_trend == -1 and ha_close[i] > dn1:
+            trend[i] = 1
+        elif prev_trend == 1 and ha_close[i] < up1:
+            trend[i] = -1
+        else:
+            trend[i] = prev_trend
+
+    return trend, ha_close
+
+
+async def ha_supertrend_poll_loop(symbol):
+    """Reiner Buy/Sell-Wechsel-Bot auf Basis von Heikin-Ashi-Supertrend-Flips,
+    SL an der High/Low der ausloesenden (echten) Kerze - kein TP."""
+    b = BOTS[symbol]
+    last_signal_ts = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "ha_st":
+                data = await fetch_candles_ohlc(symbol, cfg["ha_st_resolution"])
+                if data:
+                    timestamps, opens, highs, lows, closes = data
+                    closed_ts = timestamps[:-1]
+                    closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    trend, ha_close = compute_ha_supertrend(closed_o, closed_h, closed_l, closed_c,
+                                                              cfg["ha_st_atr_period"], cfg["ha_st_atr_mult"])
+                    if trend and len(trend) >= 2:
+                        st = b["state"]
+                        signal_key = closed_ts[-1]
+
+                        flipped_bullish = trend[-1] == 1 and trend[-2] == -1
+                        flipped_bearish = trend[-1] == -1 and trend[-2] == 1
+
+                        if (flipped_bullish or flipped_bearish) and last_signal_ts != signal_key:
+                            last_signal_ts = signal_key
+                            if cfg["bot_active"]:
+                                price = closed_c[-1]
+                                new_direction = "long" if flipped_bullish else "short"
+                                # SL an der auslösenden Kerze: unter ihrem Low (long) bzw. über ihrem High (short)
+                                new_sl = closed_l[-1] if new_direction == "long" else closed_h[-1]
+
+                                debug_log(f"📡 [{symbol}] HA-Supertrend-Flip: {new_direction.upper()} @ {price} | SL {new_sl}")
+
+                                if st["position"] is not None and st["position"] != new_direction:
+                                    await execute_exit(symbol, price, "HA-REVERSE")
+                                    await execute_entry(symbol, new_direction, price, is_add_on=False)
+                                    st["ha_st_stop_price"] = new_sl
+                                elif st["position"] is None:
+                                    await execute_entry(symbol, new_direction, price, is_add_on=False)
+                                    st["ha_st_stop_price"] = new_sl
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] HA-Supertrend-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(20)
+
+
 def compute_step_abs(reference_price, cfg, which):
     """which: 'grid' oder 'tp' - liefert den Abstand in Preiseinheiten, je nach grid_mode."""
     if cfg["grid_mode"] == "usd":
@@ -416,6 +554,7 @@ async def execute_exit(symbol, price, reason):
     st["total_coin_size"] = 0.0
     st["entry_count"] = 0
     st["anchor_price"] = price
+    st["ha_st_stop_price"] = None
 
     if cfg.get("auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid":
         opposite = "short" if closing_side == "long" else "long"
@@ -439,12 +578,19 @@ async def on_price_update(symbol, price):
 
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
-            return  # im PSAR-Modus übernimmt psar_poll_loop() den Einstieg
+            return  # im PSAR/HA-Supertrend-Modus übernehmen die jeweiligen Poll-Loops den Einstieg
         grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
         if price <= st["anchor_price"] - grid_step_abs:
             await execute_entry(symbol, "long", price, is_add_on=False)
         elif price >= st["anchor_price"] + grid_step_abs:
             await execute_entry(symbol, "short", price, is_add_on=False)
+        return
+
+    if cfg["entry_mode"] == "ha_st":
+        sl = st.get("ha_st_stop_price")
+        if sl is not None:
+            if (st["position"] == "long" and price <= sl) or (st["position"] == "short" and price >= sl):
+                await execute_exit(symbol, price, "SL")
         return
 
     if cfg["entry_mode"] != "grid":
@@ -566,8 +712,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="entry_mode">
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="psar">Parabolic SAR (reiner Buy/Sell-Wechsel)</option>
+      <option value="ha_st">Heikin Ashi Supertrend (Buy/Sell, SL an Signalkerze)</option>
     </select>
   </div>
+  <div><label>HA-Supertrend Zeitrahmen</label>
+    <select class="cfg" id="ha_st_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div><label>HA-ATR Periode</label><input type="number" step="1" id="ha_st_atr_period"></div>
+  <div><label>HA-ATR Multiplikator</label><input type="number" step="0.1" id="ha_st_atr_mult"></div>
   <div><label>PSAR Zeitrahmen</label>
     <select class="cfg" id="psar_resolution">
       <option value="1m">1 Minute</option>
@@ -676,6 +835,7 @@ async function refresh() {
     <div class="card"><div class="label">Nachkauf-Stufe</div><div class="value">${data.entry_count} / ${data.config.max_nachkauf || '∞'}</div></div>
     <div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>
     <div class="card"><div class="label">PSAR (${data.config.entry_mode==='psar'?'aktiv':'inaktiv'})</div><div class="value ${data.psar_uptrend?'green':'red'}">${data.psar_value ?? '-'}</div></div>
+    <div class="card"><div class="label">HA-Supertrend SL (${data.config.entry_mode==='ha_st'?'aktiv':'inaktiv'})</div><div class="value red">${data.ha_st_stop_price ?? '-'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -685,6 +845,9 @@ async function refresh() {
     document.getElementById('leverage').value = data.config.leverage;
     document.getElementById('entry_mode').value = data.config.entry_mode;
     document.getElementById('psar_resolution').value = data.config.psar_resolution;
+    document.getElementById('ha_st_resolution').value = data.config.ha_st_resolution;
+    document.getElementById('ha_st_atr_period').value = data.config.ha_st_atr_period;
+    document.getElementById('ha_st_atr_mult').value = data.config.ha_st_atr_mult;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -731,6 +894,9 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     leverage: parseInt(document.getElementById('leverage').value),
     entry_mode: document.getElementById('entry_mode').value,
     psar_resolution: document.getElementById('psar_resolution').value,
+    ha_st_resolution: document.getElementById('ha_st_resolution').value,
+    ha_st_atr_period: parseInt(document.getElementById('ha_st_atr_period').value),
+    ha_st_atr_mult: parseFloat(document.getElementById('ha_st_atr_mult').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -745,7 +911,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','psar_resolution','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','psar_resolution','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -795,6 +961,7 @@ async def handle_status(request):
         "unrealized_pnl_usd": calc_unrealized_pnl(symbol),
         "grid_levels": calc_grid_levels(symbol),
         "psar_value": st.get("psar_value"), "psar_uptrend": st.get("psar_uptrend"),
+        "ha_st_stop_price": st.get("ha_st_stop_price"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -811,7 +978,8 @@ async def handle_config_update(request):
     cfg = BOTS[symbol]["config"]
     for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse",
-                "psar_resolution", "psar_step", "psar_max_step"]:
+                "psar_resolution", "psar_step", "psar_max_step",
+                "ha_st_resolution", "ha_st_atr_period", "ha_st_atr_mult"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -887,7 +1055,11 @@ async def main():
     print("=" * 60)
 
     await start_web_server()
-    await asyncio.gather(trading_loop(), *[psar_poll_loop(s) for s in SYMBOLS])
+    await asyncio.gather(
+        trading_loop(),
+        *[psar_poll_loop(s) for s in SYMBOLS],
+        *[ha_supertrend_poll_loop(s) for s in SYMBOLS],
+    )
 
 
 if __name__ == "__main__":
