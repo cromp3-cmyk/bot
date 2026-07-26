@@ -307,8 +307,9 @@ async def ct_leaderboard_refresh_loop():
                     addr = row["address"]
                     if addr not in CT_STATE["watched"]:
                         CT_STATE["watched"][addr] = {
-                            "label": f"#{i+1} (Leaderboard)", "copy_enabled": False,
+                            "label": f"#{i+1} (Leaderboard)", "copy_enabled": False, "copy_coins": [],
                             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "leaderboard",
+                            "position_meta": {},
                         }
             await asyncio.sleep(CT_CONFIG["leaderboard_refresh_minutes"] * 60)
 
@@ -317,8 +318,9 @@ async def ct_watch_loop():
     for addr in CT_MANUAL_ADDRESSES:
         if addr not in CT_STATE["watched"]:
             CT_STATE["watched"][addr] = {
-                "label": "Manuell hinzugefügt", "copy_enabled": False,
+                "label": "Manuell hinzugefügt", "copy_enabled": False, "copy_coins": [],
                 "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
+                "position_meta": {},
             }
 
     async with aiohttp.ClientSession() as session:
@@ -326,6 +328,13 @@ async def ct_watch_loop():
             for address, info in list(CT_STATE["watched"].items()):
                 user_state = await fetch_user_state(session, address)
                 info["positions"] = extract_ct_positions(user_state)
+
+                # Position-Metadaten aufräumen: Coins, die nicht mehr offen sind, aus der Historie entfernen
+                meta = info.setdefault("position_meta", {})
+                open_coins = {p["coin"] for p in info["positions"]}
+                for coin in list(meta.keys()):
+                    if coin not in open_coins:
+                        del meta[coin]
 
                 fills = await fetch_user_fills(session, address)
                 if fills:
@@ -342,8 +351,25 @@ async def ct_watch_loop():
                             side = f.get("side")
                             direction = "long" if side == "B" else "short"
                             price = float(f.get("px", 0) or 0)
-                            debug_log(f"🆕 [CopyTrading] Neuer Fill bei {info['label']} ({address[:8]}...): {direction.upper()} {coin} @ {price}")
-                            if info["copy_enabled"] and price > 0:
+
+                            prev_meta = meta.get(coin)
+                            now_iso = datetime.now().isoformat()
+                            if prev_meta is None:
+                                meta[coin] = {"opened_at": now_iso, "direction": direction, "entries": 1, "last_action": "Neu"}
+                                action = "Neu"
+                            elif prev_meta["direction"] == direction:
+                                prev_meta["entries"] += 1
+                                prev_meta["last_action"] = "Nachkauf"
+                                action = "Nachkauf"
+                            else:
+                                meta[coin] = {"opened_at": now_iso, "direction": direction, "entries": 1, "last_action": "Reverse"}
+                                action = "Reverse"
+
+                            debug_log(f"🆕 [CopyTrading] Neuer Fill bei {info['label']} ({address[:8]}...): {direction.upper()} {coin} @ {price} [{action}]")
+
+                            allowed_coins = info.get("copy_coins") or []
+                            coin_allowed = (not allowed_coins) or (coin in allowed_coins)
+                            if info["copy_enabled"] and price > 0 and coin_allowed:
                                 await execute_copy_trade(coin, direction, price)
 
                 await asyncio.sleep(0.5)
@@ -1311,36 +1337,57 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
   h1 { font-size:20px; display:flex; align-items:center; gap:14px; }
   h1 a { font-size:13px; color:var(--accent); text-decoration:none; }
   h2 { font-size:13px; color:var(--dim); text-transform:uppercase; letter-spacing:0.05em; margin-top:28px; }
-  .green{color:var(--green)!important;} .red{color:var(--red)!important;}
+  .green{color:var(--green)!important;} .red{color:var(--red)!important;} .yellow{color:#fbbf24!important;}
   table { width:100%; border-collapse:collapse; font-size:13px; margin-top:10px; background:var(--panel); border:1px solid var(--border); border-radius:14px; overflow:hidden; }
-  th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--border); }
+  th,td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); }
   th { color:var(--dim); font-size:11px; text-transform:uppercase; }
-  input[type=text] { padding:8px 10px; background:#080d1c; border:1px solid var(--border); border-radius:8px; color:var(--text); width:340px; }
-  button { padding:8px 16px; background:linear-gradient(135deg,var(--accent),#2563eb); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:700; }
+  input[type=text] { padding:8px 10px; background:#080d1c; border:1px solid var(--border); border-radius:8px; color:var(--text); }
+  input.new-address { width:340px; }
+  input.coin-filter { width:130px; font-size:12px; }
+  button { padding:7px 14px; background:linear-gradient(135deg,var(--accent),#2563eb); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:700; font-size:12px; }
   button.copy-on { background:linear-gradient(135deg,#22c55e,#15803d); }
   button.copy-off { background:linear-gradient(135deg,#475569,#334155); }
   .warn { background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.35); color:#fca5b1; padding:10px 14px; border-radius:10px; font-size:13px; margin-top:10px; }
   .addr { font-family:monospace; font-size:12px; color:var(--dim); }
   .fill-buy { color:var(--green); } .fill-sell { color:var(--red); }
+  .bar-wrap { background:#080d1c; border-radius:6px; overflow:hidden; height:18px; display:flex; min-width:120px; }
+  .bar-long { background:var(--green); height:100%; } .bar-short { background:var(--red); height:100%; }
+  .action-neu { color:#93c5fd; } .action-nachkauf { color:#fbbf24; } .action-reverse { color:#f0526b; }
 </style>
 </head>
 <body>
 <h1>📡 Copy-Trading <span id="mode-badge"></span> <a href="/">← zurück zum Grid-Bot</a></h1>
 <div id="leaderboard-error"></div>
 
+<h2>Trendmeter (Top 20 Coins - Long/Short-Verteilung der beobachteten Trader)</h2>
+<table id="trend-table">
+  <thead><tr><th>Coin</th><th>Long</th><th>Short</th><th>Verteilung</th></tr></thead>
+  <tbody></tbody>
+</table>
+
 <h2>Manuelle Wallet hinzufügen</h2>
 <div>
-  <input type="text" id="new-address" placeholder="0x... Hyperliquid Wallet-Adresse">
+  <input type="text" class="new-address" id="new-address" placeholder="0x... Hyperliquid Wallet-Adresse">
   <button id="btn-add-address">Hinzufügen</button>
 </div>
 
-<h2>Beobachtete Trader</h2>
+<h2>Beobachtete Trader - Positionen im Detail</h2>
 <table id="watch-table">
-  <thead><tr><th>Label</th><th>Adresse</th><th>Positionen</th><th>Letzte Fills</th><th>Copy</th></tr></thead>
+  <thead><tr><th>Label</th><th>Adresse</th><th>Coin</th><th>Seite</th><th>Größe</th><th>Ø-Einstieg</th><th>PnL</th><th>Eröffnet</th><th>Aktion</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<h2>Copy-Einstellungen pro Trader</h2>
+<table id="copy-table">
+  <thead><tr><th>Label</th><th>Adresse</th><th>Letzte Fills</th><th>Coin-Filter (leer = alle)</th><th>Copy</th></tr></thead>
   <tbody></tbody>
 </table>
 
 <script>
+function fmtTime(iso) {
+  return iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '-';
+}
+
 async function refresh() {
   const res = await fetch('/api/ct/status');
   const data = await res.json();
@@ -1352,26 +1399,68 @@ async function refresh() {
   document.getElementById('leaderboard-error').innerHTML = data.leaderboard_error
     ? `<div class="warn">⚠️ Leaderboard-Fehler: ${data.leaderboard_error} - manuelle Adressen funktionieren trotzdem.</div>` : '';
 
-  const rows = Object.entries(data.watched).map(([addr, info]) => {
-    const posText = (info.positions || []).map(p => `${p.side==='long'?'🟢':'🔴'} ${p.coin} ${p.size}`).join('<br>') || '-';
+  // Trendmeter
+  document.querySelector('#trend-table tbody').innerHTML = (data.trend_meter || []).map(t => {
+    const pct = t.pct_long;
+    const barHtml = pct === null ? '<span style="color:var(--dim);">keine Daten</span>' :
+      `<div class="bar-wrap"><div class="bar-long" style="width:${pct}%"></div><div class="bar-short" style="width:${100-pct}%"></div></div> ${pct}% long`;
+    return `<tr><td><b>${t.coin}</b></td><td class="green">${t.long}</td><td class="red">${t.short}</td><td>${barHtml}</td></tr>`;
+  }).join('');
+
+  // Positions-Detailtabelle (eine Zeile pro Position)
+  let posRows = [];
+  Object.entries(data.watched).forEach(([addr, info]) => {
+    const meta = info.position_meta || {};
+    (info.positions || []).forEach(p => {
+      const m = meta[p.coin] || {};
+      const pnl = parseFloat(p.unrealized_pnl || 0);
+      const actionClass = m.last_action === 'Neu' ? 'action-neu' : m.last_action === 'Nachkauf' ? 'action-nachkauf' : m.last_action === 'Reverse' ? 'action-reverse' : '';
+      posRows.push(`
+        <tr>
+          <td>${info.label}</td>
+          <td class="addr">${addr.slice(0,8)}...${addr.slice(-4)}</td>
+          <td><b>${p.coin}</b></td>
+          <td class="${p.side==='long'?'green':'red'}">${p.side==='long'?'🟢 LONG':'🔴 SHORT'}</td>
+          <td>${p.size}</td>
+          <td>${p.entry_price ?? '-'}</td>
+          <td class="${pnl>=0?'green':'red'}">$${pnl.toFixed(2)}</td>
+          <td>${fmtTime(m.opened_at)}</td>
+          <td class="${actionClass}">${m.last_action ?? '-'}${m.entries>1?' ('+m.entries+'x)':''}</td>
+        </tr>`);
+    });
+  });
+  document.querySelector('#watch-table tbody').innerHTML = posRows.join('') || '<tr><td colspan="9">Noch keine offenen Positionen erfasst...</td></tr>';
+
+  // Copy-Einstellungen pro Trader
+  const copyRows = Object.entries(data.watched).map(([addr, info]) => {
     const fillsText = (info.recent_fills || []).slice(-3).reverse().map(f =>
       `<span class="${f.side==='B'?'fill-buy':'fill-sell'}">${f.side==='B'?'BUY':'SELL'} ${f.coin} @ ${f.px}</span>`
     ).join('<br>') || '-';
+    const coinFilterValue = (info.copy_coins || []).join(',');
     return `
       <tr>
         <td>${info.label}</td>
         <td class="addr">${addr.slice(0,10)}...${addr.slice(-6)}</td>
-        <td>${posText}</td>
         <td>${fillsText}</td>
+        <td>
+          <input type="text" class="coin-filter" id="coins-${addr}" placeholder="z.B. BTC,ETH" value="${coinFilterValue}">
+          <button onclick="saveCoins('${addr}')">💾</button>
+        </td>
         <td><button class="${info.copy_enabled?'copy-on':'copy-off'}" onclick="toggleCopy('${addr}', ${!info.copy_enabled})">${info.copy_enabled?'Copy AN':'Copy AUS'}</button></td>
       </tr>`;
   }).join('');
-  document.querySelector('#watch-table tbody').innerHTML = rows || '<tr><td colspan="5">Noch keine Trader beobachtet...</td></tr>';
+  document.querySelector('#copy-table tbody').innerHTML = copyRows || '<tr><td colspan="5">Noch keine Trader beobachtet...</td></tr>';
 }
 
 async function toggleCopy(address, enable) {
   await fetch('/api/ct/copy', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, enable}) });
   refresh();
+}
+
+async function saveCoins(address) {
+  const coins = document.getElementById(`coins-${address}`).value;
+  await fetch('/api/ct/coins', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, coins}) });
+  alert('Coin-Filter gespeichert für ' + address.slice(0,10) + '...');
 }
 
 document.getElementById('btn-add-address').addEventListener('click', async () => {
@@ -1394,12 +1483,35 @@ async def handle_ct_index(request):
     return web.Response(text=CT_DASHBOARD_HTML, content_type="text/html")
 
 
+TREND_METER_COINS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ADA", "AVAX", "LINK", "DOT",
+                      "TON", "SUI", "LTC", "TRX", "HYPE", "NEAR", "APT", "UNI", "ICP", "BCH"]
+
+
+def compute_trend_meter():
+    tally = {c: {"long": 0, "short": 0} for c in TREND_METER_COINS}
+    for info in CT_STATE["watched"].values():
+        for p in info.get("positions", []):
+            coin = p.get("coin")
+            side = p.get("side")
+            if coin in tally and side in ("long", "short"):
+                tally[coin][side] += 1
+
+    result = []
+    for c in TREND_METER_COINS:
+        l, s = tally[c]["long"], tally[c]["short"]
+        total = l + s
+        pct_long = round(l / total * 100, 1) if total else None
+        result.append({"coin": c, "long": l, "short": s, "pct_long": pct_long})
+    return result
+
+
 async def handle_ct_status(request):
     return web.json_response({
         "dry_run": CT_CONFIG["dry_run"],
         "leaderboard_last_fetch": CT_STATE["leaderboard_last_fetch"],
         "leaderboard_error": CT_STATE["leaderboard_error"],
         "watched": CT_STATE["watched"],
+        "trend_meter": compute_trend_meter(),
     })
 
 
@@ -1410,8 +1522,9 @@ async def handle_ct_watch(request):
         return web.json_response({"error": "keine Adresse"}, status=400)
     if addr not in CT_STATE["watched"]:
         CT_STATE["watched"][addr] = {
-            "label": "Manuell hinzugefügt", "copy_enabled": False,
+            "label": "Manuell hinzugefügt", "copy_enabled": False, "copy_coins": [],
             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
+            "position_meta": {},
         }
     return web.json_response({"success": True})
 
@@ -1424,6 +1537,17 @@ async def handle_ct_copy_toggle(request):
         CT_STATE["watched"][addr]["copy_enabled"] = enable
         debug_log(f"{'✅' if enable else '⏸️'} [CopyTrading] Copy für {addr} {'aktiviert' if enable else 'deaktiviert'}")
     return web.json_response({"success": True})
+
+
+async def handle_ct_set_coins(request):
+    body = await request.json()
+    addr = body.get("address")
+    coins_raw = body.get("coins", "")
+    coins = [c.strip().upper() for c in coins_raw.split(",") if c.strip()]
+    if addr in CT_STATE["watched"]:
+        CT_STATE["watched"][addr]["copy_coins"] = coins
+        debug_log(f"⚙️ [CopyTrading] Coin-Filter für {addr} gesetzt", {"coins": coins or "alle"})
+    return web.json_response({"success": True, "copy_coins": coins})
 
 
 async def start_web_server():
@@ -1440,6 +1564,7 @@ async def start_web_server():
     app.router.add_get("/api/ct/status", handle_ct_status)
     app.router.add_post("/api/ct/watch", handle_ct_watch)
     app.router.add_post("/api/ct/copy", handle_ct_copy_toggle)
+    app.router.add_post("/api/ct/coins", handle_ct_set_coins)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
