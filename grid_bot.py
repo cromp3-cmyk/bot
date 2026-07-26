@@ -1365,6 +1365,8 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
   table { width:100%; border-collapse:collapse; font-size:13px; margin-top:10px; background:var(--panel); border:1px solid var(--border); border-radius:14px; overflow:hidden; }
   th,td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); }
   th { color:var(--dim); font-size:11px; text-transform:uppercase; }
+  th.sortable { cursor:pointer; user-select:none; }
+  th.sortable:hover { color:var(--text); }
   input[type=text] { padding:8px 10px; background:#080d1c; border:1px solid var(--border); border-radius:8px; color:var(--text); }
   input.new-address { width:340px; }
   input.coin-filter { width:130px; font-size:12px; }
@@ -1397,7 +1399,17 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
 
 <h2>Beobachtete Trader - Positionen im Detail</h2>
 <table id="watch-table">
-  <thead><tr><th>Label</th><th>Adresse</th><th>Coin</th><th>Seite</th><th>Größe</th><th>Ø-Einstieg</th><th>PnL</th><th>Eröffnet</th><th>Aktion</th></tr></thead>
+  <thead><tr>
+    <th class="sortable" data-key="label">Label ⇅</th>
+    <th class="sortable" data-key="addr">Adresse ⇅</th>
+    <th class="sortable" data-key="coin">Coin ⇅</th>
+    <th class="sortable" data-key="side">Seite ⇅</th>
+    <th class="sortable" data-key="size">Größe ⇅</th>
+    <th class="sortable" data-key="entry_price">Ø-Einstieg ⇅</th>
+    <th class="sortable" data-key="pnl">PnL ⇅</th>
+    <th class="sortable" data-key="opened_at">Eröffnet ⇅</th>
+    <th class="sortable" data-key="last_action">Aktion ⇅</th>
+  </tr></thead>
   <tbody></tbody>
 </table>
 
@@ -1411,6 +1423,45 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
 function fmtTime(iso) {
   return iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '-';
 }
+
+let sortKey = null;
+let sortAsc = true;
+
+function renderPosTable() {
+  let rows = [...(window.posData || [])];
+  if (sortKey) {
+    rows.sort((a, b) => {
+      let av = a[sortKey], bv = b[sortKey];
+      if (typeof av === 'string') av = av.toLowerCase();
+      if (typeof bv === 'string') bv = bv.toLowerCase();
+      if (av === null || av === undefined) av = '';
+      if (bv === null || bv === undefined) bv = '';
+      if (av < bv) return sortAsc ? -1 : 1;
+      if (av > bv) return sortAsc ? 1 : -1;
+      return 0;
+    });
+  }
+  document.querySelector('#watch-table tbody').innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.label}</td>
+      <td class="addr">${r.addr_short}</td>
+      <td><b>${r.coin}</b></td>
+      <td class="${r.side==='long'?'green':'red'}">${r.side==='long'?'🟢 LONG':'🔴 SHORT'}</td>
+      <td>${r.size}</td>
+      <td>${r.entry_price ?? '-'}</td>
+      <td class="${r.pnl>=0?'green':'red'}">$${r.pnl.toFixed(2)}</td>
+      <td>${fmtTime(r.opened_at)}</td>
+      <td class="${r.actionClass}">${r.last_action || '-'}${r.entries>1?' ('+r.entries+'x)':''}</td>
+    </tr>`).join('') || '<tr><td colspan="9">Noch keine offenen Positionen erfasst...</td></tr>';
+}
+
+document.querySelectorAll('#watch-table th.sortable').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.key;
+    if (sortKey === key) { sortAsc = !sortAsc; } else { sortKey = key; sortAsc = true; }
+    renderPosTable();
+  });
+});
 
 async function refresh() {
   const res = await fetch('/api/ct/status');
@@ -1432,28 +1483,22 @@ async function refresh() {
   }).join('');
 
   // Positions-Detailtabelle (eine Zeile pro Position)
-  let posRows = [];
+  let posData = [];
   Object.entries(data.watched).forEach(([addr, info]) => {
     const meta = info.position_meta || {};
     (info.positions || []).forEach(p => {
       const m = meta[p.coin] || {};
       const pnl = parseFloat(p.unrealized_pnl || 0);
       const actionClass = m.last_action === 'Neu' ? 'action-neu' : m.last_action === 'Nachkauf' ? 'action-nachkauf' : m.last_action === 'Reverse' ? 'action-reverse' : '';
-      posRows.push(`
-        <tr>
-          <td>${info.label}</td>
-          <td class="addr">${addr.slice(0,8)}...${addr.slice(-4)}</td>
-          <td><b>${p.coin}</b></td>
-          <td class="${p.side==='long'?'green':'red'}">${p.side==='long'?'🟢 LONG':'🔴 SHORT'}</td>
-          <td>${p.size}</td>
-          <td>${p.entry_price ?? '-'}</td>
-          <td class="${pnl>=0?'green':'red'}">$${pnl.toFixed(2)}</td>
-          <td>${fmtTime(m.opened_at)}</td>
-          <td class="${actionClass}">${m.last_action ?? '-'}${m.entries>1?' ('+m.entries+'x)':''}</td>
-        </tr>`);
+      posData.push({
+        label: info.label, addr_short: addr.slice(0,8) + '...' + addr.slice(-4),
+        coin: p.coin, side: p.side, size: parseFloat(p.size || 0), entry_price: p.entry_price,
+        pnl, opened_at: m.opened_at || '', last_action: m.last_action || '', entries: m.entries || 0, actionClass,
+      });
     });
   });
-  document.querySelector('#watch-table tbody').innerHTML = posRows.join('') || '<tr><td colspan="9">Noch keine offenen Positionen erfasst...</td></tr>';
+  window.posData = posData;
+  renderPosTable();
 
   // Copy-Einstellungen pro Trader
   const copyRows = Object.entries(data.watched).map(([addr, info]) => {
