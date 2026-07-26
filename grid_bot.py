@@ -118,6 +118,10 @@ def default_config():
         "ha_st_resolution": os.getenv("HA_ST_RESOLUTION", "5m"),
         "ha_st_atr_period": int(os.getenv("HA_ST_ATR_PERIOD", "5")),
         "ha_st_atr_mult": float(os.getenv("HA_ST_ATR_MULT", "1.5")),
+        "predicta_resolution": os.getenv("PREDICTA_RESOLUTION", "1m"),
+        "predicta_entry_threshold": float(os.getenv("PREDICTA_ENTRY_THRESHOLD", "59")),
+        "predicta_exit_threshold": float(os.getenv("PREDICTA_EXIT_THRESHOLD", "50")),
+        "predicta_auto_reverse": os.getenv("PREDICTA_AUTO_REVERSE", "true").lower() == "true",
     }
 
 
@@ -126,7 +130,7 @@ def default_state():
         "position": None, "avg_entry_price": None, "total_coin_size": 0.0,
         "entry_count": 0, "anchor_price": None, "last_price": None,
         "price_history": [], "psar_value": None, "psar_uptrend": None,
-        "ha_st_stop_price": None,
+        "ha_st_stop_price": None, "predicta_long_pct": None, "position_opened_at": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -441,6 +445,264 @@ async def ha_supertrend_poll_loop(symbol):
         await asyncio.sleep(20)
 
 
+async def fetch_candles_predicta(symbol, resolution, count_back=150):
+    """Wie fetch_candles_ohlc, aber inkl. Volumen (fuer den Predicta-Score noetig)."""
+    import lighter
+    configuration = lighter.Configuration(host=BASE_URL)
+    async with lighter.ApiClient(configuration) as api_client:
+        candle_api = lighter.CandlestickApi(api_client)
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - 60 * 60 * 24 * 7 * 1000
+        response = await candle_api.candles(
+            market_id=MARKET_INDICES[symbol], resolution=resolution,
+            start_timestamp=start_ms, end_timestamp=now_ms,
+            count_back=min(count_back, 500), set_timestamp_to_end=True,
+        )
+        candles = getattr(response, "c", None)
+        if not candles:
+            return None
+        timestamps, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+        for candle in candles:
+            t_ = getattr(candle, "t", None)
+            o_ = getattr(candle, "o", None)
+            h_ = getattr(candle, "h", None)
+            l_ = getattr(candle, "l", None)
+            c_ = getattr(candle, "c", None)
+            v_ = getattr(candle, "v", None)
+            if None in (t_, o_, h_, l_, c_):
+                continue
+            timestamps.append(int(t_)); opens.append(float(o_)); highs.append(float(h_))
+            lows.append(float(l_)); closes.append(float(c_)); volumes.append(float(v_) if v_ is not None else 0.0)
+        return timestamps, opens, highs, lows, closes, volumes
+
+
+def _ema_series(values, length):
+    if not values:
+        return []
+    k = 2 / (length + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(v * k + out[-1] * (1 - k))
+    return out
+
+
+def _rsi_series(closes, length=14):
+    n = len(closes)
+    rsi = [50.0] * n
+    if n < length + 1:
+        return rsi
+    gains, losses = [0.0], [0.0]
+    for i in range(1, n):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    avg_gain = sum(gains[1:length + 1]) / length
+    avg_loss = sum(losses[1:length + 1]) / length
+    for i in range(length + 1, n):
+        avg_gain = (avg_gain * (length - 1) + gains[i]) / length
+        avg_loss = (avg_loss * (length - 1) + losses[i]) / length
+        rs = avg_gain / avg_loss if avg_loss > 0 else 100.0
+        rsi[i] = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def _stoch_series(highs, lows, closes, length=14, smooth=3):
+    n = len(closes)
+    k_vals = [50.0] * n
+    for i in range(length - 1, n):
+        hh = max(highs[i - length + 1:i + 1])
+        ll = min(lows[i - length + 1:i + 1])
+        k_vals[i] = 50.0 if hh == ll else (closes[i] - ll) / (hh - ll) * 100
+    d_vals = [50.0] * n
+    for i in range(smooth - 1, n):
+        d_vals[i] = sum(k_vals[i - smooth + 1:i + 1]) / smooth
+    return k_vals, d_vals
+
+
+def _atr_series(highs, lows, closes, length=14):
+    n = len(closes)
+    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
+    for i in range(1, n):
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+    atr = [tr[0]] * n
+    for i in range(1, n):
+        if i < length:
+            atr[i] = sum(tr[:i + 1]) / (i + 1)
+        else:
+            atr[i] = (atr[i - 1] * (length - 1) + tr[i]) / length
+    return atr
+
+
+def _adx_series(highs, lows, closes, length=14):
+    n = len(closes)
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+    for i in range(1, n):
+        up = highs[i] - highs[i - 1]
+        down = lows[i - 1] - lows[i]
+        plus_dm[i] = up if (up > down and up > 0) else 0.0
+        minus_dm[i] = down if (down > up and down > 0) else 0.0
+    tr = _atr_series(highs, lows, closes, 1)  # echter TR pro Bar (Periode 1 = keine Glaettung)
+
+    def wilder_smooth(vals):
+        out = [0.0] * n
+        if n <= length:
+            return out
+        out[length] = sum(vals[1:length + 1])
+        for i in range(length + 1, n):
+            out[i] = out[i - 1] - (out[i - 1] / length) + vals[i]
+        return out
+
+    smoothed_tr = wilder_smooth(tr)
+    smoothed_plus = wilder_smooth(plus_dm)
+    smoothed_minus = wilder_smooth(minus_dm)
+
+    adx = [0.0] * n
+    if n > 2 * length:
+        dx = [0.0] * n
+        for i in range(length, n):
+            if smoothed_tr[i] > 0:
+                di_plus = 100 * smoothed_plus[i] / smoothed_tr[i]
+                di_minus = 100 * smoothed_minus[i] / smoothed_tr[i]
+                denom = di_plus + di_minus
+                dx[i] = 100 * abs(di_plus - di_minus) / denom if denom > 0 else 0.0
+        adx[2 * length] = sum(dx[length:2 * length + 1]) / (length + 1)
+        for i in range(2 * length + 1, n):
+            adx[i] = (adx[i - 1] * (length - 1) + dx[i]) / length
+    return adx
+
+
+def _custom_supertrend(highs, lows, closes, period=10, factor=3.0):
+    """1:1 wie im Predicta-Script: ratchende ATR-Baender auf ECHTEN Kerzen (kein Heikin Ashi)."""
+    n = len(closes)
+    atr = _atr_series(highs, lows, closes, period)
+    upper = [0.0] * n
+    lower = [0.0] * n
+    direction = [1] * n
+
+    for i in range(n):
+        hl2 = (highs[i] + lows[i]) / 2
+        upper_raw = hl2 + factor * atr[i]
+        lower_raw = hl2 + (-factor * atr[i])
+        if i == 0:
+            upper[i] = upper_raw
+            lower[i] = lower_raw
+            direction[i] = 1
+            continue
+        lower[i] = max(lower_raw, lower[i - 1]) if closes[i - 1] > lower[i - 1] else lower_raw
+        upper[i] = min(upper_raw, upper[i - 1]) if closes[i - 1] < upper[i - 1] else upper_raw
+        if direction[i - 1] == -1:
+            direction[i] = 1 if closes[i] < lower[i] else -1
+        else:
+            direction[i] = -1 if closes[i] > upper[i] else 1
+
+    is_uptrend = [d == -1 for d in direction]
+    return is_uptrend
+
+
+def compute_predicta_score(opens, highs, lows, closes, volumes):
+    """Portiert aus dem Predicta-Pine-Script - liefert longPct fuer die LETZTE Kerze."""
+    n = len(closes)
+    ema8 = _ema_series(closes, 8)
+    ema21 = _ema_series(closes, 21)
+    ema50 = _ema_series(closes, 50)
+    rsi = _rsi_series(closes, 14)
+    stoch_k, stoch_d = _stoch_series(highs, lows, closes, 14, 3)
+    ema12 = _ema_series(closes, 12)
+    ema26 = _ema_series(closes, 26)
+    macd_line = [f - s for f, s in zip(ema12, ema26)]
+    signal_line = _ema_series(macd_line, 9)
+    macd_hist = [m - s for m, s in zip(macd_line, signal_line)]
+    adx = _adx_series(highs, lows, closes, 14)
+    is_uptrend = _custom_supertrend(highs, lows, closes, 10, 3.0)
+
+    vol_sma = sum(volumes[-20:]) / 20 if n >= 20 else (sum(volumes) / n if n and sum(volumes) else 1.0)
+    vol_ratio = (volumes[-1] / vol_sma) if vol_sma > 0 else 1.0
+
+    candle_range = highs[-1] - lows[-1]
+    buy_vol = volumes[-1] * (closes[-1] - lows[-1]) / candle_range if candle_range > 0 else volumes[-1] * 0.5
+    sell_vol = volumes[-1] - buy_vol
+    volume_delta = buy_vol - sell_vol
+    delta_ema = volume_delta  # vereinfachend (kein eigener Delta-Verlauf ueber Zeit in dieser Portierung)
+
+    i = n - 1
+    isUp = is_uptrend[i]
+    isDown = not isUp
+    rsiAbove50 = rsi[i] > 50
+
+    macdScoreLong = 100 if (macd_line[i] > signal_line[i] and macd_hist[i] > 0) else (70 if macd_line[i] > signal_line[i] else (50 if macd_hist[i] > 0 else 20))
+    macdScoreShort = 100 if (macd_line[i] < signal_line[i] and macd_hist[i] < 0) else (70 if macd_line[i] < signal_line[i] else (50 if macd_hist[i] < 0 else 20))
+    rsiScoreLong = 100 if rsi[i] < 30 else (85 if rsi[i] < 40 else (70 if rsi[i] < 50 else (50 if rsi[i] < 60 else 25)))
+    rsiScoreShort = 100 if rsi[i] > 70 else (85 if rsi[i] > 60 else (70 if rsi[i] > 50 else (50 if rsi[i] > 40 else 25)))
+    stochScoreLong = 100 if (stoch_k[i] > stoch_d[i] and stoch_k[i] < 20) else (85 if (stoch_k[i] > stoch_d[i] and stoch_k[i] < 50) else (65 if stoch_k[i] > stoch_d[i] else 25))
+    stochScoreShort = 100 if (stoch_k[i] < stoch_d[i] and stoch_k[i] > 80) else (85 if (stoch_k[i] < stoch_d[i] and stoch_k[i] > 50) else (65 if stoch_k[i] < stoch_d[i] else 25))
+    volScore = 100 if vol_ratio > 2.0 else (80 if vol_ratio > 1.5 else (60 if vol_ratio > 1.0 else (45 if vol_ratio > 0.8 else 25)))
+    deltaScoreLong = 100 if (volume_delta > 0 and volume_delta > delta_ema) else (75 if volume_delta > 0 else (40 if volume_delta > -abs(delta_ema) else 20))
+    deltaScoreShort = 100 if (volume_delta < 0 and volume_delta < delta_ema) else (75 if volume_delta < 0 else (40 if volume_delta < abs(delta_ema) else 20))
+    adxScore = 100 if adx[i] > 35 else (85 if adx[i] > 30 else (70 if adx[i] > 25 else (50 if adx[i] > 20 else 30)))
+    trendScoreLong = 100 if (isUp and ema8[i] > ema21[i] > ema50[i]) else (80 if (isUp and ema8[i] > ema21[i]) else (60 if isUp else 0))
+    trendScoreShort = 100 if (isDown and ema8[i] < ema21[i] < ema50[i]) else (80 if (isDown and ema8[i] < ema21[i]) else (60 if isDown else 0))
+
+    longScore = (trendScoreLong * 0.23 + macdScoreLong * 0.18 + deltaScoreLong * 0.15 +
+                 rsiScoreLong * 0.12 + stochScoreLong * 0.12 + adxScore * 0.10 + volScore * 0.10)
+    shortScore = (trendScoreShort * 0.23 + macdScoreShort * 0.18 + deltaScoreShort * 0.15 +
+                  rsiScoreShort * 0.12 + stochScoreShort * 0.12 + adxScore * 0.10 + volScore * 0.10)
+
+    total = longScore + shortScore
+    long_pct = round(longScore / total * 100, 1) if total > 0 else 50.0
+    return long_pct, closes[i]
+
+
+async def predicta_poll_loop(symbol):
+    """Score-Bot: Einstieg > entry_threshold, Ausstieg sobald < exit_threshold (bzw. spiegelverkehrt fuer Short)."""
+    b = BOTS[symbol]
+    last_signal_ts = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "predicta":
+                data = await fetch_candles_predicta(symbol, cfg["predicta_resolution"])
+                if data:
+                    timestamps, opens, highs, lows, closes, volumes = data
+                    closed_ts = timestamps[:-1]
+                    if len(closed_ts) >= 60:
+                        long_pct, price = compute_predicta_score(
+                            opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                        )
+                        st = b["state"]
+                        st["predicta_long_pct"] = long_pct
+
+                        entry_th = cfg["predicta_entry_threshold"]
+                        exit_th = cfg["predicta_exit_threshold"]
+                        signal_key = closed_ts[-1]
+
+                        if cfg["bot_active"] and last_signal_ts != signal_key:
+                            last_signal_ts = signal_key
+
+                            if st["position"] is None:
+                                if long_pct >= entry_th:
+                                    debug_log(f"📡 [{symbol}] Predicta-Score {long_pct}% ≥ {entry_th}% -> LONG @ {price}")
+                                    await execute_entry(symbol, "long", price, is_add_on=False)
+                                elif long_pct <= (100 - entry_th):
+                                    debug_log(f"📡 [{symbol}] Predicta-Score {long_pct}% ≤ {100-entry_th}% -> SHORT @ {price}")
+                                    await execute_entry(symbol, "short", price, is_add_on=False)
+                            elif st["position"] == "long" and long_pct < exit_th:
+                                debug_log(f"🏁 [{symbol}] Predicta-Score {long_pct}% < {exit_th}% -> Long schließen @ {price}")
+                                await execute_exit(symbol, price, "SCORE-EXIT")
+                                if cfg.get("predicta_auto_reverse", True) and long_pct <= (100 - entry_th):
+                                    await execute_entry(symbol, "short", price, is_add_on=False)
+                            elif st["position"] == "short" and long_pct > (100 - exit_th):
+                                debug_log(f"🏁 [{symbol}] Predicta-Score {long_pct}% > {100-exit_th}% -> Short schließen @ {price}")
+                                await execute_exit(symbol, price, "SCORE-EXIT")
+                                if cfg.get("predicta_auto_reverse", True) and long_pct >= entry_th:
+                                    await execute_entry(symbol, "long", price, is_add_on=False)
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Predicta-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(15)
+
+
 def compute_step_abs(reference_price, cfg, which):
     """which: 'grid' oder 'tp' - liefert den Abstand in Preiseinheiten, je nach grid_mode."""
     if cfg["grid_mode"] == "usd":
@@ -510,6 +772,7 @@ async def execute_entry(symbol, direction, price, is_add_on):
         st["avg_entry_price"] = price
         st["total_coin_size"] = new_units
         st["position"] = direction
+        st["position_opened_at"] = datetime.now().isoformat()
 
     st["entry_count"] += 1
     debug_log(f"📈 [{symbol}] {'Nachkauf' if is_add_on else 'Neue Position'}: {direction.upper()} @ {price} | Ø-Einstieg {round(st['avg_entry_price'], 2)} | Stufe {st['entry_count']}")
@@ -544,7 +807,8 @@ async def execute_exit(symbol, price, reason):
     stats["wins" if pnl_usd > 0 else "losses"] += 1
     st["trade_log"].append({
         "side": st["position"], "avg_entry": round(st["avg_entry_price"], 2), "exit": price,
-        "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3), "closed_at": datetime.now().isoformat(),
+        "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3),
+        "opened_at": st.get("position_opened_at"), "closed_at": datetime.now().isoformat(), "reason": reason,
     })
 
     debug_log(f"🏁 [{symbol}] Position geschlossen ({reason}): {st['position'].upper()} Ø{round(st['avg_entry_price'],2)} -> {price} | PnL ${round(pnl_usd,3)}")
@@ -555,6 +819,7 @@ async def execute_exit(symbol, price, reason):
     st["entry_count"] = 0
     st["anchor_price"] = price
     st["ha_st_stop_price"] = None
+    st["position_opened_at"] = None
 
     if cfg.get("auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid":
         opposite = "short" if closing_side == "long" else "long"
@@ -578,7 +843,7 @@ async def on_price_update(symbol, price):
 
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
-            return  # im PSAR/HA-Supertrend-Modus übernehmen die jeweiligen Poll-Loops den Einstieg
+            return  # im PSAR/HA-Supertrend/Predicta-Modus übernehmen die jeweiligen Poll-Loops den Einstieg
         grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
         if price <= st["anchor_price"] - grid_step_abs:
             await execute_entry(symbol, "long", price, is_add_on=False)
@@ -586,12 +851,13 @@ async def on_price_update(symbol, price):
             await execute_entry(symbol, "short", price, is_add_on=False)
         return
 
-    if cfg["entry_mode"] == "ha_st":
-        sl = st.get("ha_st_stop_price")
-        if sl is not None:
-            if (st["position"] == "long" and price <= sl) or (st["position"] == "short" and price >= sl):
-                await execute_exit(symbol, price, "SL")
-        return
+    if cfg["entry_mode"] in ("ha_st", "predicta"):
+        if cfg["entry_mode"] == "ha_st":
+            sl = st.get("ha_st_stop_price")
+            if sl is not None:
+                if (st["position"] == "long" and price <= sl) or (st["position"] == "short" and price >= sl):
+                    await execute_exit(symbol, price, "SL")
+        return  # Predicta-Exit passiert ausschliesslich im predicta_poll_loop (Score-basiert)
 
     if cfg["entry_mode"] != "grid":
         return  # PSAR-Positionen werden ausschliesslich durch den naechsten Flip beendet, kein %-TP/SL hier
@@ -704,36 +970,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <canvas id="priceChart" height="400"></canvas>
 
-<h2>TradingView (Referenz-Chart, eigene Marktdaten von TradingView)</h2>
-<div id="tv-widget-container" style="height:500px;"></div>
-<script src="https://s3.tradingview.com/tv.js"></script>
-<script>
-  let tvWidget = null;
-  function renderTradingViewWidget(symbol) {
-    document.getElementById('tv-widget-container').innerHTML = '';
-    // Heuristische Zuordnung - falls das Symbol nicht passt, oben links im Widget selbst per Suche anpassen
-    const tvSymbolMap = {
-      EURUSD: 'FX:EURUSD', GBPUSD: 'FX:GBPUSD', USDJPY: 'FX:USDJPY', USDCHF: 'FX:USDCHF',
-      USDCAD: 'FX:USDCAD', AUDUSD: 'FX:AUDUSD', NZDUSD: 'FX:NZDUSD', USDKRW: 'FX:USDKRW',
-      XAU: 'TVC:GOLD', XAG: 'TVC:SILVER', WTI: 'TVC:USOIL',
-    };
-    const tvSymbol = tvSymbolMap[symbol] || `BINANCE:${symbol}USDT`;
-    new TradingView.widget({
-      autosize: true,
-      symbol: tvSymbol,
-      interval: "1",
-      timezone: "Etc/UTC",
-      theme: "dark",
-      style: "1",
-      locale: "de_DE",
-      toolbar_bg: "#1a1d29",
-      enable_publishing: false,
-      allow_symbol_change: true,
-      container_id: "tv-widget-container"
-    });
-  }
-</script>
-
 <h2>Einstellungen ändern (nur für den ausgewählten Coin)</h2>
 <form id="config-form">
   <div><label>Margin (USDC)</label><input type="number" step="1" id="margin"></div>
@@ -743,13 +979,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="psar">Parabolic SAR (reiner Buy/Sell-Wechsel)</option>
       <option value="ha_st">Heikin Ashi Supertrend (Buy/Sell, SL an Signalkerze)</option>
+      <option value="predicta">Predicta-Score (Einstieg >59%, Ausstieg <50%)</option>
+    </select>
+  </div>
+  <div><label>Predicta Zeitrahmen</label>
+    <select class="cfg" id="predicta_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+    </select>
+  </div>
+  <div><label>Predicta Einstieg (%)</label><input type="number" step="1" id="predicta_entry_threshold"></div>
+  <div><label>Predicta Ausstieg (%)</label><input type="number" step="1" id="predicta_exit_threshold"></div>
+  <div><label>Predicta sofort drehen</label>
+    <select class="cfg" id="predicta_auto_reverse">
+      <option value="true">Ja</option>
+      <option value="false">Nein</option>
     </select>
   </div>
   <div><label>HA-Supertrend Zeitrahmen</label>
     <select class="cfg" id="ha_st_resolution">
-      <option value="30s">30 Sekunden (⚠️ ungetestet)</option>
       <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten (⚠️ ungetestet)</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
@@ -761,9 +1011,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div><label>HA-ATR Multiplikator</label><input type="number" step="0.1" id="ha_st_atr_mult"></div>
   <div><label>PSAR Zeitrahmen</label>
     <select class="cfg" id="psar_resolution">
-      <option value="30s">30 Sekunden (⚠️ ungetestet)</option>
       <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten (⚠️ ungetestet)</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
@@ -800,7 +1048,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div style="font-size:12px; color:#9ca3af; margin-top:8px;" id="abs-distances"></div>
 
 <h2>Letzte abgeschlossene Trades</h2>
-<table id="trades-table"><thead><tr><th>Seite</th><th>Ø-Einstieg</th><th>Exit</th><th>Stufen</th><th>PnL $</th></tr></thead><tbody></tbody></table>
+<table id="trades-table"><thead><tr><th>Eröffnet</th><th>Geschlossen</th><th>Seite</th><th>Ø-Einstieg</th><th>Exit</th><th>Stufen</th><th>Grund</th><th>PnL $</th></tr></thead><tbody></tbody></table>
 
 <script>
 let priceChart;
@@ -815,7 +1063,7 @@ async function loadSymbols() {
   sel.innerHTML = allSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
   currentSymbol = allSymbols[0];
   sel.value = currentSymbol;
-  sel.addEventListener('change', () => { currentSymbol = sel.value; window.formTouched = false; refresh(); renderTradingViewWidget(currentSymbol); });
+  sel.addEventListener('change', () => { currentSymbol = sel.value; window.formTouched = false; refresh(); });
 }
 
 document.getElementById('btn-start').addEventListener('click', async () => {
@@ -870,6 +1118,7 @@ async function refresh() {
     <div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>
     <div class="card"><div class="label">PSAR (${data.config.entry_mode==='psar'?'aktiv':'inaktiv'})</div><div class="value ${data.psar_uptrend?'green':'red'}">${data.psar_value ?? '-'}</div></div>
     <div class="card"><div class="label">HA-Supertrend SL (${data.config.entry_mode==='ha_st'?'aktiv':'inaktiv'})</div><div class="value red">${data.ha_st_stop_price ?? '-'}</div></div>
+    <div class="card"><div class="label">Predicta Long% (${data.config.entry_mode==='predicta'?'aktiv':'inaktiv'})</div><div class="value ${data.predicta_long_pct>=50?'green':'red'}">${data.predicta_long_pct ?? '-'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -882,6 +1131,10 @@ async function refresh() {
     document.getElementById('ha_st_resolution').value = data.config.ha_st_resolution;
     document.getElementById('ha_st_atr_period').value = data.config.ha_st_atr_period;
     document.getElementById('ha_st_atr_mult').value = data.config.ha_st_atr_mult;
+    document.getElementById('predicta_resolution').value = data.config.predicta_resolution;
+    document.getElementById('predicta_entry_threshold').value = data.config.predicta_entry_threshold;
+    document.getElementById('predicta_exit_threshold').value = data.config.predicta_exit_threshold;
+    document.getElementById('predicta_auto_reverse').value = String(data.config.predicta_auto_reverse);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -915,8 +1168,9 @@ async function refresh() {
   });
 
   const trades = (data.trade_log || []).slice(-15).reverse();
+  const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
   document.querySelector('#trades-table tbody').innerHTML = trades.map(t => `
-    <tr><td>${t.side}</td><td>${t.avg_entry}</td><td>${t.exit}</td><td>${t.entries}</td>
+    <tr><td>${fmtTime(t.opened_at)}</td><td>${fmtTime(t.closed_at)}</td><td>${t.side}</td><td>${t.avg_entry}</td><td>${t.exit}</td><td>${t.entries}</td><td>${t.reason ?? '-'}</td>
     <td class="${t.pnl_usd>=0?'green':'red'}">${t.pnl_usd}</td></tr>
   `).join('');
 }
@@ -931,6 +1185,10 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     ha_st_resolution: document.getElementById('ha_st_resolution').value,
     ha_st_atr_period: parseInt(document.getElementById('ha_st_atr_period').value),
     ha_st_atr_mult: parseFloat(document.getElementById('ha_st_atr_mult').value),
+    predicta_resolution: document.getElementById('predicta_resolution').value,
+    predicta_entry_threshold: parseFloat(document.getElementById('predicta_entry_threshold').value),
+    predicta_exit_threshold: parseFloat(document.getElementById('predicta_exit_threshold').value),
+    predicta_auto_reverse: document.getElementById('predicta_auto_reverse').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -945,7 +1203,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','psar_resolution','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','psar_resolution','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','predicta_resolution','predicta_entry_threshold','predicta_exit_threshold','predicta_auto_reverse','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -956,7 +1214,6 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
 
 (async () => {
   await loadSymbols();
-  renderTradingViewWidget(currentSymbol);
   refresh();
   setInterval(refresh, 3000);
 })();
@@ -997,6 +1254,7 @@ async def handle_status(request):
         "grid_levels": calc_grid_levels(symbol),
         "psar_value": st.get("psar_value"), "psar_uptrend": st.get("psar_uptrend"),
         "ha_st_stop_price": st.get("ha_st_stop_price"),
+        "predicta_long_pct": st.get("predicta_long_pct"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -1014,7 +1272,8 @@ async def handle_config_update(request):
     for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse",
                 "psar_resolution", "psar_step", "psar_max_step",
-                "ha_st_resolution", "ha_st_atr_period", "ha_st_atr_mult"]:
+                "ha_st_resolution", "ha_st_atr_period", "ha_st_atr_mult",
+                "predicta_resolution", "predicta_entry_threshold", "predicta_exit_threshold", "predicta_auto_reverse"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -1094,6 +1353,7 @@ async def main():
         trading_loop(),
         *[psar_poll_loop(s) for s in SYMBOLS],
         *[ha_supertrend_poll_loop(s) for s in SYMBOLS],
+        *[predicta_poll_loop(s) for s in SYMBOLS],
     )
 
 
