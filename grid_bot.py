@@ -200,15 +200,16 @@ async def fetch_candles_for_psar(symbol, resolution, count_back=100):
         candles = getattr(response, "c", None)
         if not candles:
             return None
-        highs, lows, closes = [], [], []
+        timestamps, highs, lows, closes = [], [], [], []
         for candle in candles:
+            t_ = getattr(candle, "t", None)
             h_ = getattr(candle, "h", None)
             l_ = getattr(candle, "l", None)
             c_ = getattr(candle, "c", None)
-            if None in (h_, l_, c_):
+            if None in (t_, h_, l_, c_):
                 continue
-            highs.append(float(h_)); lows.append(float(l_)); closes.append(float(c_))
-        return highs, lows, closes
+            timestamps.append(int(t_)); highs.append(float(h_)); lows.append(float(l_)); closes.append(float(c_))
+        return timestamps, highs, lows, closes
 
 
 def calc_psar(highs, lows, af_step=0.02, af_max=0.2):
@@ -270,8 +271,9 @@ async def psar_poll_loop(symbol):
             if cfg["entry_mode"] == "psar":
                 data = await fetch_candles_for_psar(symbol, cfg["psar_resolution"])
                 if data:
-                    highs, lows, closes = data
+                    timestamps, highs, lows, closes = data
                     # letzte Kerze evtl. noch nicht geschlossen -> weglassen
+                    closed_ts = timestamps[:-1]
                     sar, uptrend = calc_psar(highs[:-1], lows[:-1], cfg["psar_step"], cfg["psar_max_step"])
                     if len(uptrend) >= 2:
                         flipped_bullish = uptrend[-1] and not uptrend[-2]
@@ -279,13 +281,13 @@ async def psar_poll_loop(symbol):
                         b["state"]["psar_value"] = round(sar[-1], 6)
                         b["state"]["psar_uptrend"] = uptrend[-1]
 
-                        signal_key = len(closes)  # simple Dedupe-Schutz pro neuer Kerze
+                        signal_key = closed_ts[-1]  # Zeitstempel der letzten geschlossenen Kerze - aendert sich pro Kerze
                         st = b["state"]
                         if (flipped_bullish or flipped_bearish) and last_signal_ts != signal_key:
                             last_signal_ts = signal_key
                             if cfg["bot_active"]:
                                 new_direction = "long" if flipped_bullish else "short"
-                                price = closes[-1]
+                                price = closes[:-1][-1]
                                 debug_log(f"📡 [{symbol}] PSAR-Flip erkannt: {new_direction.upper()} @ {price}")
 
                                 if st["position"] is not None and st["position"] != new_direction:
