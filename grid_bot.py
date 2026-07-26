@@ -121,6 +121,7 @@ def default_config():
         "cc_resolution_seconds": int(os.getenv("CC_RESOLUTION_SECONDS", "60")),
         "cc_confirm_delay_seconds": int(os.getenv("CC_CONFIRM_DELAY_SECONDS", "20")),
         "cc_auto_reverse": os.getenv("CC_AUTO_REVERSE", "true").lower() == "true",
+        "cc_early_exit": os.getenv("CC_EARLY_EXIT", "true").lower() == "true",
     }
 
 
@@ -752,6 +753,21 @@ async def handle_candle_color_tick(symbol, price):
         return
 
     candle_age = now - st["cc_candle_start"]
+
+    # Fruehe Ausstiegs-Pruefung: kontinuierlich (jeden Tick), nicht nur einmal pro Kerze -
+    # sobald die AKTUELL LAUFENDE Kerze nach confirm_delay Sekunden die Gegenfarbe zeigt,
+    # wird sofort geschlossen, OHNE auf den Kerzenschluss zu warten.
+    if cfg.get("cc_early_exit", True) and st["position"] is not None and candle_age >= confirm_delay:
+        current_color = "green" if price > st["cc_candle_open"] else ("red" if price < st["cc_candle_open"] else None)
+        position_color = "green" if st["position"] == "long" else "red"
+        if current_color is not None and current_color != position_color:
+            await execute_exit(symbol, price, "CC-EARLY-EXIT")
+            st["cc_entered_this_candle"] = True
+            if cfg.get("cc_auto_reverse", True):
+                new_direction = "long" if current_color == "green" else "short"
+                await execute_entry(symbol, new_direction, price, is_add_on=False)
+            return
+
     if not st["cc_entered_this_candle"] and candle_age >= confirm_delay:
         st["cc_entered_this_candle"] = True
         current_color = "green" if price > st["cc_candle_open"] else ("red" if price < st["cc_candle_open"] else None)
@@ -762,7 +778,7 @@ async def handle_candle_color_tick(symbol, price):
         if st["position"] is None:
             await execute_entry(symbol, direction, price, is_add_on=False)
         elif st["position"] != direction and cfg.get("cc_auto_reverse", True):
-            # Sollte durch den Kerzenschluss-Exit oben eigentlich schon flach sein - Sicherheitsnetz
+            # Sicherheitsnetz, falls die fruehe Ausstiegs-Pruefung oben deaktiviert ist
             await execute_exit(symbol, price, "CC-REVERSE")
             await execute_entry(symbol, direction, price, is_add_on=False)
 
@@ -1009,6 +1025,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="false">Nein</option>
     </select>
   </div>
+  <div data-mode="candle_color"><label>Früher Ausstieg (nicht auf Schluss warten)</label>
+    <select class="cfg" id="cc_early_exit">
+      <option value="true">Ja - sofort bei Gegenfarbe</option>
+      <option value="false">Nein - erst bei fertigem Kerzenschluss</option>
+    </select>
+  </div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1139,6 +1161,7 @@ async function refresh() {
     document.getElementById('cc_resolution_seconds').value = data.config.cc_resolution_seconds;
     document.getElementById('cc_confirm_delay_seconds').value = data.config.cc_confirm_delay_seconds;
     document.getElementById('cc_auto_reverse').value = String(data.config.cc_auto_reverse);
+    document.getElementById('cc_early_exit').value = String(data.config.cc_early_exit);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -1194,6 +1217,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     cc_resolution_seconds: parseInt(document.getElementById('cc_resolution_seconds').value),
     cc_confirm_delay_seconds: parseInt(document.getElementById('cc_confirm_delay_seconds').value),
     cc_auto_reverse: document.getElementById('cc_auto_reverse').value === 'true',
+    cc_early_exit: document.getElementById('cc_early_exit').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -1208,7 +1232,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','cc_early_exit','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1277,7 +1301,7 @@ async def handle_config_update(request):
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse",
                 "ha_st_resolution", "ha_st_atr_period", "ha_st_atr_mult",
                 "ha_st_trend_filter", "ha_st_trend_ema_length",
-                "cc_resolution_seconds", "cc_confirm_delay_seconds", "cc_auto_reverse"]:
+                "cc_resolution_seconds", "cc_confirm_delay_seconds", "cc_auto_reverse", "cc_early_exit"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
