@@ -18,6 +18,7 @@ WICHTIG - SICHERHEIT: Erst DRY_RUN=true testen!
 
 import asyncio
 import websockets
+import aiohttp
 import json
 import time
 import os
@@ -117,6 +118,9 @@ def default_config():
         "ha_st_atr_mult": float(os.getenv("HA_ST_ATR_MULT", "1.5")),
         "ha_st_trend_filter": os.getenv("HA_ST_TREND_FILTER", "true").lower() == "true",
         "ha_st_trend_ema_length": int(os.getenv("HA_ST_TREND_EMA_LENGTH", "200")),
+        "cc_resolution_seconds": int(os.getenv("CC_RESOLUTION_SECONDS", "60")),
+        "cc_confirm_delay_seconds": int(os.getenv("CC_CONFIRM_DELAY_SECONDS", "20")),
+        "cc_auto_reverse": os.getenv("CC_AUTO_REVERSE", "true").lower() == "true",
     }
 
 
@@ -126,6 +130,7 @@ def default_state():
         "entry_count": 0, "anchor_price": None, "last_price": None,
         "price_history": [],
         "ha_st_stop_price": None, "position_opened_at": None,
+        "cc_candle_start": None, "cc_candle_open": None, "cc_entered_this_candle": False, "cc_last_color": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -133,6 +138,217 @@ def default_state():
 
 # ========== GLOBALER STATE - EIN EINTRAG PRO COIN ==========
 BOTS = {s: {"config": default_config(), "state": default_state()} for s in SYMBOLS}
+
+
+# ==========================================================================
+# COPY-TRADING: Hyperliquid Top-Trader beobachten und optional auf Lighter kopieren
+# ==========================================================================
+HL_INFO_URL = "https://api.hyperliquid.xyz/info"
+HL_LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
+
+CT_CONFIG = {
+    "dry_run": os.getenv("CT_DRY_RUN", os.getenv("DRY_RUN", "true")).lower() == "true",
+    "copy_margin": float(os.getenv("COPY_MARGIN", "10")),
+    "copy_leverage": int(os.getenv("COPY_LEVERAGE", "3")),
+    "leaderboard_top_n": int(os.getenv("LEADERBOARD_TOP_N", "100")),
+    "leaderboard_refresh_minutes": int(os.getenv("LEADERBOARD_REFRESH_MINUTES", "30")),
+    "poll_interval_seconds": int(os.getenv("CT_POLL_INTERVAL_SECONDS", "15")),
+}
+
+CT_MANUAL_ADDRESSES = [a.strip() for a in os.getenv("MANUAL_WALLET_ADDRESSES", "").split(",") if a.strip()]
+
+CT_STATE = {
+    "leaderboard": [],
+    "leaderboard_last_fetch": None,
+    "leaderboard_error": None,
+    "watched": {},
+}
+
+
+async def execute_copy_trade(symbol, direction, reference_price):
+    """Kopiert die RICHTUNG eines Trades mit EIGENER Margin/Hebel (keine Groessen-Kopie)."""
+    if symbol not in MARKET_INDICES:
+        debug_log(f"⚠️ [CopyTrading] Coin {symbol} nicht auf Lighter gemappt - übersprungen")
+        return
+
+    if CT_CONFIG["dry_run"]:
+        debug_log(f"🧪 [CopyTrading] DRY_RUN - würde kopieren: {direction.upper()} {symbol} @ ~{reference_price}")
+        return
+
+    client = get_lighter_client()
+    if client is None:
+        return
+    try:
+        market_index = MARKET_INDICES[symbol]
+        precision = get_precision(symbol)
+        min_base = get_min_base_amount(symbol)
+        position_usdc = CT_CONFIG["copy_margin"] * CT_CONFIG["copy_leverage"]
+        coin_amount = position_usdc / reference_price
+        base_amount = int(coin_amount * precision)
+        if base_amount * (1 / precision) < min_base:
+            debug_log(f"⚠️ [CopyTrading] Order-Größe für {symbol} unter Mindestgröße")
+            return
+        is_ask = direction == "short"
+        try:
+            await client.update_leverage(market_index=market_index, leverage=CT_CONFIG["copy_leverage"], margin_mode=0)
+        except Exception as e:
+            debug_log("[CopyTrading] Hebel setzen fehlgeschlagen", {"error": str(e)})
+        tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, reference_price)
+        if err:
+            debug_log(f"⚠️ [CopyTrading] Order fehlgeschlagen für {symbol}", {"error": str(err)})
+        else:
+            debug_log(f"✅ [CopyTrading] ECHTER Copy-Trade: {direction.upper()} {symbol} @ ~{reference_price}", {"tx_hash": str(tx_hash)})
+    finally:
+        await client.close()
+
+
+async def fetch_leaderboard(session):
+    """Best-effort Parsing eines INOFFIZIELLEN Endpoints - Feldnamen sind eine Annahme."""
+    try:
+        async with session.get(HL_LEADERBOARD_URL, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                CT_STATE["leaderboard_error"] = f"HTTP {resp.status}: {text[:300]}"
+                debug_log(f"⚠️ [CopyTrading] Leaderboard HTTP {resp.status}", {"body": text[:500]})
+                return None
+            data = await resp.json(content_type=None)
+    except Exception as e:
+        CT_STATE["leaderboard_error"] = str(e)
+        debug_log("⚠️ [CopyTrading] Leaderboard-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return None
+
+    debug_log("🔎 [CopyTrading] Leaderboard Rohantwort (gekürzt)", {
+        "typ": str(type(data)),
+        "keys_oder_laenge": (list(data.keys()) if isinstance(data, dict) else len(data) if isinstance(data, list) else None),
+    })
+
+    rows = None
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        for key in ("leaderboardRows", "rows", "data", "leaderboard"):
+            if key in data and isinstance(data[key], list):
+                rows = data[key]
+                break
+
+    if not rows:
+        CT_STATE["leaderboard_error"] = "Konnte Liste in der Antwort nicht finden - Rohstruktur siehe Debug-Log"
+        return None
+
+    parsed = []
+    for row in rows[:500]:
+        if not isinstance(row, dict):
+            continue
+        address = row.get("ethAddress") or row.get("address") or row.get("user")
+        pnl = row.get("pnl") or row.get("allTimePnl") or row.get("accountValue")
+        if pnl is None and "windowPerformances" in row:
+            try:
+                pnl = dict(row["windowPerformances"]).get("allTime", {}).get("pnl")
+            except Exception:
+                pass
+        if address:
+            parsed.append({"address": address, "pnl": pnl})
+
+    parsed.sort(key=lambda r: float(r["pnl"]) if r["pnl"] not in (None, "") else 0.0, reverse=True)
+    return parsed
+
+
+async def fetch_user_state(session, address):
+    try:
+        async with session.post(HL_INFO_URL, json={"type": "clearinghouseState", "user": address},
+                                 timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return None
+            return await resp.json(content_type=None)
+    except Exception as e:
+        debug_log(f"⚠️ [CopyTrading] userState fehlgeschlagen für {address}", {"error": str(e)})
+        return None
+
+
+async def fetch_user_fills(session, address):
+    try:
+        async with session.post(HL_INFO_URL, json={"type": "userFills", "user": address},
+                                 timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return None
+            return await resp.json(content_type=None)
+    except Exception as e:
+        debug_log(f"⚠️ [CopyTrading] userFills fehlgeschlagen für {address}", {"error": str(e)})
+        return None
+
+
+def extract_ct_positions(user_state):
+    if not user_state:
+        return []
+    out = []
+    for ap in user_state.get("assetPositions", []):
+        pos = ap.get("position", {})
+        szi = float(pos.get("szi", 0) or 0)
+        if szi == 0:
+            continue
+        out.append({
+            "coin": pos.get("coin"), "side": "long" if szi > 0 else "short", "size": abs(szi),
+            "entry_price": pos.get("entryPx"), "unrealized_pnl": pos.get("unrealizedPnl"),
+        })
+    return out
+
+
+async def ct_leaderboard_refresh_loop():
+    async with aiohttp.ClientSession() as session:
+        while True:
+            debug_log("📡 [CopyTrading] Aktualisiere Hyperliquid-Leaderboard...")
+            rows = await fetch_leaderboard(session)
+            if rows:
+                CT_STATE["leaderboard"] = rows[:CT_CONFIG["leaderboard_top_n"]]
+                CT_STATE["leaderboard_last_fetch"] = datetime.now().isoformat()
+                CT_STATE["leaderboard_error"] = None
+                debug_log(f"✅ [CopyTrading] Leaderboard aktualisiert: {len(CT_STATE['leaderboard'])} Trader")
+                for i, row in enumerate(CT_STATE["leaderboard"]):
+                    addr = row["address"]
+                    if addr not in CT_STATE["watched"]:
+                        CT_STATE["watched"][addr] = {
+                            "label": f"#{i+1} (Leaderboard)", "copy_enabled": False,
+                            "last_fill_time": None, "positions": [], "recent_fills": [], "source": "leaderboard",
+                        }
+            await asyncio.sleep(CT_CONFIG["leaderboard_refresh_minutes"] * 60)
+
+
+async def ct_watch_loop():
+    for addr in CT_MANUAL_ADDRESSES:
+        if addr not in CT_STATE["watched"]:
+            CT_STATE["watched"][addr] = {
+                "label": "Manuell hinzugefügt", "copy_enabled": False,
+                "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
+            }
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            for address, info in list(CT_STATE["watched"].items()):
+                user_state = await fetch_user_state(session, address)
+                info["positions"] = extract_ct_positions(user_state)
+
+                fills = await fetch_user_fills(session, address)
+                if fills:
+                    fills_sorted = sorted(fills, key=lambda f: f.get("time", 0))
+                    info["recent_fills"] = fills_sorted[-20:]
+
+                    if info["last_fill_time"] is None:
+                        info["last_fill_time"] = fills_sorted[-1]["time"] if fills_sorted else int(time.time() * 1000)
+                    else:
+                        new_fills = [f for f in fills_sorted if f.get("time", 0) > info["last_fill_time"]]
+                        for f in new_fills:
+                            info["last_fill_time"] = f["time"]
+                            coin = f.get("coin")
+                            side = f.get("side")
+                            direction = "long" if side == "B" else "short"
+                            price = float(f.get("px", 0) or 0)
+                            debug_log(f"🆕 [CopyTrading] Neuer Fill bei {info['label']} ({address[:8]}...): {direction.upper()} {coin} @ {price}")
+                            if info["copy_enabled"] and price > 0:
+                                await execute_copy_trade(coin, direction, price)
+
+                await asyncio.sleep(0.5)
+
+            await asyncio.sleep(CT_CONFIG["poll_interval_seconds"])
 
 
 # ========== LIGHTER CLIENT ==========
@@ -471,6 +687,60 @@ async def execute_exit(symbol, price, reason):
         await execute_entry(symbol, opposite, price, is_add_on=False)
 
 
+async def handle_candle_color_tick(symbol, price):
+    """Reine Preis-Feed-Strategie, keine Kerzen-API noetig - Kerzengrenzen werden
+    lokal aus der Uhrzeit berechnet. Frueher Einstieg nach X Sekunden Kerzenlaufzeit
+    (aktuelle Farbe), Ausstieg nur bei tatsaechlich geschlossener Gegenfarben-Kerze."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+
+    now = time.time()
+    resolution = cfg["cc_resolution_seconds"]
+    confirm_delay = cfg["cc_confirm_delay_seconds"]
+    candle_start = int(now // resolution) * resolution
+
+    if st["cc_candle_start"] is None:
+        st["cc_candle_start"] = candle_start
+        st["cc_candle_open"] = price
+        st["cc_entered_this_candle"] = False
+        return
+
+    if candle_start != st["cc_candle_start"]:
+        # Vorherige Kerze ist soeben geschlossen - ihre Endfarbe bestimmen
+        prev_open = st["cc_candle_open"]
+        prev_close = price  # letzter bekannter Preis vor der neuen Kerze
+        closed_color = "green" if prev_close > prev_open else ("red" if prev_close < prev_open else st["cc_last_color"])
+        st["cc_last_color"] = closed_color
+
+        if st["position"] is not None:
+            position_color = "green" if st["position"] == "long" else "red"
+            if closed_color is not None and closed_color != position_color:
+                await execute_exit(symbol, price, "CC-REVERSE")
+
+        # Neue Kerze beginnt
+        st["cc_candle_start"] = candle_start
+        st["cc_candle_open"] = price
+        st["cc_entered_this_candle"] = False
+
+    if not cfg["bot_active"]:
+        return
+
+    candle_age = now - st["cc_candle_start"]
+    if not st["cc_entered_this_candle"] and candle_age >= confirm_delay:
+        st["cc_entered_this_candle"] = True
+        current_color = "green" if price > st["cc_candle_open"] else ("red" if price < st["cc_candle_open"] else None)
+        if current_color is None:
+            return
+        direction = "long" if current_color == "green" else "short"
+
+        if st["position"] is None:
+            await execute_entry(symbol, direction, price, is_add_on=False)
+        elif st["position"] != direction and cfg.get("cc_auto_reverse", True):
+            # Sollte durch den Kerzenschluss-Exit oben eigentlich schon flach sein - Sicherheitsnetz
+            await execute_exit(symbol, price, "CC-REVERSE")
+            await execute_entry(symbol, direction, price, is_add_on=False)
+
+
 async def on_price_update(symbol, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -485,6 +755,10 @@ async def on_price_update(symbol, price):
         return
 
     bot_active = cfg["bot_active"]
+
+    if cfg["entry_mode"] == "candle_color":
+        await handle_candle_color_tick(symbol, price)
+        return
 
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
@@ -649,7 +923,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
 <div class="topbar">
   <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select></div>
-  <div class="topbar-right"><span id="mode-badge"></span><span id="active-badge"></span></div>
+  <div class="topbar-right"><a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><span id="mode-badge"></span><span id="active-badge"></span></div>
 </div>
 <div class="container">
 
@@ -671,13 +945,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
 <div class="panel-card">
 <form id="config-form">
-  <div><label>Margin (USDC)</label><input type="number" step="1" id="margin"></div>
+  <div><label>Margin (USDC)</label><input type="number" step="any" id="margin"></div>
 
   <div><label>Hebel</label><input type="number" step="1" id="leverage"></div>
   <div><label>Strategie</label>
     <select class="cfg" id="entry_mode">
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="ha_st">Heikin Ashi Supertrend (Buy/Sell, SL an Signalkerze)</option>
+      <option value="candle_color">Kerzenfarbe (früher Einstieg, Exit bei Gegenkerze)</option>
     </select>
   </div>
   <div data-mode="ha_st"><label>HA-Supertrend Zeitrahmen</label>
@@ -700,16 +975,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="ha_st"><label>Trend-EMA Länge</label><input type="number" step="1" id="ha_st_trend_ema_length"></div>
+  <div data-mode="candle_color"><label>Kerzenlänge (Sekunden)</label><input type="number" step="1" id="cc_resolution_seconds"></div>
+  <div data-mode="candle_color"><label>Bestätigung nach (Sekunden)</label><input type="number" step="1" id="cc_confirm_delay_seconds"></div>
+  <div data-mode="candle_color"><label>Nach Gegenkerze sofort drehen</label>
+    <select class="cfg" id="cc_auto_reverse">
+      <option value="true">Ja</option>
+      <option value="false">Nein</option>
+    </select>
+  </div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
       <option value="usd">Fester $-Betrag</option>
     </select>
   </div>
-  <div data-mode="grid"><label>Grid-Stufe (%)</label><input type="number" step="0.01" id="grid_step_pct"></div>
-  <div data-mode="grid"><label>TP-Stufe (%)</label><input type="number" step="0.01" id="tp_step_pct"></div>
-  <div data-mode="grid"><label>Grid-Stufe ($)</label><input type="number" step="0.01" id="grid_step_usd"></div>
-  <div data-mode="grid"><label>TP-Stufe ($)</label><input type="number" step="0.01" id="tp_step_usd"></div>
+  <div data-mode="grid"><label>Grid-Stufe (%)</label><input type="number" step="any" id="grid_step_pct"></div>
+  <div data-mode="grid"><label>TP-Stufe (%)</label><input type="number" step="any" id="tp_step_pct"></div>
+  <div data-mode="grid"><label>Grid-Stufe ($)</label><input type="number" step="any" id="grid_step_usd"></div>
+  <div data-mode="grid"><label>TP-Stufe ($)</label><input type="number" step="any" id="tp_step_usd"></div>
   <div data-mode="grid"><label>Max. Nachkauf</label><input type="number" step="1" id="max_nachkauf"></div>
   <div data-mode="grid"><label>Nach TP sofort drehen</label>
     <select class="cfg" id="auto_reverse">
@@ -813,6 +1096,7 @@ async function refresh() {
     <div class="card"><div class="label">Nachkauf-Stufe</div><div class="value">${data.entry_count} / ${data.config.max_nachkauf || '∞'}</div></div>
     <div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>
     <div class="card"><div class="label">HA-Supertrend SL (${data.config.entry_mode==='ha_st'?'aktiv':'inaktiv'})</div><div class="value red">${data.ha_st_stop_price ?? '-'}</div></div>
+    <div class="card"><div class="label">Letzte Kerzenfarbe (${data.config.entry_mode==='candle_color'?'aktiv':'inaktiv'})</div><div class="value ${data.cc_last_color==='green'?'green':data.cc_last_color==='red'?'red':'yellow'}">${data.cc_last_color ?? '-'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -826,6 +1110,9 @@ async function refresh() {
     document.getElementById('ha_st_atr_mult').value = data.config.ha_st_atr_mult;
     document.getElementById('ha_st_trend_filter').value = String(data.config.ha_st_trend_filter);
     document.getElementById('ha_st_trend_ema_length').value = data.config.ha_st_trend_ema_length;
+    document.getElementById('cc_resolution_seconds').value = data.config.cc_resolution_seconds;
+    document.getElementById('cc_confirm_delay_seconds').value = data.config.cc_confirm_delay_seconds;
+    document.getElementById('cc_auto_reverse').value = String(data.config.cc_auto_reverse);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -878,6 +1165,9 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     ha_st_atr_mult: parseFloat(document.getElementById('ha_st_atr_mult').value),
     ha_st_trend_filter: document.getElementById('ha_st_trend_filter').value === 'true',
     ha_st_trend_ema_length: parseInt(document.getElementById('ha_st_trend_ema_length').value),
+    cc_resolution_seconds: parseInt(document.getElementById('cc_resolution_seconds').value),
+    cc_confirm_delay_seconds: parseInt(document.getElementById('cc_confirm_delay_seconds').value),
+    cc_auto_reverse: document.getElementById('cc_auto_reverse').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -892,7 +1182,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -942,6 +1232,7 @@ async def handle_status(request):
         "unrealized_pnl_usd": calc_unrealized_pnl(symbol),
         "grid_levels": calc_grid_levels(symbol),
         "ha_st_stop_price": st.get("ha_st_stop_price"),
+        "cc_last_color": st.get("cc_last_color"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -959,7 +1250,8 @@ async def handle_config_update(request):
     for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse",
                 "ha_st_resolution", "ha_st_atr_period", "ha_st_atr_mult",
-                "ha_st_trend_filter", "ha_st_trend_ema_length"]:
+                "ha_st_trend_filter", "ha_st_trend_ema_length",
+                "cc_resolution_seconds", "cc_confirm_delay_seconds", "cc_auto_reverse"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -1008,6 +1300,132 @@ async def handle_reset(request):
     return web.json_response({"success": True})
 
 
+CT_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8"><title>Copy-Trading Dashboard</title>
+<style>
+  :root { --bg:#060a18; --panel:#0e1526; --border:rgba(96,165,250,0.14); --accent:#3b82f6; --green:#22c55e; --red:#f0526b; --text:#e8ecf5; --dim:#7c8aa8; }
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,sans-serif; background:var(--bg); color:var(--text); margin:0; padding:24px; }
+  h1 { font-size:20px; display:flex; align-items:center; gap:14px; }
+  h1 a { font-size:13px; color:var(--accent); text-decoration:none; }
+  h2 { font-size:13px; color:var(--dim); text-transform:uppercase; letter-spacing:0.05em; margin-top:28px; }
+  .green{color:var(--green)!important;} .red{color:var(--red)!important;}
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:10px; background:var(--panel); border:1px solid var(--border); border-radius:14px; overflow:hidden; }
+  th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--border); }
+  th { color:var(--dim); font-size:11px; text-transform:uppercase; }
+  input[type=text] { padding:8px 10px; background:#080d1c; border:1px solid var(--border); border-radius:8px; color:var(--text); width:340px; }
+  button { padding:8px 16px; background:linear-gradient(135deg,var(--accent),#2563eb); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:700; }
+  button.copy-on { background:linear-gradient(135deg,#22c55e,#15803d); }
+  button.copy-off { background:linear-gradient(135deg,#475569,#334155); }
+  .warn { background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.35); color:#fca5b1; padding:10px 14px; border-radius:10px; font-size:13px; margin-top:10px; }
+  .addr { font-family:monospace; font-size:12px; color:var(--dim); }
+  .fill-buy { color:var(--green); } .fill-sell { color:var(--red); }
+</style>
+</head>
+<body>
+<h1>📡 Copy-Trading <span id="mode-badge"></span> <a href="/">← zurück zum Grid-Bot</a></h1>
+<div id="leaderboard-error"></div>
+
+<h2>Manuelle Wallet hinzufügen</h2>
+<div>
+  <input type="text" id="new-address" placeholder="0x... Hyperliquid Wallet-Adresse">
+  <button id="btn-add-address">Hinzufügen</button>
+</div>
+
+<h2>Beobachtete Trader</h2>
+<table id="watch-table">
+  <thead><tr><th>Label</th><th>Adresse</th><th>Positionen</th><th>Letzte Fills</th><th>Copy</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<script>
+async function refresh() {
+  const res = await fetch('/api/ct/status');
+  const data = await res.json();
+
+  document.getElementById('mode-badge').innerHTML = data.dry_run
+    ? '<span style="background:rgba(99,102,241,.18);color:#a5b4fc;padding:4px 12px;border-radius:20px;font-size:12px;">DRY RUN</span>'
+    : '<span style="background:rgba(240,82,107,.15);color:#fca5b1;padding:4px 12px;border-radius:20px;font-size:12px;">LIVE</span>';
+
+  document.getElementById('leaderboard-error').innerHTML = data.leaderboard_error
+    ? `<div class="warn">⚠️ Leaderboard-Fehler: ${data.leaderboard_error} - manuelle Adressen funktionieren trotzdem.</div>` : '';
+
+  const rows = Object.entries(data.watched).map(([addr, info]) => {
+    const posText = (info.positions || []).map(p => `${p.side==='long'?'🟢':'🔴'} ${p.coin} ${p.size}`).join('<br>') || '-';
+    const fillsText = (info.recent_fills || []).slice(-3).reverse().map(f =>
+      `<span class="${f.side==='B'?'fill-buy':'fill-sell'}">${f.side==='B'?'BUY':'SELL'} ${f.coin} @ ${f.px}</span>`
+    ).join('<br>') || '-';
+    return `
+      <tr>
+        <td>${info.label}</td>
+        <td class="addr">${addr.slice(0,10)}...${addr.slice(-6)}</td>
+        <td>${posText}</td>
+        <td>${fillsText}</td>
+        <td><button class="${info.copy_enabled?'copy-on':'copy-off'}" onclick="toggleCopy('${addr}', ${!info.copy_enabled})">${info.copy_enabled?'Copy AN':'Copy AUS'}</button></td>
+      </tr>`;
+  }).join('');
+  document.querySelector('#watch-table tbody').innerHTML = rows || '<tr><td colspan="5">Noch keine Trader beobachtet...</td></tr>';
+}
+
+async function toggleCopy(address, enable) {
+  await fetch('/api/ct/copy', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, enable}) });
+  refresh();
+}
+
+document.getElementById('btn-add-address').addEventListener('click', async () => {
+  const addr = document.getElementById('new-address').value.trim();
+  if (!addr) return;
+  await fetch('/api/ct/watch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address: addr}) });
+  document.getElementById('new-address').value = '';
+  refresh();
+});
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
+"""
+
+
+async def handle_ct_index(request):
+    return web.Response(text=CT_DASHBOARD_HTML, content_type="text/html")
+
+
+async def handle_ct_status(request):
+    return web.json_response({
+        "dry_run": CT_CONFIG["dry_run"],
+        "leaderboard_last_fetch": CT_STATE["leaderboard_last_fetch"],
+        "leaderboard_error": CT_STATE["leaderboard_error"],
+        "watched": CT_STATE["watched"],
+    })
+
+
+async def handle_ct_watch(request):
+    body = await request.json()
+    addr = body.get("address", "").strip()
+    if not addr:
+        return web.json_response({"error": "keine Adresse"}, status=400)
+    if addr not in CT_STATE["watched"]:
+        CT_STATE["watched"][addr] = {
+            "label": "Manuell hinzugefügt", "copy_enabled": False,
+            "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
+        }
+    return web.json_response({"success": True})
+
+
+async def handle_ct_copy_toggle(request):
+    body = await request.json()
+    addr = body.get("address")
+    enable = bool(body.get("enable"))
+    if addr in CT_STATE["watched"]:
+        CT_STATE["watched"][addr]["copy_enabled"] = enable
+        debug_log(f"{'✅' if enable else '⏸️'} [CopyTrading] Copy für {addr} {'aktiviert' if enable else 'deaktiviert'}")
+    return web.json_response({"success": True})
+
+
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_index)
@@ -1018,6 +1436,10 @@ async def start_web_server():
     app.router.add_post("/api/control", handle_control)
     app.router.add_post("/api/close", handle_close_position)
     app.router.add_post("/api/reset", handle_reset)
+    app.router.add_get("/copytrading", handle_ct_index)
+    app.router.add_get("/api/ct/status", handle_ct_status)
+    app.router.add_post("/api/ct/watch", handle_ct_watch)
+    app.router.add_post("/api/ct/copy", handle_ct_copy_toggle)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
@@ -1038,6 +1460,8 @@ async def main():
     await asyncio.gather(
         trading_loop(),
         *[ha_supertrend_poll_loop(s) for s in SYMBOLS],
+        ct_leaderboard_refresh_loop(),
+        ct_watch_loop(),
     )
 
 
