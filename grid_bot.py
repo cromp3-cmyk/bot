@@ -748,7 +748,6 @@ def calc_grid_levels(symbol):
             levels["next_nachkauf_price"] = round(st["avg_entry_price"] + grid_step, 4)
     return levels
 
-
 async def execute_entry(symbol, direction, price, is_add_on):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -781,20 +780,23 @@ async def execute_entry(symbol, direction, price, is_add_on):
         total_value = st["avg_entry_price"] * st["total_coin_size"] + price * new_units
         st["total_coin_size"] += new_units
         st["avg_entry_price"] = total_value / st["total_coin_size"]
+        st["last_entry_price"] = price  # <-- NEU: Merken für nächste Stufe
     else:
         st["avg_entry_price"] = price
         st["total_coin_size"] = new_units
         st["position"] = direction
         st["position_opened_at"] = datetime.now().isoformat()
+        st["last_entry_price"] = price  # <-- NEU: Erste Stufe merken
 
     st["entry_count"] += 1
     debug_log(f"📈 [{symbol}] {'Nachkauf' if is_add_on else 'Neue Position'}: {direction.upper()} @ {price} | Ø-Einstieg {round(st['avg_entry_price'], 2)} | Stufe {st['entry_count']}")
     return True
-
-
+    
+   
 async def execute_exit(symbol, price, reason):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
+
     market_index = MARKET_INDICES[symbol]
 
     pnl_usd = (price - st["avg_entry_price"]) * st["total_coin_size"] if st["position"] == "long" else (st["avg_entry_price"] - price) * st["total_coin_size"]
@@ -831,6 +833,7 @@ async def execute_exit(symbol, price, reason):
     st["total_coin_size"] = 0.0
     st["entry_count"] = 0
     st["anchor_price"] = price
+    st["last_entry_price"] = None
     st["ha_st_stop_price"] = None
     st["position_opened_at"] = None
 
@@ -993,7 +996,6 @@ def update_obi_trend_ema(symbol, price, ema_length):
     k = 2 / (ema_length + 1)
     st["obi_trend_ema"] = price * k + st["obi_trend_ema"] * (1 - k)
 
-
 async def on_price_update(symbol, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -1007,58 +1009,68 @@ async def on_price_update(symbol, price):
         st["anchor_price"] = price
         return
 
-    bot_active = cfg["bot_active"]
-
-    if cfg["entry_mode"] == "obi_scalp":
-        if cfg["obi_trend_filter"]:
-            update_obi_trend_ema(symbol, price, cfg["obi_trend_ema_length"])
-        if st["position"] is not None:
-            entry = st["avg_entry_price"]
-            pnl_pct = (price - entry) / entry * 100 if st["position"] == "long" else (entry - price) / entry * 100
-            if pnl_pct >= cfg["obi_tp_pct"]:
-                await execute_exit(symbol, price, "TP")
-            elif pnl_pct <= -cfg["obi_sl_pct"]:
+    # ===== HA-Supertrend =====
+    if cfg["entry_mode"] == "ha_st":
+        sl = st.get("ha_st_stop_price")
+        if sl is not None and st["position"] is not None:
+            if (st["position"] == "long" and price <= sl) or (st["position"] == "short" and price >= sl):
                 await execute_exit(symbol, price, "SL")
         return
 
-    if cfg["entry_mode"] == "candle_color":
-        await handle_candle_color_tick(symbol, price)
+    # ===== Grid-Strategie =====
+    if cfg["entry_mode"] != "grid":
         return
 
+    # Keine Position -> Einstieg prüfen
     if st["position"] is None:
-        if not bot_active or cfg["entry_mode"] != "grid":
-            return  # im HA-Supertrend-Modus übernimmt der Poll-Loop den Einstieg
+        if not cfg["bot_active"]:
+            return
+        
         grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
+        
+        # Einstieg nur wenn Preis vom Anker entfernt ist
         if price <= st["anchor_price"] - grid_step_abs:
             await execute_entry(symbol, "long", price, is_add_on=False)
         elif price >= st["anchor_price"] + grid_step_abs:
             await execute_entry(symbol, "short", price, is_add_on=False)
         return
 
-    if cfg["entry_mode"] == "ha_st":
-        sl = st.get("ha_st_stop_price")
-        if sl is not None:
-            if (st["position"] == "long" and price <= sl) or (st["position"] == "short" and price >= sl):
-                await execute_exit(symbol, price, "SL")
-        return
-
-    if cfg["entry_mode"] != "grid":
+    # ===== Position vorhanden -> TP / Nachkauf =====
+    if not cfg["bot_active"]:
         return
 
     tp_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "tp")
     grid_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "grid")
     max_nachkauf = cfg["max_nachkauf"]
 
+    # Letzte Nachkauf-Stufe merken (WICHTIG!)
+    last_entry_price = st.get("last_entry_price", st["avg_entry_price"])
+    
     if st["position"] == "long":
+        # TP prüfen
         if price >= st["avg_entry_price"] + tp_step_abs:
             await execute_exit(symbol, price, "TP")
-        elif bot_active and price <= st["avg_entry_price"] - grid_step_abs and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf):
+            return
+        
+        # Nachkauf prüfen - NUR wenn Preis unter der LETZTEN Nachkauf-Stufe liegt
+        next_buy_price = last_entry_price - grid_step_abs
+        if price <= next_buy_price and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf):
             await execute_entry(symbol, "long", price, is_add_on=True)
+            st["last_entry_price"] = price  # Neue Nachkauf-Stufe merken
+            
     elif st["position"] == "short":
+        # TP prüfen
         if price <= st["avg_entry_price"] - tp_step_abs:
             await execute_exit(symbol, price, "TP")
-        elif bot_active and price >= st["avg_entry_price"] + grid_step_abs and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf):
+            return
+        
+        # Nachkauf prüfen - NUR wenn Preis über der LETZTEN Nachkauf-Stufe liegt
+        next_sell_price = last_entry_price + grid_step_abs
+        if price >= next_sell_price and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf):
             await execute_entry(symbol, "short", price, is_add_on=True)
+            st["last_entry_price"] = price  # Neue Nachkauf-Stufe merken
+    
+    
 
 
 async def trading_loop():
