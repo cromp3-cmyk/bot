@@ -1667,6 +1667,8 @@ async function addCoinSetting() {
   document.getElementById('modal-new-leverage').value = '';
   refresh();
 }
+
+async function toggleCopy(address, enable) {
   await fetch('/api/ct/copy', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, enable}) });
   refresh();
 }
