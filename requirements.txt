@@ -11,3 +11,4 @@ pycryptodome
 python-dotenv
 typing-extensions
 colorama
+redis>=5.0.0
