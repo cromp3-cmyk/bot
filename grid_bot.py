@@ -127,6 +127,14 @@ def default_config():
         "cc_confirm_delay_seconds": int(os.getenv("CC_CONFIRM_DELAY_SECONDS", "20")),
         "cc_auto_reverse": os.getenv("CC_AUTO_REVERSE", "true").lower() == "true",
         "cc_early_exit": os.getenv("CC_EARLY_EXIT", "true").lower() == "true",
+        "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
+        "obi_avg_window_seconds": float(os.getenv("OBI_AVG_WINDOW_SECONDS", "7")),
+        "obi_levels": int(os.getenv("OBI_LEVELS", "15")),
+        "obi_tp_pct": float(os.getenv("OBI_TP_PCT", "0.15")),
+        "obi_sl_pct": float(os.getenv("OBI_SL_PCT", "0.15")),
+        "obi_cooldown_seconds": float(os.getenv("OBI_COOLDOWN_SECONDS", "7")),
+        "obi_trend_filter": os.getenv("OBI_TREND_FILTER", "false").lower() == "true",
+        "obi_trend_ema_length": int(os.getenv("OBI_TREND_EMA_LENGTH", "300")),
     }
 
 
@@ -137,6 +145,8 @@ def default_state():
         "price_history": [],
         "ha_st_stop_price": None, "position_opened_at": None,
         "cc_candle_start": None, "cc_candle_open": None, "cc_entered_this_candle": False, "cc_last_color": None,
+        "obi_book": {"bids": {}, "asks": {}}, "obi_avg_buffer": [], "obi_last_signal_direction": None,
+        "obi_last_trade_time": 0.0, "obi_trend_ema": None, "obi_current": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -206,7 +216,7 @@ async def save_ct_watched():
         debug_log("⚠️ Speichern der Copy-Trading-Einstellungen fehlgeschlagen", {"error": str(e)})
 
 
-VALID_RESOLUTIONS = {"1m", "3m", "5m", "15m", "30m", "1h", "4h"}
+VALID_RESOLUTIONS = {"1m", "5m", "15m", "30m", "1h", "4h"}
 
 
 async def load_persisted_state():
@@ -898,6 +908,92 @@ async def handle_candle_color_tick(symbol, price):
             await execute_entry(symbol, direction, price, is_add_on=False)
 
 
+def calc_obi(symbol, levels):
+    book = BOTS[symbol]["state"]["obi_book"]
+    bids_sorted = sorted(book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
+    asks_sorted = sorted(book["asks"].items(), key=lambda x: float(x[0]))[:levels]
+    bid_vol = sum(v for _, v in bids_sorted)
+    ask_vol = sum(v for _, v in asks_sorted)
+    total = bid_vol + ask_vol
+    return 0.0 if total == 0 else (bid_vol - ask_vol) / total
+
+
+def update_obi_average(symbol, raw_obi, window_seconds):
+    st = BOTS[symbol]["state"]
+    now = time.time()
+    buf = st["obi_avg_buffer"]
+    buf.append((raw_obi, now))
+    cutoff = now - window_seconds
+    st["obi_avg_buffer"] = [d for d in buf if d[1] >= cutoff]
+    if not st["obi_avg_buffer"]:
+        return 0.0
+    return sum(v for v, _ in st["obi_avg_buffer"]) / len(st["obi_avg_buffer"])
+
+
+async def handle_obi_order_book_update(symbol, msg):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if cfg["entry_mode"] != "obi_scalp":
+        return
+
+    ob = msg.get("order_book", {})
+    book = st["obi_book"]
+    for side_key in ("bids", "asks"):
+        for level in ob.get(side_key, []):
+            price = level["price"]
+            size = float(level["size"])
+            if size == 0:
+                book[side_key].pop(price, None)
+            else:
+                book[side_key][price] = size
+
+    raw_obi = calc_obi(symbol, cfg["obi_levels"])
+    avg_obi = update_obi_average(symbol, raw_obi, cfg["obi_avg_window_seconds"])
+    st["obi_current"] = round(avg_obi, 4)
+
+    if st["position"] is not None or not cfg["bot_active"]:
+        return
+
+    now = time.time()
+    if now - st["obi_last_trade_time"] < cfg["obi_cooldown_seconds"]:
+        return
+
+    if avg_obi >= cfg["obi_threshold"]:
+        direction = "long"
+    elif avg_obi <= -cfg["obi_threshold"]:
+        direction = "short"
+    else:
+        st["obi_last_signal_direction"] = None
+        return
+
+    if direction == st["obi_last_signal_direction"]:
+        return
+
+    # Optionaler Trendfilter: nur Longs ueber der lebenden EMA, nur Shorts darunter
+    if cfg["obi_trend_filter"] and st["obi_trend_ema"] is not None and st["last_price"] is not None:
+        if direction == "long" and st["last_price"] <= st["obi_trend_ema"]:
+            return
+        if direction == "short" and st["last_price"] >= st["obi_trend_ema"]:
+            return
+
+    if st["last_price"] is None:
+        return
+
+    st["obi_last_signal_direction"] = direction
+    st["obi_last_trade_time"] = now
+    debug_log(f"📡 [{symbol}] OBI-Scalp Signal: {direction.upper()} @ {st['last_price']} (Ø-OBI {round(avg_obi,3)})")
+    await execute_entry(symbol, direction, st["last_price"], is_add_on=False)
+
+
+def update_obi_trend_ema(symbol, price, ema_length):
+    st = BOTS[symbol]["state"]
+    if st["obi_trend_ema"] is None:
+        st["obi_trend_ema"] = price
+        return
+    k = 2 / (ema_length + 1)
+    st["obi_trend_ema"] = price * k + st["obi_trend_ema"] * (1 - k)
+
+
 async def on_price_update(symbol, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -912,6 +1008,18 @@ async def on_price_update(symbol, price):
         return
 
     bot_active = cfg["bot_active"]
+
+    if cfg["entry_mode"] == "obi_scalp":
+        if cfg["obi_trend_filter"]:
+            update_obi_trend_ema(symbol, price, cfg["obi_trend_ema_length"])
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            pnl_pct = (price - entry) / entry * 100 if st["position"] == "long" else (entry - price) / entry * 100
+            if pnl_pct >= cfg["obi_tp_pct"]:
+                await execute_exit(symbol, price, "TP")
+            elif pnl_pct <= -cfg["obi_sl_pct"]:
+                await execute_exit(symbol, price, "SL")
+        return
 
     if cfg["entry_mode"] == "candle_color":
         await handle_candle_color_tick(symbol, price)
@@ -961,23 +1069,25 @@ async def trading_loop():
             async with websockets.connect(WS_URL, ping_interval=20) as ws:
                 for s in SYMBOLS:
                     await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDICES[s]}"}))
+                    await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDICES[s]}"}))
                 debug_log(f"✅ Verbunden für {', '.join(SYMBOLS)}")
 
                 async for raw in ws:
                     msg = json.loads(raw)
                     channel = msg.get("channel", "")
-                    if channel.startswith("trade"):
-                        try:
-                            market_index = int(channel.split(":")[1].split("/")[0]) if ":" in channel else int(channel.split("/")[1])
-                        except Exception:
-                            market_index = None
-                        symbol = MARKET_INDEX_TO_SYMBOL.get(market_index)
-                        if symbol is None:
-                            continue
+                    try:
+                        market_index = int(channel.split(":")[1].split("/")[0]) if ":" in channel else int(channel.split("/")[1])
+                    except Exception:
+                        market_index = None
+                    symbol = MARKET_INDEX_TO_SYMBOL.get(market_index)
+
+                    if channel.startswith("trade") and symbol:
                         trades = msg.get("trades", [])
                         if trades:
                             price = float(trades[-1]["price"])
                             await on_price_update(symbol, price)
+                    elif channel.startswith("order_book") and symbol:
+                        await handle_obi_order_book_update(symbol, msg)
 
                     now = time.time()
                     if now - last_status_log >= 20:
@@ -1110,12 +1220,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="ha_st">Heikin Ashi Supertrend (Buy/Sell, SL an Signalkerze)</option>
       <option value="candle_color">Kerzenfarbe (früher Einstieg, Exit bei Gegenkerze)</option>
+      <option value="obi_scalp">OBI-Scalp (Orderbuch-Ungleichgewicht, symmetrisches TP/SL)</option>
     </select>
   </div>
   <div data-mode="ha_st"><label>HA-Supertrend Zeitrahmen</label>
     <select class="cfg" id="ha_st_resolution">
       <option value="1m">1 Minute</option>
-      <option value="3m">3 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
@@ -1146,6 +1256,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="false">Nein - erst bei fertigem Kerzenschluss</option>
     </select>
   </div>
+  <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
+  <div data-mode="obi_scalp"><label>OBI Ø-Fenster (Sek.)</label><input type="number" step="1" id="obi_avg_window_seconds"></div>
+  <div data-mode="obi_scalp"><label>OBI Orderbuch-Level</label><input type="number" step="1" id="obi_levels"></div>
+  <div data-mode="obi_scalp"><label>TP (%)</label><input type="number" step="any" id="obi_tp_pct"></div>
+  <div data-mode="obi_scalp"><label>SL (%)</label><input type="number" step="any" id="obi_sl_pct"></div>
+  <div data-mode="obi_scalp"><label>Cooldown (Sek.)</label><input type="number" step="1" id="obi_cooldown_seconds"></div>
+  <div data-mode="obi_scalp"><label>Trendfilter (EMA)</label>
+    <select class="cfg" id="obi_trend_filter">
+      <option value="false">Aus</option>
+      <option value="true">An - nur Longs über/Shorts unter EMA</option>
+    </select>
+  </div>
+  <div data-mode="obi_scalp"><label>Trend-EMA Länge (Trades)</label><input type="number" step="1" id="obi_trend_ema_length"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1260,6 +1383,7 @@ async function refresh() {
     <div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>
     <div class="card"><div class="label">HA-Supertrend SL (${data.config.entry_mode==='ha_st'?'aktiv':'inaktiv'})</div><div class="value red">${data.ha_st_stop_price ?? '-'}</div></div>
     <div class="card"><div class="label">Letzte Kerzenfarbe (${data.config.entry_mode==='candle_color'?'aktiv':'inaktiv'})</div><div class="value ${data.cc_last_color==='green'?'green':data.cc_last_color==='red'?'red':'yellow'}">${data.cc_last_color ?? '-'}</div></div>
+    <div class="card"><div class="label">OBI Ø-Wert (${data.config.entry_mode==='obi_scalp'?'aktiv':'inaktiv'})</div><div class="value ${data.obi_current>=0?'green':'red'}">${data.obi_current ?? '-'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -1277,6 +1401,14 @@ async function refresh() {
     document.getElementById('cc_confirm_delay_seconds').value = data.config.cc_confirm_delay_seconds;
     document.getElementById('cc_auto_reverse').value = String(data.config.cc_auto_reverse);
     document.getElementById('cc_early_exit').value = String(data.config.cc_early_exit);
+    document.getElementById('obi_threshold').value = data.config.obi_threshold;
+    document.getElementById('obi_avg_window_seconds').value = data.config.obi_avg_window_seconds;
+    document.getElementById('obi_levels').value = data.config.obi_levels;
+    document.getElementById('obi_tp_pct').value = data.config.obi_tp_pct;
+    document.getElementById('obi_sl_pct').value = data.config.obi_sl_pct;
+    document.getElementById('obi_cooldown_seconds').value = data.config.obi_cooldown_seconds;
+    document.getElementById('obi_trend_filter').value = String(data.config.obi_trend_filter);
+    document.getElementById('obi_trend_ema_length').value = data.config.obi_trend_ema_length;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -1333,6 +1465,14 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     cc_confirm_delay_seconds: parseInt(document.getElementById('cc_confirm_delay_seconds').value),
     cc_auto_reverse: document.getElementById('cc_auto_reverse').value === 'true',
     cc_early_exit: document.getElementById('cc_early_exit').value === 'true',
+    obi_threshold: parseFloat(document.getElementById('obi_threshold').value),
+    obi_avg_window_seconds: parseFloat(document.getElementById('obi_avg_window_seconds').value),
+    obi_levels: parseInt(document.getElementById('obi_levels').value),
+    obi_tp_pct: parseFloat(document.getElementById('obi_tp_pct').value),
+    obi_sl_pct: parseFloat(document.getElementById('obi_sl_pct').value),
+    obi_cooldown_seconds: parseFloat(document.getElementById('obi_cooldown_seconds').value),
+    obi_trend_filter: document.getElementById('obi_trend_filter').value === 'true',
+    obi_trend_ema_length: parseInt(document.getElementById('obi_trend_ema_length').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -1347,7 +1487,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','cc_early_exit','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','cc_early_exit','obi_threshold','obi_avg_window_seconds','obi_levels','obi_tp_pct','obi_sl_pct','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1398,6 +1538,7 @@ async def handle_status(request):
         "grid_levels": calc_grid_levels(symbol),
         "ha_st_stop_price": st.get("ha_st_stop_price"),
         "cc_last_color": st.get("cc_last_color"),
+        "obi_current": st.get("obi_current"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -1416,7 +1557,9 @@ async def handle_config_update(request):
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse",
                 "ha_st_resolution", "ha_st_atr_period", "ha_st_atr_mult",
                 "ha_st_trend_filter", "ha_st_trend_ema_length",
-                "cc_resolution_seconds", "cc_confirm_delay_seconds", "cc_auto_reverse", "cc_early_exit"]:
+                "cc_resolution_seconds", "cc_confirm_delay_seconds", "cc_auto_reverse", "cc_early_exit",
+                "obi_threshold", "obi_avg_window_seconds", "obi_levels", "obi_tp_pct", "obi_sl_pct",
+                "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
