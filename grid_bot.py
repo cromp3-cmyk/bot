@@ -585,168 +585,126 @@ async def fetch_candles_ohlc(symbol, resolution, count_back=150):
             lows.append(float(l_)); closes.append(float(c_))
         return timestamps, opens, highs, lows, closes
 
-        
+
 def compute_ha_supertrend(opens, highs, lows, closes, period=5, multiplier=1.5):
-    """Berechnet Heikin-Ashi Supertrend GENAU wie TradingView."""
+    """Portiert aus dem Pine-Script: Heikin-Ashi-Kerzen + Custom-ATR-Baender/Trend."""
     n = len(closes)
-    if n < period + 3:
+    if n < period + 2:
         return None, None
 
-    # 1. Heikin-Ashi Kerzen berechnen
-    ha_close = []
-    ha_open = []
-    ha_high = []
-    ha_low = []
-    
-    # Erste HA-Kerze = normale Kerze
-    ha_close.append((opens[0] + highs[0] + lows[0] + closes[0]) / 4)
-    ha_open.append((opens[0] + closes[0]) / 2)
-    ha_high.append(highs[0])
-    ha_low.append(lows[0])
-    
-    # Restliche HA-Kerzen
+    ha_close = [(opens[i] + highs[i] + lows[i] + closes[i]) / 4 for i in range(n)]
+    ha_open = [0.0] * n
+    ha_open[0] = (opens[0] + closes[0]) / 2
     for i in range(1, n):
-        # HA-Schluss
-        ha_c = (opens[i] + highs[i] + lows[i] + closes[i]) / 4
-        ha_close.append(ha_c)
-        
-        # HA-Eröffnung
-        ha_o = (ha_open[-1] + ha_close[-2]) / 2
-        ha_open.append(ha_o)
-        
-        # HA-Hoch und HA-Tief
-        ha_h = max(highs[i], ha_o, ha_c)
-        ha_l = min(lows[i], ha_o, ha_c)
-        ha_high.append(ha_h)
-        ha_low.append(ha_l)
-    
-    # 2. ATR auf HEIKIN-ASHI Kerzen berechnen
-    tr = [ha_high[0] - ha_low[0]]
+        ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2
+
+    # ATR auf den ECHTEN Kerzen (wie im Pine-Script: ta.atr nutzt die realen high/low/close)
+    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
     for i in range(1, n):
-        tr_i = max(
-            ha_high[i] - ha_low[i],
-            abs(ha_high[i] - ha_close[i-1]),
-            abs(ha_low[i] - ha_close[i-1])
-        )
-        tr.append(tr_i)
-    
-    # ATR berechnen
-    atr = [0.0] * n
-    atr[period-1] = sum(tr[:period]) / period
-    for i in range(period, n):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-    
-    # 3. Supertrend auf HEIKIN-ASHI Kerzen berechnen
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+    atr = [tr[0]] * n
+    for i in range(1, n):
+        if i < period:
+            atr[i] = sum(tr[:i + 1]) / (i + 1)
+        else:
+            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+
     up = [0.0] * n
     dn = [0.0] * n
     trend = [1] * n
-    
+
     up[0] = ha_close[0] - multiplier * atr[0]
     dn[0] = ha_close[0] + multiplier * atr[0]
-    
+    last_up1 = up[0]
+    last_dn1 = dn[0]
+
     for i in range(1, n):
         basic_up = ha_close[i] - multiplier * atr[i]
         basic_dn = ha_close[i] + multiplier * atr[i]
-        
-        if ha_close[i-1] > up[i-1]:
-            up[i] = max(basic_up, up[i-1])
-        else:
-            up[i] = basic_up
-        
-        if ha_close[i-1] < dn[i-1]:
-            dn[i] = min(basic_dn, dn[i-1])
-        else:
-            dn[i] = basic_dn
-        
-        if trend[i-1] == -1 and ha_close[i] > dn[i-1]:
+
+        if ha_close[i - 1] > up[i - 1]:
+            last_up1 = up[i - 1]
+        up1 = last_up1
+        up[i] = max(basic_up, up1) if ha_close[i - 1] > up1 else basic_up
+
+        if ha_close[i - 1] < dn[i - 1]:
+            last_dn1 = dn[i - 1]
+        dn1 = last_dn1
+        dn[i] = min(basic_dn, dn1) if ha_close[i - 1] < dn1 else basic_dn
+
+        prev_trend = trend[i - 1]
+        if prev_trend == -1 and ha_close[i] > dn1:
             trend[i] = 1
-        elif trend[i-1] == 1 and ha_close[i] < up[i-1]:
+        elif prev_trend == 1 and ha_close[i] < up1:
             trend[i] = -1
         else:
-            trend[i] = trend[i-1]
-    
+            trend[i] = prev_trend
+
     return trend, ha_close
-        
+
+
 async def ha_supertrend_poll_loop(symbol):
-    """Handelt genau wie TradingView basierend auf HEIKIN-ASHI Supertrend."""
+    """Reiner Buy/Sell-Wechsel-Bot auf Basis von Heikin-Ashi-Supertrend-Flips,
+    SL an der High/Low der ausloesenden (echten) Kerze - kein TP."""
     b = BOTS[symbol]
     last_signal_ts = None
-    last_trade_time = 0
-    cooldown_seconds = 10
 
     while True:
         try:
             cfg = b["config"]
             if cfg["entry_mode"] == "ha_st":
-                needed_bars = max(200, cfg["ha_st_trend_ema_length"] + 20) if cfg["ha_st_trend_filter"] else 150
+                needed_bars = max(150, cfg["ha_st_trend_ema_length"] + 10) if cfg["ha_st_trend_filter"] else 150
                 data = await fetch_candles_ohlc(symbol, cfg["ha_st_resolution"], count_back=needed_bars)
-                
                 if data:
                     timestamps, opens, highs, lows, closes = data
-                    
-                    if len(closes) < 5:
-                        await asyncio.sleep(5)
-                        continue
-                    
                     closed_ts = timestamps[:-1]
-                    closed_o = opens[:-1]
-                    closed_h = highs[:-1]
-                    closed_l = lows[:-1]
-                    closed_c = closes[:-1]
-                    
-                    trend, ha_close = compute_ha_supertrend(
-                        closed_o, closed_h, closed_l, closed_c,
-                        cfg["ha_st_atr_period"], cfg["ha_st_atr_mult"]
-                    )
-                    
-                    if trend and len(trend) >= 5:
+                    closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    trend, ha_close = compute_ha_supertrend(closed_o, closed_h, closed_l, closed_c,
+                                                              cfg["ha_st_atr_period"], cfg["ha_st_atr_mult"])
+                    if trend and len(trend) >= 2:
                         st = b["state"]
-                        current_price = closes[-1]
-                        
-                        last_completed_trend = trend[-1]
-                        prev_trend = trend[-2]
-                        signal_ts = closed_ts[-1]
-                        
-                        flipped_bullish = last_completed_trend == 1 and prev_trend == -1
-                        flipped_bearish = last_completed_trend == -1 and prev_trend == 1
-                        
-                        if (flipped_bullish or flipped_bearish) and last_signal_ts != signal_ts:
-                            current_time = time.time()
-                            if current_time - last_trade_time < cooldown_seconds:
-                                debug_log(f"⏳ [{symbol}] Cooldown")
-                                continue
-                            
-                            last_signal_ts = signal_ts
-                            
-                            signal_price = ha_close[-1] if ha_close else current_price
-                            direction = "long" if flipped_bullish else "short"
-                            
-                            sl_price = closed_l[-1] if direction == "long" else closed_h[-1]
-                            
-                            debug_log(f"📡 [{symbol}] HA-Flip: {direction.upper()} @ {signal_price:.2f}")
-                            
-                            if not cfg["bot_active"]:
-                                continue
-                            
-                            if st["position"] is None:
-                                await execute_entry(symbol, direction, signal_price, is_add_on=False)
-                                st["ha_st_stop_price"] = sl_price
-                                last_trade_time = current_time
-                                debug_log(f"✅ [{symbol}] NEUE {direction.upper()}-Position")
-                                
-                            elif st["position"] != direction:
-                                await execute_exit(symbol, signal_price, "HA-REVERSE")
-                                await execute_entry(symbol, direction, signal_price, is_add_on=False)
-                                st["ha_st_stop_price"] = sl_price
-                                last_trade_time = current_time
-                                debug_log(f"🔄 [{symbol}] Reverse: {st['position']} → {direction.upper()}")
-                            
+                        signal_key = closed_ts[-1]
+
+                        flipped_bullish = trend[-1] == 1 and trend[-2] == -1
+                        flipped_bearish = trend[-1] == -1 and trend[-2] == 1
+
+                        if (flipped_bullish or flipped_bearish) and last_signal_ts != signal_key:
+                            last_signal_ts = signal_key
+                            candle_age_seconds = round(time.time() - signal_key / 1000, 1)
+                            if cfg["bot_active"]:
+                                price = closed_c[-1]
+                                new_direction = "long" if flipped_bullish else "short"
+                                # SL an der auslösenden Kerze: unter ihrem Low (long) bzw. über ihrem High (short)
+                                new_sl = closed_l[-1] if new_direction == "long" else closed_h[-1]
+
+                                # Trendfilter: nur Longs im Aufwärtstrend (Preis > lange EMA), nur Shorts im Abwärtstrend
+                                trend_ok = True
+                                ema_trend_val = None
+                                if cfg["ha_st_trend_filter"] and len(closed_c) > cfg["ha_st_trend_ema_length"]:
+                                    ema_trend_val = round(_ema_series(closed_c, cfg["ha_st_trend_ema_length"])[-1], 4)
+                                    if new_direction == "long" and price <= ema_trend_val:
+                                        trend_ok = False
+                                    elif new_direction == "short" and price >= ema_trend_val:
+                                        trend_ok = False
+
+                                debug_log(f"📡 [{symbol}] HA-Supertrend-Flip: {new_direction.upper()} @ {price} | SL {new_sl} | Trendfilter {'OK' if trend_ok else 'BLOCKIERT'}", {
+                                    "kerze_alter_sekunden": candle_age_seconds,
+                                    "ema_trend": ema_trend_val,
+                                })
+
+                                if st["position"] is not None and st["position"] != new_direction:
+                                    await execute_exit(symbol, price, "HA-REVERSE")
+                                    if trend_ok:
+                                        await execute_entry(symbol, new_direction, price, is_add_on=False)
+                                        st["ha_st_stop_price"] = new_sl
+                                elif st["position"] is None and trend_ok:
+                                    await execute_entry(symbol, new_direction, price, is_add_on=False)
+                                    st["ha_st_stop_price"] = new_sl
         except Exception as e:
-            debug_log(f"⚠️ [{symbol}] HA-Fehler", {"error": str(e)})
-        
+            debug_log(f"⚠️ [{symbol}] HA-Supertrend-Abfrage fehlgeschlagen", {"error": str(e)})
+
         await asyncio.sleep(5)
-        
-    
+
 
 def _ema_series(values, length):
     if not values:
@@ -1035,15 +993,12 @@ def update_obi_trend_ema(symbol, price, ema_length):
     k = 2 / (ema_length + 1)
     st["obi_trend_ema"] = price * k + st["obi_trend_ema"] * (1 - k)
 
-    
-    
-    
+
 async def on_price_update(symbol, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     st["last_price"] = price
-    
-    # Preis-Historie
+
     st["price_history"].append({"ts": int(time.time() * 1000), "price": price})
     if len(st["price_history"]) > 500:
         st["price_history"].pop(0)
@@ -1052,14 +1007,19 @@ async def on_price_update(symbol, price):
         st["anchor_price"] = price
         return
 
-    # HA-Supertrend: NUR Stop-Loss prüfen
-    if cfg["entry_mode"] == "ha_st":
-        sl = st.get("ha_st_stop_price")
-        if sl is not None and st["position"] is not None:
-            if (st["position"] == "long" and price <= sl) or (st["position"] == "short" and price >= sl):
+    bot_active = cfg["bot_active"]
+
+    if cfg["entry_mode"] == "obi_scalp":
+        if cfg["obi_trend_filter"]:
+            update_obi_trend_ema(symbol, price, cfg["obi_trend_ema_length"])
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            pnl_pct = (price - entry) / entry * 100 if st["position"] == "long" else (entry - price) / entry * 100
+            if pnl_pct >= cfg["obi_tp_pct"]:
+                await execute_exit(symbol, price, "TP")
+            elif pnl_pct <= -cfg["obi_sl_pct"]:
                 await execute_exit(symbol, price, "SL")
-        return 
-    
+        return
 
     if cfg["entry_mode"] == "candle_color":
         await handle_candle_color_tick(symbol, price)
