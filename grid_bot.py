@@ -585,13 +585,13 @@ async def fetch_candles_ohlc(symbol, resolution, count_back=150):
             lows.append(float(l_)); closes.append(float(c_))
         return timestamps, opens, highs, lows, closes
 
-
 def compute_ha_supertrend(opens, highs, lows, closes, period=5, multiplier=1.5):
-    """Portiert aus dem Pine-Script: Heikin-Ashi-Kerzen + Custom-ATR-Baender/Trend."""
+    """Portiert aus dem Pine-Script: Heikin-Ashi-Kerzen + Custom-ATR-Bänder/Trend."""
     n = len(closes)
-    if n < period + 2:
+    if n < period + 3:  # Mehr Sicherheitsabstand
         return None, None
 
+ 
     ha_close = [(opens[i] + highs[i] + lows[i] + closes[i]) / 4 for i in range(n)]
     ha_open = [0.0] * n
     ha_open[0] = (opens[0] + closes[0]) / 2
@@ -642,10 +642,9 @@ def compute_ha_supertrend(opens, highs, lows, closes, period=5, multiplier=1.5):
 
     return trend, ha_close
 
-
 async def ha_supertrend_poll_loop(symbol):
     """Reiner Buy/Sell-Wechsel-Bot auf Basis von Heikin-Ashi-Supertrend-Flips,
-    SL an der High/Low der ausloesenden (echten) Kerze - kein TP."""
+    SL an der High/Low der auslösenden (echten) Kerze - kein TP."""
     b = BOTS[symbol]
     last_signal_ts = None
 
@@ -653,58 +652,77 @@ async def ha_supertrend_poll_loop(symbol):
         try:
             cfg = b["config"]
             if cfg["entry_mode"] == "ha_st":
-                needed_bars = max(150, cfg["ha_st_trend_ema_length"] + 10) if cfg["ha_st_trend_filter"] else 150
+                # Mehr Kerzen für EMA-Trendfilter holen
+                needed_bars = max(200, cfg["ha_st_trend_ema_length"] + 20) if cfg["ha_st_trend_filter"] else 150
                 data = await fetch_candles_ohlc(symbol, cfg["ha_st_resolution"], count_back=needed_bars)
                 if data:
                     timestamps, opens, highs, lows, closes = data
+                    
+                    # Nur abgeschlossene Kerzen verwenden (letzte Kerze ist noch offen)
+                    if len(closes) < 2:
+                        await asyncio.sleep(5)
+                        continue
+                        
+                    # Alle Kerzen außer der aktuell offenen
                     closed_ts = timestamps[:-1]
                     closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    trend, ha_close = compute_ha_supertrend(closed_o, closed_h, closed_l, closed_c,
-                                                              cfg["ha_st_atr_period"], cfg["ha_st_atr_mult"])
+                    
+                    trend, ha_close = compute_ha_supertrend(
+                        closed_o, closed_h, closed_l, closed_c,
+                        cfg["ha_st_atr_period"], cfg["ha_st_atr_mult"]
+                    )
+                    
                     if trend and len(trend) >= 2:
                         st = b["state"]
-                        signal_key = closed_ts[-1]
-
+                        signal_key = closed_ts[-1]  # Letzte abgeschlossene Kerze
+                        
+                        # FLIP erkennen: Trendwechsel zwischen letzter und vorletzter geschlossener Kerze
                         flipped_bullish = trend[-1] == 1 and trend[-2] == -1
                         flipped_bearish = trend[-1] == -1 and trend[-2] == 1
-
+                        
                         if (flipped_bullish or flipped_bearish) and last_signal_ts != signal_key:
                             last_signal_ts = signal_key
-                            candle_age_seconds = round(time.time() - signal_key / 1000, 1)
-                            if cfg["bot_active"]:
-                                price = closed_c[-1]
-                                new_direction = "long" if flipped_bullish else "short"
-                                # SL an der auslösenden Kerze: unter ihrem Low (long) bzw. über ihrem High (short)
-                                new_sl = closed_l[-1] if new_direction == "long" else closed_h[-1]
-
-                                # Trendfilter: nur Longs im Aufwärtstrend (Preis > lange EMA), nur Shorts im Abwärtstrend
-                                trend_ok = True
-                                ema_trend_val = None
-                                if cfg["ha_st_trend_filter"] and len(closed_c) > cfg["ha_st_trend_ema_length"]:
-                                    ema_trend_val = round(_ema_series(closed_c, cfg["ha_st_trend_ema_length"])[-1], 4)
-                                    if new_direction == "long" and price <= ema_trend_val:
-                                        trend_ok = False
-                                    elif new_direction == "short" and price >= ema_trend_val:
-                                        trend_ok = False
-
-                                debug_log(f"📡 [{symbol}] HA-Supertrend-Flip: {new_direction.upper()} @ {price} | SL {new_sl} | Trendfilter {'OK' if trend_ok else 'BLOCKIERT'}", {
-                                    "kerze_alter_sekunden": candle_age_seconds,
-                                    "ema_trend": ema_trend_val,
-                                })
-
-                                if st["position"] is not None and st["position"] != new_direction:
-                                    await execute_exit(symbol, price, "HA-REVERSE")
-                                    if trend_ok:
-                                        await execute_entry(symbol, new_direction, price, is_add_on=False)
-                                        st["ha_st_stop_price"] = new_sl
-                                elif st["position"] is None and trend_ok:
+                            price = closed_c[-1]  # Schlusskurs der auslösenden Kerze
+                            new_direction = "long" if flipped_bullish else "short"
+                            
+                            # SL an der auslösenden Kerze
+                            new_sl = closed_l[-1] if new_direction == "long" else closed_h[-1]
+                            
+                            # Trendfilter: nur Longs im Aufwärtstrend, nur Shorts im Abwärtstrend
+                            trend_ok = True
+                            ema_trend_val = None
+                            if cfg["ha_st_trend_filter"] and len(closed_c) > cfg["ha_st_trend_ema_length"]:
+                                ema_trend_val = round(_ema_series(closed_c, cfg["ha_st_trend_ema_length"])[-1], 4)
+                                if new_direction == "long" and price <= ema_trend_val:
+                                    trend_ok = False
+                                elif new_direction == "short" and price >= ema_trend_val:
+                                    trend_ok = False
+                            
+                            debug_log(f"📡 [{symbol}] HA-Supertrend-Flip: {new_direction.upper()} @ {price} | SL {new_sl} | Trendfilter {'OK' if trend_ok else 'BLOCKIERT'}")
+                            
+                            if not cfg["bot_active"]:
+                                await asyncio.sleep(5)
+                                continue
+                            
+                            # NUR handeln wenn wir flach sind ODER die Position in die andere Richtung geht
+                            if st["position"] is None:
+                                # Keine Position -> neu einsteigen
+                                if trend_ok:
                                     await execute_entry(symbol, new_direction, price, is_add_on=False)
                                     st["ha_st_stop_price"] = new_sl
+                            elif st["position"] != new_direction:
+                                # Position in Gegenrichtung -> reversen
+                                await execute_exit(symbol, price, "HA-REVERSE")
+                                if trend_ok:
+                                    await execute_entry(symbol, new_direction, price, is_add_on=False)
+                                    st["ha_st_stop_price"] = new_sl
+                            # else: Position ist bereits in der gleichen Richtung -> nichts tun
+                            
         except Exception as e:
-            debug_log(f"⚠️ [{symbol}] HA-Supertrend-Abfrage fehlgeschlagen", {"error": str(e)})
+            debug_log(f"⚠️ [{symbol}] HA-Supertrend-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
-        await asyncio.sleep(5)
-
+        await asyncio.sleep(5)  # Prüfe alle 5 Sekunden
+    
 
 def _ema_series(values, length):
     if not values:
