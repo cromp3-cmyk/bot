@@ -166,14 +166,14 @@ CT_STATE = {
 }
 
 
-async def execute_copy_trade(symbol, direction, reference_price):
-    """Kopiert die RICHTUNG eines Trades mit EIGENER Margin/Hebel (keine Groessen-Kopie)."""
+async def execute_copy_trade(symbol, direction, reference_price, margin, leverage):
+    """Kopiert die RICHTUNG eines Trades mit der fuer diesen Trader/Coin eingestellten Margin/Hebel."""
     if symbol not in MARKET_INDICES:
         debug_log(f"⚠️ [CopyTrading] Coin {symbol} nicht auf Lighter gemappt - übersprungen")
         return
 
     if CT_CONFIG["dry_run"]:
-        debug_log(f"🧪 [CopyTrading] DRY_RUN - würde kopieren: {direction.upper()} {symbol} @ ~{reference_price}")
+        debug_log(f"🧪 [CopyTrading] DRY_RUN - würde kopieren: {direction.upper()} {symbol} @ ~{reference_price} (Margin {margin}, Hebel {leverage}x)")
         return
 
     client = get_lighter_client()
@@ -183,7 +183,7 @@ async def execute_copy_trade(symbol, direction, reference_price):
         market_index = MARKET_INDICES[symbol]
         precision = get_precision(symbol)
         min_base = get_min_base_amount(symbol)
-        position_usdc = CT_CONFIG["copy_margin"] * CT_CONFIG["copy_leverage"]
+        position_usdc = margin * leverage
         coin_amount = position_usdc / reference_price
         base_amount = int(coin_amount * precision)
         if base_amount * (1 / precision) < min_base:
@@ -191,7 +191,7 @@ async def execute_copy_trade(symbol, direction, reference_price):
             return
         is_ask = direction == "short"
         try:
-            await client.update_leverage(market_index=market_index, leverage=CT_CONFIG["copy_leverage"], margin_mode=0)
+            await client.update_leverage(market_index=market_index, leverage=leverage, margin_mode=0)
         except Exception as e:
             debug_log("[CopyTrading] Hebel setzen fehlgeschlagen", {"error": str(e)})
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, reference_price)
@@ -308,7 +308,8 @@ async def ct_leaderboard_refresh_loop():
                     addr = row["address"]
                     if addr not in CT_STATE["watched"]:
                         CT_STATE["watched"][addr] = {
-                            "label": f"#{i+1} (Leaderboard)", "copy_enabled": False, "copy_coins": [],
+                            "label": f"#{i+1} (Leaderboard)", "copy_enabled": False, "coin_settings": {},
+                            "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
                             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "leaderboard",
                             "position_meta": {},
                         }
@@ -319,7 +320,8 @@ async def ct_watch_loop():
     for addr in CT_MANUAL_ADDRESSES:
         if addr not in CT_STATE["watched"]:
             CT_STATE["watched"][addr] = {
-                "label": "Manuell hinzugefügt", "copy_enabled": False, "copy_coins": [],
+                "label": "Manuell hinzugefügt", "copy_enabled": False, "coin_settings": {},
+                "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
                 "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
                 "position_meta": {},
             }
@@ -346,6 +348,8 @@ async def ct_watch_loop():
                         info["last_fill_time"] = fills_sorted[-1]["time"] if fills_sorted else int(time.time() * 1000)
                     else:
                         new_fills = [f for f in fills_sorted if f.get("time", 0) > info["last_fill_time"]]
+                        copy_actions = 0
+
                         for f in new_fills:
                             info["last_fill_time"] = f["time"]
                             coin = f.get("coin")
@@ -357,21 +361,26 @@ async def ct_watch_loop():
                             now_iso = datetime.now().isoformat()
                             if prev_meta is None:
                                 meta[coin] = {"opened_at": now_iso, "direction": direction, "entries": 1, "last_action": "Neu"}
-                                action = "Neu"
                             elif prev_meta["direction"] == direction:
                                 prev_meta["entries"] += 1
                                 prev_meta["last_action"] = "Nachkauf"
-                                action = "Nachkauf"
                             else:
                                 meta[coin] = {"opened_at": now_iso, "direction": direction, "entries": 1, "last_action": "Reverse"}
-                                action = "Reverse"
 
-                            debug_log(f"🆕 [CopyTrading] Neuer Fill bei {info['label']} ({address[:8]}...): {direction.upper()} {coin} @ {price} [{action}]")
+                            # Nur kopieren, wenn Copy an ist UND dieser Coin explizit fuer diesen
+                            # Trader freigeschaltet wurde (keine Coin-Einstellung = wird NICHT kopiert)
+                            coin_cfg = (info.get("coin_settings") or {}).get(coin)
+                            if info["copy_enabled"] and coin_cfg and coin_cfg.get("enabled", True) and price > 0:
+                                margin = coin_cfg.get("margin") or info.get("copy_margin", CT_CONFIG["copy_margin"])
+                                leverage = coin_cfg.get("leverage") or info.get("copy_leverage", CT_CONFIG["copy_leverage"])
+                                debug_log(f"🆕 [CopyTrading] Kopiere Fill bei {info['label']} ({address[:8]}...): {direction.upper()} {coin} @ {price}")
+                                await execute_copy_trade(coin, direction, price, margin, leverage)
+                                copy_actions += 1
 
-                            allowed_coins = info.get("copy_coins") or []
-                            coin_allowed = (not allowed_coins) or (coin in allowed_coins)
-                            if info["copy_enabled"] and price > 0 and coin_allowed:
-                                await execute_copy_trade(coin, direction, price)
+                        if new_fills:
+                            # Eine Sammelzeile statt einer Zeile pro Fill - haelt das Log lesbar,
+                            # auch wenn der Trader (z.B. Market-Maker) hunderte Fills auf einmal macht
+                            debug_log(f"📊 [CopyTrading] {info['label']} ({address[:8]}...): {len(new_fills)} neue Fills erkannt, {copy_actions} davon kopiert")
 
                 await asyncio.sleep(0.5)
 
@@ -1413,11 +1422,53 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
   <tbody></tbody>
 </table>
 
-<h2>Copy-Einstellungen pro Trader</h2>
+<h2>Beobachtete Trader (anklicken für Details)</h2>
 <table id="copy-table">
-  <thead><tr><th>Label</th><th>Adresse</th><th>Letzte Fills</th><th>Coin-Filter (leer = alle)</th><th>Copy</th></tr></thead>
+  <thead><tr><th>Label</th><th>Adresse</th><th>Offene Positionen</th><th>Konfigurierte Coins</th><th>Copy</th></tr></thead>
   <tbody></tbody>
 </table>
+
+<!-- Detail-Modal: zeigt nur die Trades/Einstellungen EINES Traders -->
+<div id="trader-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); z-index:100; overflow-y:auto;">
+  <div style="max-width:900px; margin:40px auto; background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:24px;">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h2 id="modal-title" style="margin:0;">Trader-Details</h2>
+      <button onclick="closeModal()" style="background:#374151;">✖️ Schließen</button>
+    </div>
+
+    <h2>Standard-Margin/Hebel für diesen Trader</h2>
+    <div>
+      <input type="text" id="modal-default-margin" placeholder="Margin $" style="width:100px;">
+      <input type="text" id="modal-default-leverage" placeholder="Hebel" style="width:80px;">
+      <button onclick="saveTraderDefaults()">💾 Speichern</button>
+      <span style="font-size:12px; color:var(--dim);"> (gilt für Coins ohne eigene Einstellung unten)</span>
+    </div>
+
+    <h2>Coins zum Kopieren freischalten</h2>
+    <table>
+      <thead><tr><th>Coin</th><th>Margin $ (leer = Standard)</th><th>Hebel (leer = Standard)</th><th>Aktiv</th><th></th></tr></thead>
+      <tbody id="modal-coin-settings"></tbody>
+    </table>
+    <div style="margin-top:10px;">
+      <input type="text" id="modal-new-coin" placeholder="z.B. BTC" style="width:100px;">
+      <input type="text" id="modal-new-margin" placeholder="Margin $" style="width:100px;">
+      <input type="text" id="modal-new-leverage" placeholder="Hebel" style="width:80px;">
+      <button onclick="addCoinSetting()">+ Coin hinzufügen</button>
+    </div>
+
+    <h2>Offene Positionen dieses Traders</h2>
+    <table>
+      <thead><tr><th>Coin</th><th>Seite</th><th>Größe</th><th>Ø-Einstieg</th><th>PnL</th><th>Eröffnet</th><th>Aktion</th></tr></thead>
+      <tbody id="modal-positions"></tbody>
+    </table>
+
+    <h2>Letzte Fills dieses Traders</h2>
+    <table>
+      <thead><tr><th>Zeit</th><th>Seite</th><th>Coin</th><th>Preis</th></tr></thead>
+      <tbody id="modal-fills"></tbody>
+    </table>
+  </div>
+</div>
 
 <script>
 function fmtTime(iso) {
@@ -1500,36 +1551,124 @@ async function refresh() {
   window.posData = posData;
   renderPosTable();
 
-  // Copy-Einstellungen pro Trader
+  window.watchedData = data.watched;  // fuer's Modal zwischenspeichern
+
+  // Trader-Übersicht (klickbar)
   const copyRows = Object.entries(data.watched).map(([addr, info]) => {
-    const fillsText = (info.recent_fills || []).slice(-3).reverse().map(f =>
-      `<span class="${f.side==='B'?'fill-buy':'fill-sell'}">${f.side==='B'?'BUY':'SELL'} ${f.coin} @ ${f.px}</span>`
-    ).join('<br>') || '-';
-    const coinFilterValue = (info.copy_coins || []).join(',');
+    const posSummary = (info.positions || []).map(p => `${p.side==='long'?'🟢':'🔴'} ${p.coin}`).join(', ') || '-';
+    const coinCount = Object.keys(info.coin_settings || {}).length;
     return `
       <tr>
-        <td>${info.label}</td>
+        <td style="cursor:pointer; color:var(--accent);" onclick="openModal('${addr}')">${info.label} 🔍</td>
         <td class="addr">${addr.slice(0,10)}...${addr.slice(-6)}</td>
-        <td>${fillsText}</td>
-        <td>
-          <input type="text" class="coin-filter" id="coins-${addr}" placeholder="z.B. BTC,ETH" value="${coinFilterValue}">
-          <button onclick="saveCoins('${addr}')">💾</button>
-        </td>
+        <td>${posSummary}</td>
+        <td>${coinCount} Coin${coinCount===1?'':'s'} konfiguriert</td>
         <td><button class="${info.copy_enabled?'copy-on':'copy-off'}" onclick="toggleCopy('${addr}', ${!info.copy_enabled})">${info.copy_enabled?'Copy AN':'Copy AUS'}</button></td>
       </tr>`;
   }).join('');
   document.querySelector('#copy-table tbody').innerHTML = copyRows || '<tr><td colspan="5">Noch keine Trader beobachtet...</td></tr>';
+
+  // Falls das Modal gerade offen ist, dessen Inhalt mit aktualisieren
+  if (window.currentModalAddress) renderModal(window.currentModalAddress);
 }
 
-async function toggleCopy(address, enable) {
-  await fetch('/api/ct/copy', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, enable}) });
+let currentModalAddress = null;
+
+function openModal(address) {
+  window.currentModalAddress = address;
+  document.getElementById('trader-modal').style.display = 'block';
+  renderModal(address);
+}
+
+function closeModal() {
+  window.currentModalAddress = null;
+  document.getElementById('trader-modal').style.display = 'none';
+}
+
+function renderModal(address) {
+  const info = (window.watchedData || {})[address];
+  if (!info) return;
+
+  document.getElementById('modal-title').innerText = `${info.label} (${address.slice(0,10)}...${address.slice(-6)})`;
+  document.getElementById('modal-default-margin').value = info.copy_margin ?? '';
+  document.getElementById('modal-default-leverage').value = info.copy_leverage ?? '';
+
+  const coinSettings = info.coin_settings || {};
+  document.getElementById('modal-coin-settings').innerHTML = Object.entries(coinSettings).map(([coin, cfg]) => `
+    <tr>
+      <td><b>${coin}</b></td>
+      <td><input type="text" style="width:80px;" id="cs-margin-${coin}" value="${cfg.margin ?? ''}"></td>
+      <td><input type="text" style="width:60px;" id="cs-lev-${coin}" value="${cfg.leverage ?? ''}"></td>
+      <td><input type="checkbox" id="cs-enabled-${coin}" ${cfg.enabled ? 'checked' : ''}></td>
+      <td>
+        <button onclick="saveCoinSetting('${address}','${coin}')">💾</button>
+        <button onclick="removeCoinSetting('${address}','${coin}')" style="background:#7f1d1d;">🗑️</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="5" style="color:var(--dim);">Noch keine Coins freigeschaltet - unten hinzufügen</td></tr>';
+
+  const meta = info.position_meta || {};
+  document.getElementById('modal-positions').innerHTML = (info.positions || []).map(p => {
+    const m = meta[p.coin] || {};
+    const pnl = parseFloat(p.unrealized_pnl || 0);
+    return `<tr>
+      <td><b>${p.coin}</b></td>
+      <td class="${p.side==='long'?'green':'red'}">${p.side==='long'?'🟢 LONG':'🔴 SHORT'}</td>
+      <td>${p.size}</td><td>${p.entry_price ?? '-'}</td>
+      <td class="${pnl>=0?'green':'red'}">$${pnl.toFixed(2)}</td>
+      <td>${fmtTime(m.opened_at)}</td><td>${m.last_action ?? '-'}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" style="color:var(--dim);">Keine offenen Positionen</td></tr>';
+
+  document.getElementById('modal-fills').innerHTML = (info.recent_fills || []).slice(-20).reverse().map(f => `
+    <tr>
+      <td>${fmtTime(new Date(f.time).toISOString())}</td>
+      <td class="${f.side==='B'?'fill-buy':'fill-sell'}">${f.side==='B'?'BUY':'SELL'}</td>
+      <td>${f.coin}</td><td>${f.px}</td>
+    </tr>`).join('') || '<tr><td colspan="4" style="color:var(--dim);">Noch keine Fills erfasst</td></tr>';
+}
+
+async function saveTraderDefaults() {
+  const address = window.currentModalAddress;
+  await fetch('/api/ct/trader_defaults', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+    address,
+    copy_margin: document.getElementById('modal-default-margin').value,
+    copy_leverage: document.getElementById('modal-default-leverage').value,
+  })});
   refresh();
 }
 
-async function saveCoins(address) {
-  const coins = document.getElementById(`coins-${address}`).value;
-  await fetch('/api/ct/coins', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, coins}) });
-  alert('Coin-Filter gespeichert für ' + address.slice(0,10) + '...');
+async function saveCoinSetting(address, coin) {
+  await fetch('/api/ct/coin_setting', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+    address, coin,
+    margin: document.getElementById(`cs-margin-${coin}`).value,
+    leverage: document.getElementById(`cs-lev-${coin}`).value,
+    enabled: document.getElementById(`cs-enabled-${coin}`).checked,
+  })});
+  refresh();
+}
+
+async function removeCoinSetting(address, coin) {
+  await fetch('/api/ct/remove_coin_setting', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, coin}) });
+  refresh();
+}
+
+async function addCoinSetting() {
+  const address = window.currentModalAddress;
+  const coin = document.getElementById('modal-new-coin').value.trim().toUpperCase();
+  if (!coin) return;
+  await fetch('/api/ct/coin_setting', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+    address, coin,
+    margin: document.getElementById('modal-new-margin').value,
+    leverage: document.getElementById('modal-new-leverage').value,
+    enabled: true,
+  })});
+  document.getElementById('modal-new-coin').value = '';
+  document.getElementById('modal-new-margin').value = '';
+  document.getElementById('modal-new-leverage').value = '';
+  refresh();
+}
+  await fetch('/api/ct/copy', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, enable}) });
+  refresh();
 }
 
 document.getElementById('btn-add-address').addEventListener('click', async () => {
@@ -1591,7 +1730,8 @@ async def handle_ct_watch(request):
         return web.json_response({"error": "keine Adresse"}, status=400)
     if addr not in CT_STATE["watched"]:
         CT_STATE["watched"][addr] = {
-            "label": "Manuell hinzugefügt", "copy_enabled": False, "copy_coins": [],
+            "label": "Manuell hinzugefügt", "copy_enabled": False, "coin_settings": {},
+            "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
             "position_meta": {},
         }
@@ -1608,15 +1748,46 @@ async def handle_ct_copy_toggle(request):
     return web.json_response({"success": True})
 
 
-async def handle_ct_set_coins(request):
+async def handle_ct_set_coin_setting(request):
+    """Setzt/aktualisiert Margin, Hebel und An/Aus fuer EINEN Coin bei EINEM Trader."""
     body = await request.json()
     addr = body.get("address")
-    coins_raw = body.get("coins", "")
-    coins = [c.strip().upper() for c in coins_raw.split(",") if c.strip()]
+    coin = (body.get("coin") or "").strip().upper()
+    if addr not in CT_STATE["watched"] or not coin:
+        return web.json_response({"error": "ungültige Adresse oder Coin"}, status=400)
+
+    info = CT_STATE["watched"][addr]
+    settings = info.setdefault("coin_settings", {})
+    settings[coin] = {
+        "enabled": bool(body.get("enabled", True)),
+        "margin": float(body["margin"]) if body.get("margin") not in (None, "") else None,
+        "leverage": int(body["leverage"]) if body.get("leverage") not in (None, "") else None,
+    }
+    debug_log(f"⚙️ [CopyTrading] Coin-Einstellung für {addr} / {coin} gesetzt", settings[coin])
+    return web.json_response({"success": True, "coin_settings": settings})
+
+
+async def handle_ct_remove_coin_setting(request):
+    body = await request.json()
+    addr = body.get("address")
+    coin = (body.get("coin") or "").strip().upper()
     if addr in CT_STATE["watched"]:
-        CT_STATE["watched"][addr]["copy_coins"] = coins
-        debug_log(f"⚙️ [CopyTrading] Coin-Filter für {addr} gesetzt", {"coins": coins or "alle"})
-    return web.json_response({"success": True, "copy_coins": coins})
+        CT_STATE["watched"][addr].get("coin_settings", {}).pop(coin, None)
+    return web.json_response({"success": True})
+
+
+async def handle_ct_set_trader_defaults(request):
+    """Setzt Standard-Margin/Hebel fuer einen Trader (greift fuer Coins ohne eigene Einstellung)."""
+    body = await request.json()
+    addr = body.get("address")
+    if addr not in CT_STATE["watched"]:
+        return web.json_response({"error": "unbekannte Adresse"}, status=400)
+    info = CT_STATE["watched"][addr]
+    if body.get("copy_margin") not in (None, ""):
+        info["copy_margin"] = float(body["copy_margin"])
+    if body.get("copy_leverage") not in (None, ""):
+        info["copy_leverage"] = int(body["copy_leverage"])
+    return web.json_response({"success": True})
 
 
 async def start_web_server():
@@ -1633,7 +1804,9 @@ async def start_web_server():
     app.router.add_get("/api/ct/status", handle_ct_status)
     app.router.add_post("/api/ct/watch", handle_ct_watch)
     app.router.add_post("/api/ct/copy", handle_ct_copy_toggle)
-    app.router.add_post("/api/ct/coins", handle_ct_set_coins)
+    app.router.add_post("/api/ct/coin_setting", handle_ct_set_coin_setting)
+    app.router.add_post("/api/ct/remove_coin_setting", handle_ct_remove_coin_setting)
+    app.router.add_post("/api/ct/trader_defaults", handle_ct_set_trader_defaults)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
