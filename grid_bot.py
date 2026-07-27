@@ -26,6 +26,11 @@ import traceback
 from datetime import datetime
 from aiohttp import web
 
+try:
+    import redis.asyncio as redis_lib
+except ImportError:
+    redis_lib = None
+
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
 WS_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 
@@ -139,6 +144,92 @@ def default_state():
 
 # ========== GLOBALER STATE - EIN EINTRAG PRO COIN ==========
 BOTS = {s: {"config": default_config(), "state": default_state()} for s in SYMBOLS}
+
+
+# ==========================================================================
+# PERSISTENZ (Redis) - ueberlebt Redeploys, damit Einstellungen nicht
+# jedesmal verloren gehen. Optional: laeuft auch ohne REDIS_URL (dann
+# einfach ohne Persistenz, wie bisher).
+# ==========================================================================
+REDIS_URL = os.getenv("REDIS_URL", "")
+_redis_client = None
+
+
+async def get_redis():
+    global _redis_client
+    if not REDIS_URL or redis_lib is None:
+        return None
+    if _redis_client is None:
+        try:
+            _redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
+            await _redis_client.ping()
+            debug_log("✅ Redis verbunden - Einstellungen werden ab jetzt gespeichert")
+        except Exception as e:
+            debug_log("⚠️ Redis-Verbindung fehlgeschlagen - läuft ohne Persistenz weiter", {"error": str(e)})
+            _redis_client = None
+    return _redis_client
+
+
+async def save_bot_configs():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        data = {s: BOTS[s]["config"] for s in SYMBOLS}
+        await r.set("gridbot:configs", json.dumps(data))
+    except Exception as e:
+        debug_log("⚠️ Speichern der Grid-Bot-Configs fehlgeschlagen", {"error": str(e)})
+
+
+async def save_ct_watched():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        # Nur die dauerhaften Einstellungen speichern, nicht Positionen/Fills (die kommen eh live nach)
+        trimmed = {
+            addr: {
+                "label": info.get("label"), "copy_enabled": info.get("copy_enabled", False),
+                "coin_settings": info.get("coin_settings", {}), "copy_margin": info.get("copy_margin"),
+                "copy_leverage": info.get("copy_leverage"), "source": info.get("source"),
+            }
+            for addr, info in CT_STATE["watched"].items()
+        }
+        r_client = r
+        await r_client.set("gridbot:ct_watched", json.dumps(trimmed))
+    except Exception as e:
+        debug_log("⚠️ Speichern der Copy-Trading-Einstellungen fehlgeschlagen", {"error": str(e)})
+
+
+async def load_persisted_state():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        raw_configs = await r.get("gridbot:configs")
+        if raw_configs:
+            saved = json.loads(raw_configs)
+            for s in SYMBOLS:
+                if s in saved:
+                    BOTS[s]["config"].update(saved[s])
+            debug_log("✅ Grid-Bot-Configs aus Redis geladen", {"coins": list(saved.keys())})
+    except Exception as e:
+        debug_log("⚠️ Laden der Grid-Bot-Configs fehlgeschlagen", {"error": str(e)})
+
+    try:
+        raw_watched = await r.get("gridbot:ct_watched")
+        if raw_watched:
+            saved = json.loads(raw_watched)
+            for addr, cfg in saved.items():
+                CT_STATE["watched"][addr] = {
+                    "label": cfg.get("label", "Wiederhergestellt"), "copy_enabled": cfg.get("copy_enabled", False),
+                    "coin_settings": cfg.get("coin_settings", {}), "copy_margin": cfg.get("copy_margin", CT_CONFIG["copy_margin"]),
+                    "copy_leverage": cfg.get("copy_leverage", CT_CONFIG["copy_leverage"]), "source": cfg.get("source", "manual"),
+                    "last_fill_time": None, "positions": [], "recent_fills": [], "position_meta": {},
+                }
+            debug_log(f"✅ {len(saved)} Copy-Trading-Trader aus Redis wiederhergestellt")
+    except Exception as e:
+        debug_log("⚠️ Laden der Copy-Trading-Einstellungen fehlgeschlagen", {"error": str(e)})
 
 
 # ==========================================================================
@@ -1314,6 +1405,7 @@ async def handle_config_update(request):
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
+    await save_bot_configs()
     return web.json_response({"success": True, "config": cfg})
 
 
@@ -1737,6 +1829,7 @@ async def handle_ct_watch(request):
             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
             "position_meta": {},
         }
+        await save_ct_watched()
     return web.json_response({"success": True})
 
 
@@ -1747,6 +1840,7 @@ async def handle_ct_copy_toggle(request):
     if addr in CT_STATE["watched"]:
         CT_STATE["watched"][addr]["copy_enabled"] = enable
         debug_log(f"{'✅' if enable else '⏸️'} [CopyTrading] Copy für {addr} {'aktiviert' if enable else 'deaktiviert'}")
+        await save_ct_watched()
     return web.json_response({"success": True})
 
 
@@ -1766,6 +1860,7 @@ async def handle_ct_set_coin_setting(request):
         "leverage": int(body["leverage"]) if body.get("leverage") not in (None, "") else None,
     }
     debug_log(f"⚙️ [CopyTrading] Coin-Einstellung für {addr} / {coin} gesetzt", settings[coin])
+    await save_ct_watched()
     return web.json_response({"success": True, "coin_settings": settings})
 
 
@@ -1775,6 +1870,7 @@ async def handle_ct_remove_coin_setting(request):
     coin = (body.get("coin") or "").strip().upper()
     if addr in CT_STATE["watched"]:
         CT_STATE["watched"][addr].get("coin_settings", {}).pop(coin, None)
+        await save_ct_watched()
     return web.json_response({"success": True})
 
 
@@ -1789,6 +1885,7 @@ async def handle_ct_set_trader_defaults(request):
         info["copy_margin"] = float(body["copy_margin"])
     if body.get("copy_leverage") not in (None, ""):
         info["copy_leverage"] = int(body["copy_leverage"])
+    await save_ct_watched()
     return web.json_response({"success": True})
 
 
@@ -1825,6 +1922,7 @@ async def main():
         print(f"   [{s}] DRY_RUN={cfg['dry_run']} Margin={cfg['margin']} Hebel={cfg['leverage']}x Grid={cfg['grid_step_pct']}% TP={cfg['tp_step_pct']}%")
     print("=" * 60)
 
+    await load_persisted_state()
     await start_web_server()
     await asyncio.gather(
         trading_loop(),
