@@ -151,7 +151,7 @@ BOTS = {s: {"config": default_config(), "state": default_state()} for s in SYMBO
 # jedesmal verloren gehen. Optional: laeuft auch ohne REDIS_URL (dann
 # einfach ohne Persistenz, wie bisher).
 # ==========================================================================
-REDIS_URL = os.getenv("REDIS_URL", "")
+REDIS_URL = os.getenv("REDIS_URL", "").strip().strip('"').strip("'")
 _redis_client = None
 
 
@@ -161,6 +161,11 @@ async def get_redis():
         return None
     if _redis_client is None:
         try:
+            debug_log("🔎 Redis-URL Diagnose (Passwort verdeckt)", {
+                "laenge": len(REDIS_URL),
+                "beginnt_mit": REDIS_URL[:12] + "...",
+                "startet_korrekt_mit_redis://": REDIS_URL.startswith("redis://"),
+            })
             _redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
             await _redis_client.ping()
             debug_log("✅ Redis verbunden - Einstellungen werden ab jetzt gespeichert")
@@ -201,6 +206,9 @@ async def save_ct_watched():
         debug_log("⚠️ Speichern der Copy-Trading-Einstellungen fehlgeschlagen", {"error": str(e)})
 
 
+VALID_RESOLUTIONS = {"1m", "3m", "5m", "15m", "30m", "1h", "4h"}
+
+
 async def load_persisted_state():
     r = await get_redis()
     if r is None:
@@ -211,7 +219,14 @@ async def load_persisted_state():
             saved = json.loads(raw_configs)
             for s in SYMBOLS:
                 if s in saved:
-                    BOTS[s]["config"].update(saved[s])
+                    incoming = saved[s]
+                    # Absicherung: ungueltige, veraltete Zeitrahmen-Werte (z.B. aus einer
+                    # frueheren Version mit anderen Dropdown-Optionen) nicht uebernehmen
+                    for res_key in ("ha_st_resolution",):
+                        if res_key in incoming and incoming[res_key] not in VALID_RESOLUTIONS:
+                            debug_log(f"⚠️ [{s}] Ungültiger gespeicherter Zeitrahmen '{incoming[res_key]}' - auf Standard zurückgesetzt")
+                            incoming.pop(res_key)
+                    BOTS[s]["config"].update(incoming)
             debug_log("✅ Grid-Bot-Configs aus Redis geladen", {"coins": list(saved.keys())})
     except Exception as e:
         debug_log("⚠️ Laden der Grid-Bot-Configs fehlgeschlagen", {"error": str(e)})
