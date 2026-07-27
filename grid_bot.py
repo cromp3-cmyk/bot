@@ -1035,6 +1035,9 @@ def update_obi_trend_ema(symbol, price, ema_length):
     k = 2 / (ema_length + 1)
     st["obi_trend_ema"] = price * k + st["obi_trend_ema"] * (1 - k)
 
+    
+    
+    
 async def on_price_update(symbol, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
