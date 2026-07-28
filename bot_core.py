@@ -120,7 +120,10 @@ def default_config():
         "cc_auto_reverse": os.getenv("CC_AUTO_REVERSE", "true").lower() == "true",
         "cc_early_exit": os.getenv("CC_EARLY_EXIT", "true").lower() == "true",
         "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
-        "obi_mode": os.getenv("OBI_MODE", "momentum"),  # "momentum" (mit dem Ungleichgewicht) oder "mean_reversion" (dagegen)
+        "obi_mode": os.getenv("OBI_MODE", "momentum"),  # "momentum" (mit dem Ungleichgewicht), "mean_reversion" (dagegen) oder "reversal" (separater Long/Short-Einstieg bei Umkehr aus Extremzone)
+        "obi_long_threshold": float(os.getenv("OBI_LONG_THRESHOLD", "0.20")),  # nur Reversal-Modus: Long-Zone ab OBI <= -Wert
+        "obi_short_threshold": float(os.getenv("OBI_SHORT_THRESHOLD", "0.30")),  # nur Reversal-Modus: Short-Zone ab OBI >= +Wert
+        "obi_reversal_min_bounce": float(os.getenv("OBI_REVERSAL_MIN_BOUNCE", "0.05")),
         "obi_window_fast_seconds": float(os.getenv("OBI_WINDOW_FAST_SECONDS", "5")),
         "obi_window_medium_seconds": float(os.getenv("OBI_WINDOW_MEDIUM_SECONDS", "20")),
         "obi_window_slow_seconds": float(os.getenv("OBI_WINDOW_SLOW_SECONDS", "60")),
@@ -147,6 +150,7 @@ def default_state():
         "obi_fast": None, "obi_medium": None, "obi_slow": None, "obi_history": [],
         "last_entry_price": None,
         "obi_last_trade_time": 0.0, "obi_trend_ema": None, "obi_current": None,
+        "obi_extreme_zone": None, "obi_extreme_value": None, "obi_prev_fast": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -569,8 +573,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="obi_mode">
       <option value="momentum">Momentum (mit dem Ungleichgewicht)</option>
       <option value="mean_reversion">Mean-Reversion (dagegen, wie RSI)</option>
+      <option value="reversal">Reversal (separater Long/Short-Einstieg bei Umkehr aus Extremzone)</option>
     </select>
   </div>
+  <div data-mode="obi_scalp"><label>Reversal OBI-Wert Long (überverkauft, negativ)</label><input type="number" step="0.01" id="obi_long_threshold"></div>
+  <div data-mode="obi_scalp"><label>Reversal OBI-Wert Short (überkauft, positiv)</label><input type="number" step="0.01" id="obi_short_threshold"></div>
+  <div data-mode="obi_scalp"><label>Reversal Rückprall-Schwelle</label><input type="number" step="0.01" id="obi_reversal_min_bounce"></div>
   <div data-mode="obi_scalp"><label>OBI schnell (Sek.)</label><input type="number" step="1" id="obi_window_fast_seconds"></div>
   <div data-mode="obi_scalp"><label>OBI mittel (Sek.)</label><input type="number" step="1" id="obi_window_medium_seconds"></div>
   <div data-mode="obi_scalp"><label>OBI langsam (Sek.)</label><input type="number" step="1" id="obi_window_slow_seconds"></div>
@@ -731,6 +739,9 @@ async function refresh() {
     document.getElementById('cc_early_exit').value = String(data.config.cc_early_exit);
     document.getElementById('obi_threshold').value = data.config.obi_threshold;
     document.getElementById('obi_mode').value = data.config.obi_mode;
+    document.getElementById('obi_long_threshold').value = data.config.obi_long_threshold;
+    document.getElementById('obi_short_threshold').value = data.config.obi_short_threshold;
+    document.getElementById('obi_reversal_min_bounce').value = data.config.obi_reversal_min_bounce;
     document.getElementById('obi_window_fast_seconds').value = data.config.obi_window_fast_seconds;
     document.getElementById('obi_window_medium_seconds').value = data.config.obi_window_medium_seconds;
     document.getElementById('obi_window_slow_seconds').value = data.config.obi_window_slow_seconds;
@@ -839,6 +850,9 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     cc_early_exit: document.getElementById('cc_early_exit').value === 'true',
     obi_threshold: parseFloat(document.getElementById('obi_threshold').value),
     obi_mode: document.getElementById('obi_mode').value,
+    obi_long_threshold: parseFloat(document.getElementById('obi_long_threshold').value),
+    obi_short_threshold: parseFloat(document.getElementById('obi_short_threshold').value),
+    obi_reversal_min_bounce: parseFloat(document.getElementById('obi_reversal_min_bounce').value),
     obi_window_fast_seconds: parseFloat(document.getElementById('obi_window_fast_seconds').value),
     obi_window_medium_seconds: parseFloat(document.getElementById('obi_window_medium_seconds').value),
     obi_window_slow_seconds: parseFloat(document.getElementById('obi_window_slow_seconds').value),
@@ -865,7 +879,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','ha_st_candle_source','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','cc_early_exit','obi_threshold','obi_mode','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','ha_st_candle_source','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','cc_early_exit','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -938,7 +952,7 @@ async def handle_config_update(request):
                 "ha_st_resolution", "ha_st_atr_period", "ha_st_atr_mult",
                 "ha_st_trend_filter", "ha_st_trend_ema_length", "ha_st_candle_source",
                 "cc_resolution_seconds", "cc_confirm_delay_seconds", "cc_auto_reverse", "cc_early_exit",
-                "obi_threshold", "obi_mode", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
+                "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
                 "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length"]:
         if key in body:
             cfg[key] = body[key]

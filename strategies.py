@@ -325,6 +325,48 @@ def update_obi_windows(symbol, raw_obi, fast_s, medium_s, slow_s):
     return avg_over(fast_s), avg_over(medium_s), avg_over(slow_s)
 
 
+def check_obi_reversal(st, fast, long_threshold, short_threshold, min_bounce):
+    """Separate Long-/Short-Logik für den OBI-Reversal-Modus mit zwei eigenen Schwellenwerten:
+    Läuft der OBI-EMA-Verlauf über +short_threshold (überkauft) und dreht danach wieder nach
+    unten -> Short (der Kurs dreht laut Beobachtung nach dem Hoch nach unten).
+    Läuft er unter -long_threshold (überverkauft) und erholt sich danach wieder -> Long
+    (der Kurs steigt laut Beobachtung, sobald sich die Unterseite erholt).
+    long_threshold und short_threshold werden als positive Beträge angegeben
+    (z.B. long_threshold=0.20 -> Long-Zone ab OBI <= -0.20, short_threshold=0.30 -> Short-Zone ab OBI >= +0.30).
+    Es wird jeweils der Extremwert innerhalb der Zone gemerkt, damit erst bei einer
+    echten Umkehr (Rückprall um min_bounce) ausgelöst wird, nicht schon beim ersten Zittern."""
+    prev = st.get("obi_prev_fast")
+    st["obi_prev_fast"] = fast
+
+    if fast >= short_threshold:
+        st["obi_extreme_zone"] = "overbought"
+        st["obi_extreme_value"] = max(fast, st.get("obi_extreme_value") if st.get("obi_extreme_value") is not None else fast)
+    elif fast <= -long_threshold:
+        st["obi_extreme_zone"] = "oversold"
+        st["obi_extreme_value"] = min(fast, st.get("obi_extreme_value") if st.get("obi_extreme_value") is not None else fast)
+
+    zone = st.get("obi_extreme_zone")
+    if zone is None or prev is None:
+        return None
+
+    direction = None
+    if zone == "overbought" and fast < prev:
+        drop = st["obi_extreme_value"] - fast
+        if drop >= min_bounce:
+            direction = "short"
+    elif zone == "oversold" and fast > prev:
+        rise = fast - st["obi_extreme_value"]
+        if rise >= min_bounce:
+            direction = "long"
+
+    if direction is not None:
+        # Zone zuruecksetzen, damit die naechste Extremzone wieder frisch erkannt wird
+        st["obi_extreme_zone"] = None
+        st["obi_extreme_value"] = None
+
+    return direction
+
+
 async def handle_obi_order_book_update(symbol, msg):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -363,25 +405,37 @@ async def handle_obi_order_book_update(symbol, msg):
     if now - st["obi_last_trade_time"] < cfg["obi_cooldown_seconds"]:
         return
 
-    mean_reversion = cfg.get("obi_mode", "momentum") == "mean_reversion"
+    obi_mode = cfg.get("obi_mode", "momentum")
     threshold = cfg["obi_threshold"]
 
-    def side_of(value):
-        if value >= threshold:
-            return "short" if mean_reversion else "long"
-        if value <= -threshold:
-            return "long" if mean_reversion else "short"
-        return None
+    if obi_mode == "reversal":
+        # Separater Long-/Short-Einstieg bei Umkehr aus einer Extremzone, mit eigenen Schwellenwerten
+        direction = check_obi_reversal(
+            st, fast,
+            cfg.get("obi_long_threshold", 0.20), cfg.get("obi_short_threshold", 0.30),
+            cfg.get("obi_reversal_min_bounce", 0.05),
+        )
+        if direction is None:
+            return
+    else:
+        mean_reversion = obi_mode == "mean_reversion"
 
-    fast_dir, medium_dir, slow_dir = side_of(fast), side_of(medium), side_of(slow)
+        def side_of(value):
+            if value >= threshold:
+                return "short" if mean_reversion else "long"
+            if value <= -threshold:
+                return "long" if mean_reversion else "short"
+            return None
 
-    if fast_dir is None or fast_dir != medium_dir or fast_dir != slow_dir:
-        st["obi_last_signal_direction"] = None
-        return
-    direction = fast_dir
+        fast_dir, medium_dir, slow_dir = side_of(fast), side_of(medium), side_of(slow)
 
-    if direction == st["obi_last_signal_direction"]:
-        return
+        if fast_dir is None or fast_dir != medium_dir or fast_dir != slow_dir:
+            st["obi_last_signal_direction"] = None
+            return
+        direction = fast_dir
+
+        if direction == st["obi_last_signal_direction"]:
+            return
 
     # Optionaler Trendfilter: nur Longs ueber der lebenden EMA, nur Shorts darunter
     if cfg["obi_trend_filter"] and st["obi_trend_ema"] is not None and st["last_price"] is not None:
