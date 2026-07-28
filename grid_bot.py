@@ -1303,11 +1303,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="grid" id="status-grid"></div>
 
 <h2 class="section-title">Kursverlauf</h2>
-<canvas id="priceChart" height="400"></canvas>
+<div style="position:relative; height:400px;"><canvas id="priceChart"></canvas></div>
 
 <div id="obi-chart-section" style="display:none;">
   <h2 class="section-title">OBI-Verlauf (schnell / mittel / langsam)</h2>
-  <canvas id="obiChart" height="250"></canvas>
+  <div style="position:relative; height:250px;"><canvas id="obiChart"></canvas></div>
 </div>
 
 <h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
