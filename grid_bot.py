@@ -123,15 +123,22 @@ def default_config():
         "ha_st_atr_mult": float(os.getenv("HA_ST_ATR_MULT", "1.5")),
         "ha_st_trend_filter": os.getenv("HA_ST_TREND_FILTER", "true").lower() == "true",
         "ha_st_trend_ema_length": int(os.getenv("HA_ST_TREND_EMA_LENGTH", "200")),
+        "ha_st_candle_source": os.getenv("HA_ST_CANDLE_SOURCE", "binance"),  # "lighter" oder "binance"
         "cc_resolution_seconds": int(os.getenv("CC_RESOLUTION_SECONDS", "60")),
         "cc_confirm_delay_seconds": int(os.getenv("CC_CONFIRM_DELAY_SECONDS", "20")),
         "cc_auto_reverse": os.getenv("CC_AUTO_REVERSE", "true").lower() == "true",
         "cc_early_exit": os.getenv("CC_EARLY_EXIT", "true").lower() == "true",
         "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
-        "obi_avg_window_seconds": float(os.getenv("OBI_AVG_WINDOW_SECONDS", "7")),
+        "obi_mode": os.getenv("OBI_MODE", "momentum"),  # "momentum" (mit dem Ungleichgewicht) oder "mean_reversion" (dagegen)
+        "obi_window_fast_seconds": float(os.getenv("OBI_WINDOW_FAST_SECONDS", "5")),
+        "obi_window_medium_seconds": float(os.getenv("OBI_WINDOW_MEDIUM_SECONDS", "20")),
+        "obi_window_slow_seconds": float(os.getenv("OBI_WINDOW_SLOW_SECONDS", "60")),
         "obi_levels": int(os.getenv("OBI_LEVELS", "15")),
+        "obi_tp_sl_mode": os.getenv("OBI_TP_SL_MODE", "pct"),  # "pct" oder "usd"
         "obi_tp_pct": float(os.getenv("OBI_TP_PCT", "0.15")),
         "obi_sl_pct": float(os.getenv("OBI_SL_PCT", "0.15")),
+        "obi_tp_usd": float(os.getenv("OBI_TP_USD", "1")),
+        "obi_sl_usd": float(os.getenv("OBI_SL_USD", "1")),
         "obi_cooldown_seconds": float(os.getenv("OBI_COOLDOWN_SECONDS", "7")),
         "obi_trend_filter": os.getenv("OBI_TREND_FILTER", "false").lower() == "true",
         "obi_trend_ema_length": int(os.getenv("OBI_TREND_EMA_LENGTH", "300")),
@@ -146,6 +153,8 @@ def default_state():
         "ha_st_stop_price": None, "position_opened_at": None,
         "cc_candle_start": None, "cc_candle_open": None, "cc_entered_this_candle": False, "cc_last_color": None,
         "obi_book": {"bids": {}, "asks": {}}, "obi_avg_buffer": [], "obi_last_signal_direction": None,
+        "obi_fast": None, "obi_medium": None, "obi_slow": None, "obi_history": [],
+        "last_entry_price": None,
         "obi_last_trade_time": 0.0, "obi_trend_ema": None, "obi_current": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
@@ -556,6 +565,47 @@ def calc_unrealized_pnl(symbol):
         return round((st["avg_entry_price"] - st["last_price"]) * st["total_coin_size"], 4)
 
 
+BINANCE_SYMBOL_MAP = {
+    "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "DOGE": "DOGEUSDT", "XRP": "XRPUSDT",
+    "LINK": "LINKUSDT", "AVAX": "AVAXUSDT", "NEAR": "NEARUSDT", "DOT": "DOTUSDT", "TON": "TONUSDT",
+    "SUI": "SUIUSDT", "BNB": "BNBUSDT", "UNI": "UNIUSDT", "APT": "APTUSDT", "ADA": "ADAUSDT",
+    "TRX": "TRXUSDT", "LTC": "LTCUSDT", "BCH": "BCHUSDT", "HBAR": "HBARUSDT", "ICP": "ICPUSDT",
+    # HYPE und Forex/Rohstoffe (EURUSD, XAU, WTI, ...) gibt es nicht auf Binance - dafuer greift der Lighter-Fallback
+}
+
+
+async def fetch_candles_binance(symbol, resolution, count_back=150):
+    """Alternative Kerzenquelle - Binance hat deutlich mehr Liquiditaet als Lighter,
+    kann daher weniger anfaellig fuer kurze Preis-Spikes/Wicks sein, die auf einer
+    kleineren Perp-DEX Fehlsignale ausloesen wuerden."""
+    pair = BINANCE_SYMBOL_MAP.get(symbol)
+    if not pair:
+        return None
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 500)}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    debug_log(f"⚠️ [{symbol}] Binance-Kerzenabfrage HTTP {resp.status}")
+                    return None
+                data = await resp.json()
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Binance-Kerzenabfrage fehlgeschlagen", {"error": str(e)})
+        return None
+
+    if not data or not isinstance(data, list):
+        return None
+
+    timestamps, opens, highs, lows, closes = [], [], [], [], []
+    for k in data:
+        timestamps.append(int(k[0]))
+        opens.append(float(k[1]))
+        highs.append(float(k[2]))
+        lows.append(float(k[3]))
+        closes.append(float(k[4]))
+    return timestamps, opens, highs, lows, closes
+
+
 async def fetch_candles_ohlc(symbol, resolution, count_back=150):
     """Kerzendaten inkl. Open (fuer Heikin Ashi noetig)."""
     import lighter
@@ -654,7 +704,13 @@ async def ha_supertrend_poll_loop(symbol):
             cfg = b["config"]
             if cfg["entry_mode"] == "ha_st":
                 needed_bars = max(150, cfg["ha_st_trend_ema_length"] + 10) if cfg["ha_st_trend_filter"] else 150
-                data = await fetch_candles_ohlc(symbol, cfg["ha_st_resolution"], count_back=needed_bars)
+                data = None
+                if cfg.get("ha_st_candle_source", "binance") == "binance":
+                    data = await fetch_candles_binance(symbol, cfg["ha_st_resolution"], count_back=needed_bars)
+                    if data is None:
+                        debug_log(f"ℹ️ [{symbol}] Nicht auf Binance verfügbar - nutze Lighter-Kerzen")
+                if data is None:
+                    data = await fetch_candles_ohlc(symbol, cfg["ha_st_resolution"], count_back=needed_bars)
                 if data:
                     timestamps, opens, highs, lows, closes = data
                     closed_ts = timestamps[:-1]
@@ -748,6 +804,7 @@ def calc_grid_levels(symbol):
             levels["next_nachkauf_price"] = round(st["avg_entry_price"] + grid_step, 4)
     return levels
 
+
 async def execute_entry(symbol, direction, price, is_add_on):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -780,23 +837,21 @@ async def execute_entry(symbol, direction, price, is_add_on):
         total_value = st["avg_entry_price"] * st["total_coin_size"] + price * new_units
         st["total_coin_size"] += new_units
         st["avg_entry_price"] = total_value / st["total_coin_size"]
-        st["last_entry_price"] = price  # <-- NEU: Merken für nächste Stufe
     else:
         st["avg_entry_price"] = price
         st["total_coin_size"] = new_units
         st["position"] = direction
         st["position_opened_at"] = datetime.now().isoformat()
-        st["last_entry_price"] = price  # <-- NEU: Erste Stufe merken
 
+    st["last_entry_price"] = price
     st["entry_count"] += 1
     debug_log(f"📈 [{symbol}] {'Nachkauf' if is_add_on else 'Neue Position'}: {direction.upper()} @ {price} | Ø-Einstieg {round(st['avg_entry_price'], 2)} | Stufe {st['entry_count']}")
     return True
-    
-   
+
+
 async def execute_exit(symbol, price, reason):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
-
     market_index = MARKET_INDICES[symbol]
 
     pnl_usd = (price - st["avg_entry_price"]) * st["total_coin_size"] if st["position"] == "long" else (st["avg_entry_price"] - price) * st["total_coin_size"]
@@ -833,9 +888,9 @@ async def execute_exit(symbol, price, reason):
     st["total_coin_size"] = 0.0
     st["entry_count"] = 0
     st["anchor_price"] = price
-    st["last_entry_price"] = None
     st["ha_st_stop_price"] = None
     st["position_opened_at"] = None
+    st["last_entry_price"] = None
 
     if cfg.get("auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid":
         opposite = "short" if closing_side == "long" else "long"
@@ -921,16 +976,24 @@ def calc_obi(symbol, levels):
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
 
-def update_obi_average(symbol, raw_obi, window_seconds):
+def update_obi_windows(symbol, raw_obi, fast_s, medium_s, slow_s):
+    """Ein gemeinsamer Rohwert-Puffer, daraus werden alle drei Zeitfenster berechnet -
+    effizienter als drei getrennte Puffer, und alle drei sehen exakt dieselben Rohdaten."""
     st = BOTS[symbol]["state"]
     now = time.time()
     buf = st["obi_avg_buffer"]
     buf.append((raw_obi, now))
-    cutoff = now - window_seconds
-    st["obi_avg_buffer"] = [d for d in buf if d[1] >= cutoff]
-    if not st["obi_avg_buffer"]:
-        return 0.0
-    return sum(v for v, _ in st["obi_avg_buffer"]) / len(st["obi_avg_buffer"])
+    max_window = max(fast_s, medium_s, slow_s)
+    cutoff = now - max_window
+    buf = [d for d in buf if d[1] >= cutoff]
+    st["obi_avg_buffer"] = buf
+
+    def avg_over(seconds):
+        window_cutoff = now - seconds
+        vals = [v for v, ts in buf if ts >= window_cutoff]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    return avg_over(fast_s), avg_over(medium_s), avg_over(slow_s)
 
 
 async def handle_obi_order_book_update(symbol, msg):
@@ -951,8 +1014,18 @@ async def handle_obi_order_book_update(symbol, msg):
                 book[side_key][price] = size
 
     raw_obi = calc_obi(symbol, cfg["obi_levels"])
-    avg_obi = update_obi_average(symbol, raw_obi, cfg["obi_avg_window_seconds"])
-    st["obi_current"] = round(avg_obi, 4)
+    fast, medium, slow = update_obi_windows(
+        symbol, raw_obi,
+        cfg["obi_window_fast_seconds"], cfg["obi_window_medium_seconds"], cfg["obi_window_slow_seconds"],
+    )
+    st["obi_fast"] = round(fast, 4)
+    st["obi_medium"] = round(medium, 4)
+    st["obi_slow"] = round(slow, 4)
+    st["obi_current"] = st["obi_fast"]  # fuer Abwaertskompatibilitaet in der Anzeige
+
+    st["obi_history"].append({"ts": int(time.time() * 1000), "fast": st["obi_fast"], "medium": st["obi_medium"], "slow": st["obi_slow"]})
+    if len(st["obi_history"]) > 300:
+        st["obi_history"].pop(0)
 
     if st["position"] is not None or not cfg["bot_active"]:
         return
@@ -961,13 +1034,23 @@ async def handle_obi_order_book_update(symbol, msg):
     if now - st["obi_last_trade_time"] < cfg["obi_cooldown_seconds"]:
         return
 
-    if avg_obi >= cfg["obi_threshold"]:
-        direction = "long"
-    elif avg_obi <= -cfg["obi_threshold"]:
-        direction = "short"
-    else:
+    mean_reversion = cfg.get("obi_mode", "momentum") == "mean_reversion"
+    threshold = cfg["obi_threshold"]
+
+    def side_of(value):
+        if value >= threshold:
+            return "short" if mean_reversion else "long"
+        if value <= -threshold:
+            return "long" if mean_reversion else "short"
+        return None
+
+    fast_dir, medium_dir, slow_dir = side_of(fast), side_of(medium), side_of(slow)
+
+    # Alle drei Zeitfenster muessen uebereinstimmen - reduziert Fehlsignale durch kurzes Rauschen
+    if fast_dir is None or fast_dir != medium_dir or fast_dir != slow_dir:
         st["obi_last_signal_direction"] = None
         return
+    direction = fast_dir
 
     if direction == st["obi_last_signal_direction"]:
         return
@@ -996,6 +1079,7 @@ def update_obi_trend_ema(symbol, price, ema_length):
     k = 2 / (ema_length + 1)
     st["obi_trend_ema"] = price * k + st["obi_trend_ema"] * (1 - k)
 
+
 async def on_price_update(symbol, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -1009,68 +1093,68 @@ async def on_price_update(symbol, price):
         st["anchor_price"] = price
         return
 
-    # ===== HA-Supertrend =====
-    if cfg["entry_mode"] == "ha_st":
-        sl = st.get("ha_st_stop_price")
-        if sl is not None and st["position"] is not None:
-            if (st["position"] == "long" and price <= sl) or (st["position"] == "short" and price >= sl):
-                await execute_exit(symbol, price, "SL")
+    bot_active = cfg["bot_active"]
+
+    if cfg["entry_mode"] == "obi_scalp":
+        if cfg["obi_trend_filter"]:
+            update_obi_trend_ema(symbol, price, cfg["obi_trend_ema_length"])
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            if cfg.get("obi_tp_sl_mode", "pct") == "usd":
+                pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+                if pnl_usd >= cfg["obi_tp_usd"]:
+                    await execute_exit(symbol, price, "TP")
+                elif pnl_usd <= -cfg["obi_sl_usd"]:
+                    await execute_exit(symbol, price, "SL")
+            else:
+                pnl_pct = (price - entry) / entry * 100 if st["position"] == "long" else (entry - price) / entry * 100
+                if pnl_pct >= cfg["obi_tp_pct"]:
+                    await execute_exit(symbol, price, "TP")
+                elif pnl_pct <= -cfg["obi_sl_pct"]:
+                    await execute_exit(symbol, price, "SL")
         return
 
-    # ===== Grid-Strategie =====
-    if cfg["entry_mode"] != "grid":
+    if cfg["entry_mode"] == "candle_color":
+        await handle_candle_color_tick(symbol, price)
         return
 
-    # Keine Position -> Einstieg prüfen
     if st["position"] is None:
-        if not cfg["bot_active"]:
-            return
-        
+        if not bot_active or cfg["entry_mode"] != "grid":
+            return  # im HA-Supertrend-Modus übernimmt der Poll-Loop den Einstieg
         grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
-        
-        # Einstieg nur wenn Preis vom Anker entfernt ist
         if price <= st["anchor_price"] - grid_step_abs:
             await execute_entry(symbol, "long", price, is_add_on=False)
         elif price >= st["anchor_price"] + grid_step_abs:
             await execute_entry(symbol, "short", price, is_add_on=False)
         return
 
-    # ===== Position vorhanden -> TP / Nachkauf =====
-    if not cfg["bot_active"]:
+    if cfg["entry_mode"] == "ha_st":
+        sl = st.get("ha_st_stop_price")
+        if sl is not None:
+            if (st["position"] == "long" and price <= sl) or (st["position"] == "short" and price >= sl):
+                await execute_exit(symbol, price, "SL")
+        return
+
+    if cfg["entry_mode"] != "grid":
         return
 
     tp_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "tp")
-    grid_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "grid")
+    # Nachkauf-Abstand wird vom LETZTEN Kaufpreis gemessen, nicht vom laufenden
+    # Durchschnitt - sonst schrumpft der Abstand zwischen Nachkaeufen immer weiter
+    # (der Durchschnitt "hinkt" den fruehen, hoeheren Einstiegen hinterher).
+    grid_step_abs = compute_step_abs(st["last_entry_price"] or st["avg_entry_price"], cfg, "grid")
     max_nachkauf = cfg["max_nachkauf"]
 
-    # Letzte Nachkauf-Stufe merken (WICHTIG!)
-    last_entry_price = st.get("last_entry_price", st["avg_entry_price"])
-    
     if st["position"] == "long":
-        # TP prüfen
         if price >= st["avg_entry_price"] + tp_step_abs:
             await execute_exit(symbol, price, "TP")
-            return
-        
-        # Nachkauf prüfen - NUR wenn Preis unter der LETZTEN Nachkauf-Stufe liegt
-        next_buy_price = last_entry_price - grid_step_abs
-        if price <= next_buy_price and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf):
+        elif bot_active and price <= st["last_entry_price"] - grid_step_abs and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf):
             await execute_entry(symbol, "long", price, is_add_on=True)
-            st["last_entry_price"] = price  # Neue Nachkauf-Stufe merken
-            
     elif st["position"] == "short":
-        # TP prüfen
         if price <= st["avg_entry_price"] - tp_step_abs:
             await execute_exit(symbol, price, "TP")
-            return
-        
-        # Nachkauf prüfen - NUR wenn Preis über der LETZTEN Nachkauf-Stufe liegt
-        next_sell_price = last_entry_price + grid_step_abs
-        if price >= next_sell_price and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf):
+        elif bot_active and price >= st["last_entry_price"] + grid_step_abs and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf):
             await execute_entry(symbol, "short", price, is_add_on=True)
-            st["last_entry_price"] = price  # Neue Nachkauf-Stufe merken
-    
-    
 
 
 async def trading_loop():
@@ -1221,6 +1305,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <h2 class="section-title">Kursverlauf</h2>
 <canvas id="priceChart" height="400"></canvas>
 
+<div id="obi-chart-section" style="display:none;">
+  <h2 class="section-title">OBI-Verlauf (schnell / mittel / langsam)</h2>
+  <canvas id="obiChart" height="250"></canvas>
+</div>
+
 <h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
 <div class="panel-card">
 <form id="config-form">
@@ -1254,6 +1343,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="ha_st"><label>Trend-EMA Länge</label><input type="number" step="1" id="ha_st_trend_ema_length"></div>
+  <div data-mode="ha_st"><label>Kerzenquelle</label>
+    <select class="cfg" id="ha_st_candle_source">
+      <option value="binance">Binance (mehr Liquidität, Fallback: Lighter)</option>
+      <option value="lighter">Lighter (Original-Handelsdaten)</option>
+    </select>
+  </div>
   <div data-mode="candle_color"><label>Kerzenlänge (Sekunden)</label><input type="number" step="1" id="cc_resolution_seconds"></div>
   <div data-mode="candle_color"><label>Bestätigung nach (Sekunden)</label><input type="number" step="1" id="cc_confirm_delay_seconds"></div>
   <div data-mode="candle_color"><label>Nach Gegenkerze sofort drehen</label>
@@ -1269,10 +1364,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
-  <div data-mode="obi_scalp"><label>OBI Ø-Fenster (Sek.)</label><input type="number" step="1" id="obi_avg_window_seconds"></div>
+  <div data-mode="obi_scalp"><label>OBI Modus</label>
+    <select class="cfg" id="obi_mode">
+      <option value="momentum">Momentum (mit dem Ungleichgewicht)</option>
+      <option value="mean_reversion">Mean-Reversion (dagegen, wie RSI)</option>
+    </select>
+  </div>
+  <div data-mode="obi_scalp"><label>OBI schnell (Sek.)</label><input type="number" step="1" id="obi_window_fast_seconds"></div>
+  <div data-mode="obi_scalp"><label>OBI mittel (Sek.)</label><input type="number" step="1" id="obi_window_medium_seconds"></div>
+  <div data-mode="obi_scalp"><label>OBI langsam (Sek.)</label><input type="number" step="1" id="obi_window_slow_seconds"></div>
   <div data-mode="obi_scalp"><label>OBI Orderbuch-Level</label><input type="number" step="1" id="obi_levels"></div>
+  <div data-mode="obi_scalp"><label>TP/SL Modus</label>
+    <select class="cfg" id="obi_tp_sl_mode">
+      <option value="pct">Prozent (%)</option>
+      <option value="usd">Fester $-Betrag</option>
+    </select>
+  </div>
   <div data-mode="obi_scalp"><label>TP (%)</label><input type="number" step="any" id="obi_tp_pct"></div>
   <div data-mode="obi_scalp"><label>SL (%)</label><input type="number" step="any" id="obi_sl_pct"></div>
+  <div data-mode="obi_scalp"><label>TP ($)</label><input type="number" step="any" id="obi_tp_usd"></div>
+  <div data-mode="obi_scalp"><label>SL ($)</label><input type="number" step="any" id="obi_sl_usd"></div>
   <div data-mode="obi_scalp"><label>Cooldown (Sek.)</label><input type="number" step="1" id="obi_cooldown_seconds"></div>
   <div data-mode="obi_scalp"><label>Trendfilter (EMA)</label>
     <select class="cfg" id="obi_trend_filter">
@@ -1318,6 +1429,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <script>
 let priceChart;
+let obiChart;
 let currentSymbol = null;
 let allSymbols = [];
 
@@ -1395,7 +1507,9 @@ async function refresh() {
     <div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>
     <div class="card"><div class="label">HA-Supertrend SL (${data.config.entry_mode==='ha_st'?'aktiv':'inaktiv'})</div><div class="value red">${data.ha_st_stop_price ?? '-'}</div></div>
     <div class="card"><div class="label">Letzte Kerzenfarbe (${data.config.entry_mode==='candle_color'?'aktiv':'inaktiv'})</div><div class="value ${data.cc_last_color==='green'?'green':data.cc_last_color==='red'?'red':'yellow'}">${data.cc_last_color ?? '-'}</div></div>
-    <div class="card"><div class="label">OBI Ø-Wert (${data.config.entry_mode==='obi_scalp'?'aktiv':'inaktiv'})</div><div class="value ${data.obi_current>=0?'green':'red'}">${data.obi_current ?? '-'}</div></div>
+    <div class="card"><div class="label">OBI schnell (${data.config.entry_mode==='obi_scalp'?'aktiv':'inaktiv'})</div><div class="value ${data.obi_fast>=0?'green':'red'}">${data.obi_fast ?? '-'}</div></div>
+    <div class="card"><div class="label">OBI mittel</div><div class="value ${data.obi_medium>=0?'green':'red'}">${data.obi_medium ?? '-'}</div></div>
+    <div class="card"><div class="label">OBI langsam</div><div class="value ${data.obi_slow>=0?'green':'red'}">${data.obi_slow ?? '-'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -1409,15 +1523,22 @@ async function refresh() {
     document.getElementById('ha_st_atr_mult').value = data.config.ha_st_atr_mult;
     document.getElementById('ha_st_trend_filter').value = String(data.config.ha_st_trend_filter);
     document.getElementById('ha_st_trend_ema_length').value = data.config.ha_st_trend_ema_length;
+    document.getElementById('ha_st_candle_source').value = data.config.ha_st_candle_source;
     document.getElementById('cc_resolution_seconds').value = data.config.cc_resolution_seconds;
     document.getElementById('cc_confirm_delay_seconds').value = data.config.cc_confirm_delay_seconds;
     document.getElementById('cc_auto_reverse').value = String(data.config.cc_auto_reverse);
     document.getElementById('cc_early_exit').value = String(data.config.cc_early_exit);
     document.getElementById('obi_threshold').value = data.config.obi_threshold;
-    document.getElementById('obi_avg_window_seconds').value = data.config.obi_avg_window_seconds;
+    document.getElementById('obi_mode').value = data.config.obi_mode;
+    document.getElementById('obi_window_fast_seconds').value = data.config.obi_window_fast_seconds;
+    document.getElementById('obi_window_medium_seconds').value = data.config.obi_window_medium_seconds;
+    document.getElementById('obi_window_slow_seconds').value = data.config.obi_window_slow_seconds;
     document.getElementById('obi_levels').value = data.config.obi_levels;
+    document.getElementById('obi_tp_sl_mode').value = data.config.obi_tp_sl_mode;
     document.getElementById('obi_tp_pct').value = data.config.obi_tp_pct;
     document.getElementById('obi_sl_pct').value = data.config.obi_sl_pct;
+    document.getElementById('obi_tp_usd').value = data.config.obi_tp_usd;
+    document.getElementById('obi_sl_usd').value = data.config.obi_sl_usd;
     document.getElementById('obi_cooldown_seconds').value = data.config.obi_cooldown_seconds;
     document.getElementById('obi_trend_filter').value = String(data.config.obi_trend_filter);
     document.getElementById('obi_trend_ema_length').value = data.config.obi_trend_ema_length;
@@ -1454,6 +1575,34 @@ async function refresh() {
     options: { responsive:true, maintainAspectRatio:false, animation:false, scales:{ x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } }, plugins:{legend:{labels:{color:'#e5e7eb'}}} }
   });
 
+  // OBI-Chart: nur anzeigen, wenn die Strategie aktiv OBI-Scalp ist
+  const obiSection = document.getElementById('obi-chart-section');
+  if (data.config.entry_mode === 'obi_scalp' && (data.obi_history || []).length > 0) {
+    obiSection.style.display = 'block';
+    const obiHist = data.obi_history || [];
+    const obiLabels = obiHist.map(p => new Date(p.ts).toLocaleTimeString());
+    const obiDatasets = [
+      { label:'Schnell', data: obiHist.map(p=>p.fast), borderColor:'#f87171', pointRadius:0, borderWidth:2 },
+      { label:'Mittel', data: obiHist.map(p=>p.medium), borderColor:'#fbbf24', pointRadius:0, borderWidth:2 },
+      { label:'Langsam', data: obiHist.map(p=>p.slow), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
+      { label:'Schwelle +', data: Array(obiHist.length).fill(data.config.obi_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+      { label:'Schwelle -', data: Array(obiHist.length).fill(-data.config.obi_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+      { label:'Null', data: Array(obiHist.length).fill(0), borderColor:'#4b5563', pointRadius:0, borderWidth:1 },
+    ];
+    if (obiChart) obiChart.destroy();
+    obiChart = new Chart(document.getElementById('obiChart'), {
+      type: 'line',
+      data: { labels: obiLabels, datasets: obiDatasets },
+      options: {
+        responsive:true, maintainAspectRatio:false, animation:false,
+        scales: { x:{ display:false }, y:{ min:-1, max:1, ticks:{color:'#9ca3af'} } },
+        plugins:{legend:{labels:{color:'#e5e7eb'}}}
+      }
+    });
+  } else {
+    obiSection.style.display = 'none';
+  }
+
   const trades = (data.trade_log || []).slice(-15).reverse();
   const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
   document.querySelector('#trades-table tbody').innerHTML = trades.map(t => `
@@ -1473,15 +1622,22 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     ha_st_atr_mult: parseFloat(document.getElementById('ha_st_atr_mult').value),
     ha_st_trend_filter: document.getElementById('ha_st_trend_filter').value === 'true',
     ha_st_trend_ema_length: parseInt(document.getElementById('ha_st_trend_ema_length').value),
+    ha_st_candle_source: document.getElementById('ha_st_candle_source').value,
     cc_resolution_seconds: parseInt(document.getElementById('cc_resolution_seconds').value),
     cc_confirm_delay_seconds: parseInt(document.getElementById('cc_confirm_delay_seconds').value),
     cc_auto_reverse: document.getElementById('cc_auto_reverse').value === 'true',
     cc_early_exit: document.getElementById('cc_early_exit').value === 'true',
     obi_threshold: parseFloat(document.getElementById('obi_threshold').value),
-    obi_avg_window_seconds: parseFloat(document.getElementById('obi_avg_window_seconds').value),
+    obi_mode: document.getElementById('obi_mode').value,
+    obi_window_fast_seconds: parseFloat(document.getElementById('obi_window_fast_seconds').value),
+    obi_window_medium_seconds: parseFloat(document.getElementById('obi_window_medium_seconds').value),
+    obi_window_slow_seconds: parseFloat(document.getElementById('obi_window_slow_seconds').value),
     obi_levels: parseInt(document.getElementById('obi_levels').value),
+    obi_tp_sl_mode: document.getElementById('obi_tp_sl_mode').value,
     obi_tp_pct: parseFloat(document.getElementById('obi_tp_pct').value),
     obi_sl_pct: parseFloat(document.getElementById('obi_sl_pct').value),
+    obi_tp_usd: parseFloat(document.getElementById('obi_tp_usd').value),
+    obi_sl_usd: parseFloat(document.getElementById('obi_sl_usd').value),
     obi_cooldown_seconds: parseFloat(document.getElementById('obi_cooldown_seconds').value),
     obi_trend_filter: document.getElementById('obi_trend_filter').value === 'true',
     obi_trend_ema_length: parseInt(document.getElementById('obi_trend_ema_length').value),
@@ -1499,7 +1655,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','cc_early_exit','obi_threshold','obi_avg_window_seconds','obi_levels','obi_tp_pct','obi_sl_pct','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','ha_st_candle_source','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','cc_early_exit','obi_threshold','obi_mode','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1550,7 +1706,9 @@ async def handle_status(request):
         "grid_levels": calc_grid_levels(symbol),
         "ha_st_stop_price": st.get("ha_st_stop_price"),
         "cc_last_color": st.get("cc_last_color"),
-        "obi_current": st.get("obi_current"),
+        "obi_current": st.get("obi_current"), "obi_fast": st.get("obi_fast"),
+        "obi_medium": st.get("obi_medium"), "obi_slow": st.get("obi_slow"),
+        "obi_history": st.get("obi_history", [])[-300:],
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -1568,9 +1726,9 @@ async def handle_config_update(request):
     for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse",
                 "ha_st_resolution", "ha_st_atr_period", "ha_st_atr_mult",
-                "ha_st_trend_filter", "ha_st_trend_ema_length",
+                "ha_st_trend_filter", "ha_st_trend_ema_length", "ha_st_candle_source",
                 "cc_resolution_seconds", "cc_confirm_delay_seconds", "cc_auto_reverse", "cc_early_exit",
-                "obi_threshold", "obi_avg_window_seconds", "obi_levels", "obi_tp_pct", "obi_sl_pct",
+                "obi_threshold", "obi_mode", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
                 "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length"]:
         if key in body:
             cfg[key] = body[key]
