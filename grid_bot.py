@@ -1568,12 +1568,17 @@ async function refresh() {
   if (gl.next_entry_long) datasets.push({ label:'Entry Long ab', data: Array(n).fill(gl.next_entry_long), borderColor:'#4ade80', borderDash:[2,2], pointRadius:0, borderWidth:1 });
   if (gl.next_entry_short) datasets.push({ label:'Entry Short ab', data: Array(n).fill(gl.next_entry_short), borderColor:'#f87171', borderDash:[2,2], pointRadius:0, borderWidth:1 });
 
-  if (priceChart) priceChart.destroy();
-  priceChart = new Chart(document.getElementById('priceChart'), {
-    type: 'line',
-    data: { labels, datasets },
-    options: { responsive:true, maintainAspectRatio:false, animation:false, scales:{ x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } }, plugins:{legend:{labels:{color:'#e5e7eb'}}} }
-  });
+  if (!priceChart) {
+    priceChart = new Chart(document.getElementById('priceChart'), {
+      type: 'line',
+      data: { labels, datasets },
+      options: { responsive:true, maintainAspectRatio:false, animation:false, scales:{ x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } }, plugins:{legend:{labels:{color:'#e5e7eb'}}} }
+    });
+  } else {
+    priceChart.data.labels = labels;
+    priceChart.data.datasets = datasets;
+    priceChart.update('none');
+  }
 
   // OBI-Chart: nur anzeigen, wenn die Strategie aktiv OBI-Scalp ist
   const obiSection = document.getElementById('obi-chart-section');
@@ -1589,16 +1594,21 @@ async function refresh() {
       { label:'Schwelle -', data: Array(obiHist.length).fill(-data.config.obi_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
       { label:'Null', data: Array(obiHist.length).fill(0), borderColor:'#4b5563', pointRadius:0, borderWidth:1 },
     ];
-    if (obiChart) obiChart.destroy();
-    obiChart = new Chart(document.getElementById('obiChart'), {
-      type: 'line',
-      data: { labels: obiLabels, datasets: obiDatasets },
-      options: {
-        responsive:true, maintainAspectRatio:false, animation:false,
-        scales: { x:{ display:false }, y:{ min:-1, max:1, ticks:{color:'#9ca3af'} } },
-        plugins:{legend:{labels:{color:'#e5e7eb'}}}
-      }
-    });
+    if (!obiChart) {
+      obiChart = new Chart(document.getElementById('obiChart'), {
+        type: 'line',
+        data: { labels: obiLabels, datasets: obiDatasets },
+        options: {
+          responsive:true, maintainAspectRatio:false, animation:false,
+          scales: { x:{ display:false }, y:{ min:-1, max:1, ticks:{color:'#9ca3af'} } },
+          plugins:{legend:{labels:{color:'#e5e7eb'}}}
+        }
+      });
+    } else {
+      obiChart.data.labels = obiLabels;
+      obiChart.data.datasets = obiDatasets;
+      obiChart.update('none');
+    }
   } else {
     obiSection.style.display = 'none';
   }
