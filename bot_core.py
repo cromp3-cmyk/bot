@@ -18,8 +18,42 @@ import os
 import secrets
 import base64
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiohttp import web
+
+try:
+    from zoneinfo import ZoneInfo
+    DISPLAY_TZ = ZoneInfo("Europe/Berlin")
+except Exception:
+    DISPLAY_TZ = None
+
+
+def _last_sunday(year, month):
+    next_month_first = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
+    last_day = next_month_first - timedelta(days=1)
+    return last_day - timedelta(days=(last_day.weekday() - 6) % 7)
+
+
+def _eu_dst_active(utc_naive_dt):
+    """EU-Sommerzeitregel (gilt fuer Deutschland): letzter Sonntag Maerz 01:00 UTC bis
+    letzter Sonntag Oktober 01:00 UTC. Fallback ohne tzdata-Paket - falls zoneinfo im
+    Container aus irgendeinem Grund fehlschlaegt (z.B. schlankes Docker-Image ohne tzdata),
+    damit die Zeitzone NIE unbemerkt auf UTC zurueckfaellt."""
+    year = utc_naive_dt.year
+    dst_start = _last_sunday(year, 3).replace(hour=1)
+    dst_end = _last_sunday(year, 10).replace(hour=1)
+    return dst_start <= utc_naive_dt < dst_end
+
+
+def now_local():
+    """Render-Server laufen in UTC - datetime.now() alleine wuerde also 2h (Sommerzeit) bzw.
+    1h (Winterzeit) hinter der deutschen TradingView-Chartzeit liegen. Alle Trade-Zeitstempel
+    nutzen diese Funktion, damit sie 1:1 mit dem Chart vergleichbar sind."""
+    if DISPLAY_TZ is not None:
+        return datetime.now(DISPLAY_TZ)
+    utc_now = datetime.utcnow()
+    offset_hours = 2 if _eu_dst_active(utc_now) else 1
+    return utc_now + timedelta(hours=offset_hours)
 
 try:
     import redis.asyncio as redis_lib
@@ -34,7 +68,7 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 
 def debug_log(msg, data=None):
     if DEBUG_MODE:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        timestamp = now_local().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         print(f"[DEBUG {timestamp}] {msg}", flush=True)
         if data:
             print(f"   DATA: {json.dumps(data, indent=2, default=str)}", flush=True)
@@ -177,6 +211,7 @@ def default_config():
         "macd_sl_usd": float(os.getenv("MACD_SL_USD", "1")),
         "macd_fast_fade_exit_enabled": os.getenv("MACD_FAST_FADE_EXIT_ENABLED", "true").lower() == "true",
         "macd_slow_fade_exit_enabled": os.getenv("MACD_SLOW_FADE_EXIT_ENABLED", "false").lower() == "true",
+        "macd_slow_reversal_exit_enabled": os.getenv("MACD_SLOW_REVERSAL_EXIT_ENABLED", "true").lower() == "true",
         "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
         "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
         "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
@@ -201,7 +236,7 @@ def default_state():
         "obi_last_trade_time": 0.0, "obi_trend_ema": None, "obi_current": None,
         "obi_extreme_zone": None, "obi_extreme_value": None, "obi_prev_fast": None,
         "macd_fast_hist": None, "macd_slow_hist": None, "macd_stoch_k": None, "macd_stoch_d": None,
-        "macd_fade_exit": False, "macd_slow_fade_exit": False,
+        "macd_fade_exit": False, "macd_slow_fade_exit": False, "macd_slow_reversal_exit": False,
         "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
         "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
@@ -394,7 +429,7 @@ async def execute_entry(symbol, direction, price, is_add_on):
         st["avg_entry_price"] = price
         st["total_coin_size"] = new_units
         st["position"] = direction
-        st["position_opened_at"] = datetime.now().isoformat()
+        st["position_opened_at"] = now_local().isoformat()
 
     st["last_entry_price"] = price
     st["entry_count"] += 1
@@ -440,7 +475,7 @@ async def execute_partial_exit(symbol, price, fraction, reason):
     st["trade_log"].append({
         "side": position_side, "avg_entry": round(st["avg_entry_price"], 2), "exit": price,
         "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3),
-        "opened_at": st.get("position_opened_at"), "closed_at": datetime.now().isoformat(),
+        "opened_at": st.get("position_opened_at"), "closed_at": now_local().isoformat(),
         "reason": reason, "partial": True, "fraction": fraction,
     })
 
@@ -478,7 +513,7 @@ async def execute_exit(symbol, price, reason):
     st["trade_log"].append({
         "side": st["position"], "avg_entry": round(st["avg_entry_price"], 2), "exit": price,
         "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3),
-        "opened_at": st.get("position_opened_at"), "closed_at": datetime.now().isoformat(), "reason": reason,
+        "opened_at": st.get("position_opened_at"), "closed_at": now_local().isoformat(), "reason": reason,
     })
 
     debug_log(f"🏁 [{symbol}] Position geschlossen ({reason}): {st['position'].upper()} Ø{round(st['avg_entry_price'],2)} -> {price} | PnL ${round(pnl_usd,3)}")
@@ -693,6 +728,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - zusätzlich zum schnellen Histogramm</option>
     </select>
   </div>
+  <div data-mode="macd_stoch"><label>Sofort-Exit bei Trendumkehr (langsamer MACD wechselt Vorzeichen)</label>
+    <select class="cfg" id="macd_slow_reversal_exit_enabled">
+      <option value="true">An - empfohlen für Pullback-Strategie</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
       <option value="1h">1 Stunde</option>
@@ -869,6 +910,7 @@ async function refresh() {
     document.getElementById('macd_sl_usd').value = data.config.macd_sl_usd;
     document.getElementById('macd_fast_fade_exit_enabled').value = String(data.config.macd_fast_fade_exit_enabled);
     document.getElementById('macd_slow_fade_exit_enabled').value = String(data.config.macd_slow_fade_exit_enabled);
+    document.getElementById('macd_slow_reversal_exit_enabled').value = String(data.config.macd_slow_reversal_exit_enabled);
     document.getElementById('fib_resolution').value = data.config.fib_resolution;
     document.getElementById('fib_lookback_candles').value = data.config.fib_lookback_candles;
     document.getElementById('fib_entry1_level').value = data.config.fib_entry1_level;
@@ -994,6 +1036,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     macd_sl_usd: parseFloat(document.getElementById('macd_sl_usd').value),
     macd_fast_fade_exit_enabled: document.getElementById('macd_fast_fade_exit_enabled').value === 'true',
     macd_slow_fade_exit_enabled: document.getElementById('macd_slow_fade_exit_enabled').value === 'true',
+    macd_slow_reversal_exit_enabled: document.getElementById('macd_slow_reversal_exit_enabled').value === 'true',
     fib_resolution: document.getElementById('fib_resolution').value,
     fib_lookback_candles: parseInt(document.getElementById('fib_lookback_candles').value),
     fib_entry1_level: parseFloat(document.getElementById('fib_entry1_level').value),
@@ -1017,7 +1060,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1095,6 +1138,7 @@ async def handle_config_update(request):
                 "stoch_k_period", "stoch_k_smooth", "stoch_d_period", "macd_tp_usd", "macd_sl_usd",
                 "macd_fast_fade_exit_enabled",
                 "macd_slow_fade_exit_enabled",
+                "macd_slow_reversal_exit_enabled",
                 "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
                 "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds"]:
         if key in body:

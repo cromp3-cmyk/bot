@@ -169,14 +169,28 @@ async def macd_stoch_poll_loop(symbol):
                                 elif st["position"] == "short" and curr_slow < 0 and curr_slow >= last_slow_hist:
                                     st["macd_slow_fade_exit"] = True
 
-                            # Einstieg: langsames Histogramm gibt Richtung vor, schnelles Histogramm
-                            # kreuzt gerade die Nulllinie in dieselbe Richtung
+                            # Trendumkehr: langsames Histogramm wechselt komplett das Vorzeichen
+                            # gegen die Position (nicht nur schwaecher, sondern die Trend-Praemisse
+                            # der Pullback-Strategie ist hinfaellig) -> sofortiger Exit
+                            if (cfg.get("macd_slow_reversal_exit_enabled", True) and st["position"] is not None):
+                                if st["position"] == "long" and curr_slow < 0:
+                                    st["macd_slow_reversal_exit"] = True
+                                elif st["position"] == "short" and curr_slow > 0:
+                                    st["macd_slow_reversal_exit"] = True
+
+                            # Einstieg (Pullback-faehig): langsames Histogramm gibt die Trendrichtung
+                            # vor (jeder Gruen-/Rot-Ton reicht), schnelles Histogramm wird GERADE
+                            # dunkler in Trendrichtung (steigt bei Gruen, faellt bei Rot gegenueber
+                            # dem letzten Balken) - das deckt sowohl den ersten Nulllinien-Durchgang
+                            # als auch ein Wiederaufleben nach einem kurzen Gegenfarben-Dip
+                            # (Pullback) ab, da waehrend einer offenen Position ohnehin nicht neu
+                            # eingestiegen wird.
                             if (st["position"] is None and cfg["bot_active"]
                                     and last_entry_signal_ts != signal_key and last_fast_hist is not None):
                                 direction = None
-                                if curr_slow > 0 and last_fast_hist <= 0 and curr_fast > 0:
+                                if curr_slow > 0 and curr_fast > 0 and curr_fast > last_fast_hist:
                                     direction = "long"
-                                elif curr_slow < 0 and last_fast_hist >= 0 and curr_fast < 0:
+                                elif curr_slow < 0 and curr_fast < 0 and curr_fast < last_fast_hist:
                                     direction = "short"
 
                                 if direction and cfg.get("macd_use_stochastic", True):
@@ -200,6 +214,7 @@ async def macd_stoch_poll_loop(symbol):
                                               f"{f' / Stoch %K={round(stoch_k,1)} %D={round(stoch_d,1)}' if stoch_k is not None else ''})")
                                     st["macd_fade_exit"] = False
                                     st["macd_slow_fade_exit"] = False
+                                    st["macd_slow_reversal_exit"] = False
                                     await execute_entry(symbol, direction, price, is_add_on=False)
 
                             last_fast_hist = curr_fast
@@ -492,6 +507,11 @@ async def on_price_update(symbol, price):
             elif pnl_usd <= -cfg["macd_sl_usd"]:
                 await execute_exit(symbol, price, "SL")
                 st["macd_fade_exit"] = False
+            elif cfg.get("macd_slow_reversal_exit_enabled", True) and st.get("macd_slow_reversal_exit"):
+                await execute_exit(symbol, price, "MACD-SLOW-REVERSAL")
+                st["macd_slow_reversal_exit"] = False
+                st["macd_fade_exit"] = False
+                st["macd_slow_fade_exit"] = False
             elif cfg.get("macd_fast_fade_exit_enabled", True) and st.get("macd_fade_exit"):
                 await execute_exit(symbol, price, "MACD-FADE")
                 st["macd_fade_exit"] = False
