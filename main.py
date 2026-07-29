@@ -12,8 +12,9 @@ from bot_core import (
     debug_log, PORT, SYMBOLS, BOTS, load_bot_configs,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reset,
+    basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
-from strategies import trading_loop, ha_supertrend_poll_loop
+from strategies import trading_loop, macd_stoch_poll_loop, fib_reversal_poll_loop
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
     handle_ct_index, handle_ct_status, handle_ct_watch, handle_ct_copy_toggle,
@@ -22,7 +23,7 @@ from copytrade import (
 
 
 async def start_web_server():
-    app = web.Application()
+    app = web.Application(middlewares=[basic_auth_middleware])
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/symbols", handle_symbols)
     app.router.add_get("/api/overview", handle_overview)
@@ -53,13 +54,22 @@ async def main():
         cfg = BOTS[s]["config"]
         print(f"   [{s}] DRY_RUN={cfg['dry_run']} Margin={cfg['margin']} Hebel={cfg['leverage']}x Grid={cfg['grid_step_pct']}% TP={cfg['tp_step_pct']}%")
     print("=" * 60)
+    if DASHBOARD_PASSWORD_GENERATED:
+        print("🔐 KEIN DASHBOARD_PASSWORD gesetzt - automatisch generiertes Passwort (aendert sich bei jedem Neustart!):")
+        print(f"   Benutzername: {DASHBOARD_USERNAME}")
+        print(f"   Passwort:     {DASHBOARD_PASSWORD}")
+        print("   -> Fuer dauerhaften Zugriff DASHBOARD_PASSWORD in Render unter Environment setzen.")
+    else:
+        print(f"🔐 Dashboard passwortgeschützt (Benutzername: {DASHBOARD_USERNAME})")
+    print("=" * 60)
 
     await load_bot_configs()
     await load_ct_watched()
     await start_web_server()
     await asyncio.gather(
         trading_loop(),
-        *[ha_supertrend_poll_loop(s) for s in SYMBOLS],
+        *[macd_stoch_poll_loop(s) for s in SYMBOLS],
+        *[fib_reversal_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
     )

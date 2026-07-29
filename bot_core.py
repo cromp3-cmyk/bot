@@ -15,6 +15,8 @@ import aiohttp
 import json
 import time
 import os
+import secrets
+import base64
 import traceback
 from datetime import datetime
 from aiohttp import web
@@ -40,35 +42,38 @@ def debug_log(msg, data=None):
 
 MARKET_INDICES = {
     "ETH": 0, "BTC": 1, "SOL": 2, "DOGE": 3, "XRP": 7, "LINK": 8, "AVAX": 9,
-    "NEAR": 10, "DOT": 11, "TON": 12, "SUI": 16, "BNB": 25, "UNI": 30, "APT": 31,
+    "NEAR": 10, "DOT": 11, "GRAM": 12, "SUI": 16, "BNB": 25, "UNI": 30, "APT": 31,
     "ADA": 39, "TRX": 43, "LTC": 35, "BCH": 58, "HBAR": 59, "ICP": 102, "HYPE": 24,
     "EURUSD": 96, "GBPUSD": 97, "USDJPY": 98, "USDCHF": 99, "USDCAD": 100,
     "AUDUSD": 106, "NZDUSD": 107, "USDKRW": 105,
     "XAU": 92, "XAG": 93, "WTI": 145,
+    # ACHTUNG: "TON" wurde entfernt - market_id 12 gehoert auf Lighter inzwischen zu "GRAM",
+    # nicht mehr zu TON. Falls TON weiterhin gehandelt werden soll, zuerst bei Lighter die
+    # aktuelle market_id fuer TON pruefen (apidocs.lighter.xyz -> /api/v1/orderBooks) und hier
+    # neu eintragen - NICHT einfach wieder auf 12 setzen, das ist jetzt ein anderer Coin!
 }
 PRECISION_MAP = {
-    "BTC": 100000, "ETH": 10000, "SOL": 1000, "LTC": 1000,
-    "AVAX": 100, "BNB": 100, "UNI": 100, "APT": 100, "XAG": 100,
-    "LINK": 10, "NEAR": 10, "DOT": 10, "SUI": 10, "ADA": 10, "EURUSD": 10, "GBPUSD": 10, "USDCHF": 10, "USDCAD": 10,
-    "DOGE": 1, "XRP": 1, "TRX": 1,
-    "USDJPY": 1000, "AUDUSD": 10, "NZDUSD": 10, "USDKRW": 10, "XAU": 10000,
-    # BCH, HBAR, ICP, TON, WTI: keine explizite Angabe in der Quelle - Standardwert (10000) greift,
-    # bitte vor dem Live-Handel dieser Coins/Rohstoffe unbedingt mit kleiner Größe testen!
+    # Werte 1:1 von der Lighter-API (/api/v1/orderBooks, supported_size_decimals) uebernommen,
+    # Precision = 10 ** supported_size_decimals. Zuletzt geprueft: siehe Chat-Verlauf.
+    "ETH": 10000, "BTC": 100000, "SOL": 1000, "DOGE": 1, "XRP": 1, "LINK": 10, "AVAX": 100,
+    "NEAR": 10, "DOT": 10, "GRAM": 10, "SUI": 10, "BNB": 100, "UNI": 100, "APT": 100,
+    "ADA": 10, "TRX": 10, "LTC": 1000, "BCH": 1000, "HBAR": 10, "ICP": 100, "HYPE": 100,
+    "EURUSD": 10, "GBPUSD": 10, "USDJPY": 1000, "USDCHF": 10, "USDCAD": 10,
+    "AUDUSD": 10, "NZDUSD": 10, "USDKRW": 10000, "XAU": 10000, "XAG": 100, "WTI": 1000,
 }
 PRICE_DECIMALS_MAP = {
-    "BTC": 1, "ETH": 2, "SOL": 3, "LTC": 3, "XAU": 1,
-    "AVAX": 3, "BNB": 4, "UNI": 4, "APT": 4,
-    "LINK": 5, "NEAR": 5, "DOT": 5, "SUI": 5, "ADA": 5, "EURUSD": 5, "GBPUSD": 5, "USDCHF": 5, "USDCAD": 5,
-    "DOGE": 6, "XRP": 6, "XAG": 6,
-    "USDJPY": 3, "AUDUSD": 5, "NZDUSD": 5, "USDKRW": 5,
+    "ETH": 2, "BTC": 1, "SOL": 3, "DOGE": 6, "XRP": 6, "LINK": 5, "AVAX": 4,
+    "NEAR": 5, "DOT": 5, "GRAM": 5, "SUI": 5, "BNB": 4, "UNI": 4, "APT": 4,
+    "ADA": 5, "TRX": 5, "LTC": 3, "BCH": 3, "HBAR": 5, "ICP": 4, "HYPE": 4,
+    "EURUSD": 5, "GBPUSD": 5, "USDJPY": 3, "USDCHF": 5, "USDCAD": 5,
+    "AUDUSD": 5, "NZDUSD": 5, "USDKRW": 2, "XAU": 2, "XAG": 4, "WTI": 3,
 }
 MIN_BASE_AMOUNT_MAP = {
-    "BTC": 0.00020, "ETH": 0.005, "SOL": 0.05, "LTC": 0.1, "BCH": 0.01,
-    "AVAX": 0.5, "BNB": 0.02, "UNI": 1.0, "APT": 2.0, "XAU": 0.003, "XAG": 0.15,
-    "LINK": 1.0, "NEAR": 2.0, "DOT": 2.0, "SUI": 3.0, "ADA": 10.0,
-    "DOGE": 10, "XRP": 20, "HBAR": 20.0,
-    "EURUSD": 10.0, "GBPUSD": 10.0, "USDJPY": 0.05, "USDCHF": 8.0, "USDCAD": 10.0,
-    "AUDUSD": 10.0, "NZDUSD": 10.0, "USDKRW": 10.0,
+    "ETH": 0.005, "BTC": 0.0001, "SOL": 0.1, "DOGE": 100.0, "XRP": 7.0, "LINK": 1.0, "AVAX": 1.0,
+    "NEAR": 4.0, "DOT": 9.5, "GRAM": 5.0, "SUI": 10.0, "BNB": 0.02, "UNI": 2.0, "APT": 10.0,
+    "ADA": 45.0, "TRX": 25.0, "LTC": 0.15, "BCH": 0.035, "HBAR": 100.0, "ICP": 3.5, "HYPE": 0.15,
+    "EURUSD": 6.5, "GBPUSD": 5.5, "USDJPY": 0.05, "USDCHF": 8.0, "USDCAD": 5.5,
+    "AUDUSD": 10.0, "NZDUSD": 10.0, "USDKRW": 0.005, "XAU": 0.002, "XAG": 0.15, "WTI": 0.1,
 }
 
 
@@ -86,6 +91,37 @@ def get_min_base_amount(symbol):
 
 PORT = int(os.getenv("PORT", "10000"))
 
+# ========== DASHBOARD-ZUGANGSSCHUTZ ==========
+# Ohne das ist das Dashboard fuer jeden mit dem Link offen einsehbar UND bedienbar
+# (Config aendern, Positionen schliessen, Bot stoppen). Passwort per Env-Var DASHBOARD_PASSWORD
+# setzen (in Render unter "Environment"), sonst wird bei jedem Start ein zufaelliges Passwort
+# generiert und einmalig ins Log geschrieben - dann aber bei jedem Neustart/Redeploy ein anderes!
+# Fuer dauerhaften, gleichbleibenden Zugriff DASHBOARD_PASSWORD unbedingt in Render setzen.
+DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD")
+DASHBOARD_PASSWORD_GENERATED = False
+if not DASHBOARD_PASSWORD:
+    DASHBOARD_PASSWORD = secrets.token_urlsafe(12)
+    DASHBOARD_PASSWORD_GENERATED = True
+
+
+@web.middleware
+async def basic_auth_middleware(request, handler):
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+            username, _, password = decoded.partition(":")
+        except Exception:
+            username, password = "", ""
+        if secrets.compare_digest(username, DASHBOARD_USERNAME) and secrets.compare_digest(password, DASHBOARD_PASSWORD):
+            return await handler(request)
+    return web.Response(
+        status=401,
+        headers={"WWW-Authenticate": 'Basic realm="Trading Bot Dashboard"'},
+        text="401 Unauthorized - Dashboard ist passwortgeschuetzt",
+    )
+
 # ========== WELCHE COINS LAUFEN SOLLEN ==========
 # Komma-getrennt, z.B. GRID_SYMBOLS="BTC,SOL,ETH". Default: nur BTC (abwaertskompatibel).
 SYMBOLS = [s.strip().upper() for s in os.getenv("GRID_SYMBOLS", os.getenv("GRID_SYMBOL", "BTC")).split(",") if s.strip()]
@@ -100,7 +136,7 @@ def default_config():
         "dry_run": os.getenv("DRY_RUN", "true").lower() == "true",
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
-        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid" oder "ha_st"
+        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "obi_scalp" oder "macd_stoch"
         "grid_mode": os.getenv("GRID_MODE", "pct"),  # "pct" oder "usd"
         "grid_step_pct": float(os.getenv("GRID_STEP_PCT", "0.25")),
         "tp_step_pct": float(os.getenv("TP_STEP_PCT", "0.25")),
@@ -109,16 +145,6 @@ def default_config():
         "max_nachkauf": int(os.getenv("MAX_NACHKAUF", "5")),
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
-        "ha_st_resolution": os.getenv("HA_ST_RESOLUTION", "5m"),
-        "ha_st_atr_period": int(os.getenv("HA_ST_ATR_PERIOD", "5")),
-        "ha_st_atr_mult": float(os.getenv("HA_ST_ATR_MULT", "1.5")),
-        "ha_st_trend_filter": os.getenv("HA_ST_TREND_FILTER", "true").lower() == "true",
-        "ha_st_trend_ema_length": int(os.getenv("HA_ST_TREND_EMA_LENGTH", "200")),
-        "ha_st_candle_source": os.getenv("HA_ST_CANDLE_SOURCE", "binance"),  # "lighter" oder "binance"
-        "cc_resolution_seconds": int(os.getenv("CC_RESOLUTION_SECONDS", "60")),
-        "cc_confirm_delay_seconds": int(os.getenv("CC_CONFIRM_DELAY_SECONDS", "20")),
-        "cc_auto_reverse": os.getenv("CC_AUTO_REVERSE", "true").lower() == "true",
-        "cc_early_exit": os.getenv("CC_EARLY_EXIT", "true").lower() == "true",
         "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
         "obi_mode": os.getenv("OBI_MODE", "momentum"),  # "momentum" (mit dem Ungleichgewicht), "mean_reversion" (dagegen) oder "reversal" (separater Long/Short-Einstieg bei Umkehr aus Extremzone)
         "obi_long_threshold": float(os.getenv("OBI_LONG_THRESHOLD", "0.20")),  # nur Reversal-Modus: Long-Zone ab OBI <= -Wert
@@ -136,6 +162,29 @@ def default_config():
         "obi_cooldown_seconds": float(os.getenv("OBI_COOLDOWN_SECONDS", "7")),
         "obi_trend_filter": os.getenv("OBI_TREND_FILTER", "false").lower() == "true",
         "obi_trend_ema_length": int(os.getenv("OBI_TREND_EMA_LENGTH", "300")),
+        "macd_resolution": os.getenv("MACD_RESOLUTION", "1m"),  # "1m", "5m" oder "15m"
+        "macd_fast_fast": int(os.getenv("MACD_FAST_FAST", "13")),
+        "macd_fast_slow": int(os.getenv("MACD_FAST_SLOW", "21")),
+        "macd_fast_signal": int(os.getenv("MACD_FAST_SIGNAL", "9")),
+        "macd_slow_fast": int(os.getenv("MACD_SLOW_FAST", "34")),
+        "macd_slow_slow": int(os.getenv("MACD_SLOW_SLOW", "144")),
+        "macd_slow_signal": int(os.getenv("MACD_SLOW_SIGNAL", "9")),
+        "macd_use_stochastic": os.getenv("MACD_USE_STOCHASTIC", "true").lower() == "true",
+        "stoch_k_period": int(os.getenv("STOCH_K_PERIOD", "7")),
+        "stoch_k_smooth": int(os.getenv("STOCH_K_SMOOTH", "3")),
+        "stoch_d_period": int(os.getenv("STOCH_D_PERIOD", "3")),
+        "macd_tp_usd": float(os.getenv("MACD_TP_USD", "1")),
+        "macd_sl_usd": float(os.getenv("MACD_SL_USD", "1")),
+        "macd_slow_fade_exit_enabled": os.getenv("MACD_SLOW_FADE_EXIT_ENABLED", "false").lower() == "true",
+        "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
+        "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
+        "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
+        "fib_entry2_level": float(os.getenv("FIB_ENTRY2_LEVEL", "0.941")),
+        "fib_tp1_level": float(os.getenv("FIB_TP1_LEVEL", "0.786")),
+        "fib_tp2_level": float(os.getenv("FIB_TP2_LEVEL", "0.667")),
+        "fib_sl_level": float(os.getenv("FIB_SL_LEVEL", "1.0")),
+        "fib_tp1_close_pct": float(os.getenv("FIB_TP1_CLOSE_PCT", "50")),
+        "fib_cooldown_seconds": float(os.getenv("FIB_COOLDOWN_SECONDS", "300")),
     }
 
 
@@ -144,13 +193,16 @@ def default_state():
         "position": None, "avg_entry_price": None, "total_coin_size": 0.0,
         "entry_count": 0, "anchor_price": None, "last_price": None,
         "price_history": [],
-        "ha_st_stop_price": None, "position_opened_at": None,
-        "cc_candle_start": None, "cc_candle_open": None, "cc_entered_this_candle": False, "cc_last_color": None,
+        "position_opened_at": None,
         "obi_book": {"bids": {}, "asks": {}}, "obi_avg_buffer": [], "obi_last_signal_direction": None,
         "obi_fast": None, "obi_medium": None, "obi_slow": None, "obi_history": [],
         "last_entry_price": None,
         "obi_last_trade_time": 0.0, "obi_trend_ema": None, "obi_current": None,
         "obi_extreme_zone": None, "obi_extreme_value": None, "obi_prev_fast": None,
+        "macd_fast_hist": None, "macd_slow_hist": None, "macd_stoch_k": None, "macd_stoch_d": None,
+        "macd_fade_exit": False, "macd_slow_fade_exit": False,
+        "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
+        "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -209,10 +261,6 @@ async def load_bot_configs():
             for s in SYMBOLS:
                 if s in saved:
                     incoming = saved[s]
-                    for res_key in ("ha_st_resolution",):
-                        if res_key in incoming and incoming[res_key] not in VALID_RESOLUTIONS:
-                            debug_log(f"⚠️ [{s}] Ungültiger gespeicherter Zeitrahmen '{incoming[res_key]}' - auf Standard zurückgesetzt")
-                            incoming.pop(res_key)
                     BOTS[s]["config"].update(incoming)
             debug_log("✅ Grid-Bot-Configs aus Redis geladen", {"coins": list(saved.keys())})
     except Exception as e:
@@ -353,6 +401,53 @@ async def execute_entry(symbol, direction, price, is_add_on):
     return True
 
 
+async def execute_partial_exit(symbol, price, fraction, reason):
+    """Schliesst nur einen Teil der Position (z.B. 0.5 = 50%), Rest bleibt offen mit
+    unveraendertem Ø-Einstiegspreis. Zaehlt NICHT in stats.trades/wins/losses, damit die
+    Trefferquote nicht durch Teilverkaeufe verzerrt wird - nur der PnL wird verbucht."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    market_index = MARKET_INDICES[symbol]
+
+    if st["position"] is None or st["total_coin_size"] <= 0:
+        return False
+
+    close_size = st["total_coin_size"] * fraction
+    position_side = st["position"]
+    pnl_usd = (price - st["avg_entry_price"]) * close_size if position_side == "long" else (st["avg_entry_price"] - price) * close_size
+
+    if not cfg["dry_run"]:
+        client = get_lighter_client()
+        if client is None:
+            debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Teil-Exit übersprungen")
+            return False
+        precision = get_precision(symbol)
+        base_amount = int(round(close_size * precision))
+        min_base = get_min_base_amount(symbol)
+        if base_amount * (1 / precision) < min_base:
+            debug_log(f"⚠️ [{symbol}] Teil-Exit-Größe unter Mindestgröße - übersprungen")
+            await client.close()
+            return False
+        is_ask = position_side == "long"
+        tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
+        await client.close()
+        if err:
+            debug_log(f"⚠️ [{symbol}] Teil-Exit-Order fehlgeschlagen", {"error": str(err)})
+            return False
+
+    st["stats"]["total_pnl_usd"] += pnl_usd
+    st["trade_log"].append({
+        "side": position_side, "avg_entry": round(st["avg_entry_price"], 2), "exit": price,
+        "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3),
+        "opened_at": st.get("position_opened_at"), "closed_at": datetime.now().isoformat(),
+        "reason": reason, "partial": True, "fraction": fraction,
+    })
+
+    st["total_coin_size"] -= close_size
+    debug_log(f"✂️ [{symbol}] Teil-Exit ({reason}): {position_side.upper()} {round(fraction*100)}% @ {price} | PnL ${round(pnl_usd,3)} | Rest {round(st['total_coin_size'],6)}")
+    return True
+
+
 async def execute_exit(symbol, price, reason):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -392,7 +487,6 @@ async def execute_exit(symbol, price, reason):
     st["total_coin_size"] = 0.0
     st["entry_count"] = 0
     st["anchor_price"] = price
-    st["ha_st_stop_price"] = None
     st["position_opened_at"] = None
     st["last_entry_price"] = None
 
@@ -524,48 +618,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div><label>Strategie</label>
     <select class="cfg" id="entry_mode">
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
-      <option value="ha_st">Heikin Ashi Supertrend (Buy/Sell, SL an Signalkerze)</option>
-      <option value="candle_color">Kerzenfarbe (früher Einstieg, Exit bei Gegenkerze)</option>
       <option value="obi_scalp">OBI-Scalp (Orderbuch-Ungleichgewicht, symmetrisches TP/SL)</option>
-    </select>
-  </div>
-  <div data-mode="ha_st"><label>HA-Supertrend Zeitrahmen</label>
-    <select class="cfg" id="ha_st_resolution">
-      <option value="1m">1 Minute</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-    </select>
-  </div>
-  <div data-mode="ha_st"><label>HA-ATR Periode</label><input type="number" step="1" id="ha_st_atr_period"></div>
-  <div data-mode="ha_st"><label>HA-ATR Multiplikator</label><input type="number" step="0.1" id="ha_st_atr_mult"></div>
-  <div data-mode="ha_st"><label>Trendfilter (Long nur aufwärts, Short nur abwärts)</label>
-    <select class="cfg" id="ha_st_trend_filter">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="ha_st"><label>Trend-EMA Länge</label><input type="number" step="1" id="ha_st_trend_ema_length"></div>
-  <div data-mode="ha_st"><label>Kerzenquelle</label>
-    <select class="cfg" id="ha_st_candle_source">
-      <option value="binance">Binance (mehr Liquidität, Fallback: Lighter)</option>
-      <option value="lighter">Lighter (Original-Handelsdaten)</option>
-    </select>
-  </div>
-  <div data-mode="candle_color"><label>Kerzenlänge (Sekunden)</label><input type="number" step="1" id="cc_resolution_seconds"></div>
-  <div data-mode="candle_color"><label>Bestätigung nach (Sekunden)</label><input type="number" step="1" id="cc_confirm_delay_seconds"></div>
-  <div data-mode="candle_color"><label>Nach Gegenkerze sofort drehen</label>
-    <select class="cfg" id="cc_auto_reverse">
-      <option value="true">Ja</option>
-      <option value="false">Nein</option>
-    </select>
-  </div>
-  <div data-mode="candle_color"><label>Früher Ausstieg (nicht auf Schluss warten)</label>
-    <select class="cfg" id="cc_early_exit">
-      <option value="true">Ja - sofort bei Gegenfarbe</option>
-      <option value="false">Nein - erst bei fertigem Kerzenschluss</option>
+      <option value="macd_stoch">MACD-Dual + Stochastic (Histogramm-Trend, optional Stochastic-Filter)</option>
+      <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -601,6 +656,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>Trend-EMA Länge (Trades)</label><input type="number" step="1" id="obi_trend_ema_length"></div>
+  <div data-mode="macd_stoch"><label>Zeitrahmen</label>
+    <select class="cfg" id="macd_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+    </select>
+  </div>
+  <div data-mode="macd_stoch"><label>MACD schnell - Fast</label><input type="number" step="1" id="macd_fast_fast"></div>
+  <div data-mode="macd_stoch"><label>MACD schnell - Slow</label><input type="number" step="1" id="macd_fast_slow"></div>
+  <div data-mode="macd_stoch"><label>MACD schnell - Signal</label><input type="number" step="1" id="macd_fast_signal"></div>
+  <div data-mode="macd_stoch"><label>MACD langsam - Fast</label><input type="number" step="1" id="macd_slow_fast"></div>
+  <div data-mode="macd_stoch"><label>MACD langsam - Slow</label><input type="number" step="1" id="macd_slow_slow"></div>
+  <div data-mode="macd_stoch"><label>MACD langsam - Signal</label><input type="number" step="1" id="macd_slow_signal"></div>
+  <div data-mode="macd_stoch"><label>Stochastic-Filter</label>
+    <select class="cfg" id="macd_use_stochastic">
+      <option value="true">An - nur bei %K/%D in Signal-Richtung</option>
+      <option value="false">Aus - nur MACD-Histogramme</option>
+    </select>
+  </div>
+  <div data-mode="macd_stoch"><label>Stochastic %K-Periode</label><input type="number" step="1" id="stoch_k_period"></div>
+  <div data-mode="macd_stoch"><label>Stochastic %K-Glättung</label><input type="number" step="1" id="stoch_k_smooth"></div>
+  <div data-mode="macd_stoch"><label>Stochastic %D-Periode</label><input type="number" step="1" id="stoch_d_period"></div>
+  <div data-mode="macd_stoch"><label>TP ($, fest)</label><input type="number" step="any" id="macd_tp_usd"></div>
+  <div data-mode="macd_stoch"><label>SL ($, fest)</label><input type="number" step="any" id="macd_sl_usd"></div>
+  <div data-mode="macd_stoch"><label>Zusätzlicher TP bei Farbwechsel langsames Histogramm</label>
+    <select class="cfg" id="macd_slow_fade_exit_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - zusätzlich zum schnellen Histogramm</option>
+    </select>
+  </div>
+  <div data-mode="fib_reversal"><label>Zeitrahmen</label>
+    <select class="cfg" id="fib_resolution">
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="fib_reversal"><label>Lookback (Kerzen für Swing-High/Low)</label><input type="number" step="1" id="fib_lookback_candles"></div>
+  <div data-mode="fib_reversal"><label>Einstieg 1 (Fib-Level)</label><input type="number" step="0.001" id="fib_entry1_level"></div>
+  <div data-mode="fib_reversal"><label>Einstieg 2 / Nachkauf (Fib-Level)</label><input type="number" step="0.001" id="fib_entry2_level"></div>
+  <div data-mode="fib_reversal"><label>TP1 (Fib-Level)</label><input type="number" step="0.001" id="fib_tp1_level"></div>
+  <div data-mode="fib_reversal"><label>TP1 Teilverkauf (%)</label><input type="number" step="1" id="fib_tp1_close_pct"></div>
+  <div data-mode="fib_reversal"><label>TP2 (Fib-Level, Rest schließen)</label><input type="number" step="0.001" id="fib_tp2_level"></div>
+  <div data-mode="fib_reversal"><label>Stop-Loss (Fib-Level)</label><input type="number" step="0.001" id="fib_sl_level"></div>
+  <div data-mode="fib_reversal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="fib_cooldown_seconds"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -714,11 +813,15 @@ async function refresh() {
     <div class="card"><div class="label">Unrealisiert $</div><div class="value ${data.unrealized_pnl_usd>=0?'green':'red'}">${data.unrealized_pnl_usd}</div></div>
     <div class="card"><div class="label">Nachkauf-Stufe</div><div class="value">${data.entry_count} / ${data.config.max_nachkauf || '∞'}</div></div>
     <div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>
-    <div class="card"><div class="label">HA-Supertrend SL (${data.config.entry_mode==='ha_st'?'aktiv':'inaktiv'})</div><div class="value red">${data.ha_st_stop_price ?? '-'}</div></div>
-    <div class="card"><div class="label">Letzte Kerzenfarbe (${data.config.entry_mode==='candle_color'?'aktiv':'inaktiv'})</div><div class="value ${data.cc_last_color==='green'?'green':data.cc_last_color==='red'?'red':'yellow'}">${data.cc_last_color ?? '-'}</div></div>
     <div class="card"><div class="label">OBI schnell (${data.config.entry_mode==='obi_scalp'?'aktiv':'inaktiv'})</div><div class="value ${data.obi_fast>=0?'green':'red'}">${data.obi_fast ?? '-'}</div></div>
     <div class="card"><div class="label">OBI mittel</div><div class="value ${data.obi_medium>=0?'green':'red'}">${data.obi_medium ?? '-'}</div></div>
     <div class="card"><div class="label">OBI langsam</div><div class="value ${data.obi_slow>=0?'green':'red'}">${data.obi_slow ?? '-'}</div></div>
+    <div class="card"><div class="label">MACD schnell (${data.config.entry_mode==='macd_stoch'?'aktiv':'inaktiv'})</div><div class="value ${data.macd_fast_hist>=0?'green':'red'}">${data.macd_fast_hist ?? '-'}</div></div>
+    <div class="card"><div class="label">MACD langsam</div><div class="value ${data.macd_slow_hist>=0?'green':'red'}">${data.macd_slow_hist ?? '-'}</div></div>
+    <div class="card"><div class="label">Stochastic %K / %D</div><div class="value">${data.macd_stoch_k ?? '-'} / ${data.macd_stoch_d ?? '-'}</div></div>
+    <div class="card"><div class="label">Fib High / Low (${data.config.entry_mode==='fib_reversal'?'aktiv':'inaktiv'})</div><div class="value">${data.fib?.high ?? '-'} / ${data.fib?.low ?? '-'}</div></div>
+    <div class="card"><div class="label">Fib Einstieg 1 / 2</div><div class="value">${data.fib?.entry1_price ?? '-'} / ${data.fib?.entry2_price ?? '-'}</div></div>
+    <div class="card"><div class="label">Fib TP1 / TP2 / SL</div><div class="value">${data.fib?.tp1_price ?? '-'} / ${data.fib?.tp2_price ?? '-'} / ${data.fib?.sl_price ?? '-'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -727,16 +830,6 @@ async function refresh() {
     document.getElementById('margin').value = data.config.margin;
     document.getElementById('leverage').value = data.config.leverage;
     document.getElementById('entry_mode').value = data.config.entry_mode;
-    document.getElementById('ha_st_resolution').value = data.config.ha_st_resolution;
-    document.getElementById('ha_st_atr_period').value = data.config.ha_st_atr_period;
-    document.getElementById('ha_st_atr_mult').value = data.config.ha_st_atr_mult;
-    document.getElementById('ha_st_trend_filter').value = String(data.config.ha_st_trend_filter);
-    document.getElementById('ha_st_trend_ema_length').value = data.config.ha_st_trend_ema_length;
-    document.getElementById('ha_st_candle_source').value = data.config.ha_st_candle_source;
-    document.getElementById('cc_resolution_seconds').value = data.config.cc_resolution_seconds;
-    document.getElementById('cc_confirm_delay_seconds').value = data.config.cc_confirm_delay_seconds;
-    document.getElementById('cc_auto_reverse').value = String(data.config.cc_auto_reverse);
-    document.getElementById('cc_early_exit').value = String(data.config.cc_early_exit);
     document.getElementById('obi_threshold').value = data.config.obi_threshold;
     document.getElementById('obi_mode').value = data.config.obi_mode;
     document.getElementById('obi_long_threshold').value = data.config.obi_long_threshold;
@@ -754,6 +847,29 @@ async function refresh() {
     document.getElementById('obi_cooldown_seconds').value = data.config.obi_cooldown_seconds;
     document.getElementById('obi_trend_filter').value = String(data.config.obi_trend_filter);
     document.getElementById('obi_trend_ema_length').value = data.config.obi_trend_ema_length;
+    document.getElementById('macd_resolution').value = data.config.macd_resolution;
+    document.getElementById('macd_fast_fast').value = data.config.macd_fast_fast;
+    document.getElementById('macd_fast_slow').value = data.config.macd_fast_slow;
+    document.getElementById('macd_fast_signal').value = data.config.macd_fast_signal;
+    document.getElementById('macd_slow_fast').value = data.config.macd_slow_fast;
+    document.getElementById('macd_slow_slow').value = data.config.macd_slow_slow;
+    document.getElementById('macd_slow_signal').value = data.config.macd_slow_signal;
+    document.getElementById('macd_use_stochastic').value = String(data.config.macd_use_stochastic);
+    document.getElementById('stoch_k_period').value = data.config.stoch_k_period;
+    document.getElementById('stoch_k_smooth').value = data.config.stoch_k_smooth;
+    document.getElementById('stoch_d_period').value = data.config.stoch_d_period;
+    document.getElementById('macd_tp_usd').value = data.config.macd_tp_usd;
+    document.getElementById('macd_sl_usd').value = data.config.macd_sl_usd;
+    document.getElementById('macd_slow_fade_exit_enabled').value = String(data.config.macd_slow_fade_exit_enabled);
+    document.getElementById('fib_resolution').value = data.config.fib_resolution;
+    document.getElementById('fib_lookback_candles').value = data.config.fib_lookback_candles;
+    document.getElementById('fib_entry1_level').value = data.config.fib_entry1_level;
+    document.getElementById('fib_entry2_level').value = data.config.fib_entry2_level;
+    document.getElementById('fib_tp1_level').value = data.config.fib_tp1_level;
+    document.getElementById('fib_tp1_close_pct').value = data.config.fib_tp1_close_pct;
+    document.getElementById('fib_tp2_level').value = data.config.fib_tp2_level;
+    document.getElementById('fib_sl_level').value = data.config.fib_sl_level;
+    document.getElementById('fib_cooldown_seconds').value = data.config.fib_cooldown_seconds;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -838,16 +954,6 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     margin: parseFloat(document.getElementById('margin').value),
     leverage: parseInt(document.getElementById('leverage').value),
     entry_mode: document.getElementById('entry_mode').value,
-    ha_st_resolution: document.getElementById('ha_st_resolution').value,
-    ha_st_atr_period: parseInt(document.getElementById('ha_st_atr_period').value),
-    ha_st_atr_mult: parseFloat(document.getElementById('ha_st_atr_mult').value),
-    ha_st_trend_filter: document.getElementById('ha_st_trend_filter').value === 'true',
-    ha_st_trend_ema_length: parseInt(document.getElementById('ha_st_trend_ema_length').value),
-    ha_st_candle_source: document.getElementById('ha_st_candle_source').value,
-    cc_resolution_seconds: parseInt(document.getElementById('cc_resolution_seconds').value),
-    cc_confirm_delay_seconds: parseInt(document.getElementById('cc_confirm_delay_seconds').value),
-    cc_auto_reverse: document.getElementById('cc_auto_reverse').value === 'true',
-    cc_early_exit: document.getElementById('cc_early_exit').value === 'true',
     obi_threshold: parseFloat(document.getElementById('obi_threshold').value),
     obi_mode: document.getElementById('obi_mode').value,
     obi_long_threshold: parseFloat(document.getElementById('obi_long_threshold').value),
@@ -865,6 +971,29 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     obi_cooldown_seconds: parseFloat(document.getElementById('obi_cooldown_seconds').value),
     obi_trend_filter: document.getElementById('obi_trend_filter').value === 'true',
     obi_trend_ema_length: parseInt(document.getElementById('obi_trend_ema_length').value),
+    macd_resolution: document.getElementById('macd_resolution').value,
+    macd_fast_fast: parseInt(document.getElementById('macd_fast_fast').value),
+    macd_fast_slow: parseInt(document.getElementById('macd_fast_slow').value),
+    macd_fast_signal: parseInt(document.getElementById('macd_fast_signal').value),
+    macd_slow_fast: parseInt(document.getElementById('macd_slow_fast').value),
+    macd_slow_slow: parseInt(document.getElementById('macd_slow_slow').value),
+    macd_slow_signal: parseInt(document.getElementById('macd_slow_signal').value),
+    macd_use_stochastic: document.getElementById('macd_use_stochastic').value === 'true',
+    stoch_k_period: parseInt(document.getElementById('stoch_k_period').value),
+    stoch_k_smooth: parseInt(document.getElementById('stoch_k_smooth').value),
+    stoch_d_period: parseInt(document.getElementById('stoch_d_period').value),
+    macd_tp_usd: parseFloat(document.getElementById('macd_tp_usd').value),
+    macd_sl_usd: parseFloat(document.getElementById('macd_sl_usd').value),
+    macd_slow_fade_exit_enabled: document.getElementById('macd_slow_fade_exit_enabled').value === 'true',
+    fib_resolution: document.getElementById('fib_resolution').value,
+    fib_lookback_candles: parseInt(document.getElementById('fib_lookback_candles').value),
+    fib_entry1_level: parseFloat(document.getElementById('fib_entry1_level').value),
+    fib_entry2_level: parseFloat(document.getElementById('fib_entry2_level').value),
+    fib_tp1_level: parseFloat(document.getElementById('fib_tp1_level').value),
+    fib_tp1_close_pct: parseFloat(document.getElementById('fib_tp1_close_pct').value),
+    fib_tp2_level: parseFloat(document.getElementById('fib_tp2_level').value),
+    fib_sl_level: parseFloat(document.getElementById('fib_sl_level').value),
+    fib_cooldown_seconds: parseFloat(document.getElementById('fib_cooldown_seconds').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -879,7 +1008,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','ha_st_resolution','ha_st_atr_period','ha_st_atr_mult','ha_st_trend_filter','ha_st_trend_ema_length','ha_st_candle_source','cc_resolution_seconds','cc_confirm_delay_seconds','cc_auto_reverse','cc_early_exit','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_slow_fade_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -928,11 +1057,12 @@ async def handle_status(request):
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),
         "unrealized_pnl_usd": calc_unrealized_pnl(symbol),
         "grid_levels": calc_grid_levels(symbol),
-        "ha_st_stop_price": st.get("ha_st_stop_price"),
-        "cc_last_color": st.get("cc_last_color"),
         "obi_current": st.get("obi_current"), "obi_fast": st.get("obi_fast"),
         "obi_medium": st.get("obi_medium"), "obi_slow": st.get("obi_slow"),
         "obi_history": st.get("obi_history", [])[-300:],
+        "macd_fast_hist": st.get("macd_fast_hist"), "macd_slow_hist": st.get("macd_slow_hist"),
+        "macd_stoch_k": st.get("macd_stoch_k"), "macd_stoch_d": st.get("macd_stoch_d"),
+        "fib": st.get("fib"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -949,11 +1079,14 @@ async def handle_config_update(request):
     cfg = BOTS[symbol]["config"]
     for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse",
-                "ha_st_resolution", "ha_st_atr_period", "ha_st_atr_mult",
-                "ha_st_trend_filter", "ha_st_trend_ema_length", "ha_st_candle_source",
-                "cc_resolution_seconds", "cc_confirm_delay_seconds", "cc_auto_reverse", "cc_early_exit",
                 "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
-                "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length"]:
+                "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length",
+                "macd_resolution", "macd_fast_fast", "macd_fast_slow", "macd_fast_signal",
+                "macd_slow_fast", "macd_slow_slow", "macd_slow_signal", "macd_use_stochastic",
+                "stoch_k_period", "stoch_k_smooth", "stoch_d_period", "macd_tp_usd", "macd_sl_usd",
+                "macd_slow_fade_exit_enabled",
+                "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
+                "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

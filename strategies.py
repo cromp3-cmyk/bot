@@ -1,6 +1,6 @@
 """
-strategies.py - Die 4 Handelsstrategien: Grid, Heikin-Ashi-Supertrend,
-Kerzenfarbe, OBI-Scalp. Nutzt gemeinsame Infrastruktur aus bot_core.py.
+strategies.py - Die Handelsstrategien: Grid, OBI-Scalp, MACD-Dual + Stochastic.
+Nutzt gemeinsame Infrastruktur aus bot_core.py.
 """
 
 import asyncio
@@ -11,8 +11,8 @@ import time
 import traceback
 
 from bot_core import (
-    debug_log, BASE_URL, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
-    BOTS, execute_entry, execute_exit, compute_step_abs,
+    debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
+    BOTS, execute_entry, execute_exit, execute_partial_exit, compute_step_abs,
 )
 
 BINANCE_SYMBOL_MAP = {
@@ -56,164 +56,6 @@ async def fetch_candles_binance(symbol, resolution, count_back=150):
     return timestamps, opens, highs, lows, closes
 
 
-async def fetch_candles_ohlc(symbol, resolution, count_back=150):
-    """Kerzendaten inkl. Open (fuer Heikin Ashi noetig)."""
-    import lighter
-    configuration = lighter.Configuration(host=BASE_URL)
-    async with lighter.ApiClient(configuration) as api_client:
-        candle_api = lighter.CandlestickApi(api_client)
-        now_ms = int(time.time() * 1000)
-        start_ms = now_ms - 60 * 60 * 24 * 7 * 1000
-        response = await candle_api.candles(
-            market_id=MARKET_INDICES[symbol], resolution=resolution,
-            start_timestamp=start_ms, end_timestamp=now_ms,
-            count_back=min(count_back, 500), set_timestamp_to_end=True,
-        )
-        candles = getattr(response, "c", None)
-        if not candles:
-            return None
-        timestamps, opens, highs, lows, closes = [], [], [], [], []
-        for candle in candles:
-            t_ = getattr(candle, "t", None)
-            o_ = getattr(candle, "o", None)
-            h_ = getattr(candle, "h", None)
-            l_ = getattr(candle, "l", None)
-            c_ = getattr(candle, "c", None)
-            if None in (t_, o_, h_, l_, c_):
-                continue
-            timestamps.append(int(t_)); opens.append(float(o_)); highs.append(float(h_))
-            lows.append(float(l_)); closes.append(float(c_))
-        return timestamps, opens, highs, lows, closes
-
-
-
-def compute_ha_supertrend(opens, highs, lows, closes, period=5, multiplier=1.5):
-    """Portiert aus dem Pine-Script: Heikin-Ashi-Kerzen + Custom-ATR-Baender/Trend."""
-    n = len(closes)
-    if n < period + 2:
-        return None, None
-
-    ha_close = [(opens[i] + highs[i] + lows[i] + closes[i]) / 4 for i in range(n)]
-    ha_open = [0.0] * n
-    ha_open[0] = (opens[0] + closes[0]) / 2
-    for i in range(1, n):
-        ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2
-
-    # ATR auf den ECHTEN Kerzen (wie im Pine-Script: ta.atr nutzt die realen high/low/close)
-    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
-    for i in range(1, n):
-        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-    atr = [tr[0]] * n
-    for i in range(1, n):
-        if i < period:
-            atr[i] = sum(tr[:i + 1]) / (i + 1)
-        else:
-            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-
-    up = [0.0] * n
-    dn = [0.0] * n
-    trend = [1] * n
-
-    up[0] = ha_close[0] - multiplier * atr[0]
-    dn[0] = ha_close[0] + multiplier * atr[0]
-    last_up1 = up[0]
-    last_dn1 = dn[0]
-
-    for i in range(1, n):
-        basic_up = ha_close[i] - multiplier * atr[i]
-        basic_dn = ha_close[i] + multiplier * atr[i]
-
-        if ha_close[i - 1] > up[i - 1]:
-            last_up1 = up[i - 1]
-        up1 = last_up1
-        up[i] = max(basic_up, up1) if ha_close[i - 1] > up1 else basic_up
-
-        if ha_close[i - 1] < dn[i - 1]:
-            last_dn1 = dn[i - 1]
-        dn1 = last_dn1
-        dn[i] = min(basic_dn, dn1) if ha_close[i - 1] < dn1 else basic_dn
-
-        prev_trend = trend[i - 1]
-        if prev_trend == -1 and ha_close[i] > dn1:
-            trend[i] = 1
-        elif prev_trend == 1 and ha_close[i] < up1:
-            trend[i] = -1
-        else:
-            trend[i] = prev_trend
-
-    return trend, ha_close
-
-
-async def ha_supertrend_poll_loop(symbol):
-    """Reiner Buy/Sell-Wechsel-Bot auf Basis von Heikin-Ashi-Supertrend-Flips,
-    SL an der High/Low der ausloesenden (echten) Kerze - kein TP."""
-    b = BOTS[symbol]
-    last_signal_ts = None
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "ha_st":
-                needed_bars = max(150, cfg["ha_st_trend_ema_length"] + 10) if cfg["ha_st_trend_filter"] else 150
-                data = None
-                if cfg.get("ha_st_candle_source", "binance") == "binance":
-                    data = await fetch_candles_binance(symbol, cfg["ha_st_resolution"], count_back=needed_bars)
-                    if data is None:
-                        debug_log(f"ℹ️ [{symbol}] Nicht auf Binance verfügbar - nutze Lighter-Kerzen")
-                if data is None:
-                    data = await fetch_candles_ohlc(symbol, cfg["ha_st_resolution"], count_back=needed_bars)
-                if data:
-                    timestamps, opens, highs, lows, closes = data
-                    closed_ts = timestamps[:-1]
-                    closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    trend, ha_close = compute_ha_supertrend(closed_o, closed_h, closed_l, closed_c,
-                                                              cfg["ha_st_atr_period"], cfg["ha_st_atr_mult"])
-                    if trend and len(trend) >= 2:
-                        st = b["state"]
-                        signal_key = closed_ts[-1]
-
-                        flipped_bullish = trend[-1] == 1 and trend[-2] == -1
-                        flipped_bearish = trend[-1] == -1 and trend[-2] == 1
-
-                        if (flipped_bullish or flipped_bearish) and last_signal_ts != signal_key:
-                            last_signal_ts = signal_key
-                            candle_age_seconds = round(time.time() - signal_key / 1000, 1)
-                            if cfg["bot_active"]:
-                                price = closed_c[-1]
-                                new_direction = "long" if flipped_bullish else "short"
-                                # SL an der auslösenden Kerze: unter ihrem Low (long) bzw. über ihrem High (short)
-                                new_sl = closed_l[-1] if new_direction == "long" else closed_h[-1]
-
-                                # Trendfilter: nur Longs im Aufwärtstrend (Preis > lange EMA), nur Shorts im Abwärtstrend
-                                trend_ok = True
-                                ema_trend_val = None
-                                if cfg["ha_st_trend_filter"] and len(closed_c) > cfg["ha_st_trend_ema_length"]:
-                                    ema_trend_val = round(_ema_series(closed_c, cfg["ha_st_trend_ema_length"])[-1], 4)
-                                    if new_direction == "long" and price <= ema_trend_val:
-                                        trend_ok = False
-                                    elif new_direction == "short" and price >= ema_trend_val:
-                                        trend_ok = False
-
-                                debug_log(f"📡 [{symbol}] HA-Supertrend-Flip: {new_direction.upper()} @ {price} | SL {new_sl} | Trendfilter {'OK' if trend_ok else 'BLOCKIERT'}", {
-                                    "kerze_alter_sekunden": candle_age_seconds,
-                                    "ema_trend": ema_trend_val,
-                                })
-
-                                if st["position"] is not None and st["position"] != new_direction:
-                                    await execute_exit(symbol, price, "HA-REVERSE")
-                                    if trend_ok:
-                                        await execute_entry(symbol, new_direction, price, is_add_on=False)
-                                        st["ha_st_stop_price"] = new_sl
-                                elif st["position"] is None and trend_ok:
-                                    await execute_entry(symbol, new_direction, price, is_add_on=False)
-                                    st["ha_st_stop_price"] = new_sl
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] HA-Supertrend-Abfrage fehlgeschlagen", {"error": str(e)})
-
-        await asyncio.sleep(5)
-
-
-
 def _ema_series(values, length):
     if not values:
         return []
@@ -224,75 +66,206 @@ def _ema_series(values, length):
     return out
 
 
+def compute_macd_histogram(closes, fast_period, slow_period, signal_period):
+    """MACD-Histogramm = MACD-Linie (EMA-schnell minus EMA-langsam) minus Signallinie
+    (EMA der MACD-Linie). Nur das Histogramm wird fuer die Strategie genutzt."""
+    ema_fast = _ema_series(closes, fast_period)
+    ema_slow = _ema_series(closes, slow_period)
+    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+    signal_line = _ema_series(macd_line, signal_period)
+    histogram = [m - s for m, s in zip(macd_line, signal_line)]
+    return histogram
 
-async def handle_candle_color_tick(symbol, price):
-    """Reine Preis-Feed-Strategie, keine Kerzen-API noetig - Kerzengrenzen werden
-    lokal aus der Uhrzeit berechnet. Frueher Einstieg nach X Sekunden Kerzenlaufzeit
-    (aktuelle Farbe), Ausstieg nur bei tatsaechlich geschlossener Gegenfarben-Kerze."""
+
+def compute_stochastic(highs, lows, closes, k_period, k_smooth, d_period):
+    """%K (geglaettet) und %D fuer den Stochastic-Oszillator."""
+    n = len(closes)
+    if n < k_period + k_smooth + d_period:
+        return [], []
+    raw_k = []
+    for i in range(n):
+        if i < k_period - 1:
+            raw_k.append(50.0)
+            continue
+        window_h = highs[i - k_period + 1:i + 1]
+        window_l = lows[i - k_period + 1:i + 1]
+        hh, ll = max(window_h), min(window_l)
+        raw_k.append(50.0 if hh == ll else (closes[i] - ll) / (hh - ll) * 100)
+
+    def sma(values, length):
+        out = []
+        for i in range(len(values)):
+            if i < length - 1:
+                out.append(sum(values[:i + 1]) / (i + 1))
+            else:
+                out.append(sum(values[i - length + 1:i + 1]) / length)
+        return out
+
+    k_smoothed = sma(raw_k, k_smooth)
+    d_line = sma(k_smoothed, d_period)
+    return k_smoothed, d_line
+
+
+async def macd_stoch_poll_loop(symbol):
+    """MACD-Dual + Stochastic: Einstieg wenn der langsame MACD-Histogramm-Trend
+    (34/144/9) und ein Nulldurchgang des schnellen Histogramms (13/21/9) in dieselbe
+    Richtung zeigen, optional bestaetigt durch die Stochastic-%K/%D-Lage.
+    TP: fester $-Wert ODER schnelles Histogramm faerbt sich hell (Momentum laesst nach).
+    SL: immer fester $-Wert (siehe on_price_update)."""
     b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
+    last_fast_hist = None
+    last_slow_hist = None
+    last_entry_signal_ts = None
 
-    now = time.time()
-    resolution = cfg["cc_resolution_seconds"]
-    confirm_delay = cfg["cc_confirm_delay_seconds"]
-    candle_start = int(now // resolution) * resolution
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "macd_stoch":
+                needed_bars = min(500, cfg["macd_slow_slow"] + cfg["macd_slow_signal"] + 60)
+                data = await fetch_candles_binance(symbol, cfg["macd_resolution"], count_back=needed_bars)
+                if data:
+                    timestamps, opens, highs, lows, closes = data
+                    closed_ts = timestamps[:-1]
+                    closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
 
-    if st["cc_candle_start"] is None:
-        st["cc_candle_start"] = candle_start
-        st["cc_candle_open"] = price
-        st["cc_entered_this_candle"] = False
-        return
+                    if len(closed_c) > cfg["macd_slow_slow"] + cfg["macd_slow_signal"]:
+                        fast_hist = compute_macd_histogram(closed_c, cfg["macd_fast_fast"], cfg["macd_fast_slow"], cfg["macd_fast_signal"])
+                        slow_hist = compute_macd_histogram(closed_c, cfg["macd_slow_fast"], cfg["macd_slow_slow"], cfg["macd_slow_signal"])
+                        st = b["state"]
+                        curr_fast = fast_hist[-1]
+                        curr_slow = slow_hist[-1]
+                        st["macd_fast_hist"] = round(curr_fast, 4)
+                        st["macd_slow_hist"] = round(curr_slow, 4)
 
-    if candle_start != st["cc_candle_start"]:
-        # Vorherige Kerze ist soeben geschlossen - ihre Endfarbe bestimmen
-        prev_open = st["cc_candle_open"]
-        prev_close = price  # letzter bekannter Preis vor der neuen Kerze
-        closed_color = "green" if prev_close > prev_open else ("red" if prev_close < prev_open else st["cc_last_color"])
-        st["cc_last_color"] = closed_color
+                        stoch_k = stoch_d = None
+                        if cfg.get("macd_use_stochastic", True):
+                            k_series, d_series = compute_stochastic(closed_h, closed_l, closed_c,
+                                                                      cfg["stoch_k_period"], cfg["stoch_k_smooth"], cfg["stoch_d_period"])
+                            if k_series and d_series:
+                                stoch_k, stoch_d = k_series[-1], d_series[-1]
+                                st["macd_stoch_k"] = round(stoch_k, 2)
+                                st["macd_stoch_d"] = round(stoch_d, 2)
 
-        if st["position"] is not None:
-            position_color = "green" if st["position"] == "long" else "red"
-            if closed_color is not None and closed_color != position_color:
-                await execute_exit(symbol, price, "CC-REVERSE")
+                        # Fade-Erkennung fuer eine offene Position: schnelles Histogramm
+                        # ist noch in Positions-Richtung, wird aber schwaecher (hell statt dunkel)
+                        if st["position"] is not None and last_fast_hist is not None:
+                            if st["position"] == "long" and curr_fast > 0 and curr_fast <= last_fast_hist:
+                                st["macd_fade_exit"] = True
+                            elif st["position"] == "short" and curr_fast < 0 and curr_fast >= last_fast_hist:
+                                st["macd_fade_exit"] = True
 
-        # Neue Kerze beginnt
-        st["cc_candle_start"] = candle_start
-        st["cc_candle_open"] = price
-        st["cc_entered_this_candle"] = False
+                        # Optionale zusaetzliche Fade-Erkennung auf dem LANGSAMEN Histogramm
+                        if (cfg.get("macd_slow_fade_exit_enabled", False)
+                                and st["position"] is not None and last_slow_hist is not None):
+                            if st["position"] == "long" and curr_slow > 0 and curr_slow <= last_slow_hist:
+                                st["macd_slow_fade_exit"] = True
+                            elif st["position"] == "short" and curr_slow < 0 and curr_slow >= last_slow_hist:
+                                st["macd_slow_fade_exit"] = True
 
-    if not cfg["bot_active"]:
-        return
+                        # Einstieg: langsames Histogramm gibt Richtung vor, schnelles Histogramm
+                        # kreuzt gerade die Nulllinie in dieselbe Richtung
+                        signal_key = closed_ts[-1]
+                        if (st["position"] is None and cfg["bot_active"]
+                                and last_entry_signal_ts != signal_key and last_fast_hist is not None):
+                            direction = None
+                            if curr_slow > 0 and last_fast_hist <= 0 and curr_fast > 0:
+                                direction = "long"
+                            elif curr_slow < 0 and last_fast_hist >= 0 and curr_fast < 0:
+                                direction = "short"
 
-    candle_age = now - st["cc_candle_start"]
+                            if direction and cfg.get("macd_use_stochastic", True):
+                                if stoch_k is None or stoch_d is None:
+                                    direction = None
+                                elif direction == "long" and stoch_k <= stoch_d:
+                                    direction = None
+                                elif direction == "short" and stoch_k >= stoch_d:
+                                    direction = None
 
-    # Fruehe Ausstiegs-Pruefung: kontinuierlich (jeden Tick), nicht nur einmal pro Kerze -
-    # sobald die AKTUELL LAUFENDE Kerze nach confirm_delay Sekunden die Gegenfarbe zeigt,
-    # wird sofort geschlossen, OHNE auf den Kerzenschluss zu warten.
-    if cfg.get("cc_early_exit", True) and st["position"] is not None and candle_age >= confirm_delay:
-        current_color = "green" if price > st["cc_candle_open"] else ("red" if price < st["cc_candle_open"] else None)
-        position_color = "green" if st["position"] == "long" else "red"
-        if current_color is not None and current_color != position_color:
-            await execute_exit(symbol, price, "CC-EARLY-EXIT")
-            st["cc_entered_this_candle"] = True
-            if cfg.get("cc_auto_reverse", True):
-                new_direction = "long" if current_color == "green" else "short"
-                await execute_entry(symbol, new_direction, price, is_add_on=False)
-            return
+                            if direction:
+                                last_entry_signal_ts = signal_key
+                                price = closed_c[-1]
+                                debug_log(f"📡 [{symbol}] MACD-Dual Signal: {direction.upper()} @ {price} "
+                                          f"(schnell {round(curr_fast,4)} / langsam {round(curr_slow,4)}"
+                                          f"{f' / Stoch %K={round(stoch_k,1)} %D={round(stoch_d,1)}' if stoch_k is not None else ''})")
+                                st["macd_fade_exit"] = False
+                                st["macd_slow_fade_exit"] = False
+                                await execute_entry(symbol, direction, price, is_add_on=False)
 
-    if not st["cc_entered_this_candle"] and candle_age >= confirm_delay:
-        st["cc_entered_this_candle"] = True
-        current_color = "green" if price > st["cc_candle_open"] else ("red" if price < st["cc_candle_open"] else None)
-        if current_color is None:
-            return
-        direction = "long" if current_color == "green" else "short"
+                        last_fast_hist = curr_fast
+                        last_slow_hist = curr_slow
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] MACD-Dual-Abfrage fehlgeschlagen", {"error": str(e)})
 
-        if st["position"] is None:
-            await execute_entry(symbol, direction, price, is_add_on=False)
-        elif st["position"] != direction and cfg.get("cc_auto_reverse", True):
-            # Sicherheitsnetz, falls die fruehe Ausstiegs-Pruefung oben deaktiviert ist
-            await execute_exit(symbol, price, "CC-REVERSE")
-            await execute_entry(symbol, direction, price, is_add_on=False)
+        await asyncio.sleep(5)
 
+
+def compute_fib_swing(highs, lows, lookback):
+    """Sucht im Lookback-Fenster den hoechsten High- und tiefsten Low-Punkt und leitet
+    daraus die Fib-Richtung ab: kam das Low NACH dem High, ist der letzte Impuls ein
+    Abwaertsmove -> Long-Setup (Einstieg tief im Retracement, Ziel: Rueckkehr Richtung High).
+    Kam das High NACH dem Low, ist der letzte Impuls ein Aufwaertsmove -> Short-Setup."""
+    window_h = highs[-lookback:]
+    window_l = lows[-lookback:]
+    if len(window_h) < 5:
+        return None
+    high_idx = window_h.index(max(window_h))
+    low_idx = window_l.index(min(window_l))
+    if high_idx == low_idx:
+        return None
+    high_val = window_h[high_idx]
+    low_val = window_l[low_idx]
+    direction = "long" if low_idx > high_idx else "short"
+    return {"high": high_val, "low": low_val, "direction": direction}
+
+
+def build_fib_levels(swing, cfg):
+    """Berechnet aus Swing-High/Low und den konfigurierten Fib-Prozentwerten die
+    tatsaechlichen Preise fuer Einstieg 1/2, TP1/TP2 und SL."""
+    high, low, direction = swing["high"], swing["low"], swing["direction"]
+    span = high - low
+
+    def price_at(level):
+        # long: 0% = High, 100% = Low (Retracement von oben nach unten gemessen)
+        # short: 0% = Low, 100% = High (Retracement von unten nach oben gemessen)
+        return (high - level * span) if direction == "long" else (low + level * span)
+
+    return {
+        "direction": direction,
+        "high": round(high, 4), "low": round(low, 4),
+        "entry1_price": round(price_at(cfg["fib_entry1_level"]), 4),
+        "entry2_price": round(price_at(cfg["fib_entry2_level"]), 4),
+        "tp1_price": round(price_at(cfg["fib_tp1_level"]), 4),
+        "tp2_price": round(price_at(cfg["fib_tp2_level"]), 4),
+        "sl_price": round(price_at(cfg["fib_sl_level"]), 4),
+    }
+
+
+async def fib_reversal_poll_loop(symbol):
+    """Fibonacci-Reversal: solange noch kein Einstieg erfolgt ist, wird die Fib bei
+    jedem Poll auf den neuesten Swing (letzte fib_lookback_candles Kerzen) neu gezogen.
+    Sobald Einstieg 1 ausgefuehrt wurde, wird die Fib eingefroren (kein Nachziehen mehr),
+    bis die Position komplett geschlossen ist (SL oder TP2)."""
+    b = BOTS[symbol]
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "fib_reversal":
+                st = b["state"]
+                if not st["fib_entry1_done"]:
+                    needed_bars = cfg["fib_lookback_candles"] + 5
+                    data = await fetch_candles_binance(symbol, cfg["fib_resolution"], count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_h, closed_l = highs[:-1], lows[:-1]
+                        if len(closed_h) >= 5:
+                            swing = compute_fib_swing(closed_h, closed_l, cfg["fib_lookback_candles"])
+                            if swing:
+                                st["fib"] = build_fib_levels(swing, cfg)
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Fib-Reversal-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(30)
 
 
 def calc_obi(symbol, levels):
@@ -497,25 +470,97 @@ async def on_price_update(symbol, price):
                     await execute_exit(symbol, price, "SL")
         return
 
-    if cfg["entry_mode"] == "candle_color":
-        await handle_candle_color_tick(symbol, price)
+    if cfg["entry_mode"] == "macd_stoch":
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if pnl_usd >= cfg["macd_tp_usd"]:
+                await execute_exit(symbol, price, "TP")
+                st["macd_fade_exit"] = False
+            elif pnl_usd <= -cfg["macd_sl_usd"]:
+                await execute_exit(symbol, price, "SL")
+                st["macd_fade_exit"] = False
+            elif st.get("macd_fade_exit"):
+                await execute_exit(symbol, price, "MACD-FADE")
+                st["macd_fade_exit"] = False
+            elif cfg.get("macd_slow_fade_exit_enabled", False) and st.get("macd_slow_fade_exit"):
+                await execute_exit(symbol, price, "MACD-SLOW-FADE")
+                st["macd_slow_fade_exit"] = False
+        return
+
+    if cfg["entry_mode"] == "fib_reversal":
+        fib = st.get("fib")
+        if fib is None:
+            return
+        direction = fib["direction"]
+        now = time.time()
+
+        if st["position"] is None:
+            if not bot_active or now - st["fib_last_trade_time"] < cfg["fib_cooldown_seconds"]:
+                return
+            reached = price <= fib["entry1_price"] if direction == "long" else price >= fib["entry1_price"]
+            if reached:
+                ok = await execute_entry(symbol, direction, price, is_add_on=False)
+                if ok:
+                    st["fib_entry1_done"] = True
+                    st["fib_sl_active_price"] = fib["sl_price"]
+                    debug_log(f"📡 [{symbol}] Fib-Reversal Einstieg 1: {direction.upper()} @ {price} "
+                              f"(Level {cfg['fib_entry1_level']}, High {fib['high']} / Low {fib['low']})")
+            return
+
+        # Nachkauf (Einstieg 2), falls Kurs noch tiefer ins Retracement laeuft
+        if not st["fib_entry2_done"]:
+            reached2 = price <= fib["entry2_price"] if direction == "long" else price >= fib["entry2_price"]
+            if reached2:
+                ok = await execute_entry(symbol, direction, price, is_add_on=True)
+                if ok:
+                    st["fib_entry2_done"] = True
+                    debug_log(f"📡 [{symbol}] Fib-Reversal Einstieg 2 (Nachkauf): {direction.upper()} @ {price} (Level {cfg['fib_entry2_level']})")
+
+        # Stop-Loss (springt nach TP1 auf Ø-Einstieg = Break-Even)
+        sl_price = st["fib_sl_active_price"]
+        sl_hit = price <= sl_price if direction == "long" else price >= sl_price
+        if sl_hit:
+            await execute_exit(symbol, price, "SL")
+            st["fib_entry1_done"] = False
+            st["fib_entry2_done"] = False
+            st["fib_tp1_done"] = False
+            st["fib_sl_active_price"] = None
+            st["fib_last_trade_time"] = now
+            st["fib"] = None
+            return
+
+        # TP1: Teilverkauf + SL auf Break-Even
+        if not st["fib_tp1_done"]:
+            tp1_hit = price >= fib["tp1_price"] if direction == "long" else price <= fib["tp1_price"]
+            if tp1_hit:
+                fraction = cfg["fib_tp1_close_pct"] / 100
+                ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+                if ok:
+                    st["fib_tp1_done"] = True
+                    st["fib_sl_active_price"] = st["avg_entry_price"]
+                    debug_log(f"📡 [{symbol}] Fib-Reversal TP1 erreicht - SL auf Break-Even ({st['avg_entry_price']}) gesetzt")
+            return
+
+        # TP2: Rest schliessen
+        tp2_hit = price >= fib["tp2_price"] if direction == "long" else price <= fib["tp2_price"]
+        if tp2_hit:
+            await execute_exit(symbol, price, "TP2")
+            st["fib_entry1_done"] = False
+            st["fib_entry2_done"] = False
+            st["fib_tp1_done"] = False
+            st["fib_sl_active_price"] = None
+            st["fib"] = None
         return
 
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
-            return  # im HA-Supertrend-Modus übernimmt der Poll-Loop den Einstieg
+            return
         grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
         if price <= st["anchor_price"] - grid_step_abs:
             await execute_entry(symbol, "long", price, is_add_on=False)
         elif price >= st["anchor_price"] + grid_step_abs:
             await execute_entry(symbol, "short", price, is_add_on=False)
-        return
-
-    if cfg["entry_mode"] == "ha_st":
-        sl = st.get("ha_st_stop_price")
-        if sl is not None:
-            if (st["position"] == "long" and price <= sl) or (st["position"] == "short" and price >= sl):
-                await execute_exit(symbol, price, "SL")
         return
 
     if cfg["entry_mode"] != "grid":
