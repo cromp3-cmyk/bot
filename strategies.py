@@ -115,6 +115,7 @@ async def macd_stoch_poll_loop(symbol):
     b = BOTS[symbol]
     last_fast_hist = None
     last_slow_hist = None
+    last_processed_ts = None
     last_entry_signal_ts = None
 
     while True:
@@ -146,53 +147,64 @@ async def macd_stoch_poll_loop(symbol):
                                 st["macd_stoch_k"] = round(stoch_k, 2)
                                 st["macd_stoch_d"] = round(stoch_d, 2)
 
-                        # Fade-Erkennung fuer eine offene Position: schnelles Histogramm
-                        # ist noch in Positions-Richtung, wird aber schwaecher (hell statt dunkel)
-                        if st["position"] is not None and last_fast_hist is not None:
-                            if st["position"] == "long" and curr_fast > 0 and curr_fast <= last_fast_hist:
-                                st["macd_fade_exit"] = True
-                            elif st["position"] == "short" and curr_fast < 0 and curr_fast >= last_fast_hist:
-                                st["macd_fade_exit"] = True
-
-                        # Optionale zusaetzliche Fade-Erkennung auf dem LANGSAMEN Histogramm
-                        if (cfg.get("macd_slow_fade_exit_enabled", False)
-                                and st["position"] is not None and last_slow_hist is not None):
-                            if st["position"] == "long" and curr_slow > 0 and curr_slow <= last_slow_hist:
-                                st["macd_slow_fade_exit"] = True
-                            elif st["position"] == "short" and curr_slow < 0 and curr_slow >= last_slow_hist:
-                                st["macd_slow_fade_exit"] = True
-
-                        # Einstieg: langsames Histogramm gibt Richtung vor, schnelles Histogramm
-                        # kreuzt gerade die Nulllinie in dieselbe Richtung
+                        # WICHTIG: Faerbung/Signal nur EINMAL pro tatsaechlich neu geschlossener
+                        # Kerze auswerten - nicht bei jedem 5-Sek-Poll, sonst wird der noch offene
+                        # letzte Kerzenwert mit sich selbst verglichen und faelschlich als "heller"
+                        # (Fade) gewertet, bevor die Kerze ueberhaupt geschlossen hat.
                         signal_key = closed_ts[-1]
-                        if (st["position"] is None and cfg["bot_active"]
-                                and last_entry_signal_ts != signal_key and last_fast_hist is not None):
-                            direction = None
-                            if curr_slow > 0 and last_fast_hist <= 0 and curr_fast > 0:
-                                direction = "long"
-                            elif curr_slow < 0 and last_fast_hist >= 0 and curr_fast < 0:
-                                direction = "short"
+                        if last_processed_ts != signal_key:
+                            # Fade-Erkennung fuer eine offene Position: schnelles Histogramm
+                            # ist noch in Positions-Richtung, wird aber schwaecher (hell statt dunkel)
+                            if st["position"] is not None and last_fast_hist is not None:
+                                if st["position"] == "long" and curr_fast > 0 and curr_fast <= last_fast_hist:
+                                    st["macd_fade_exit"] = True
+                                elif st["position"] == "short" and curr_fast < 0 and curr_fast >= last_fast_hist:
+                                    st["macd_fade_exit"] = True
 
-                            if direction and cfg.get("macd_use_stochastic", True):
-                                if stoch_k is None or stoch_d is None:
-                                    direction = None
-                                elif direction == "long" and stoch_k <= stoch_d:
-                                    direction = None
-                                elif direction == "short" and stoch_k >= stoch_d:
-                                    direction = None
+                            # Optionale zusaetzliche Fade-Erkennung auf dem LANGSAMEN Histogramm
+                            if (cfg.get("macd_slow_fade_exit_enabled", False)
+                                    and st["position"] is not None and last_slow_hist is not None):
+                                if st["position"] == "long" and curr_slow > 0 and curr_slow <= last_slow_hist:
+                                    st["macd_slow_fade_exit"] = True
+                                elif st["position"] == "short" and curr_slow < 0 and curr_slow >= last_slow_hist:
+                                    st["macd_slow_fade_exit"] = True
 
-                            if direction:
-                                last_entry_signal_ts = signal_key
-                                price = closed_c[-1]
-                                debug_log(f"📡 [{symbol}] MACD-Dual Signal: {direction.upper()} @ {price} "
-                                          f"(schnell {round(curr_fast,4)} / langsam {round(curr_slow,4)}"
-                                          f"{f' / Stoch %K={round(stoch_k,1)} %D={round(stoch_d,1)}' if stoch_k is not None else ''})")
-                                st["macd_fade_exit"] = False
-                                st["macd_slow_fade_exit"] = False
-                                await execute_entry(symbol, direction, price, is_add_on=False)
+                            # Einstieg: langsames Histogramm gibt Richtung vor, schnelles Histogramm
+                            # kreuzt gerade die Nulllinie in dieselbe Richtung
+                            if (st["position"] is None and cfg["bot_active"]
+                                    and last_entry_signal_ts != signal_key and last_fast_hist is not None):
+                                direction = None
+                                if curr_slow > 0 and last_fast_hist <= 0 and curr_fast > 0:
+                                    direction = "long"
+                                elif curr_slow < 0 and last_fast_hist >= 0 and curr_fast < 0:
+                                    direction = "short"
 
-                        last_fast_hist = curr_fast
-                        last_slow_hist = curr_slow
+                                if direction and cfg.get("macd_use_stochastic", True):
+                                    if stoch_k is None or stoch_d is None:
+                                        direction = None
+                                    elif direction == "long" and stoch_k <= stoch_d:
+                                        direction = None
+                                    elif direction == "short" and stoch_k >= stoch_d:
+                                        direction = None
+
+                                if direction:
+                                    last_entry_signal_ts = signal_key
+                                    # WICHTIG: fuer den tatsaechlichen Einstieg den LIVE-Preis nutzen,
+                                    # nicht den (ggf. Sekunden bis Minuten alten) Kerzenschlusspreis -
+                                    # sonst weicht avg_entry_price vom echten Fuellpreis ab und SL/TP
+                                    # feuern sofort falsch, weil on_price_update mit dem Live-Preis rechnet.
+                                    signal_price = closed_c[-1]
+                                    price = st["last_price"] if st["last_price"] is not None else signal_price
+                                    debug_log(f"📡 [{symbol}] MACD-Dual Signal: {direction.upper()} @ {price} "
+                                              f"(Signal-Kerze {signal_price} / schnell {round(curr_fast,4)} / langsam {round(curr_slow,4)}"
+                                              f"{f' / Stoch %K={round(stoch_k,1)} %D={round(stoch_d,1)}' if stoch_k is not None else ''})")
+                                    st["macd_fade_exit"] = False
+                                    st["macd_slow_fade_exit"] = False
+                                    await execute_entry(symbol, direction, price, is_add_on=False)
+
+                            last_fast_hist = curr_fast
+                            last_slow_hist = curr_slow
+                            last_processed_ts = signal_key
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] MACD-Dual-Abfrage fehlgeschlagen", {"error": str(e)})
 
