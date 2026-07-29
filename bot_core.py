@@ -209,9 +209,10 @@ def default_config():
         "stoch_d_period": int(os.getenv("STOCH_D_PERIOD", "3")),
         "macd_tp_usd": float(os.getenv("MACD_TP_USD", "1")),
         "macd_sl_usd": float(os.getenv("MACD_SL_USD", "1")),
-        "macd_fast_fade_exit_enabled": os.getenv("MACD_FAST_FADE_EXIT_ENABLED", "true").lower() == "true",
+        "macd_fast_fade_exit_enabled": os.getenv("MACD_FAST_FADE_EXIT_ENABLED", "false").lower() == "true",
         "macd_slow_fade_exit_enabled": os.getenv("MACD_SLOW_FADE_EXIT_ENABLED", "false").lower() == "true",
         "macd_slow_reversal_exit_enabled": os.getenv("MACD_SLOW_REVERSAL_EXIT_ENABLED", "true").lower() == "true",
+        "macd_fast_zero_cross_exit_enabled": os.getenv("MACD_FAST_ZERO_CROSS_EXIT_ENABLED", "true").lower() == "true",
         "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
         "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
         "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
@@ -237,6 +238,7 @@ def default_state():
         "obi_extreme_zone": None, "obi_extreme_value": None, "obi_prev_fast": None,
         "macd_fast_hist": None, "macd_slow_hist": None, "macd_stoch_k": None, "macd_stoch_d": None,
         "macd_fade_exit": False, "macd_slow_fade_exit": False, "macd_slow_reversal_exit": False,
+        "macd_fast_zero_cross_exit": False,
         "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
         "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
@@ -734,6 +736,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="false">Aus</option>
     </select>
   </div>
+  <div data-mode="macd_stoch"><label>TP bei Nulllinien-Durchgang schnelles Histogramm</label>
+    <select class="cfg" id="macd_fast_zero_cross_exit_enabled">
+      <option value="true">An - lässt Trend durch Pullback-Dips laufen, exit erst bei echtem Rückkreuzen</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
       <option value="1h">1 Stunde</option>
@@ -911,6 +919,7 @@ async function refresh() {
     document.getElementById('macd_fast_fade_exit_enabled').value = String(data.config.macd_fast_fade_exit_enabled);
     document.getElementById('macd_slow_fade_exit_enabled').value = String(data.config.macd_slow_fade_exit_enabled);
     document.getElementById('macd_slow_reversal_exit_enabled').value = String(data.config.macd_slow_reversal_exit_enabled);
+    document.getElementById('macd_fast_zero_cross_exit_enabled').value = String(data.config.macd_fast_zero_cross_exit_enabled);
     document.getElementById('fib_resolution').value = data.config.fib_resolution;
     document.getElementById('fib_lookback_candles').value = data.config.fib_lookback_candles;
     document.getElementById('fib_entry1_level').value = data.config.fib_entry1_level;
@@ -1037,6 +1046,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     macd_fast_fade_exit_enabled: document.getElementById('macd_fast_fade_exit_enabled').value === 'true',
     macd_slow_fade_exit_enabled: document.getElementById('macd_slow_fade_exit_enabled').value === 'true',
     macd_slow_reversal_exit_enabled: document.getElementById('macd_slow_reversal_exit_enabled').value === 'true',
+    macd_fast_zero_cross_exit_enabled: document.getElementById('macd_fast_zero_cross_exit_enabled').value === 'true',
     fib_resolution: document.getElementById('fib_resolution').value,
     fib_lookback_candles: parseInt(document.getElementById('fib_lookback_candles').value),
     fib_entry1_level: parseFloat(document.getElementById('fib_entry1_level').value),
@@ -1060,7 +1070,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1139,6 +1149,7 @@ async def handle_config_update(request):
                 "macd_fast_fade_exit_enabled",
                 "macd_slow_fade_exit_enabled",
                 "macd_slow_reversal_exit_enabled",
+                "macd_fast_zero_cross_exit_enabled",
                 "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
                 "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds"]:
         if key in body:

@@ -178,6 +178,17 @@ async def macd_stoch_poll_loop(symbol):
                                 elif st["position"] == "short" and curr_slow > 0:
                                     st["macd_slow_reversal_exit"] = True
 
+                            # TP ueber Nulllinien-Durchgang des SCHNELLEN Histogramms: laesst die
+                            # Position durch normale Pullback-Dips laufen (die kreuzen die Nulllinie
+                            # ja nicht), schliesst aber sofort, sobald sich der kurzfristige Impuls
+                            # wirklich umkehrt (Gegenrichtung kreuzt die Nulllinie)
+                            if (cfg.get("macd_fast_zero_cross_exit_enabled", True)
+                                    and st["position"] is not None and last_fast_hist is not None):
+                                if st["position"] == "short" and last_fast_hist <= 0 and curr_fast > 0:
+                                    st["macd_fast_zero_cross_exit"] = True
+                                elif st["position"] == "long" and last_fast_hist >= 0 and curr_fast < 0:
+                                    st["macd_fast_zero_cross_exit"] = True
+
                             # Einstieg (Pullback-faehig): langsames Histogramm gibt die Trendrichtung
                             # vor (jeder Gruen-/Rot-Ton reicht), schnelles Histogramm wird GERADE
                             # dunkler in Trendrichtung (steigt bei Gruen, faellt bei Rot gegenueber
@@ -215,6 +226,7 @@ async def macd_stoch_poll_loop(symbol):
                                     st["macd_fade_exit"] = False
                                     st["macd_slow_fade_exit"] = False
                                     st["macd_slow_reversal_exit"] = False
+                                    st["macd_fast_zero_cross_exit"] = False
                                     await execute_entry(symbol, direction, price, is_add_on=False)
 
                             last_fast_hist = curr_fast
@@ -501,17 +513,24 @@ async def on_price_update(symbol, price):
         if st["position"] is not None:
             entry = st["avg_entry_price"]
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if pnl_usd >= cfg["macd_tp_usd"]:
-                await execute_exit(symbol, price, "TP")
-                st["macd_fade_exit"] = False
-            elif pnl_usd <= -cfg["macd_sl_usd"]:
+            if pnl_usd <= -cfg["macd_sl_usd"]:
                 await execute_exit(symbol, price, "SL")
+                st["macd_fade_exit"] = False
+            elif not cfg.get("macd_fast_zero_cross_exit_enabled", True) and pnl_usd >= cfg["macd_tp_usd"]:
+                # Fester TP-Betrag greift nur, wenn der Nulllinien-Exit AUS ist - sonst wuerde er
+                # die Position ja genau in dem Moment schliessen, den der Nulllinien-Exit bewusst
+                # laufen lassen soll (Pullback-Trend geht weiter).
+                await execute_exit(symbol, price, "TP")
                 st["macd_fade_exit"] = False
             elif cfg.get("macd_slow_reversal_exit_enabled", True) and st.get("macd_slow_reversal_exit"):
                 await execute_exit(symbol, price, "MACD-SLOW-REVERSAL")
                 st["macd_slow_reversal_exit"] = False
                 st["macd_fade_exit"] = False
                 st["macd_slow_fade_exit"] = False
+            elif cfg.get("macd_fast_zero_cross_exit_enabled", True) and st.get("macd_fast_zero_cross_exit"):
+                await execute_exit(symbol, price, "MACD-ZERO-CROSS")
+                st["macd_fast_zero_cross_exit"] = False
+                st["macd_fade_exit"] = False
             elif cfg.get("macd_fast_fade_exit_enabled", True) and st.get("macd_fade_exit"):
                 await execute_exit(symbol, price, "MACD-FADE")
                 st["macd_fade_exit"] = False
