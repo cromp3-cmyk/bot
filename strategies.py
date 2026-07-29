@@ -492,7 +492,7 @@ async def on_price_update(symbol, price):
             elif pnl_usd <= -cfg["macd_sl_usd"]:
                 await execute_exit(symbol, price, "SL")
                 st["macd_fade_exit"] = False
-            elif st.get("macd_fade_exit"):
+            elif cfg.get("macd_fast_fade_exit_enabled", True) and st.get("macd_fade_exit"):
                 await execute_exit(symbol, price, "MACD-FADE")
                 st["macd_fade_exit"] = False
             elif cfg.get("macd_slow_fade_exit_enabled", False) and st.get("macd_slow_fade_exit"):
