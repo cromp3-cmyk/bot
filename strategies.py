@@ -56,6 +56,44 @@ async def fetch_candles_binance(symbol, resolution, count_back=150):
     return timestamps, opens, highs, lows, closes
 
 
+def resample_candles(data, factor):
+    """Fasst je 'factor' aufeinanderfolgende Kerzen zu einer groesseren Kerze zusammen
+    (Open der ersten, High/Low ueber alle, Close der letzten, Zeitstempel der ersten).
+    Noetig fuer Zeitrahmen, die Binance nicht direkt anbietet (z.B. 2m)."""
+    timestamps, opens, highs, lows, closes = data
+    n = (len(closes) // factor) * factor
+    if n == 0:
+        return [], [], [], [], []
+    out_ts, out_o, out_h, out_l, out_c = [], [], [], [], []
+    for i in range(0, n, factor):
+        chunk_o = opens[i:i + factor]
+        chunk_h = highs[i:i + factor]
+        chunk_l = lows[i:i + factor]
+        chunk_c = closes[i:i + factor]
+        out_ts.append(timestamps[i])
+        out_o.append(chunk_o[0])
+        out_h.append(max(chunk_h))
+        out_l.append(min(chunk_l))
+        out_c.append(chunk_c[-1])
+    return out_ts, out_o, out_h, out_l, out_c
+
+
+SYNTHETIC_RESOLUTIONS = {"2m": ("1m", 2)}  # Zeitrahmen, die Binance nicht nativ anbietet
+
+
+async def fetch_candles_binance_multi(symbol, resolution, count_back=150):
+    """Wie fetch_candles_binance, kann aber zusaetzlich synthetische Zeitrahmen liefern
+    (z.B. 2m), die Binance selbst nicht unterstuetzt - dafuer wird die naechstkleinere
+    native Aufloesung geholt und zu groesseren Kerzen zusammengefasst."""
+    if resolution in SYNTHETIC_RESOLUTIONS:
+        base_resolution, factor = SYNTHETIC_RESOLUTIONS[resolution]
+        data = await fetch_candles_binance(symbol, base_resolution, count_back=count_back * factor)
+        if data is None:
+            return None
+        return resample_candles(data, factor)
+    return await fetch_candles_binance(symbol, resolution, count_back=count_back)
+
+
 def _ema_series(values, length):
     if not values:
         return []
@@ -66,14 +104,27 @@ def _ema_series(values, length):
     return out
 
 
-def compute_macd_histogram(closes, fast_period, slow_period, signal_period):
+def ema_step(prev_ema, value, period):
+    """Ein einzelner EMA-Rechenschritt - damit kann eine bestehende EMA (Stand: letzte
+    geschlossene Kerze) mit einem einzelnen Live-Preis-Tick weitergerechnet werden,
+    ohne die komplette Historie neu zu holen. Fuer den Live-Zero-Cross-Exit noetig."""
+    k = 2 / (period + 1)
+    return value * k + prev_ema * (1 - k)
+
+
+def compute_macd_histogram(closes, fast_period, slow_period, signal_period, return_components=False):
     """MACD-Histogramm = MACD-Linie (EMA-schnell minus EMA-langsam) minus Signallinie
-    (EMA der MACD-Linie). Nur das Histogramm wird fuer die Strategie genutzt."""
+    (EMA der MACD-Linie). Nur das Histogramm wird fuer die Strategie genutzt.
+    Mit return_components=True werden zusaetzlich die letzten EMA-Werte (ema_fast,
+    ema_slow, signal) zurueckgegeben, um das Histogramm live mit dem aktuellen
+    Preis-Tick weiterzurechnen (siehe ema_step)."""
     ema_fast = _ema_series(closes, fast_period)
     ema_slow = _ema_series(closes, slow_period)
     macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
     signal_line = _ema_series(macd_line, signal_period)
     histogram = [m - s for m, s in zip(macd_line, signal_line)]
+    if return_components:
+        return histogram, ema_fast[-1], ema_slow[-1], signal_line[-1]
     return histogram
 
 
@@ -123,20 +174,25 @@ async def macd_stoch_poll_loop(symbol):
             cfg = b["config"]
             if cfg["entry_mode"] == "macd_stoch":
                 needed_bars = min(500, cfg["macd_slow_slow"] + cfg["macd_slow_signal"] + 60)
-                data = await fetch_candles_binance(symbol, cfg["macd_resolution"], count_back=needed_bars)
+                data = await fetch_candles_binance_multi(symbol, cfg["macd_resolution"], count_back=needed_bars)
                 if data:
                     timestamps, opens, highs, lows, closes = data
                     closed_ts = timestamps[:-1]
                     closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
 
                     if len(closed_c) > cfg["macd_slow_slow"] + cfg["macd_slow_signal"]:
-                        fast_hist = compute_macd_histogram(closed_c, cfg["macd_fast_fast"], cfg["macd_fast_slow"], cfg["macd_fast_signal"])
+                        fast_hist, fast_ema_fast_val, fast_ema_slow_val, fast_signal_val = compute_macd_histogram(
+                            closed_c, cfg["macd_fast_fast"], cfg["macd_fast_slow"], cfg["macd_fast_signal"], return_components=True)
                         slow_hist = compute_macd_histogram(closed_c, cfg["macd_slow_fast"], cfg["macd_slow_slow"], cfg["macd_slow_signal"])
                         st = b["state"]
                         curr_fast = fast_hist[-1]
                         curr_slow = slow_hist[-1]
                         st["macd_fast_hist"] = round(curr_fast, 4)
                         st["macd_slow_hist"] = round(curr_slow, 4)
+                        # Basiswerte (Stand: letzte geschlossene Kerze) fuer den Live-Zero-Cross-Exit
+                        st["macd_fast_ema_fast_val"] = fast_ema_fast_val
+                        st["macd_fast_ema_slow_val"] = fast_ema_slow_val
+                        st["macd_fast_signal_val"] = fast_signal_val
 
                         stoch_k = stoch_d = None
                         if cfg.get("macd_use_stochastic", True):
@@ -178,16 +234,9 @@ async def macd_stoch_poll_loop(symbol):
                                 elif st["position"] == "short" and curr_slow > 0:
                                     st["macd_slow_reversal_exit"] = True
 
-                            # TP ueber Nulllinien-Durchgang des SCHNELLEN Histogramms: laesst die
-                            # Position durch normale Pullback-Dips laufen (die kreuzen die Nulllinie
-                            # ja nicht), schliesst aber sofort, sobald sich der kurzfristige Impuls
-                            # wirklich umkehrt (Gegenrichtung kreuzt die Nulllinie)
-                            if (cfg.get("macd_fast_zero_cross_exit_enabled", True)
-                                    and st["position"] is not None and last_fast_hist is not None):
-                                if st["position"] == "short" and last_fast_hist <= 0 and curr_fast > 0:
-                                    st["macd_fast_zero_cross_exit"] = True
-                                elif st["position"] == "long" and last_fast_hist >= 0 and curr_fast < 0:
-                                    st["macd_fast_zero_cross_exit"] = True
+                            # TP-Zero-Cross wird jetzt LIVE in on_price_update mit dem aktuellen
+                            # Preis-Tick geprueft (siehe ema_step) statt hier auf den naechsten
+                            # Kerzenschluss zu warten - kein Poll-Loop-Flag mehr noetig.
 
                             # Einstieg (Pullback-faehig): langsames Histogramm gibt die Trendrichtung
                             # vor (jeder Gruen-/Rot-Ton reicht), schnelles Histogramm wird GERADE
@@ -513,6 +562,28 @@ async def on_price_update(symbol, price):
         if st["position"] is not None:
             entry = st["avg_entry_price"]
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+
+            # Live-Zero-Cross: rechnet die schnelle MACD-EMA mit dem AKTUELLEN Preis-Tick
+            # weiter (ausgehend vom Stand der letzten geschlossenen Kerze), statt auf den
+            # naechsten Kerzenschluss zu warten - reagiert also sofort, sobald der Live-Preis
+            # die Nulllinie ueberschreiten wuerde.
+            live_zero_cross = False
+            if cfg.get("macd_fast_zero_cross_exit_enabled", True):
+                base_ema_fast = st.get("macd_fast_ema_fast_val")
+                base_ema_slow = st.get("macd_fast_ema_slow_val")
+                base_signal = st.get("macd_fast_signal_val")
+                last_closed_fast = st.get("macd_fast_hist")
+                if base_ema_fast is not None and base_ema_slow is not None and base_signal is not None and last_closed_fast is not None:
+                    live_ema_fast = ema_step(base_ema_fast, price, cfg["macd_fast_fast"])
+                    live_ema_slow = ema_step(base_ema_slow, price, cfg["macd_fast_slow"])
+                    live_macd_line = live_ema_fast - live_ema_slow
+                    live_signal = ema_step(base_signal, live_macd_line, cfg["macd_fast_signal"])
+                    live_fast_hist = live_macd_line - live_signal
+                    if st["position"] == "short" and last_closed_fast <= 0 and live_fast_hist > 0:
+                        live_zero_cross = True
+                    elif st["position"] == "long" and last_closed_fast >= 0 and live_fast_hist < 0:
+                        live_zero_cross = True
+
             if pnl_usd <= -cfg["macd_sl_usd"]:
                 await execute_exit(symbol, price, "SL")
                 st["macd_fade_exit"] = False
@@ -527,7 +598,7 @@ async def on_price_update(symbol, price):
                 st["macd_slow_reversal_exit"] = False
                 st["macd_fade_exit"] = False
                 st["macd_slow_fade_exit"] = False
-            elif cfg.get("macd_fast_zero_cross_exit_enabled", True) and st.get("macd_fast_zero_cross_exit"):
+            elif live_zero_cross:
                 await execute_exit(symbol, price, "MACD-ZERO-CROSS")
                 st["macd_fast_zero_cross_exit"] = False
                 st["macd_fade_exit"] = False

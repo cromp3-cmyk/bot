@@ -239,6 +239,7 @@ def default_state():
         "macd_fast_hist": None, "macd_slow_hist": None, "macd_stoch_k": None, "macd_stoch_d": None,
         "macd_fade_exit": False, "macd_slow_fade_exit": False, "macd_slow_reversal_exit": False,
         "macd_fast_zero_cross_exit": False,
+        "macd_fast_ema_fast_val": None, "macd_fast_ema_slow_val": None, "macd_fast_signal_val": None,
         "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
         "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
@@ -642,6 +643,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <h2 class="section-title">Kursverlauf</h2>
 <div style="position:relative; height:400px;"><canvas id="priceChart"></canvas></div>
 
+<div id="pocket-trading-section" style="display:none;">
+  <h2 class="section-title">⚡ Pocket-Trading (manuell, läuft parallel zur Automatik)</h2>
+  <div class="panel-card">
+    <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:16px;">
+      <div><div class="label">Margin (nächster Klick)</div><div class="value" id="pocket-margin">-</div></div>
+      <div><div class="label">Position</div><div class="value" id="pocket-position">-</div></div>
+      <div><div class="label">Ø-Einstieg</div><div class="value" id="pocket-entry">-</div></div>
+      <div><div class="label">Unrealisiert $</div><div class="value" id="pocket-pnl">-</div></div>
+    </div>
+    <div style="display:flex; gap:12px; margin-bottom:18px;">
+      <button id="btn-manual-buy" style="flex:1; padding:24px 10px; font-size:20px; font-weight:700; background:#16a34a; color:white; border:none; border-radius:14px; cursor:pointer;">⬆️ BUY</button>
+      <button id="btn-manual-sell" style="flex:1; padding:24px 10px; font-size:20px; font-weight:700; background:#dc2626; color:white; border:none; border-radius:14px; cursor:pointer;">⬇️ SELL</button>
+      <button id="btn-manual-tp" style="flex:1; padding:24px 10px; font-size:20px; font-weight:700; background:#2563eb; color:white; border:none; border-radius:14px; cursor:pointer;">✅ TP</button>
+    </div>
+    <div class="label" style="margin-bottom:6px;">Letzte 10 Kerzen (aus dem Live-Preis-Tick zusammengesetzt)</div>
+    <div id="mini-candles" style="display:flex; gap:4px; align-items:center; height:70px;"></div>
+  </div>
+</div>
+
 <div id="obi-chart-section" style="display:none;">
   <h2 class="section-title">OBI-Verlauf (schnell / mittel / langsam)</h2>
   <div style="position:relative; height:250px;"><canvas id="obiChart"></canvas></div>
@@ -697,6 +717,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="macd_stoch"><label>Zeitrahmen</label>
     <select class="cfg" id="macd_resolution">
       <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch aus 1m-Kerzen zusammengesetzt)</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
     </select>
@@ -797,6 +818,45 @@ let obiChart;
 let currentSymbol = null;
 let allSymbols = [];
 
+function computeEMA(values, period) {
+  if (!values.length) return [];
+  const k = 2 / (period + 1);
+  const out = [values[0]];
+  for (let i = 1; i < values.length; i++) out.push(values[i] * k + out[i-1] * (1 - k));
+  return out;
+}
+
+function renderMiniCandles(hist) {
+  const container = document.getElementById('mini-candles');
+  if (!container) return;
+  if (!hist || hist.length < 2) { container.innerHTML = '<span style="color:#6b7280;">noch nicht genug Daten</span>'; return; }
+  const numCandles = 10;
+  const chunkSize = Math.max(1, Math.floor(hist.length / numCandles));
+  const candles = [];
+  for (let i = 0; i < hist.length; i += chunkSize) {
+    const chunk = hist.slice(i, i + chunkSize).map(p => p.price);
+    if (!chunk.length) continue;
+    candles.push({ open: chunk[0], close: chunk[chunk.length-1], high: Math.max(...chunk), low: Math.min(...chunk) });
+  }
+  const last10 = candles.slice(-numCandles);
+  const globalMin = Math.min(...last10.map(c => c.low));
+  const globalMax = Math.max(...last10.map(c => c.high));
+  const range = (globalMax - globalMin) || 1;
+  const maxPx = 60;
+  container.innerHTML = last10.map(c => {
+    const isGreen = c.close >= c.open;
+    const bodyTop = maxPx * (1 - (Math.max(c.open, c.close) - globalMin) / range);
+    const bodyHeight = Math.max(2, maxPx * (Math.abs(c.close - c.open) / range));
+    const wickTop = maxPx * (1 - (c.high - globalMin) / range);
+    const wickHeight = Math.max(1, maxPx * ((c.high - c.low) / range));
+    const color = isGreen ? '#4ade80' : '#f87171';
+    return `<div style="position:relative; width:18px; height:${maxPx}px;">
+      <div style="position:absolute; left:8px; top:${wickTop}px; width:2px; height:${wickHeight}px; background:${color};"></div>
+      <div style="position:absolute; left:2px; top:${bodyTop}px; width:14px; height:${bodyHeight}px; background:${color}; border-radius:2px;"></div>
+    </div>`;
+  }).join('');
+}
+
 function updateModeFields() {
   const mode = document.getElementById('entry_mode').value;
   document.querySelectorAll('[data-mode]').forEach(el => {
@@ -835,6 +895,23 @@ document.getElementById('btn-close').addEventListener('click', async () => {
 document.getElementById('btn-reset').addEventListener('click', async () => {
   if (!confirm(`Statistik/Trade-Log für ${currentSymbol} zurücksetzen? (nur möglich wenn flach)`)) return;
   const res = await fetch(`/api/reset?symbol=${currentSymbol}`, { method:'POST' });
+  const data = await res.json();
+  if (data.error) alert(data.error);
+  refresh();
+});
+
+async function manualTrade(direction) {
+  const res = await fetch(`/api/manual_trade?symbol=${currentSymbol}`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({direction})
+  });
+  const data = await res.json();
+  if (data.error) alert(data.error);
+  refresh();
+}
+document.getElementById('btn-manual-buy').addEventListener('click', () => manualTrade('long'));
+document.getElementById('btn-manual-sell').addEventListener('click', () => manualTrade('short'));
+document.getElementById('btn-manual-tp').addEventListener('click', async () => {
+  const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method:'POST' });
   const data = await res.json();
   if (data.error) alert(data.error);
   refresh();
@@ -955,6 +1032,11 @@ async function refresh() {
   if (gl.next_entry_long) datasets.push({ label:'Entry Long ab', data: Array(n).fill(gl.next_entry_long), borderColor:'#4ade80', borderDash:[2,2], pointRadius:0, borderWidth:1 });
   if (gl.next_entry_short) datasets.push({ label:'Entry Short ab', data: Array(n).fill(gl.next_entry_short), borderColor:'#f87171', borderDash:[2,2], pointRadius:0, borderWidth:1 });
 
+  if (data.config.entry_mode === 'obi_scalp' && prices.length > 5) {
+    datasets.push({ label:'EMA 9', data: computeEMA(prices, 9), borderColor:'#fbbf24', pointRadius:0, borderWidth:1.5 });
+    datasets.push({ label:'EMA 21', data: computeEMA(prices, 21), borderColor:'#a78bfa', pointRadius:0, borderWidth:1.5 });
+  }
+
   if (!priceChart) {
     priceChart = new Chart(document.getElementById('priceChart'), {
       type: 'line',
@@ -997,6 +1079,20 @@ async function refresh() {
     }
   } else {
     obiSection.style.display = 'none';
+  }
+
+  const pocketSection = document.getElementById('pocket-trading-section');
+  if (data.config.entry_mode === 'obi_scalp') {
+    pocketSection.style.display = 'block';
+    document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
+    document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
+    document.getElementById('pocket-entry').innerText = data.avg_entry_price ?? '-';
+    const pnlEl = document.getElementById('pocket-pnl');
+    pnlEl.innerText = data.unrealized_pnl_usd ?? '-';
+    pnlEl.className = (data.unrealized_pnl_usd ?? 0) >= 0 ? 'value green' : 'value red';
+    renderMiniCandles(hist);
+  } else {
+    pocketSection.style.display = 'none';
   }
 
   const trades = (data.trade_log || []).slice(-15).reverse();
@@ -1169,6 +1265,34 @@ async def handle_control(request):
         cfg["bot_active"] = bool(body["bot_active"])
         debug_log(f"{'▶️' if cfg['bot_active'] else '⏸️'} [{symbol}] Bot {'gestartet' if cfg['bot_active'] else 'gestoppt'}")
     return web.json_response({"success": True, "bot_active": cfg["bot_active"]})
+
+
+async def handle_manual_trade(request):
+    """Manueller Buy/Sell-Button (Pocket-Trading-Panel, laeuft parallel zur Automatik):
+    - flach -> neue Position in die geklickte Richtung
+    - gleiche Richtung bereits offen -> Nachkauf (Ø-Einstieg wird angepasst)
+    - Gegenrichtung offen -> erst schliessen, dann in die geklickte Richtung neu eroeffnen"""
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    direction = body.get("direction")
+    if direction not in ("long", "short"):
+        return web.json_response({"error": "direction muss 'long' oder 'short' sein"}, status=400)
+    st = BOTS[symbol]["state"]
+    if st["last_price"] is None:
+        return web.json_response({"error": "kein aktueller Preis bekannt"}, status=400)
+    price = st["last_price"]
+
+    if st["position"] is not None and st["position"] != direction:
+        await execute_exit(symbol, price, "MANUAL-REVERSE")
+        price = st["last_price"]
+
+    is_add_on = st["position"] == direction
+    ok = await execute_entry(symbol, direction, price, is_add_on=is_add_on)
+    if not ok:
+        return web.json_response({"error": "Order fehlgeschlagen - siehe Log"}, status=500)
+    return web.json_response({"success": True, "position": st["position"], "avg_entry_price": st["avg_entry_price"]})
 
 
 async def handle_close_position(request):
