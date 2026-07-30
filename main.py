@@ -15,7 +15,9 @@ from bot_core import (
     handle_manual_trade,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
-from strategies import trading_loop, macd_stoch_poll_loop, fib_reversal_poll_loop
+from strategies import (
+    trading_loop, macd_stoch_poll_loop, fib_reversal_poll_loop, stoch_cross_poll_loop, range_profile_poll_loop,
+)
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
     handle_ct_index, handle_ct_status, handle_ct_watch, handle_ct_copy_toggle,
@@ -72,6 +74,8 @@ async def main():
         trading_loop(),
         *[macd_stoch_poll_loop(s) for s in SYMBOLS],
         *[fib_reversal_poll_loop(s) for s in SYMBOLS],
+        *[stoch_cross_poll_loop(s) for s in SYMBOLS],
+        *[range_profile_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
     )

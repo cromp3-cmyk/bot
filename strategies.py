@@ -356,6 +356,217 @@ async def fib_reversal_poll_loop(symbol):
         await asyncio.sleep(30)
 
 
+async def stoch_cross_poll_loop(symbol):
+    """Einfache Stochastic-Cross-Strategie: %K kreuzt von unten nach oben durch die
+    Ueberverkauft-Schwelle (Standard 20) -> Long. %K kreuzt von oben nach unten durch
+    die Ueberkauft-Schwelle (Standard 80) -> Short. TP/SL sind feste $-Betraege."""
+    b = BOTS[symbol]
+    last_k = None
+    last_processed_ts = None
+    last_entry_signal_ts = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "stoch_cross":
+                needed_bars = max(60, cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"] + 20)
+                data = await fetch_candles_binance_multi(symbol, cfg["stoch_cross_resolution"], count_back=needed_bars)
+                if data:
+                    timestamps, opens, highs, lows, closes = data
+                    closed_ts = timestamps[:-1]
+                    closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
+
+                    if len(closed_c) >= cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"]:
+                        k_series, d_series = compute_stochastic(closed_h, closed_l, closed_c,
+                                                                  cfg["stoch_cross_k_period"], cfg["stoch_cross_k_smooth"], cfg["stoch_cross_d_period"])
+                        if k_series:
+                            st = b["state"]
+                            curr_k = k_series[-1]
+                            curr_d = d_series[-1] if d_series else None
+                            st["stoch_cross_k"] = round(curr_k, 2)
+                            st["stoch_cross_d"] = round(curr_d, 2) if curr_d is not None else None
+
+                            # Nur einmal pro tatsaechlich neu geschlossener Kerze auswerten
+                            signal_key = closed_ts[-1]
+                            if last_processed_ts != signal_key:
+                                if (st["position"] is None and cfg["bot_active"]
+                                        and last_entry_signal_ts != signal_key and last_k is not None):
+                                    direction = None
+                                    if last_k <= cfg["stoch_cross_oversold"] and curr_k > cfg["stoch_cross_oversold"]:
+                                        direction = "long"
+                                    elif last_k >= cfg["stoch_cross_overbought"] and curr_k < cfg["stoch_cross_overbought"]:
+                                        direction = "short"
+
+                                    if direction:
+                                        last_entry_signal_ts = signal_key
+                                        price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                                        debug_log(f"📡 [{symbol}] Stochastic-Cross Signal: {direction.upper()} @ {price} (%K {round(curr_k,2)})")
+                                        await execute_entry(symbol, direction, price, is_add_on=False)
+
+                                last_k = curr_k
+                                last_processed_ts = signal_key
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Stochastic-Cross-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(5)
+
+
+def compute_atr(highs, lows, closes, period):
+    """ATR mit Wilder-RMA-Glaettung (wie Pine's ta.atr), fuer marktadaptive SL-Groesse."""
+    n = len(closes)
+    if n < 2:
+        return []
+    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
+    for i in range(1, n):
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+    atr = [tr[0]] * n
+    for i in range(1, n):
+        if i < period:
+            atr[i] = sum(tr[:i + 1]) / (i + 1)
+        else:
+            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    return atr
+
+
+def compute_range_profile_snapshot(highs, lows, closes, opens, lookback, bins, ob_os_level):
+    """Portiert aus dem Pine-Script 'Range Profile Oscillator': baut ueber die letzten
+    'lookback' Kerzen ein Bullen-/Baeren-gewichtetes Histogramm (Volumen-Profil-Prinzip,
+    aber gewichtet nach Kerzenrichtung statt echtem Volumen), findet den Point of Control
+    (staerkste Preiszone) als Mittellinie und zieht einen Kanal, der ob_os_level% des
+    Gesamtgewichts um die Mittellinie einschliesst. Gibt None zurueck, wenn nicht genug
+    Daten oder eine Preisspanne von 0 vorliegt."""
+    if len(closes) < lookback:
+        return None
+    h, l, c, o = highs[-lookback:], lows[-lookback:], closes[-lookback:], opens[-lookback:]
+
+    minL, maxH = min(l), max(h)
+    price_range = maxH - minL
+    if price_range <= 0:
+        return None
+    bin_size = price_range / bins
+    bull_w = [0.0] * bins
+    bear_w = [0.0] * bins
+
+    for i in range(lookback):
+        candle_size = h[i] - l[i]
+        if candle_size <= 0:
+            continue
+        b1 = max(0, min(bins - 1, int((l[i] - minL) / bin_size)))
+        b2 = max(0, min(bins - 1, int((h[i] - minL) / bin_size)))
+        is_bull = c[i] >= o[i]
+        for b in range(b1, b2 + 1):
+            if is_bull:
+                bull_w[b] += bin_size
+            else:
+                bear_w[b] += bin_size
+
+    total_per_bin = [bull_w[i] + bear_w[i] for i in range(bins)]
+    mid_bin = max(range(bins), key=lambda i: total_per_bin[i])
+    mid_price = minL + bin_size * (mid_bin + 0.5)
+
+    total = sum(total_per_bin)
+    if total <= 0:
+        return None
+    remaining = total * (ob_os_level / 100) - total_per_bin[mid_bin]
+    lowB, highB = mid_bin, mid_bin
+    while remaining > 0 and (lowB > 0 or highB < bins - 1):
+        upper = total_per_bin[highB + 1] if highB < bins - 1 else -1
+        lower = total_per_bin[lowB - 1] if lowB > 0 else -1
+        if upper >= lower and upper >= 0:
+            highB += 1
+            remaining -= upper
+        elif lower >= 0:
+            lowB -= 1
+            remaining -= lower
+        else:
+            break
+
+    range_low = minL + lowB * bin_size
+    range_high = minL + (highB + 1) * bin_size
+    half_range = (range_high - range_low) / 2
+    if half_range <= 0:
+        return None
+    osc = (c[-1] - mid_price) / half_range * ob_os_level
+    return {"mid_price": mid_price, "range_high": range_high, "range_low": range_low, "osc": osc}
+
+
+async def range_profile_poll_loop(symbol):
+    """Range-Profile-Strategie (portiert aus dem 'Range Profile Oscillator'-Indikator),
+    zwei waehlbare Modi:
+    - reversion (empfohlen): Ausbruch ueber/unter den Kanal wird als Gegenrichtung
+      gehandelt, TP ist die tatsaechlich berechnete Mittellinie (Point of Control) -
+      passt sich also automatisch der Marktlage an statt einem festen Betrag.
+    - momentum: wie im Original-Indikator, Ausbruch wird in Ausbruchsrichtung gehandelt.
+    In beiden Modi ist der SL ATR-basiert (marktadaptiv), im Momentum-Modus ist das TP
+    ein Risk/Reward-Vielfaches des ATR-Risikos."""
+    b = BOTS[symbol]
+    last_osc = None
+    last_processed_ts = None
+    last_entry_signal_ts = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "range_profile":
+                lookback = cfg["rp_lookback"]
+                needed_bars = min(1000, lookback + max(cfg["rp_atr_period"] * 5, 60) + 5)
+                data = await fetch_candles_binance_multi(symbol, cfg["rp_resolution"], count_back=needed_bars)
+                if data:
+                    timestamps, opens, highs, lows, closes = data
+                    closed_ts = timestamps[:-1]
+                    closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+
+                    if len(closed_c) > lookback + 2:
+                        snap = compute_range_profile_snapshot(closed_h, closed_l, closed_c, closed_o, lookback, 50, cfg["rp_ob_os_level"])
+                        atr_series = compute_atr(closed_h, closed_l, closed_c, cfg["rp_atr_period"])
+                        if snap and atr_series:
+                            st = b["state"]
+                            curr_osc = snap["osc"]
+                            curr_atr = atr_series[-1]
+                            st["rp_osc"] = round(curr_osc, 2)
+                            st["rp_mid_price"] = round(snap["mid_price"], 4)
+                            st["rp_range_high"] = round(snap["range_high"], 4)
+                            st["rp_range_low"] = round(snap["range_low"], 4)
+
+                            signal_key = closed_ts[-1]
+                            if last_processed_ts != signal_key:
+                                if (st["position"] is None and cfg["bot_active"]
+                                        and last_entry_signal_ts != signal_key and last_osc is not None):
+                                    ob = cfg["rp_ob_os_level"]
+                                    breakout_up = last_osc <= ob and curr_osc > ob
+                                    breakout_down = last_osc >= -ob and curr_osc < -ob
+                                    mode = cfg.get("rp_mode", "reversion")
+
+                                    direction = None
+                                    if breakout_up:
+                                        direction = "short" if mode == "reversion" else "long"
+                                    elif breakout_down:
+                                        direction = "long" if mode == "reversion" else "short"
+
+                                    if direction:
+                                        last_entry_signal_ts = signal_key
+                                        price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                                        risk_dist = curr_atr * cfg["rp_sl_atr_mult"]
+                                        sl_price = price - risk_dist if direction == "long" else price + risk_dist
+                                        if mode == "reversion":
+                                            tp_price = snap["mid_price"]
+                                        else:
+                                            tp_price = price + risk_dist * cfg["rp_tp_rr"] if direction == "long" else price - risk_dist * cfg["rp_tp_rr"]
+
+                                        debug_log(f"📡 [{symbol}] Range-Profile Signal ({mode}): {direction.upper()} @ {price} "
+                                                  f"| Mitte {round(snap['mid_price'],4)} | SL {round(sl_price,4)} | TP {round(tp_price,4)} | Oszillator {round(curr_osc,2)}")
+                                        st["rp_sl_price"] = sl_price
+                                        st["rp_tp_price"] = tp_price
+                                        await execute_entry(symbol, direction, price, is_add_on=False)
+
+                                last_osc = curr_osc
+                                last_processed_ts = signal_key
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Range-Profile-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(5)
+
+
 def calc_obi(symbol, levels):
     book = BOTS[symbol]["state"]["obi_book"]
     bids_sorted = sorted(book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
@@ -673,6 +884,35 @@ async def on_price_update(symbol, price):
             st["fib_tp1_done"] = False
             st["fib_sl_active_price"] = None
             st["fib"] = None
+        return
+
+    if cfg["entry_mode"] == "stoch_cross":
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if pnl_usd <= -cfg["stoch_cross_sl_usd"]:
+                await execute_exit(symbol, price, "SL")
+            elif pnl_usd >= cfg["stoch_cross_tp_usd"]:
+                await execute_exit(symbol, price, "TP")
+        return
+
+    if cfg["entry_mode"] == "range_profile":
+        if st["position"] is not None:
+            sl_price = st.get("rp_sl_price")
+            tp_price = st.get("rp_tp_price")
+            if sl_price is not None:
+                sl_hit = price <= sl_price if st["position"] == "long" else price >= sl_price
+                if sl_hit:
+                    await execute_exit(symbol, price, "SL")
+                    st["rp_sl_price"] = None
+                    st["rp_tp_price"] = None
+                    return
+            if tp_price is not None:
+                tp_hit = price >= tp_price if st["position"] == "long" else price <= tp_price
+                if tp_hit:
+                    await execute_exit(symbol, price, "TP")
+                    st["rp_sl_price"] = None
+                    st["rp_tp_price"] = None
         return
 
     if st["position"] is None:

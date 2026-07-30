@@ -222,6 +222,21 @@ def default_config():
         "fib_sl_level": float(os.getenv("FIB_SL_LEVEL", "1.0")),
         "fib_tp1_close_pct": float(os.getenv("FIB_TP1_CLOSE_PCT", "50")),
         "fib_cooldown_seconds": float(os.getenv("FIB_COOLDOWN_SECONDS", "300")),
+        "stoch_cross_resolution": os.getenv("STOCH_CROSS_RESOLUTION", "1m"),  # "1m", "2m", "5m" oder "15m"
+        "stoch_cross_k_period": int(os.getenv("STOCH_CROSS_K_PERIOD", "7")),
+        "stoch_cross_k_smooth": int(os.getenv("STOCH_CROSS_K_SMOOTH", "3")),
+        "stoch_cross_d_period": int(os.getenv("STOCH_CROSS_D_PERIOD", "3")),
+        "stoch_cross_oversold": float(os.getenv("STOCH_CROSS_OVERSOLD", "20")),
+        "stoch_cross_overbought": float(os.getenv("STOCH_CROSS_OVERBOUGHT", "80")),
+        "stoch_cross_tp_usd": float(os.getenv("STOCH_CROSS_TP_USD", "3")),
+        "stoch_cross_sl_usd": float(os.getenv("STOCH_CROSS_SL_USD", "3")),
+        "rp_mode": os.getenv("RP_MODE", "reversion"),  # "reversion" (empfohlen) oder "momentum"
+        "rp_resolution": os.getenv("RP_RESOLUTION", "1m"),
+        "rp_lookback": int(os.getenv("RP_LOOKBACK", "110")),
+        "rp_ob_os_level": float(os.getenv("RP_OB_OS_LEVEL", "80")),
+        "rp_atr_period": int(os.getenv("RP_ATR_PERIOD", "14")),
+        "rp_sl_atr_mult": float(os.getenv("RP_SL_ATR_MULT", "1.5")),
+        "rp_tp_rr": float(os.getenv("RP_TP_RR", "1.0")),  # nur im momentum-Modus genutzt
     }
 
 
@@ -242,6 +257,9 @@ def default_state():
         "macd_fast_ema_fast_val": None, "macd_fast_ema_slow_val": None, "macd_fast_signal_val": None,
         "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
         "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
+        "stoch_cross_k": None, "stoch_cross_d": None,
+        "rp_osc": None, "rp_mid_price": None, "rp_range_high": None, "rp_range_low": None,
+        "rp_sl_price": None, "rp_tp_price": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -679,6 +697,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="obi_scalp">OBI-Scalp (Orderbuch-Ungleichgewicht, symmetrisches TP/SL)</option>
       <option value="macd_stoch">MACD-Dual + Stochastic (Histogramm-Trend, optional Stochastic-Filter)</option>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
+      <option value="stoch_cross">Stochastic-Cross (unter 20 = Long, über 80 = Short, fester TP/SL)</option>
+      <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, ATR-SL)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -777,6 +797,40 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="fib_reversal"><label>TP2 (Fib-Level, Rest schließen)</label><input type="number" step="0.001" id="fib_tp2_level"></div>
   <div data-mode="fib_reversal"><label>Stop-Loss (Fib-Level)</label><input type="number" step="0.001" id="fib_sl_level"></div>
   <div data-mode="fib_reversal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="fib_cooldown_seconds"></div>
+  <div data-mode="stoch_cross"><label>Zeitrahmen</label>
+    <select class="cfg" id="stoch_cross_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+    </select>
+  </div>
+  <div data-mode="stoch_cross"><label>Stochastic %K-Periode</label><input type="number" step="1" id="stoch_cross_k_period"></div>
+  <div data-mode="stoch_cross"><label>Stochastic %K-Glättung</label><input type="number" step="1" id="stoch_cross_k_smooth"></div>
+  <div data-mode="stoch_cross"><label>Stochastic %D-Periode</label><input type="number" step="1" id="stoch_cross_d_period"></div>
+  <div data-mode="stoch_cross"><label>Überverkauft-Schwelle (Long-Kreuzung)</label><input type="number" step="1" id="stoch_cross_oversold"></div>
+  <div data-mode="stoch_cross"><label>Überkauft-Schwelle (Short-Kreuzung)</label><input type="number" step="1" id="stoch_cross_overbought"></div>
+  <div data-mode="stoch_cross"><label>TP ($, fest)</label><input type="number" step="any" id="stoch_cross_tp_usd"></div>
+  <div data-mode="stoch_cross"><label>SL ($, fest)</label><input type="number" step="any" id="stoch_cross_sl_usd"></div>
+  <div data-mode="range_profile"><label>Modus</label>
+    <select class="cfg" id="rp_mode">
+      <option value="reversion">Reversion - Ausbruch = Gegenrichtung, TP = Mittellinie</option>
+      <option value="momentum">Momentum - Ausbruch = Fortsetzung (wie Original-Indikator)</option>
+    </select>
+  </div>
+  <div data-mode="range_profile"><label>Zeitrahmen</label>
+    <select class="cfg" id="rp_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+    </select>
+  </div>
+  <div data-mode="range_profile"><label>Lookback (Kerzen)</label><input type="number" step="1" id="rp_lookback"></div>
+  <div data-mode="range_profile"><label>OB/OS-Level (%)</label><input type="number" step="1" id="rp_ob_os_level"></div>
+  <div data-mode="range_profile"><label>ATR-Periode</label><input type="number" step="1" id="rp_atr_period"></div>
+  <div data-mode="range_profile"><label>SL ATR-Multiplikator</label><input type="number" step="0.1" id="rp_sl_atr_mult"></div>
+  <div data-mode="range_profile"><label>TP Risk/Reward (nur Momentum-Modus)</label><input type="number" step="0.1" id="rp_tp_rr"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -955,6 +1009,10 @@ async function refresh() {
     <div class="card"><div class="label">Fib High / Low (${data.config.entry_mode==='fib_reversal'?'aktiv':'inaktiv'})</div><div class="value">${data.fib?.high ?? '-'} / ${data.fib?.low ?? '-'}</div></div>
     <div class="card"><div class="label">Fib Einstieg 1 / 2</div><div class="value">${data.fib?.entry1_price ?? '-'} / ${data.fib?.entry2_price ?? '-'}</div></div>
     <div class="card"><div class="label">Fib TP1 / TP2 / SL</div><div class="value">${data.fib?.tp1_price ?? '-'} / ${data.fib?.tp2_price ?? '-'} / ${data.fib?.sl_price ?? '-'}</div></div>
+    <div class="card"><div class="label">Stochastic-Cross %K / %D (${data.config.entry_mode==='stoch_cross'?'aktiv':'inaktiv'})</div><div class="value">${data.stoch_cross_k ?? '-'} / ${data.stoch_cross_d ?? '-'}</div></div>
+    <div class="card"><div class="label">Range-Profile Oszillator (${data.config.entry_mode==='range_profile'?'aktiv':'inaktiv'})</div><div class="value ${(data.rp_osc??0)>=0?'green':'red'}">${data.rp_osc ?? '-'}</div></div>
+    <div class="card"><div class="label">Range-Profile Mitte / Kanal</div><div class="value">${data.rp_mid_price ?? '-'} (${data.rp_range_low ?? '-'} – ${data.rp_range_high ?? '-'})</div></div>
+    <div class="card"><div class="label">Range-Profile SL / TP (aktive Position)</div><div class="value">${data.rp_sl_price ?? '-'} / ${data.rp_tp_price ?? '-'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -1006,6 +1064,21 @@ async function refresh() {
     document.getElementById('fib_tp2_level').value = data.config.fib_tp2_level;
     document.getElementById('fib_sl_level').value = data.config.fib_sl_level;
     document.getElementById('fib_cooldown_seconds').value = data.config.fib_cooldown_seconds;
+    document.getElementById('stoch_cross_resolution').value = data.config.stoch_cross_resolution;
+    document.getElementById('stoch_cross_k_period').value = data.config.stoch_cross_k_period;
+    document.getElementById('stoch_cross_k_smooth').value = data.config.stoch_cross_k_smooth;
+    document.getElementById('stoch_cross_d_period').value = data.config.stoch_cross_d_period;
+    document.getElementById('stoch_cross_oversold').value = data.config.stoch_cross_oversold;
+    document.getElementById('stoch_cross_overbought').value = data.config.stoch_cross_overbought;
+    document.getElementById('stoch_cross_tp_usd').value = data.config.stoch_cross_tp_usd;
+    document.getElementById('stoch_cross_sl_usd').value = data.config.stoch_cross_sl_usd;
+    document.getElementById('rp_mode').value = data.config.rp_mode;
+    document.getElementById('rp_resolution').value = data.config.rp_resolution;
+    document.getElementById('rp_lookback').value = data.config.rp_lookback;
+    document.getElementById('rp_ob_os_level').value = data.config.rp_ob_os_level;
+    document.getElementById('rp_atr_period').value = data.config.rp_atr_period;
+    document.getElementById('rp_sl_atr_mult').value = data.config.rp_sl_atr_mult;
+    document.getElementById('rp_tp_rr').value = data.config.rp_tp_rr;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -1152,6 +1225,21 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     fib_tp2_level: parseFloat(document.getElementById('fib_tp2_level').value),
     fib_sl_level: parseFloat(document.getElementById('fib_sl_level').value),
     fib_cooldown_seconds: parseFloat(document.getElementById('fib_cooldown_seconds').value),
+    stoch_cross_resolution: document.getElementById('stoch_cross_resolution').value,
+    stoch_cross_k_period: parseInt(document.getElementById('stoch_cross_k_period').value),
+    stoch_cross_k_smooth: parseInt(document.getElementById('stoch_cross_k_smooth').value),
+    stoch_cross_d_period: parseInt(document.getElementById('stoch_cross_d_period').value),
+    stoch_cross_oversold: parseFloat(document.getElementById('stoch_cross_oversold').value),
+    stoch_cross_overbought: parseFloat(document.getElementById('stoch_cross_overbought').value),
+    stoch_cross_tp_usd: parseFloat(document.getElementById('stoch_cross_tp_usd').value),
+    stoch_cross_sl_usd: parseFloat(document.getElementById('stoch_cross_sl_usd').value),
+    rp_mode: document.getElementById('rp_mode').value,
+    rp_resolution: document.getElementById('rp_resolution').value,
+    rp_lookback: parseInt(document.getElementById('rp_lookback').value),
+    rp_ob_os_level: parseFloat(document.getElementById('rp_ob_os_level').value),
+    rp_atr_period: parseInt(document.getElementById('rp_atr_period').value),
+    rp_sl_atr_mult: parseFloat(document.getElementById('rp_sl_atr_mult').value),
+    rp_tp_rr: parseFloat(document.getElementById('rp_tp_rr').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -1166,7 +1254,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1221,6 +1309,10 @@ async def handle_status(request):
         "macd_fast_hist": st.get("macd_fast_hist"), "macd_slow_hist": st.get("macd_slow_hist"),
         "macd_stoch_k": st.get("macd_stoch_k"), "macd_stoch_d": st.get("macd_stoch_d"),
         "fib": st.get("fib"),
+        "stoch_cross_k": st.get("stoch_cross_k"), "stoch_cross_d": st.get("stoch_cross_d"),
+        "rp_osc": st.get("rp_osc"), "rp_mid_price": st.get("rp_mid_price"),
+        "rp_range_high": st.get("rp_range_high"), "rp_range_low": st.get("rp_range_low"),
+        "rp_sl_price": st.get("rp_sl_price"), "rp_tp_price": st.get("rp_tp_price"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -1247,7 +1339,10 @@ async def handle_config_update(request):
                 "macd_slow_reversal_exit_enabled",
                 "macd_fast_zero_cross_exit_enabled",
                 "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
-                "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds"]:
+                "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds",
+                "stoch_cross_resolution", "stoch_cross_k_period", "stoch_cross_k_smooth", "stoch_cross_d_period",
+                "stoch_cross_oversold", "stoch_cross_overbought", "stoch_cross_tp_usd", "stoch_cross_sl_usd",
+                "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_atr_period", "rp_sl_atr_mult", "rp_tp_rr"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
