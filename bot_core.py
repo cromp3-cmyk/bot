@@ -256,6 +256,7 @@ def default_config():
         "macd_simple_signal": int(os.getenv("MACD_SIMPLE_SIGNAL", "9")),
         "macd_simple_tp_usd": float(os.getenv("MACD_SIMPLE_TP_USD", "3")),
         "macd_simple_sl_usd": float(os.getenv("MACD_SIMPLE_SL_USD", "3")),
+        "macd_simple_exit_mode": os.getenv("MACD_SIMPLE_EXIT_MODE", "tp_sl"),  # "tp_sl" oder "reverse"
         "rp_require_squeeze": os.getenv("RP_REQUIRE_SQUEEZE", "false").lower() == "true",
     }
 
@@ -286,9 +287,7 @@ def default_state():
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "macd_simple_hist": None, "macd_simple_hist_history": [],
-        "local30s_bucket_start": None, "local30s_candle_open": None,
-        "local30s_candle_high": None, "local30s_candle_low": None, "local30s_candle_last": None,
-        "local30s_candles": [],
+        "binance_1s_buffer": [],
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -771,7 +770,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="obi_scalp"><label>Trend-EMA Länge (Trades)</label><input type="number" step="1" id="obi_trend_ema_length"></div>
   <div data-mode="macd_stoch"><label>Zeitrahmen</label>
     <select class="cfg" id="macd_resolution">
-      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
       <option value="2m">2 Minuten (synthetisch aus 1m-Kerzen zusammengesetzt)</option>
       <option value="5m">5 Minuten</option>
@@ -821,7 +822,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
-      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
     </select>
@@ -836,7 +839,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="fib_reversal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="fib_cooldown_seconds"></div>
   <div data-mode="stoch_cross"><label>Zeitrahmen</label>
     <select class="cfg" id="stoch_cross_resolution">
-      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
       <option value="2m">2 Minuten (synthetisch)</option>
       <option value="5m">5 Minuten</option>
@@ -889,7 +894,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="range_profile"><label>Zeitrahmen</label>
     <select class="cfg" id="rp_resolution">
-      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
       <option value="2m">2 Minuten (synthetisch)</option>
       <option value="5m">5 Minuten</option>
@@ -905,7 +912,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="range_profile"><label>Squeeze-Schwelle (%)</label><input type="number" step="5" id="rp_squeeze_threshold_pct"></div>
   <div data-mode="macd_simple"><label>Zeitrahmen</label>
     <select class="cfg" id="macd_simple_resolution">
-      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
       <option value="2m">2 Minuten (synthetisch)</option>
       <option value="5m">5 Minuten</option>
@@ -917,6 +926,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="macd_simple"><label>MACD Signal</label><input type="number" step="1" id="macd_simple_signal"></div>
   <div data-mode="macd_simple"><label>TP ($, fest)</label><input type="number" step="any" id="macd_simple_tp_usd"></div>
   <div data-mode="macd_simple"><label>SL ($, fest)</label><input type="number" step="any" id="macd_simple_sl_usd"></div>
+  <div data-mode="macd_simple"><label>Exit-Modus</label>
+    <select class="cfg" id="macd_simple_exit_mode">
+      <option value="tp_sl">Fester TP/SL</option>
+      <option value="reverse">Position bei Farbwechsel drehen (SL bleibt als Schutz aktiv, TP entfällt)</option>
+    </select>
+  </div>
   <div data-mode="range_profile"><label>Nur nach Squeeze einsteigen</label>
     <select class="cfg" id="rp_require_squeeze">
       <option value="false">Aus - Squeeze nur zur Anzeige</option>
@@ -1258,6 +1273,7 @@ async function refresh() {
     document.getElementById('macd_simple_signal').value = data.config.macd_simple_signal;
     document.getElementById('macd_simple_tp_usd').value = data.config.macd_simple_tp_usd;
     document.getElementById('macd_simple_sl_usd').value = data.config.macd_simple_sl_usd;
+    document.getElementById('macd_simple_exit_mode').value = data.config.macd_simple_exit_mode;
     document.getElementById('rp_require_squeeze').value = String(data.config.rp_require_squeeze);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -1342,7 +1358,7 @@ async function refresh() {
     const mValues = mHist.map(p => p.hist);
     const mColors = mValues.map(v => v >= 0 ? '#4ade80' : '#f87171');
     const macdDatasets = [
-      { label: 'Histogramm', data: mValues, backgroundColor: mColors, borderWidth: 0 },
+      { label: 'Histogramm', data: mValues, backgroundColor: mColors, borderWidth: 0, maxBarThickness: 14, categoryPercentage: 0.9, barPercentage: 0.9 },
     ];
     if (!macdSimpleChart) {
       macdSimpleChart = new Chart(document.getElementById('macdSimpleChart'), {
@@ -1469,6 +1485,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     macd_simple_signal: parseInt(document.getElementById('macd_simple_signal').value),
     macd_simple_tp_usd: parseFloat(document.getElementById('macd_simple_tp_usd').value),
     macd_simple_sl_usd: parseFloat(document.getElementById('macd_simple_sl_usd').value),
+    macd_simple_exit_mode: document.getElementById('macd_simple_exit_mode').value,
     rp_require_squeeze: document.getElementById('rp_require_squeeze').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -1484,7 +1501,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','macd_simple_exit_mode','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1585,7 +1602,7 @@ async def handle_config_update(request):
                 "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_atr_period", "rp_sl_atr_mult", "rp_tp_rr",
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
                 "macd_simple_resolution", "macd_simple_fast", "macd_simple_slow", "macd_simple_signal",
-                "macd_simple_tp_usd", "macd_simple_sl_usd"]:
+                "macd_simple_tp_usd", "macd_simple_sl_usd", "macd_simple_exit_mode"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
