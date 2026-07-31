@@ -2070,15 +2070,20 @@ async def run_backtest(symbol, entry_mode, cfg, days):
     now = time.time()
     cache_used = False
 
+    # WICHTIG: der Cache darf nur genutzt werden, wenn er mit einer mindestens genauso
+    # hohen Kerzen-Obergrenze befuellt wurde wie die aktuelle Anfrage braucht - sonst
+    # bekaeme z.B. MACD-Dual (500.000 Kerzen erlaubt) stillschweigend den kleineren,
+    # von Range-Profile (nur 30.000 erlaubt) gecachten Datensatz serviert.
     if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
-            and cached["days"] >= days and len(cached["candles"][4]) >= 100):
+            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
+            and len(cached["candles"][4]) >= 100):
         candles = _trim_candles_to_days(cached["candles"], days, max_candles)
         err = None
         cache_used = True
     else:
         candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
         if candles:
-            _backtest_candle_cache[cache_key] = {"fetched_at": now, "days": days, "candles": candles}
+            _backtest_candle_cache[cache_key] = {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles}
 
     if err:
         return {"error": err}
