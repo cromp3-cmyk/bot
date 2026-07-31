@@ -285,7 +285,7 @@ def default_state():
         "rp_sl_price": None, "rp_tp_price": None,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
-        "macd_simple_hist": None,
+        "macd_simple_hist": None, "macd_simple_hist_history": [],
         "local30s_bucket_start": None, "local30s_candle_open": None,
         "local30s_candle_high": None, "local30s_candle_low": None, "local30s_candle_last": None,
         "local30s_candles": [],
@@ -714,6 +714,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="position:relative; height:250px;"><canvas id="obiChart"></canvas></div>
 </div>
 
+<div id="macd-simple-chart-section" style="display:none;">
+  <h2 class="section-title">MACD-Simple Histogramm-Verlauf</h2>
+  <div style="position:relative; height:250px;"><canvas id="macdSimpleChart"></canvas></div>
+</div>
+
 <h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
 <div class="panel-card">
 <form id="config-form">
@@ -982,6 +987,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 let priceChart;
 let obiChart;
+let macdSimpleChart;
 let currentSymbol = null;
 let allSymbols = [];
 
@@ -1328,6 +1334,36 @@ async function refresh() {
     obiSection.style.display = 'none';
   }
 
+  const macdSimpleSection = document.getElementById('macd-simple-chart-section');
+  if (data.config.entry_mode === 'macd_simple' && (data.macd_simple_hist_history || []).length > 0) {
+    macdSimpleSection.style.display = 'block';
+    const mHist = data.macd_simple_hist_history || [];
+    const mLabels = mHist.map(p => new Date(p.ts).toLocaleTimeString());
+    const mValues = mHist.map(p => p.hist);
+    const mColors = mValues.map(v => v >= 0 ? '#4ade80' : '#f87171');
+    const macdDatasets = [
+      { label: 'Histogramm', data: mValues, backgroundColor: mColors, borderWidth: 0 },
+    ];
+    if (!macdSimpleChart) {
+      macdSimpleChart = new Chart(document.getElementById('macdSimpleChart'), {
+        type: 'bar',
+        data: { labels: mLabels, datasets: macdDatasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          scales: { x: { display: false }, y: { ticks: { color: '#9ca3af' } } },
+          plugins: { legend: { display: false } }
+        }
+      });
+    } else {
+      macdSimpleChart.data.labels = mLabels;
+      macdSimpleChart.data.datasets[0].data = mValues;
+      macdSimpleChart.data.datasets[0].backgroundColor = mColors;
+      macdSimpleChart.update('none');
+    }
+  } else {
+    macdSimpleSection.style.display = 'none';
+  }
+
   const pocketSection = document.getElementById('pocket-trading-section');
   if (data.config.entry_mode === 'obi_scalp') {
     pocketSection.style.display = 'block';
@@ -1512,6 +1548,7 @@ async def handle_status(request):
         "rp_channel_width": st.get("rp_channel_width"), "rp_avg_width": st.get("rp_avg_width"),
         "rp_squeeze_active": st.get("rp_squeeze_active"),
         "macd_simple_hist": st.get("macd_simple_hist"),
+        "macd_simple_hist_history": st.get("macd_simple_hist_history", [])[-200:],
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],

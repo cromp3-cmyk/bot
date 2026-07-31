@@ -849,6 +849,12 @@ async def macd_simple_poll_loop(symbol):
 
                         last_fast = curr_fast
                         last_processed_ts = signal_key
+
+                        hist_history = st.get("macd_simple_hist_history", [])
+                        hist_history.append({"ts": signal_key, "hist": round(curr_fast, 4)})
+                        if len(hist_history) > 200:
+                            hist_history = hist_history[-200:]
+                        st["macd_simple_hist_history"] = hist_history
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] MACD-Simple-Abfrage fehlgeschlagen", {"error": str(e)})
 
