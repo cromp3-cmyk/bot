@@ -1071,7 +1071,7 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `✅ ${data.candles_processed} Kerzen verarbeitet (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})` +
+      statusEl.innerText = `${data.cache_used ? '⚡ aus Cache' : '📡 neu von Binance geladen'} - ${data.candles_processed} Kerzen verarbeitet (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})` +
         (data.candles_processed >= data.candle_cap ? ` - auf ${data.candle_cap} Kerzen begrenzt (Performance-Schutz)` : '');
       document.getElementById('bt-candles').innerText = data.candles_processed;
       document.getElementById('bt-days').innerText = data.actual_days_covered;

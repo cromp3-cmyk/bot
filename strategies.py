@@ -1524,6 +1524,26 @@ def summarize_backtest_trades(trades):
     }
 
 
+_backtest_candle_cache = {}  # key: (symbol, resolution) -> {"fetched_at": float, "days": int, "candles": (...)}
+BACKTEST_CACHE_TTL_SECONDS = 300  # 5 Minuten - danach gilt der Cache als zu alt und wird neu geladen
+
+
+def _trim_candles_to_days(candles, days, max_candles):
+    ts, o, h, l, c = candles
+    if not ts:
+        return candles
+    cutoff = ts[-1] - days * 24 * 60 * 60 * 1000
+    idx = 0
+    for i, t in enumerate(ts):
+        if t >= cutoff:
+            idx = i
+            break
+    ts, o, h, l, c = ts[idx:], o[idx:], h[idx:], l[idx:], c[idx:]
+    if len(c) > max_candles:
+        ts, o, h, l, c = ts[-max_candles:], o[-max_candles:], h[-max_candles:], l[-max_candles:], c[-max_candles:]
+    return ts, o, h, l, c
+
+
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
         return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur macd_stoch, stoch_cross, range_profile, fib_reversal - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
@@ -1533,7 +1553,21 @@ async def run_backtest(symbol, entry_mode, cfg, days):
     resolution = cfg.get(resolution_key, "1m")
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
+    cache_key = (symbol, resolution)
+    cached = _backtest_candle_cache.get(cache_key)
+    now = time.time()
+    cache_used = False
+
+    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
+            and cached["days"] >= days and len(cached["candles"][4]) >= 100):
+        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
+        err = None
+        cache_used = True
+    else:
+        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
+        if candles:
+            _backtest_candle_cache[cache_key] = {"fetched_at": now, "days": days, "candles": candles}
+
     if err:
         return {"error": err}
     if not candles or len(candles[4]) < 100:
@@ -1548,6 +1582,6 @@ async def run_backtest(symbol, entry_mode, cfg, days):
     return {
         "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
         "requested_days": days, "actual_days_covered": round(actual_days, 1),
-        "candles_processed": n_candles, "candle_cap": max_candles,
+        "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": cache_used,
         "stats": stats, "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
     }
