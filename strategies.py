@@ -954,6 +954,73 @@ async def macd_simple_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+async def candle_flip_poll_loop(symbol):
+    """Candle-Flip: immer im Markt, dreht bei jedem Kerzenfarbwechsel sofort um.
+    Grün (Close > Open) -> Long, Rot (Close < Open) -> Short. Kein TP - der Gewinn
+    kommt daher, mit der jeweils letzten Kerze auf der richtigen Seite zu stehen.
+    Fester SL bleibt als Sicherheitsnetz. Optionaler Mindest-Kerzenkoerper filtert
+    Rauschen/Doji-Kerzen raus, damit nicht auf jedes Zittern reagiert wird.
+    Nur sinnvoll auf gebuehrenfreien Boersen wie Lighter - bei Gebuehren wuerde die
+    hohe Handelsfrequenz jeden Gewinn auffressen."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "candle_flip":
+                resolution = cfg["cf_resolution"]
+                needed_bars = 5  # nur die letzte abgeschlossene Kerze wird gebraucht
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, _, _, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars + 1)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts = timestamps[:-1]
+                        closed_o, closed_c = opens[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                if closed_ts and len(closed_c) >= 1:
+                    st = b["state"]
+                    signal_key = closed_ts[-1]
+                    if last_processed_ts != signal_key:
+                        last_processed_ts = signal_key
+                        open_p, close_p = closed_o[-1], closed_c[-1]
+                        body_pct = abs(close_p - open_p) / open_p * 100 if open_p else 0
+                        st["cf_last_body_pct"] = round(body_pct, 4)
+
+                        color = None
+                        if close_p > open_p:
+                            color = "green"
+                        elif close_p < open_p:
+                            color = "red"
+                        st["cf_last_color"] = color
+
+                        if color and body_pct >= cfg.get("cf_min_body_pct", 0) and cfg["bot_active"]:
+                            direction = "long" if color == "green" else "short"
+                            price = st["last_price"] if st["last_price"] is not None else close_p
+
+                            if st["position"] is None:
+                                debug_log(f"📡 [{symbol}] Candle-Flip Einstieg: {direction.upper()} @ {price} (Körper {round(body_pct,4)}%)")
+                                await execute_entry(symbol, direction, price, is_add_on=False)
+                            elif st["position"] != direction:
+                                debug_log(f"🔄 [{symbol}] Candle-Flip Umkehr: {direction.upper()} @ {price} (Körper {round(body_pct,4)}%)")
+                                await execute_exit(symbol, price, "CANDLE-FLIP")
+                                price_after = st["last_price"] if st["last_price"] is not None else price
+                                await execute_entry(symbol, direction, price_after, is_add_on=False)
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Candle-Flip-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(2)  # kurzes Intervall, damit Flips bei sehr schnellen Zeitrahmen nicht verpasst werden
+
+
 def calc_obi(symbol, levels):
     book = BOTS[symbol]["state"]["obi_book"]
     bids_sorted = sorted(book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
@@ -1180,6 +1247,14 @@ async def on_price_update(symbol, price):
                 await execute_exit(symbol, price, "SL")
             elif cfg.get("macd_simple_exit_mode", "tp_sl") == "tp_sl" and pnl_usd >= cfg["macd_simple_tp_usd"]:
                 await execute_exit(symbol, price, "TP")
+        return
+
+    if cfg["entry_mode"] == "candle_flip":
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if pnl_usd <= -cfg["cf_sl_usd"]:
+                await execute_exit(symbol, price, "SL")
         return
 
     if cfg["entry_mode"] == "obi_scalp":
@@ -1449,7 +1524,7 @@ async def trading_loop():
 
 BACKTEST_MAX_CANDLES = {
     "macd_stoch": 500_000, "stoch_cross": 500_000, "fib_reversal": 500_000, "range_profile": 30_000,
-    "macd_simple": 500_000,
+    "macd_simple": 500_000, "candle_flip": 500_000,
 }
 
 
@@ -1820,12 +1895,50 @@ def backtest_macd_simple(candles, cfg):
     return trades
 
 
+def backtest_candle_flip(candles, cfg):
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    min_body_pct = cfg.get("cf_min_body_pct", 0)
+    sl_usd = cfg["cf_sl_usd"]
+
+    position = None
+    trades = []
+
+    for i in range(1, n):
+        open_p, close_p = o[i], c[i]
+        price = close_p
+
+        if position is not None:
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            if pnl_usd <= -sl_usd:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                position = None
+
+        body_pct = abs(close_p - open_p) / open_p * 100 if open_p else 0
+        color = "green" if close_p > open_p else ("red" if close_p < open_p else None)
+
+        if color and body_pct >= min_body_pct:
+            direction = "long" if color == "green" else "short"
+            if position is None:
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+            elif position["dir"] != direction:
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "CANDLE-FLIP")
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+
+    return trades
+
+
 BACKTEST_FUNCS = {
     "macd_stoch": backtest_macd_stoch,
     "stoch_cross": backtest_stoch_cross,
     "range_profile": backtest_range_profile,
     "fib_reversal": backtest_fib_reversal,
     "macd_simple": backtest_macd_simple,
+    "candle_flip": backtest_candle_flip,
 }
 
 
@@ -1879,7 +1992,7 @@ async def run_backtest(symbol, entry_mode, cfg, days):
 
     resolution_key = {"macd_stoch": "macd_resolution", "stoch_cross": "stoch_cross_resolution",
                        "range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
-                       "macd_simple": "macd_simple_resolution"}[entry_mode]
+                       "macd_simple": "macd_simple_resolution", "candle_flip": "cf_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
     if resolution in SUB_MINUTE_RESOLUTIONS:

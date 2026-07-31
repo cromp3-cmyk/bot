@@ -260,6 +260,9 @@ def default_config():
         "macd_simple_early_exit_enabled": os.getenv("MACD_SIMPLE_EARLY_EXIT_ENABLED", "false").lower() == "true",
         "macd_simple_early_exit_bars": int(os.getenv("MACD_SIMPLE_EARLY_EXIT_BARS", "3")),
         "rp_require_squeeze": os.getenv("RP_REQUIRE_SQUEEZE", "false").lower() == "true",
+        "cf_resolution": os.getenv("CF_RESOLUTION", "10s"),  # "10s","15s","30s","1m","2m","5m"
+        "cf_min_body_pct": float(os.getenv("CF_MIN_BODY_PCT", "0")),
+        "cf_sl_usd": float(os.getenv("CF_SL_USD", "5")),
     }
 
 
@@ -293,6 +296,7 @@ def default_state():
         "local_1s_bucket_start": None, "local_1s_candle_open": None,
         "local_1s_candle_high": None, "local_1s_candle_low": None, "local_1s_candle_last": None,
         "local_1s_buffer": [],
+        "cf_last_color": None, "cf_last_body_pct": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -738,6 +742,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="stoch_cross">Stochastic-Cross (unter 20 = Long, über 80 = Short, fester TP/SL)</option>
       <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, ATR-SL)</option>
       <option value="macd_simple">MACD-Simple (schnelles Histogramm wird grün/rot = Buy/Sell, fester TP/SL, auch 30s)</option>
+      <option value="candle_flip">Candle-Flip (immer im Markt, dreht bei jedem Kerzenfarbwechsel, nur SL als Schutz)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -944,6 +949,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="macd_simple"><label>Früh-Exit nach X Kerzen in Folge schwächer</label><input type="number" step="1" id="macd_simple_early_exit_bars"></div>
+  <div data-mode="candle_flip"><label>Zeitrahmen</label>
+    <select class="cfg" id="cf_resolution">
+      <option value="10s">10 Sekunden</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+    </select>
+  </div>
+  <div data-mode="candle_flip"><label>Mindest-Kerzenkörper (%) - filtert Rauschen</label><input type="number" step="0.01" id="cf_min_body_pct"></div>
+  <div data-mode="candle_flip"><label>SL ($, fest - Sicherheitsnetz)</label><input type="number" step="any" id="cf_sl_usd"></div>
   <div data-mode="range_profile"><label>Nur nach Squeeze einsteigen</label>
     <select class="cfg" id="rp_require_squeeze">
       <option value="false">Aus - Squeeze nur zur Anzeige</option>
@@ -983,7 +1000,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
     Testet die aktuell gespeicherten Strategie-Einstellungen gegen echte historische Binance-Kerzen.
-    Nur für MACD-Dual, MACD-Simple, Stochastic-Cross, Range-Profile und Fibonacci-Reversal (Grid/OBI-Scalp brauchen
+    Nur für MACD-Dual, MACD-Simple, Candle-Flip, Stochastic-Cross, Range-Profile und Fibonacci-Reversal (Grid/OBI-Scalp brauchen
     historische Orderbuch-Daten, die es nicht gibt). SL/TP werden pro Kerze am Schlusskurs geprüft,
     nicht Tick-für-Tick wie live. Lighter ist gebührenfrei, es werden also keine Gebühren simuliert.
   </div>
@@ -1202,6 +1219,7 @@ async function refresh() {
     <div class="card"><div class="label">MACD-Simple Histogramm (${data.config.entry_mode==='macd_simple'?'aktiv':'inaktiv'})</div><div class="value ${(data.macd_simple_hist??0)>=0?'green':'red'}">${data.macd_simple_hist ?? '-'}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
+    <div class="card"><div class="label">Candle-Flip letzte Farbe (${data.config.entry_mode==='candle_flip'?'aktiv':'inaktiv'})</div><div class="value ${data.cf_last_color==='green'?'green':data.cf_last_color==='red'?'red':''}">${data.cf_last_color ?? '-'} (${data.cf_last_body_pct ?? '-'}%)</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -1290,6 +1308,9 @@ async function refresh() {
     document.getElementById('macd_simple_exit_mode').value = data.config.macd_simple_exit_mode;
     document.getElementById('macd_simple_early_exit_enabled').value = String(data.config.macd_simple_early_exit_enabled);
     document.getElementById('macd_simple_early_exit_bars').value = data.config.macd_simple_early_exit_bars;
+    document.getElementById('cf_resolution').value = data.config.cf_resolution;
+    document.getElementById('cf_min_body_pct').value = data.config.cf_min_body_pct;
+    document.getElementById('cf_sl_usd').value = data.config.cf_sl_usd;
     document.getElementById('rp_require_squeeze').value = String(data.config.rp_require_squeeze);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -1504,6 +1525,9 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     macd_simple_exit_mode: document.getElementById('macd_simple_exit_mode').value,
     macd_simple_early_exit_enabled: document.getElementById('macd_simple_early_exit_enabled').value === 'true',
     macd_simple_early_exit_bars: parseInt(document.getElementById('macd_simple_early_exit_bars').value),
+    cf_resolution: document.getElementById('cf_resolution').value,
+    cf_min_body_pct: parseFloat(document.getElementById('cf_min_body_pct').value),
+    cf_sl_usd: parseFloat(document.getElementById('cf_sl_usd').value),
     rp_require_squeeze: document.getElementById('rp_require_squeeze').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -1519,7 +1543,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','macd_simple_exit_mode','macd_simple_early_exit_enabled','macd_simple_early_exit_bars','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','macd_simple_exit_mode','macd_simple_early_exit_enabled','macd_simple_early_exit_bars','cf_resolution','cf_min_body_pct','cf_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1590,6 +1614,7 @@ async def handle_status(request):
             if len(st.get("binance_1s_buffer", [])) > 1 else 0
         ),
         "local_1s_buffer_size": len(st.get("local_1s_buffer", [])),
+        "cf_last_color": st.get("cf_last_color"), "cf_last_body_pct": st.get("cf_last_body_pct"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -1627,7 +1652,8 @@ async def handle_config_update(request):
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
                 "macd_simple_resolution", "macd_simple_fast", "macd_simple_slow", "macd_simple_signal",
                 "macd_simple_tp_usd", "macd_simple_sl_usd", "macd_simple_exit_mode",
-                "macd_simple_early_exit_enabled", "macd_simple_early_exit_bars"]:
+                "macd_simple_early_exit_enabled", "macd_simple_early_exit_bars",
+                "cf_resolution", "cf_min_body_pct", "cf_sl_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
