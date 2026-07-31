@@ -286,9 +286,9 @@ def default_state():
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "macd_simple_hist": None,
-        "macd_simple_bucket_start": None, "macd_simple_candle_open": None,
-        "macd_simple_candle_high": None, "macd_simple_candle_low": None, "macd_simple_candle_last": None,
-        "macd_simple_completed_candles": [],
+        "local30s_bucket_start": None, "local30s_candle_open": None,
+        "local30s_candle_high": None, "local30s_candle_low": None, "local30s_candle_last": None,
+        "local30s_candles": [],
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -766,6 +766,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="obi_scalp"><label>Trend-EMA Länge (Trades)</label><input type="number" step="1" id="obi_trend_ema_length"></div>
   <div data-mode="macd_stoch"><label>Zeitrahmen</label>
     <select class="cfg" id="macd_resolution">
+      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
       <option value="1m">1 Minute</option>
       <option value="2m">2 Minuten (synthetisch aus 1m-Kerzen zusammengesetzt)</option>
       <option value="5m">5 Minuten</option>
@@ -815,6 +816,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
+      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
     </select>
@@ -829,6 +831,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="fib_reversal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="fib_cooldown_seconds"></div>
   <div data-mode="stoch_cross"><label>Zeitrahmen</label>
     <select class="cfg" id="stoch_cross_resolution">
+      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
       <option value="1m">1 Minute</option>
       <option value="2m">2 Minuten (synthetisch)</option>
       <option value="5m">5 Minuten</option>
@@ -881,6 +884,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="range_profile"><label>Zeitrahmen</label>
     <select class="cfg" id="rp_resolution">
+      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
       <option value="1m">1 Minute</option>
       <option value="2m">2 Minuten (synthetisch)</option>
       <option value="5m">5 Minuten</option>
@@ -947,7 +951,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
     Testet die aktuell gespeicherten Strategie-Einstellungen gegen echte historische Binance-Kerzen.
-    Nur für MACD-Dual, Stochastic-Cross, Range-Profile und Fibonacci-Reversal (Grid/OBI-Scalp brauchen
+    Nur für MACD-Dual, MACD-Simple, Stochastic-Cross, Range-Profile und Fibonacci-Reversal (Grid/OBI-Scalp brauchen
     historische Orderbuch-Daten, die es nicht gibt). SL/TP werden pro Kerze am Schlusskurs geprüft,
     nicht Tick-für-Tick wie live. Lighter ist gebührenfrei, es werden also keine Gebühren simuliert.
   </div>

@@ -150,6 +150,19 @@ def resample_candles(data, factor):
 SYNTHETIC_RESOLUTIONS = {"2m": ("1m", 2)}  # Zeitrahmen, die Binance nicht nativ anbietet
 
 
+def get_local_30s_candles(state, needed_bars):
+    """Liest die selbst aus Live-Ticks gebauten 30s-Kerzen (siehe on_price_update) im
+    gleichen (timestamps, opens, highs, lows, closes)-Format wie die Binance-Funktionen.
+    Enthaelt nur bereits ABGESCHLOSSENE Kerzen - anders als bei Binance-Daten muss hier
+    NICHT noch die letzte (aktuell offene) Kerze abgeschnitten werden."""
+    candles = state.get("local30s_candles", [])
+    if not candles:
+        return None
+    recent = candles[-needed_bars:] if len(candles) > needed_bars else candles
+    return ([c["ts"] for c in recent], [c["o"] for c in recent],
+            [c["h"] for c in recent], [c["l"] for c in recent], [c["c"] for c in recent])
+
+
 async def fetch_candles_binance_multi(symbol, resolution, count_back=150):
     """Wie fetch_candles_binance, kann aber zusaetzlich synthetische Zeitrahmen liefern
     (z.B. 2m), die Binance selbst nicht unterstuetzt - dafuer wird die naechstkleinere
@@ -243,12 +256,23 @@ async def macd_stoch_poll_loop(symbol):
             cfg = b["config"]
             if cfg["entry_mode"] == "macd_stoch":
                 needed_bars = min(500, cfg["macd_slow_slow"] + cfg["macd_slow_signal"] + 60)
-                data = await fetch_candles_binance_multi(symbol, cfg["macd_resolution"], count_back=needed_bars)
-                if data:
-                    timestamps, opens, highs, lows, closes = data
-                    closed_ts = timestamps[:-1]
-                    closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
+                resolution = cfg["macd_resolution"]
+                if resolution == "30s":
+                    local = get_local_30s_candles(b["state"], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts = timestamps[:-1]
+                        closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
 
+                if closed_ts:
                     if len(closed_c) > cfg["macd_slow_slow"] + cfg["macd_slow_signal"]:
                         fast_hist, fast_ema_fast_val, fast_ema_slow_val, fast_signal_val = compute_macd_histogram(
                             closed_c, cfg["macd_fast_fast"], cfg["macd_fast_slow"], cfg["macd_fast_signal"], return_components=True)
@@ -411,14 +435,24 @@ async def fib_reversal_poll_loop(symbol):
                 st = b["state"]
                 if not st["fib_entry1_done"]:
                     needed_bars = cfg["fib_lookback_candles"] + 5
-                    data = await fetch_candles_binance(symbol, cfg["fib_resolution"], count_back=needed_bars)
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_h, closed_l = highs[:-1], lows[:-1]
-                        if len(closed_h) >= 5:
-                            swing = compute_fib_swing(closed_h, closed_l, cfg["fib_lookback_candles"])
-                            if swing:
-                                st["fib"] = build_fib_levels(swing, cfg)
+                    resolution = cfg["fib_resolution"]
+                    if resolution == "30s":
+                        local = get_local_30s_candles(st, needed_bars)
+                        if local:
+                            _, _, closed_h, closed_l, _ = local
+                        else:
+                            closed_h = None
+                    else:
+                        data = await fetch_candles_binance(symbol, resolution, count_back=needed_bars)
+                        if data:
+                            timestamps, opens, highs, lows, closes = data
+                            closed_h, closed_l = highs[:-1], lows[:-1]
+                        else:
+                            closed_h = None
+                    if closed_h and len(closed_h) >= 5:
+                        swing = compute_fib_swing(closed_h, closed_l, cfg["fib_lookback_candles"])
+                        if swing:
+                            st["fib"] = build_fib_levels(swing, cfg)
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Fib-Reversal-Abfrage fehlgeschlagen", {"error": str(e)})
 
@@ -454,12 +488,23 @@ async def stoch_cross_poll_loop(symbol):
                     needed_bars = max(needed_bars, cfg["stoch_cross_rp_lookback"] + 10)
                 needed_bars = min(1000, needed_bars)
 
-                data = await fetch_candles_binance_multi(symbol, cfg["stoch_cross_resolution"], count_back=needed_bars)
-                if data:
-                    timestamps, opens, highs, lows, closes = data
-                    closed_ts = timestamps[:-1]
-                    closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                resolution = cfg["stoch_cross_resolution"]
+                if resolution == "30s":
+                    local = get_local_30s_candles(b["state"], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts = timestamps[:-1]
+                        closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
 
+                if closed_ts:
                     if len(closed_c) >= cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"]:
                         k_series, d_series = compute_stochastic(closed_h, closed_l, closed_c,
                                                                   cfg["stoch_cross_k_period"], cfg["stoch_cross_k_smooth"], cfg["stoch_cross_d_period"])
@@ -659,12 +704,23 @@ async def range_profile_poll_loop(symbol):
             if cfg["entry_mode"] == "range_profile":
                 lookback = cfg["rp_lookback"]
                 needed_bars = min(1000, lookback + max(cfg["rp_atr_period"] * 5, 60) + 5)
-                data = await fetch_candles_binance_multi(symbol, cfg["rp_resolution"], count_back=needed_bars)
-                if data:
-                    timestamps, opens, highs, lows, closes = data
-                    closed_ts = timestamps[:-1]
-                    closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                resolution = cfg["rp_resolution"]
+                if resolution == "30s":
+                    local = get_local_30s_candles(b["state"], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts = timestamps[:-1]
+                        closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
 
+                if closed_ts:
                     if len(closed_c) > lookback + 2:
                         snap = compute_range_profile_snapshot(closed_h, closed_l, closed_c, closed_o, lookback, 50, cfg["rp_ob_os_level"])
                         atr_series = compute_atr(closed_h, closed_l, closed_c, cfg["rp_atr_period"])
@@ -757,12 +813,9 @@ async def macd_simple_poll_loop(symbol):
                 resolution = cfg.get("macd_simple_resolution", "30s")
 
                 if resolution == "30s":
-                    st = b["state"]
-                    local_candles = st.get("macd_simple_completed_candles", [])
-                    if len(local_candles) >= slow_p + signal_p:
-                        recent = local_candles[-needed_bars:]
-                        closed_ts = [x["ts"] for x in recent]
-                        closed_c = [x["c"] for x in recent]
+                    local = get_local_30s_candles(b["state"], needed_bars)
+                    if local and len(local[4]) > slow_p + signal_p:
+                        closed_ts, closed_c = local[0], local[4]
                     else:
                         closed_ts = closed_c = None
                 else:
@@ -976,36 +1029,39 @@ async def on_price_update(symbol, price):
     st["last_price"] = price
 
     # 30s-Mini-Kerzen aus dem Live-Tick bauen (Binance bietet 30s nicht an) - laeuft immer
-    # mit, kostet praktisch nichts, damit sie schon gefuellt sind falls der Modus aktiviert wird.
+    # mit, unabhaengig von der gewaehlten Strategie, damit JEDE Strategie 30s waehlen kann.
+    # Puffer haelt 5000 Kerzen (~41 Stunden) - reicht auch fuer Strategien mit langer
+    # Aufwaermphase (z.B. EMA-200-Trendfilter), auch wenn die dafuer entsprechend lange
+    # laufen muss, bevor genug lokale Historie gesammelt ist.
     now_epoch = time.time()
     bucket_start = int(now_epoch // 30) * 30
-    if st["macd_simple_bucket_start"] is None:
-        st["macd_simple_bucket_start"] = bucket_start
-        st["macd_simple_candle_open"] = price
-        st["macd_simple_candle_high"] = price
-        st["macd_simple_candle_low"] = price
-        st["macd_simple_candle_last"] = price
-    elif bucket_start != st["macd_simple_bucket_start"]:
+    if st["local30s_bucket_start"] is None:
+        st["local30s_bucket_start"] = bucket_start
+        st["local30s_candle_open"] = price
+        st["local30s_candle_high"] = price
+        st["local30s_candle_low"] = price
+        st["local30s_candle_last"] = price
+    elif bucket_start != st["local30s_bucket_start"]:
         # WICHTIG: als Close den letzten Preis nehmen, der noch IN der alten Kerze lag
-        # (macd_simple_candle_last) - NICHT den neuen Tick, der schon zur naechsten gehoert.
-        candles = st["macd_simple_completed_candles"]
+        # (local30s_candle_last) - NICHT den neuen Tick, der schon zur naechsten gehoert.
+        candles = st["local30s_candles"]
         candles.append({
-            "ts": st["macd_simple_bucket_start"] * 1000, "o": st["macd_simple_candle_open"],
-            "h": st["macd_simple_candle_high"], "l": st["macd_simple_candle_low"],
-            "c": st["macd_simple_candle_last"],
+            "ts": st["local30s_bucket_start"] * 1000, "o": st["local30s_candle_open"],
+            "h": st["local30s_candle_high"], "l": st["local30s_candle_low"],
+            "c": st["local30s_candle_last"],
         })
-        if len(candles) > 500:
-            candles = candles[-500:]
-        st["macd_simple_completed_candles"] = candles
-        st["macd_simple_bucket_start"] = bucket_start
-        st["macd_simple_candle_open"] = price
-        st["macd_simple_candle_high"] = price
-        st["macd_simple_candle_low"] = price
-        st["macd_simple_candle_last"] = price
+        if len(candles) > 5000:
+            candles = candles[-5000:]
+        st["local30s_candles"] = candles
+        st["local30s_bucket_start"] = bucket_start
+        st["local30s_candle_open"] = price
+        st["local30s_candle_high"] = price
+        st["local30s_candle_low"] = price
+        st["local30s_candle_last"] = price
     else:
-        st["macd_simple_candle_high"] = max(st["macd_simple_candle_high"], price)
-        st["macd_simple_candle_low"] = min(st["macd_simple_candle_low"], price)
-        st["macd_simple_candle_last"] = price
+        st["local30s_candle_high"] = max(st["local30s_candle_high"], price)
+        st["local30s_candle_low"] = min(st["local30s_candle_low"], price)
+        st["local30s_candle_last"] = price
 
     st["price_history"].append({"ts": int(time.time() * 1000), "price": price})
     if len(st["price_history"]) > 500:
@@ -1292,6 +1348,7 @@ async def trading_loop():
 
 BACKTEST_MAX_CANDLES = {
     "macd_stoch": 500_000, "stoch_cross": 500_000, "fib_reversal": 500_000, "range_profile": 30_000,
+    "macd_simple": 500_000,
 }
 
 
@@ -1600,11 +1657,52 @@ def backtest_fib_reversal(candles, cfg):
     return trades
 
 
+def backtest_macd_simple(candles, cfg):
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    fast_p, slow_p, signal_p = cfg["macd_simple_fast"], cfg["macd_simple_slow"], cfg["macd_simple_signal"]
+
+    fast_hist = compute_macd_histogram(c, fast_p, slow_p, signal_p)
+    warmup = slow_p + signal_p + 5
+    position = None
+    trades = []
+    last_fast = None
+
+    for i in range(warmup, n):
+        curr_fast, price = fast_hist[i], c[i]
+
+        if position is not None:
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            if pnl_usd <= -cfg["macd_simple_sl_usd"]:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                position = None
+            elif pnl_usd >= cfg["macd_simple_tp_usd"]:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
+                position = None
+
+        if position is None and last_fast is not None:
+            direction = None
+            if last_fast <= 0 and curr_fast > 0:
+                direction = "long"
+            elif last_fast >= 0 and curr_fast < 0:
+                direction = "short"
+            if direction:
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+
+        last_fast = curr_fast
+
+    return trades
+
+
 BACKTEST_FUNCS = {
     "macd_stoch": backtest_macd_stoch,
     "stoch_cross": backtest_stoch_cross,
     "range_profile": backtest_range_profile,
     "fib_reversal": backtest_fib_reversal,
+    "macd_simple": backtest_macd_simple,
 }
 
 
@@ -1654,11 +1752,16 @@ def _trim_candles_to_days(candles, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur macd_stoch, stoch_cross, range_profile, fib_reversal - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur macd_stoch, stoch_cross, range_profile, fib_reversal, macd_simple - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     resolution_key = {"macd_stoch": "macd_resolution", "stoch_cross": "stoch_cross_resolution",
-                       "range_profile": "rp_resolution", "fib_reversal": "fib_resolution"}[entry_mode]
+                       "range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
+                       "macd_simple": "macd_simple_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
+    if resolution == "30s":
+        return {"error": "Backtest für 30 Sekunden ist nicht möglich - es gibt dafür keine historischen Daten "
+                          "(die 30s-Kerzen werden erst live vom Bot selbst aus dem Preis-Tick gesammelt). "
+                          "Wähle für den Backtest einen anderen Zeitrahmen (1m/2m/5m/15m/1h/4h)."}
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
     cache_key = (symbol, resolution)
