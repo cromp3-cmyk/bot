@@ -842,6 +842,7 @@ async def macd_simple_poll_loop(symbol):
     last_fast = None
     last_processed_ts = None
     last_entry_signal_ts = None
+    shrink_streak = 0
 
     while True:
         try:
@@ -873,6 +874,24 @@ async def macd_simple_poll_loop(symbol):
 
                     signal_key = closed_ts[-1]
                     if last_processed_ts != signal_key:
+                        # Fruehzeitiger Exit: schliesst schon VOR dem vollen Farbwechsel, wenn
+                        # das Histogramm mehrere Kerzen in Folge in Positionsrichtung schwaecher
+                        # wird (schrumpft) - schneller als auf die volle Nulllinien-Kreuzung
+                        # zu warten, dafuer aber ohne die Sicherheit einer bestaetigten Umkehr.
+                        if (cfg.get("macd_simple_early_exit_enabled", False)
+                                and st["position"] is not None and last_fast is not None):
+                            shrinking = ((st["position"] == "long" and curr_fast < last_fast)
+                                         or (st["position"] == "short" and curr_fast > last_fast))
+                            shrink_streak = shrink_streak + 1 if shrinking else 0
+                            needed_streak = cfg.get("macd_simple_early_exit_bars", 3)
+                            if shrink_streak >= needed_streak:
+                                price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                                debug_log(f"📉 [{symbol}] MACD-Simple Früh-Exit: {shrink_streak} Kerzen in Folge schwächer (Histogramm {round(curr_fast,4)})")
+                                await execute_exit(symbol, price, "MACD-EARLY-FADE")
+                                shrink_streak = 0
+                        else:
+                            shrink_streak = 0
+
                         if cfg["bot_active"] and last_entry_signal_ts != signal_key and last_fast is not None:
                             direction = None
                             if last_fast <= 0 and curr_fast > 0:
@@ -886,6 +905,7 @@ async def macd_simple_poll_loop(symbol):
 
                                 if st["position"] is None:
                                     last_entry_signal_ts = signal_key
+                                    shrink_streak = 0
                                     debug_log(f"📡 [{symbol}] MACD-Simple Signal: {direction.upper()} @ {price} (Histogramm {round(curr_fast,4)})")
                                     await execute_entry(symbol, direction, price, is_add_on=False)
                                 elif exit_mode == "reverse" and st["position"] != direction:
@@ -893,6 +913,7 @@ async def macd_simple_poll_loop(symbol):
                                     # statt auf ein TP-Kursziel zu warten. Der feste SL bleibt
                                     # unabhaengig davon als Kapitalschutz aktiv (siehe on_price_update).
                                     last_entry_signal_ts = signal_key
+                                    shrink_streak = 0
                                     debug_log(f"🔄 [{symbol}] MACD-Simple Farbwechsel-Umkehr: {direction.upper()} @ {price} (Histogramm {round(curr_fast,4)})")
                                     await execute_exit(symbol, price, "MACD-REVERSE")
                                     price_after_exit = st["last_price"] if st["last_price"] is not None else price
@@ -1691,6 +1712,9 @@ def backtest_macd_simple(candles, cfg):
     position = None
     trades = []
     last_fast = None
+    shrink_streak = 0
+    early_exit_enabled = cfg.get("macd_simple_early_exit_enabled", False)
+    early_exit_bars = cfg.get("macd_simple_early_exit_bars", 3)
 
     for i in range(warmup, n):
         curr_fast, price = fast_hist[i], c[i]
@@ -1705,6 +1729,17 @@ def backtest_macd_simple(candles, cfg):
                 _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
                 position = None
 
+        if position is not None and early_exit_enabled and last_fast is not None:
+            shrinking = ((position["dir"] == "long" and curr_fast < last_fast)
+                         or (position["dir"] == "short" and curr_fast > last_fast))
+            shrink_streak = shrink_streak + 1 if shrinking else 0
+            if shrink_streak >= early_exit_bars:
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MACD-EARLY-FADE")
+                position = None
+                shrink_streak = 0
+        elif position is None:
+            shrink_streak = 0
+
         direction = None
         if last_fast is not None:
             if last_fast <= 0 and curr_fast > 0:
@@ -1716,6 +1751,7 @@ def backtest_macd_simple(candles, cfg):
             if position is None:
                 size = (margin * leverage) / price
                 position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                shrink_streak = 0
             elif exit_mode == "reverse" and position["dir"] != direction:
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MACD-REVERSE")
                 size = (margin * leverage) / price
