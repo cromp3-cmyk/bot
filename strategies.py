@@ -1021,19 +1021,40 @@ async def candle_flip_poll_loop(symbol):
         await asyncio.sleep(2)  # kurzes Intervall, damit Flips bei sehr schnellen Zeitrahmen nicht verpasst werden
 
 
-def calc_obi(symbol, levels):
+def calc_obi(symbol, levels, depth_weighting=False, min_liquidity=0.0):
+    """Berechnet das Orderbuch-Ungleichgewicht ueber die naechsten 'levels' Preisstufen.
+    depth_weighting: gewichtet Level naeher am aktuellen Kurs staerker (1/(i+1)) statt
+    jedes Level gleich zu zaehlen - Orders weit weg im Buch sind oft nur Deko.
+    min_liquidity: ist die Gesamtliquiditaet (bid_vol+ask_vol) unter diesem Wert, wird
+    0.0 zurueckgegeben statt einer verrauschten Prozentzahl - bei duennem Buch schlaegt
+    schon eine kleine Order stark auf den Prozentwert durch, ohne dass das wirklich
+    etwas bedeutet."""
     book = BOTS[symbol]["state"]["obi_book"]
     bids_sorted = sorted(book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
     asks_sorted = sorted(book["asks"].items(), key=lambda x: float(x[0]))[:levels]
-    bid_vol = sum(v for _, v in bids_sorted)
-    ask_vol = sum(v for _, v in asks_sorted)
+
+    if depth_weighting:
+        bid_vol = sum(v / (i + 1) for i, (_, v) in enumerate(bids_sorted))
+        ask_vol = sum(v / (i + 1) for i, (_, v) in enumerate(asks_sorted))
+        raw_bid_vol = sum(v for _, v in bids_sorted)
+        raw_ask_vol = sum(v for _, v in asks_sorted)
+    else:
+        bid_vol = sum(v for _, v in bids_sorted)
+        ask_vol = sum(v for _, v in asks_sorted)
+        raw_bid_vol, raw_ask_vol = bid_vol, ask_vol
+
+    if raw_bid_vol + raw_ask_vol < min_liquidity:
+        return 0.0
+
     total = bid_vol + ask_vol
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
 
-def update_obi_windows(symbol, raw_obi, fast_s, medium_s, slow_s):
+def update_obi_windows(symbol, raw_obi, fast_s, medium_s, slow_s, use_median=False):
     """Ein gemeinsamer Rohwert-Puffer, daraus werden alle drei Zeitfenster berechnet -
-    effizienter als drei getrennte Puffer, und alle drei sehen exakt dieselben Rohdaten."""
+    effizienter als drei getrennte Puffer, und alle drei sehen exakt dieselben Rohdaten.
+    use_median: Median statt Durchschnitt - ein einzelner Ausreisser-Tick (kurz
+    aufblitzende Grossorder) kippt dann nicht mehr den ganzen Fensterwert."""
     st = BOTS[symbol]["state"]
     now = time.time()
     buf = st["obi_avg_buffer"]
@@ -1046,7 +1067,13 @@ def update_obi_windows(symbol, raw_obi, fast_s, medium_s, slow_s):
     def avg_over(seconds):
         window_cutoff = now - seconds
         vals = [v for v, ts in buf if ts >= window_cutoff]
-        return sum(vals) / len(vals) if vals else 0.0
+        if not vals:
+            return 0.0
+        if use_median:
+            svals = sorted(vals)
+            mid = len(svals) // 2
+            return svals[mid] if len(svals) % 2 == 1 else (svals[mid - 1] + svals[mid]) / 2
+        return sum(vals) / len(vals)
 
     return avg_over(fast_s), avg_over(medium_s), avg_over(slow_s)
 
@@ -1110,10 +1137,13 @@ async def handle_obi_order_book_update(symbol, msg):
             else:
                 book[side_key][price] = size
 
-    raw_obi = calc_obi(symbol, cfg["obi_levels"])
+    raw_obi = calc_obi(symbol, cfg["obi_levels"],
+                        depth_weighting=cfg.get("obi_depth_weighting_enabled", False),
+                        min_liquidity=cfg.get("obi_min_liquidity", 0.0))
     fast, medium, slow = update_obi_windows(
         symbol, raw_obi,
         cfg["obi_window_fast_seconds"], cfg["obi_window_medium_seconds"], cfg["obi_window_slow_seconds"],
+        use_median=cfg.get("obi_use_median", False),
     )
     st["obi_fast"] = round(fast, 4)
     st["obi_medium"] = round(medium, 4)
