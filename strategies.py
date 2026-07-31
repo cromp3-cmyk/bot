@@ -1185,18 +1185,36 @@ async def handle_obi_order_book_update(symbol, msg):
         # Wie "reversal", aber OHNE auf eine bestaetigte Umkehr zu warten - sobald die
         # jeweilige Schwelle durchbrochen wird, wird sofort gehandelt. Getrennte
         # Long-/Short-Schwellen wie bei "reversal", nur ohne Rueckprall-Verzoegerung.
+        # HYSTERESE: nach einem Trigger muss der Wert erst wieder deutlich unter die
+        # Schwelle zurueckfallen (obi_instant_reset_ratio, Standard 50% der Schwelle),
+        # bevor er erneut ausloesen darf - sonst wuerde jedes Zittern direkt an der
+        # Schwelle (z.B. 0.48/0.52/0.49/0.51...) staendig neu feuern, ohne dass eine
+        # echte neue Bewegung stattgefunden hat.
         long_th = cfg.get("obi_long_threshold", 0.20)
         short_th = cfg.get("obi_short_threshold", 0.30)
+        reset_ratio = cfg.get("obi_instant_reset_ratio", 0.5)
+
+        if st.get("obi_instant_armed_short") is None:
+            st["obi_instant_armed_short"] = True
+        if st.get("obi_instant_armed_long") is None:
+            st["obi_instant_armed_long"] = True
+
         direction = None
-        if fast >= short_th:
+        if fast >= short_th and st["obi_instant_armed_short"]:
             direction = "short"
-        elif fast <= -long_th:
+            st["obi_instant_armed_short"] = False
+        elif fast <= -long_th and st["obi_instant_armed_long"]:
             direction = "long"
+            st["obi_instant_armed_long"] = False
+
+        # Erst wenn der Wert deutlich zurueckgefallen ist, wird die jeweilige Seite
+        # wieder "scharf" gemacht
+        if fast < short_th * reset_ratio:
+            st["obi_instant_armed_short"] = True
+        if fast > -long_th * reset_ratio:
+            st["obi_instant_armed_long"] = True
 
         if direction is None:
-            st["obi_last_signal_direction"] = None
-            return
-        if direction == st["obi_last_signal_direction"]:
             return
     else:
         mean_reversion = obi_mode == "mean_reversion"
@@ -1919,6 +1937,10 @@ def backtest_macd_simple(candles, cfg):
     margin, leverage = cfg["margin"], cfg["leverage"]
     fast_p, slow_p, signal_p = cfg["macd_simple_fast"], cfg["macd_simple_slow"], cfg["macd_simple_signal"]
     exit_mode = cfg.get("macd_simple_exit_mode", "tp_sl")
+    breakeven_enabled = cfg.get("macd_simple_breakeven_enabled", False)
+    breakeven_trigger = cfg.get("macd_simple_breakeven_trigger_usd", 3)
+    breakeven_lock = cfg.get("macd_simple_breakeven_lock_usd", 0.5)
+    early_exit_reverse = cfg.get("macd_simple_early_exit_reverse", False)
 
     fast_hist = compute_macd_histogram(c, fast_p, slow_p, signal_p)
     warmup = slow_p + signal_p + 5
@@ -1926,6 +1948,7 @@ def backtest_macd_simple(candles, cfg):
     trades = []
     last_fast = None
     shrink_streak = 0
+    breakeven_triggered = False
     early_exit_enabled = cfg.get("macd_simple_early_exit_enabled", False)
     early_exit_bars = cfg.get("macd_simple_early_exit_bars", 3)
 
@@ -1935,21 +1958,35 @@ def backtest_macd_simple(candles, cfg):
         if position is not None:
             direction, entry, size = position["dir"], position["entry"], position["size"]
             pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            if pnl_usd <= -cfg["macd_simple_sl_usd"]:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+            sl_floor = -cfg["macd_simple_sl_usd"]
+            if breakeven_enabled:
+                if not breakeven_triggered and pnl_usd >= breakeven_trigger:
+                    breakeven_triggered = True
+                if breakeven_triggered:
+                    sl_floor = breakeven_lock
+            if pnl_usd <= sl_floor:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
                 position = None
+                breakeven_triggered = False
             elif exit_mode == "tp_sl" and pnl_usd >= cfg["macd_simple_tp_usd"]:
                 _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
                 position = None
+                breakeven_triggered = False
 
         if position is not None and early_exit_enabled and last_fast is not None:
             shrinking = ((position["dir"] == "long" and curr_fast < last_fast)
                          or (position["dir"] == "short" and curr_fast > last_fast))
             shrink_streak = shrink_streak + 1 if shrinking else 0
             if shrink_streak >= early_exit_bars:
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MACD-EARLY-FADE")
+                closing_dir = position["dir"]
+                _bt_close_trade(trades, closing_dir, position["entry"], price, position["size"], i, position["entry_i"], "MACD-EARLY-FADE")
                 position = None
+                breakeven_triggered = False
                 shrink_streak = 0
+                if early_exit_reverse:
+                    opposite = "short" if closing_dir == "long" else "long"
+                    size = (margin * leverage) / price
+                    position = {"dir": opposite, "entry": price, "size": size, "entry_i": i}
         elif position is None:
             shrink_streak = 0
 
@@ -1965,10 +2002,12 @@ def backtest_macd_simple(candles, cfg):
                 size = (margin * leverage) / price
                 position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
                 shrink_streak = 0
+                breakeven_triggered = False
             elif exit_mode == "reverse" and position["dir"] != direction:
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MACD-REVERSE")
                 size = (margin * leverage) / price
                 position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                breakeven_triggered = False
 
         last_fast = curr_fast
 
