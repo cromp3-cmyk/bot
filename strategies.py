@@ -1290,20 +1290,37 @@ async def on_price_update(symbol, price):
     if cfg["entry_mode"] == "obi_scalp":
         if cfg["obi_trend_filter"]:
             update_obi_trend_ema(symbol, price, cfg["obi_trend_ema_length"])
-        if st["position"] is not None:
+        if st["position"] is None:
+            st["obi_breakeven_triggered"] = False
+        else:
             entry = st["avg_entry_price"]
+            breakeven_enabled = cfg.get("obi_breakeven_enabled", False)
             if cfg.get("obi_tp_sl_mode", "pct") == "usd":
                 pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+                sl_floor = -cfg["obi_sl_usd"]
+                if breakeven_enabled:
+                    trigger_level = cfg["obi_tp_usd"] * cfg.get("obi_breakeven_trigger_ratio", 0.5)
+                    if not st["obi_breakeven_triggered"] and pnl_usd >= trigger_level:
+                        st["obi_breakeven_triggered"] = True
+                    if st["obi_breakeven_triggered"]:
+                        sl_floor = cfg.get("obi_breakeven_lock_usd", 0.1)
                 if pnl_usd >= cfg["obi_tp_usd"]:
                     await execute_exit(symbol, price, "TP")
-                elif pnl_usd <= -cfg["obi_sl_usd"]:
-                    await execute_exit(symbol, price, "SL")
+                elif pnl_usd <= sl_floor:
+                    await execute_exit(symbol, price, "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
             else:
                 pnl_pct = (price - entry) / entry * 100 if st["position"] == "long" else (entry - price) / entry * 100
+                sl_floor = -cfg["obi_sl_pct"]
+                if breakeven_enabled:
+                    trigger_level = cfg["obi_tp_pct"] * cfg.get("obi_breakeven_trigger_ratio", 0.5)
+                    if not st["obi_breakeven_triggered"] and pnl_pct >= trigger_level:
+                        st["obi_breakeven_triggered"] = True
+                    if st["obi_breakeven_triggered"]:
+                        sl_floor = cfg.get("obi_breakeven_lock_pct", 0.1)
                 if pnl_pct >= cfg["obi_tp_pct"]:
                     await execute_exit(symbol, price, "TP")
-                elif pnl_pct <= -cfg["obi_sl_pct"]:
-                    await execute_exit(symbol, price, "SL")
+                elif pnl_pct <= sl_floor:
+                    await execute_exit(symbol, price, "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
         return
 
     if cfg["entry_mode"] == "macd_stoch":
