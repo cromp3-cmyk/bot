@@ -177,17 +177,35 @@ async def binance_1s_poll_loop(symbol):
     """Sammelt fortlaufend echte Binance-1s-Kerzen in einen wachsenden Puffer pro Coin.
     Noetig, weil eine einzelne Live-Abfrage auf max. 1000 Kerzen begrenzt ist - das
     reicht bei 1s-Basis nur fuer ~33 x 30s-Kerzen, zu wenig Aufwaermphase fuer die
-    meisten Strategien. Durch kontinuierliches Sammeln (dedupliziert per Zeitstempel)
-    waechst die verfuegbare 30s-Historie mit der Laufzeit des Bots."""
+    meisten Strategien. Beim Start wird der Puffer per paginiertem Bulk-Abruf SOFORT
+    mit ca. 3 Stunden Historie vorbefuellt (dauert nur ein paar Sekunden), damit man
+    nicht erst 15+ Minuten in Echtzeit auf genug Kerzen warten muss. Danach waechst
+    der Puffer laufend per 5-Sekunden-Poll weiter (dedupliziert per Zeitstempel)."""
     if BINANCE_SYMBOL_MAP.get(symbol) is None:
         return  # Coin nicht auf Binance - keine 1s-Daten moeglich, Loop hat nichts zu tun
     b = BOTS[symbol]
+    st = b["state"]
+
+    if not st.get("binance_1s_buffer"):
+        try:
+            seed, err = await fetch_historical_candles_binance(symbol, "1s", days=0.125, max_candles=10800)  # ~3 Stunden
+            if seed:
+                timestamps, opens, highs, lows, closes = seed
+                st["binance_1s_buffer"] = [
+                    {"ts": timestamps[i], "o": opens[i], "h": highs[i], "l": lows[i], "c": closes[i]}
+                    for i in range(len(timestamps))
+                ]
+                debug_log(f"✅ [{symbol}] Binance-1s-Puffer vorbefüllt", {"kerzen": len(timestamps)})
+            elif err:
+                debug_log(f"⚠️ [{symbol}] Binance-1s-Vorbefüllung fehlgeschlagen", {"error": err})
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Binance-1s-Vorbefüllung fehlgeschlagen", {"error": str(e)})
+
     while True:
         try:
             data = await fetch_candles_binance(symbol, "1s", count_back=1000)
             if data:
                 timestamps, opens, highs, lows, closes = data
-                st = b["state"]
                 buffer = st.get("binance_1s_buffer", [])
                 existing_ts = {c["ts"] for c in buffer}
                 for i in range(len(timestamps)):
