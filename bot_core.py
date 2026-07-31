@@ -1197,6 +1197,7 @@ async function refresh() {
     <div class="card"><div class="label">Range-Profile Kanalbreite (Ø)</div><div class="value">${data.rp_channel_width ?? '-'} (Ø ${data.rp_avg_width ?? '-'})</div></div>
     <div class="card"><div class="label">⚠ Squeeze (Ausbruch könnte bevorstehen)</div><div class="value ${data.rp_squeeze_active?'red':'green'}">${data.rp_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
     <div class="card"><div class="label">MACD-Simple Histogramm (${data.config.entry_mode==='macd_simple'?'aktiv':'inaktiv'})</div><div class="value ${(data.macd_simple_hist??0)>=0?'green':'red'}">${data.macd_simple_hist ?? '-'}</div></div>
+    <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -1579,6 +1580,11 @@ async def handle_status(request):
         "rp_squeeze_active": st.get("rp_squeeze_active"),
         "macd_simple_hist": st.get("macd_simple_hist"),
         "macd_simple_hist_history": st.get("macd_simple_hist_history", [])[-200:],
+        "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
+        "binance_1s_buffer_span_sec": (
+            (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
+            if len(st.get("binance_1s_buffer", [])) > 1 else 0
+        ),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
