@@ -12,7 +12,7 @@ from bot_core import (
     debug_log, PORT, SYMBOLS, BOTS, load_bot_configs,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reset,
-    handle_manual_trade,
+    handle_manual_trade, handle_backtest,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
@@ -35,6 +35,7 @@ async def start_web_server():
     app.router.add_post("/api/control", handle_control)
     app.router.add_post("/api/close", handle_close_position)
     app.router.add_post("/api/manual_trade", handle_manual_trade)
+    app.router.add_post("/api/backtest", handle_backtest)
     app.router.add_post("/api/reset", handle_reset)
     app.router.add_get("/copytrading", handle_ct_index)
     app.router.add_get("/api/ct/status", handle_ct_status)

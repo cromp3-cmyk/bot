@@ -56,6 +56,75 @@ async def fetch_candles_binance(symbol, resolution, count_back=150):
     return timestamps, opens, highs, lows, closes
 
 
+BINANCE_INTERVAL_MS = {
+    "1m": 60_000, "2m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+    "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000,
+}
+
+
+async def fetch_historical_candles_binance(symbol, resolution, days, max_candles):
+    """Holt bis zu 'days' Tage Kerzenhistorie von Binance fuer Backtests, in 1000er-
+    Batches paginiert (endTime schrittweise nach hinten). '2m' wird - wie live - aus
+    1m-Kerzen synthetisch zusammengesetzt. max_candles begrenzt hart, wie viele Kerzen
+    am Ende verarbeitet werden (Performance-Schutz fuer den Render-Server)."""
+    pair = BINANCE_SYMBOL_MAP.get(symbol)
+    if not pair:
+        return None, "Coin nicht auf Binance verfügbar"
+
+    base_resolution = "1m" if resolution == "2m" else resolution
+    interval_ms = BINANCE_INTERVAL_MS.get(base_resolution, 60_000)
+    fetch_factor = 2 if resolution == "2m" else 1
+    total_ms = days * 24 * 60 * 60 * 1000
+    end_time = int(time.time() * 1000)
+    start_time = end_time - total_ms
+    # Hartes Limit an Basis-Kerzen (vor evtl. 2m-Zusammenfassung), damit die Anfrage nicht ausufert
+    hard_candle_cap = max_candles * fetch_factor + 2000
+
+    all_rows = []
+    cursor = end_time
+    requests_made = 0
+    try:
+        async with aiohttp.ClientSession() as session:
+            while cursor > start_time and len(all_rows) < hard_candle_cap:
+                url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        break
+                    batch = await resp.json()
+                requests_made += 1
+                if not batch:
+                    break
+                all_rows = batch + all_rows
+                cursor = int(batch[0][0]) - 1
+                if len(batch) < 1000:
+                    break
+                await asyncio.sleep(0.2)  # Binance-Ratelimit-freundlich
+    except Exception as e:
+        return None, f"Abruf fehlgeschlagen nach {requests_made} Anfragen: {e}"
+
+    if not all_rows:
+        return None, "Keine Daten erhalten"
+
+    all_rows = [r for r in all_rows if int(r[0]) >= start_time]
+    timestamps = [int(r[0]) for r in all_rows]
+    opens = [float(r[1]) for r in all_rows]
+    highs = [float(r[2]) for r in all_rows]
+    lows = [float(r[3]) for r in all_rows]
+    closes = [float(r[4]) for r in all_rows]
+
+    if resolution == "2m":
+        timestamps, opens, highs, lows, closes = resample_candles((timestamps, opens, highs, lows, closes), 2)
+
+    if len(closes) > max_candles:
+        timestamps = timestamps[-max_candles:]
+        opens = opens[-max_candles:]
+        highs = highs[-max_candles:]
+        lows = lows[-max_candles:]
+        closes = closes[-max_candles:]
+
+    return (timestamps, opens, highs, lows, closes), None
+
+
 def resample_candles(data, factor):
     """Fasst je 'factor' aufeinanderfolgende Kerzen zu einer groesseren Kerze zusammen
     (Open der ersten, High/Low ueber alle, Close der letzten, Zeitstempel der ersten).
@@ -1101,3 +1170,384 @@ async def trading_loop():
 
 
 # ========== WEB-DASHBOARD ==========
+
+
+# ========== BACKTEST-ENGINE ==========
+# Alle Simulationen nutzen dieselben Berechnungsfunktionen wie die Live-Strategien
+# (compute_macd_histogram, compute_stochastic, compute_range_profile_snapshot, compute_atr,
+# compute_fib_swing, build_fib_levels), damit Backtest und Live-Verhalten nicht auseinanderlaufen.
+# WICHTIGE EINSCHRAENKUNG: SL/TP und Indikator-Exits werden pro Kerze am SCHLUSSKURS geprueft,
+# nicht Tick-fuer-Tick wie live - ein kurzes Durchstechen von SL/TP innerhalb einer Kerze, das
+# sich bis zum Kerzenschluss wieder erholt, wird also nicht erkannt. Fuer eine erste Einschaetzung
+# der Strategie-Qualitaet reicht das aber aus.
+# Lighter.xyz ist gebuehrenfrei - es werden daher keine Handelsgebuehren simuliert.
+
+BACKTEST_MAX_CANDLES = {
+    "macd_stoch": 500_000, "stoch_cross": 500_000, "fib_reversal": 500_000, "range_profile": 30_000,
+}
+
+
+def _bt_close_trade(trades, direction, entry, exit_price, size, i, entry_i, reason):
+    pnl = (exit_price - entry) * size if direction == "long" else (entry - exit_price) * size
+    trades.append({"dir": direction, "entry": entry, "exit": exit_price, "reason": reason,
+                    "pnl": pnl, "bars_held": i - entry_i})
+
+
+def backtest_macd_stoch(candles, cfg):
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+
+    fast_hist = compute_macd_histogram(c, cfg["macd_fast_fast"], cfg["macd_fast_slow"], cfg["macd_fast_signal"])
+    slow_hist = compute_macd_histogram(c, cfg["macd_slow_fast"], cfg["macd_slow_slow"], cfg["macd_slow_signal"])
+    use_stoch = cfg.get("macd_use_stochastic", True)
+    k_series = d_series = None
+    if use_stoch:
+        k_series, d_series = compute_stochastic(h, l, c, cfg["stoch_k_period"], cfg["stoch_k_smooth"], cfg["stoch_d_period"])
+
+    warmup = cfg["macd_slow_slow"] + cfg["macd_slow_signal"] + 5
+    position = None
+    trades = []
+    last_fast = last_slow = None
+
+    for i in range(warmup, n):
+        curr_fast, curr_slow, price = fast_hist[i], slow_hist[i], c[i]
+
+        if position is not None:
+            size, entry, direction = position["size"], position["entry"], position["dir"]
+            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            reason = None
+            if pnl_usd <= -cfg["macd_sl_usd"]:
+                reason = "SL"
+            elif not cfg.get("macd_fast_zero_cross_exit_enabled", True) and pnl_usd >= cfg["macd_tp_usd"]:
+                reason = "TP"
+            elif cfg.get("macd_slow_reversal_exit_enabled", True) and (
+                    (direction == "long" and curr_slow < 0) or (direction == "short" and curr_slow > 0)):
+                reason = "MACD-SLOW-REVERSAL"
+            elif cfg.get("macd_fast_zero_cross_exit_enabled", True) and last_fast is not None and (
+                    (direction == "short" and last_fast <= 0 and curr_fast > 0) or
+                    (direction == "long" and last_fast >= 0 and curr_fast < 0)):
+                reason = "MACD-ZERO-CROSS"
+            elif cfg.get("macd_fast_fade_exit_enabled", True) and last_fast is not None and (
+                    (direction == "long" and curr_fast > 0 and curr_fast <= last_fast) or
+                    (direction == "short" and curr_fast < 0 and curr_fast >= last_fast)):
+                reason = "MACD-FADE"
+            elif cfg.get("macd_slow_fade_exit_enabled", False) and last_slow is not None and (
+                    (direction == "long" and curr_slow > 0 and curr_slow <= last_slow) or
+                    (direction == "short" and curr_slow < 0 and curr_slow >= last_slow)):
+                reason = "MACD-SLOW-FADE"
+            if reason:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], reason)
+                position = None
+
+        if position is None and last_fast is not None:
+            direction = None
+            if curr_slow > 0 and curr_fast > 0 and curr_fast > last_fast:
+                direction = "long"
+            elif curr_slow < 0 and curr_fast < 0 and curr_fast < last_fast:
+                direction = "short"
+            if direction and use_stoch and k_series:
+                stoch_k, stoch_d = k_series[i], d_series[i]
+                if direction == "long" and stoch_k <= stoch_d:
+                    direction = None
+                elif direction == "short" and stoch_k >= stoch_d:
+                    direction = None
+            if direction:
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+
+        last_fast, last_slow = curr_fast, curr_slow
+
+    return trades
+
+
+def backtest_stoch_cross(candles, cfg):
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+
+    k_series, d_series = compute_stochastic(h, l, c, cfg["stoch_cross_k_period"], cfg["stoch_cross_k_smooth"], cfg["stoch_cross_d_period"])
+    trend_ema = _ema_series(c, cfg["stoch_cross_trend_ema_period"]) if cfg.get("stoch_cross_trend_filter_enabled", False) else None
+    atr_series = compute_atr(h, l, c, cfg["stoch_cross_atr_period"]) if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr" else None
+
+    use_rp = cfg.get("stoch_cross_rp_filter_enabled", False) or cfg.get("stoch_cross_require_squeeze", False)
+    rp_lookback = cfg.get("stoch_cross_rp_lookback", 110)
+
+    warmup = max(cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"], rp_lookback if use_rp else 0) + 5
+    position = None
+    trades = []
+    last_k = None
+    width_history = []
+    squeeze_active = False
+
+    for i in range(warmup, n):
+        curr_k, price = k_series[i], c[i]
+
+        if position is not None:
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            reason = None
+            if position.get("sl_price") is not None:
+                sl_hit = price <= position["sl_price"] if direction == "long" else price >= position["sl_price"]
+                tp_hit = price >= position["tp_price"] if direction == "long" else price <= position["tp_price"]
+                if sl_hit:
+                    reason = "SL"
+                elif tp_hit:
+                    reason = "TP"
+            else:
+                pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+                if pnl_usd <= -cfg["stoch_cross_sl_usd"]:
+                    reason = "SL"
+                elif pnl_usd >= cfg["stoch_cross_tp_usd"]:
+                    reason = "TP"
+            if reason:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], reason)
+                position = None
+
+        squeeze_before_entry = squeeze_active
+        if use_rp and i >= rp_lookback:
+            snap = compute_range_profile_snapshot(h[i - rp_lookback + 1:i + 1], l[i - rp_lookback + 1:i + 1],
+                                                    c[i - rp_lookback + 1:i + 1], o[i - rp_lookback + 1:i + 1], rp_lookback, 50, 80.0)
+            if snap:
+                width = snap["range_high"] - snap["range_low"]
+                avg_width = sum(width_history) / len(width_history) if len(width_history) >= 5 else None
+                squeeze_active = avg_width is not None and width < avg_width * (cfg["stoch_cross_squeeze_threshold_pct"] / 100)
+                width_history.append(width)
+                if len(width_history) > cfg["stoch_cross_squeeze_lookback"]:
+                    width_history = width_history[-cfg["stoch_cross_squeeze_lookback"]:]
+            else:
+                snap = None
+        else:
+            snap = None
+
+        if position is None and last_k is not None:
+            direction = None
+            if last_k <= cfg["stoch_cross_oversold"] and curr_k > cfg["stoch_cross_oversold"]:
+                direction = "long"
+            elif last_k >= cfg["stoch_cross_overbought"] and curr_k < cfg["stoch_cross_overbought"]:
+                direction = "short"
+
+            if direction and trend_ema is not None:
+                if direction == "long" and price <= trend_ema[i]:
+                    direction = None
+                elif direction == "short" and price >= trend_ema[i]:
+                    direction = None
+
+            if direction and cfg.get("stoch_cross_rp_filter_enabled", False) and snap:
+                if direction == "long" and price >= snap["mid_price"]:
+                    direction = None
+                elif direction == "short" and price <= snap["mid_price"]:
+                    direction = None
+
+            if direction and cfg.get("stoch_cross_require_squeeze", False) and not squeeze_before_entry:
+                direction = None
+
+            if direction:
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
+                            "sl_price": None, "tp_price": None}
+                if atr_series and atr_series[i]:
+                    risk = atr_series[i] * cfg["stoch_cross_sl_atr_mult"]
+                    reward = atr_series[i] * cfg["stoch_cross_tp_atr_mult"]
+                    position["sl_price"] = price - risk if direction == "long" else price + risk
+                    position["tp_price"] = price + reward if direction == "long" else price - reward
+
+        last_k = curr_k
+
+    return trades
+
+
+def backtest_range_profile(candles, cfg):
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    lookback = cfg["rp_lookback"]
+    ob = cfg["rp_ob_os_level"]
+    mode = cfg.get("rp_mode", "reversion")
+
+    atr_series = compute_atr(h, l, c, cfg["rp_atr_period"])
+    warmup = lookback + cfg["rp_atr_period"] + 5
+    position = None
+    trades = []
+    last_osc = None
+    width_history = []
+    squeeze_active = False
+
+    for i in range(warmup, n):
+        snap = compute_range_profile_snapshot(h[i - lookback + 1:i + 1], l[i - lookback + 1:i + 1],
+                                                c[i - lookback + 1:i + 1], o[i - lookback + 1:i + 1], lookback, 50, ob)
+        if snap is None:
+            continue
+        curr_osc, price, curr_atr = snap["osc"], c[i], atr_series[i]
+
+        if position is not None:
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            sl_hit = price <= position["sl"] if direction == "long" else price >= position["sl"]
+            tp_hit = price >= position["tp"] if direction == "long" else price <= position["tp"]
+            if sl_hit:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                position = None
+            elif tp_hit:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
+                position = None
+
+        squeeze_before_entry = squeeze_active
+        channel_width = snap["range_high"] - snap["range_low"]
+        avg_width = sum(width_history) / len(width_history) if len(width_history) >= 5 else None
+        squeeze_active = avg_width is not None and channel_width < avg_width * (cfg["rp_squeeze_threshold_pct"] / 100)
+        width_history.append(channel_width)
+        if len(width_history) > cfg["rp_squeeze_lookback"]:
+            width_history = width_history[-cfg["rp_squeeze_lookback"]:]
+
+        if position is None and last_osc is not None:
+            breakout_up = last_osc <= ob and curr_osc > ob
+            breakout_down = last_osc >= -ob and curr_osc < -ob
+            direction = None
+            if breakout_up:
+                direction = "short" if mode == "reversion" else "long"
+            elif breakout_down:
+                direction = "long" if mode == "reversion" else "short"
+
+            if direction and cfg.get("rp_require_squeeze", False) and not squeeze_before_entry:
+                direction = None
+
+            if direction and curr_atr:
+                risk_dist = curr_atr * cfg["rp_sl_atr_mult"]
+                sl_price = price - risk_dist if direction == "long" else price + risk_dist
+                if mode == "momentum":
+                    tp_price = price + risk_dist * cfg["rp_tp_rr"] if direction == "long" else price - risk_dist * cfg["rp_tp_rr"]
+                else:
+                    tp_price = snap["mid_price"]
+                    valid = (direction == "long" and tp_price > price) or (direction == "short" and tp_price < price)
+                    if not valid:
+                        direction = None
+                if direction:
+                    size = (margin * leverage) / price
+                    position = {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl": sl_price, "tp": tp_price}
+
+        last_osc = curr_osc
+
+    return trades
+
+
+def backtest_fib_reversal(candles, cfg):
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    lookback = cfg["fib_lookback_candles"]
+
+    warmup = lookback + 5
+    position = None  # {"dir","avg_entry","size","entry1_done","entry2_done","tp1_done","sl_active","fib","entry_i"}
+    trades = []
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is None:
+            swing = compute_fib_swing(h[max(0, i - lookback + 1):i + 1], l[max(0, i - lookback + 1):i + 1], lookback)
+            if swing is None:
+                continue
+            fib = build_fib_levels(swing, cfg)
+            direction = fib["direction"]
+            reached = price <= fib["entry1_price"] if direction == "long" else price >= fib["entry1_price"]
+            if reached:
+                size = (margin * leverage) / price
+                position = {"dir": direction, "avg_entry": price, "size": size, "entry1_done": True,
+                            "entry2_done": False, "tp1_done": False, "sl_active": fib["sl_price"],
+                            "fib": fib, "entry_i": i}
+            continue
+
+        direction, fib = position["dir"], position["fib"]
+
+        if not position["entry2_done"]:
+            reached2 = price <= fib["entry2_price"] if direction == "long" else price >= fib["entry2_price"]
+            if reached2:
+                add_size = (margin * leverage) / price
+                total_size = position["size"] + add_size
+                position["avg_entry"] = (position["avg_entry"] * position["size"] + price * add_size) / total_size
+                position["size"] = total_size
+                position["entry2_done"] = True
+
+        sl_hit = price <= position["sl_active"] if direction == "long" else price >= position["sl_active"]
+        if sl_hit:
+            _bt_close_trade(trades, direction, position["avg_entry"], price, position["size"], i, position["entry_i"], "SL")
+            position = None
+            continue
+
+        if not position["tp1_done"]:
+            tp1_hit = price >= fib["tp1_price"] if direction == "long" else price <= fib["tp1_price"]
+            if tp1_hit:
+                fraction = cfg["fib_tp1_close_pct"] / 100
+                close_size = position["size"] * fraction
+                _bt_close_trade(trades, direction, position["avg_entry"], price, close_size, i, position["entry_i"], "TP1")
+                position["size"] -= close_size
+                position["tp1_done"] = True
+                position["sl_active"] = position["avg_entry"]
+            continue
+
+        tp2_hit = price >= fib["tp2_price"] if direction == "long" else price <= fib["tp2_price"]
+        if tp2_hit:
+            _bt_close_trade(trades, direction, position["avg_entry"], price, position["size"], i, position["entry_i"], "TP2")
+            position = None
+
+    return trades
+
+
+BACKTEST_FUNCS = {
+    "macd_stoch": backtest_macd_stoch,
+    "stoch_cross": backtest_stoch_cross,
+    "range_profile": backtest_range_profile,
+    "fib_reversal": backtest_fib_reversal,
+}
+
+
+def summarize_backtest_trades(trades):
+    n = len(trades)
+    if n == 0:
+        return {"trades": 0, "win_rate_pct": 0, "total_pnl_usd": 0, "avg_win_usd": 0, "avg_loss_usd": 0,
+                "max_drawdown_usd": 0, "avg_bars_held": 0}
+    wins = [t for t in trades if t["pnl"] > 0]
+    losses = [t for t in trades if t["pnl"] <= 0]
+    total_pnl = sum(t["pnl"] for t in trades)
+    equity = peak = max_dd = 0.0
+    for t in trades:
+        equity += t["pnl"]
+        peak = max(peak, equity)
+        max_dd = min(max_dd, equity - peak)
+    return {
+        "trades": n,
+        "win_rate_pct": round(len(wins) / n * 100, 1),
+        "total_pnl_usd": round(total_pnl, 2),
+        "avg_win_usd": round(sum(t["pnl"] for t in wins) / len(wins), 2) if wins else 0,
+        "avg_loss_usd": round(sum(t["pnl"] for t in losses) / len(losses), 2) if losses else 0,
+        "max_drawdown_usd": round(max_dd, 2),
+        "avg_bars_held": round(sum(t["bars_held"] for t in trades) / n, 1),
+    }
+
+
+async def run_backtest(symbol, entry_mode, cfg, days):
+    if entry_mode not in BACKTEST_FUNCS:
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur macd_stoch, stoch_cross, range_profile, fib_reversal - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+
+    resolution_key = {"macd_stoch": "macd_resolution", "stoch_cross": "stoch_cross_resolution",
+                       "range_profile": "rp_resolution", "fib_reversal": "fib_resolution"}[entry_mode]
+    resolution = cfg.get(resolution_key, "1m")
+    max_candles = BACKTEST_MAX_CANDLES[entry_mode]
+
+    candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 100:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
+
+    n_candles = len(candles[4])
+    backtest_fn = BACKTEST_FUNCS[entry_mode]
+    trades = backtest_fn(candles, cfg)
+    stats = summarize_backtest_trades(trades)
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+        "requested_days": days, "actual_days_covered": round(actual_days, 1),
+        "candles_processed": n_candles, "candle_cap": max_candles,
+        "stats": stats, "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
+    }

@@ -918,6 +918,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div style="font-size:12px; color:var(--text-dim); margin-top:8px;" id="abs-distances"></div>
 </div>
 
+<h2 class="section-title">📊 Backtest (mit den oben gespeicherten Einstellungen)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet die aktuell gespeicherten Strategie-Einstellungen gegen echte historische Binance-Kerzen.
+    Nur für MACD-Dual, Stochastic-Cross, Range-Profile und Fibonacci-Reversal (Grid/OBI-Scalp brauchen
+    historische Orderbuch-Daten, die es nicht gibt). SL/TP werden pro Kerze am Schlusskurs geprüft,
+    nicht Tick-für-Tick wie live. Lighter ist gebührenfrei, es werden also keine Gebühren simuliert.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="backtest-days" value="30" style="width:100px;"></div>
+    <button id="btn-backtest" style="padding:12px 24px;">▶️ Backtest starten</button>
+  </div>
+  <div id="backtest-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <div id="backtest-results" style="display:none; margin-top:16px;">
+    <div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:12px;">
+      <div><div class="label">Kerzen verarbeitet</div><div class="value" id="bt-candles">-</div></div>
+      <div><div class="label">Zeitraum tatsächlich</div><div class="value" id="bt-days">-</div></div>
+      <div><div class="label">Trades</div><div class="value" id="bt-trades">-</div></div>
+      <div><div class="label">Trefferquote</div><div class="value" id="bt-winrate">-</div></div>
+      <div><div class="label">Gesamt-PnL $</div><div class="value" id="bt-pnl">-</div></div>
+      <div><div class="label">Max Drawdown $</div><div class="value" id="bt-dd">-</div></div>
+      <div><div class="label">Ø Gewinn / Ø Verlust $</div><div class="value" id="bt-avg">-</div></div>
+    </div>
+  </div>
+</div>
+
 <h2 class="section-title">Letzte abgeschlossene Trades</h2>
 <div class="panel-card">
 <table id="trades-table"><thead><tr><th>Eröffnet</th><th>Geschlossen</th><th>Seite</th><th>Ø-Einstieg</th><th>Exit</th><th>Stufen</th><th>Grund</th><th>PnL $</th></tr></thead><tbody></tbody></table>
@@ -1027,6 +1053,41 @@ document.getElementById('btn-manual-tp').addEventListener('click', async () => {
   const data = await res.json();
   if (data.error) alert(data.error);
   refresh();
+});
+
+document.getElementById('btn-backtest').addEventListener('click', async () => {
+  const days = parseInt(document.getElementById('backtest-days').value) || 30;
+  const btn = document.getElementById('btn-backtest');
+  const statusEl = document.getElementById('backtest-status');
+  const resultsEl = document.getElementById('backtest-results');
+  btn.disabled = true;
+  resultsEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen von Binance und simuliere... kann bei langen Zeiträumen 1-2 Minuten dauern.`;
+  try {
+    const res = await fetch(`/api/backtest?symbol=${currentSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days})
+    });
+    const data = await res.json();
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `✅ ${data.candles_processed} Kerzen verarbeitet (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})` +
+        (data.candles_processed >= data.candle_cap ? ` - auf ${data.candle_cap} Kerzen begrenzt (Performance-Schutz)` : '');
+      document.getElementById('bt-candles').innerText = data.candles_processed;
+      document.getElementById('bt-days').innerText = data.actual_days_covered;
+      document.getElementById('bt-trades').innerText = data.stats.trades;
+      document.getElementById('bt-winrate').innerText = data.stats.win_rate_pct + '%';
+      const pnlEl = document.getElementById('bt-pnl');
+      pnlEl.innerText = data.stats.total_pnl_usd;
+      pnlEl.className = data.stats.total_pnl_usd >= 0 ? 'value green' : 'value red';
+      document.getElementById('bt-dd').innerText = data.stats.max_drawdown_usd;
+      document.getElementById('bt-avg').innerText = `${data.stats.avg_win_usd} / ${data.stats.avg_loss_usd}`;
+      resultsEl.style.display = 'block';
+    }
+  } catch (e) {
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  btn.disabled = false;
 });
 
 async function refresh() {
@@ -1460,6 +1521,23 @@ async def handle_control(request):
         cfg["bot_active"] = bool(body["bot_active"])
         debug_log(f"{'▶️' if cfg['bot_active'] else '⏸️'} [{symbol}] Bot {'gestartet' if cfg['bot_active'] else 'gestoppt'}")
     return web.json_response({"success": True, "bot_active": cfg["bot_active"]})
+
+
+async def handle_backtest(request):
+    from strategies import run_backtest
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    days = body.get("days", 30)
+    try:
+        days = max(1, min(365, int(days)))
+    except (TypeError, ValueError):
+        days = 30
+    cfg = dict(BOTS[symbol]["config"])  # Kopie - Backtest darf die Live-Config nicht veraendern
+    entry_mode = cfg["entry_mode"]
+    result = await run_backtest(symbol, entry_mode, cfg, days)
+    return web.json_response(result)
 
 
 async def handle_manual_trade(request):
