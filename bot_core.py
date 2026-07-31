@@ -266,6 +266,10 @@ def default_config():
         "macd_simple_exit_mode": os.getenv("MACD_SIMPLE_EXIT_MODE", "tp_sl"),  # "tp_sl" oder "reverse"
         "macd_simple_early_exit_enabled": os.getenv("MACD_SIMPLE_EARLY_EXIT_ENABLED", "false").lower() == "true",
         "macd_simple_early_exit_bars": int(os.getenv("MACD_SIMPLE_EARLY_EXIT_BARS", "3")),
+        "macd_simple_early_exit_reverse": os.getenv("MACD_SIMPLE_EARLY_EXIT_REVERSE", "false").lower() == "true",
+        "macd_simple_breakeven_enabled": os.getenv("MACD_SIMPLE_BREAKEVEN_ENABLED", "false").lower() == "true",
+        "macd_simple_breakeven_trigger_usd": float(os.getenv("MACD_SIMPLE_BREAKEVEN_TRIGGER_USD", "3")),
+        "macd_simple_breakeven_lock_usd": float(os.getenv("MACD_SIMPLE_BREAKEVEN_LOCK_USD", "0.5")),
         "rp_require_squeeze": os.getenv("RP_REQUIRE_SQUEEZE", "false").lower() == "true",
         "cf_resolution": os.getenv("CF_RESOLUTION", "10s"),  # "10s","15s","30s","1m","2m","5m"
         "cf_min_body_pct": float(os.getenv("CF_MIN_BODY_PCT", "0")),
@@ -300,6 +304,7 @@ def default_state():
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "macd_simple_hist": None, "macd_simple_hist_history": [],
+        "macd_simple_breakeven_triggered": False,
         "binance_1s_buffer": [],
         "local_1s_bucket_start": None, "local_1s_candle_open": None,
         "local_1s_candle_high": None, "local_1s_candle_low": None, "local_1s_candle_last": None,
@@ -980,6 +985,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="macd_simple"><label>Früh-Exit nach X Kerzen in Folge schwächer</label><input type="number" step="1" id="macd_simple_early_exit_bars"></div>
+  <div data-mode="macd_simple"><label>Früh-Exit dreht sofort in Gegenrichtung</label>
+    <select class="cfg" id="macd_simple_early_exit_reverse">
+      <option value="false">Aus - schließt nur</option>
+      <option value="true">An - öffnet direkt die Gegenposition</option>
+    </select>
+  </div>
+  <div data-mode="macd_simple"><label>Gewinn absichern (SL springt bei X$ auf kleinen Gewinn)</label>
+    <select class="cfg" id="macd_simple_breakeven_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="macd_simple"><label>Auslöser ($, z.B. 3)</label><input type="number" step="any" id="macd_simple_breakeven_trigger_usd"></div>
+  <div data-mode="macd_simple"><label>Abgesicherter Gewinn ($)</label><input type="number" step="any" id="macd_simple_breakeven_lock_usd"></div>
   <div data-mode="candle_flip"><label>Zeitrahmen</label>
     <select class="cfg" id="cf_resolution">
       <option value="10s">10 Sekunden</option>
@@ -1346,6 +1365,10 @@ async function refresh() {
     document.getElementById('macd_simple_exit_mode').value = data.config.macd_simple_exit_mode;
     document.getElementById('macd_simple_early_exit_enabled').value = String(data.config.macd_simple_early_exit_enabled);
     document.getElementById('macd_simple_early_exit_bars').value = data.config.macd_simple_early_exit_bars;
+    document.getElementById('macd_simple_early_exit_reverse').value = String(data.config.macd_simple_early_exit_reverse);
+    document.getElementById('macd_simple_breakeven_enabled').value = String(data.config.macd_simple_breakeven_enabled);
+    document.getElementById('macd_simple_breakeven_trigger_usd').value = data.config.macd_simple_breakeven_trigger_usd;
+    document.getElementById('macd_simple_breakeven_lock_usd').value = data.config.macd_simple_breakeven_lock_usd;
     document.getElementById('cf_resolution').value = data.config.cf_resolution;
     document.getElementById('cf_min_body_pct').value = data.config.cf_min_body_pct;
     document.getElementById('cf_sl_usd').value = data.config.cf_sl_usd;
@@ -1570,6 +1593,10 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     macd_simple_exit_mode: document.getElementById('macd_simple_exit_mode').value,
     macd_simple_early_exit_enabled: document.getElementById('macd_simple_early_exit_enabled').value === 'true',
     macd_simple_early_exit_bars: parseInt(document.getElementById('macd_simple_early_exit_bars').value),
+    macd_simple_early_exit_reverse: document.getElementById('macd_simple_early_exit_reverse').value === 'true',
+    macd_simple_breakeven_enabled: document.getElementById('macd_simple_breakeven_enabled').value === 'true',
+    macd_simple_breakeven_trigger_usd: parseFloat(document.getElementById('macd_simple_breakeven_trigger_usd').value),
+    macd_simple_breakeven_lock_usd: parseFloat(document.getElementById('macd_simple_breakeven_lock_usd').value),
     cf_resolution: document.getElementById('cf_resolution').value,
     cf_min_body_pct: parseFloat(document.getElementById('cf_min_body_pct').value),
     cf_sl_usd: parseFloat(document.getElementById('cf_sl_usd').value),
@@ -1588,7 +1615,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','macd_simple_exit_mode','macd_simple_early_exit_enabled','macd_simple_early_exit_bars','cf_resolution','cf_min_body_pct','cf_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','macd_simple_exit_mode','macd_simple_early_exit_enabled','macd_simple_early_exit_bars','macd_simple_early_exit_reverse','macd_simple_breakeven_enabled','macd_simple_breakeven_trigger_usd','macd_simple_breakeven_lock_usd','cf_resolution','cf_min_body_pct','cf_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1697,7 +1724,8 @@ async def handle_config_update(request):
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
                 "macd_simple_resolution", "macd_simple_fast", "macd_simple_slow", "macd_simple_signal",
                 "macd_simple_tp_usd", "macd_simple_sl_usd", "macd_simple_exit_mode",
-                "macd_simple_early_exit_enabled", "macd_simple_early_exit_bars",
+                "macd_simple_early_exit_enabled", "macd_simple_early_exit_bars", "macd_simple_early_exit_reverse",
+                "macd_simple_breakeven_enabled", "macd_simple_breakeven_trigger_usd", "macd_simple_breakeven_lock_usd",
                 "cf_resolution", "cf_min_body_pct", "cf_sl_usd"]:
         if key in body:
             cfg[key] = body[key]

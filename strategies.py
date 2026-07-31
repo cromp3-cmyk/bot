@@ -908,8 +908,16 @@ async def macd_simple_poll_loop(symbol):
                             if shrink_streak >= needed_streak:
                                 price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
                                 debug_log(f"📉 [{symbol}] MACD-Simple Früh-Exit: {shrink_streak} Kerzen in Folge schwächer (Histogramm {round(curr_fast,4)})")
+                                closing_direction = st["position"]
                                 await execute_exit(symbol, price, "MACD-EARLY-FADE")
                                 shrink_streak = 0
+                                # Optional: statt nur zu schliessen, sofort in die Gegenrichtung drehen
+                                if cfg.get("macd_simple_early_exit_reverse", False):
+                                    opposite = "short" if closing_direction == "long" else "long"
+                                    price_after = st["last_price"] if st["last_price"] is not None else price
+                                    debug_log(f"🔄 [{symbol}] MACD-Simple Früh-Exit-Umkehr: {opposite.upper()} @ {price_after}")
+                                    last_entry_signal_ts = signal_key
+                                    await execute_entry(symbol, opposite, price_after, is_add_on=False)
                         else:
                             shrink_streak = 0
 
@@ -1287,11 +1295,19 @@ async def on_price_update(symbol, price):
     bot_active = cfg["bot_active"]
 
     if cfg["entry_mode"] == "macd_simple":
-        if st["position"] is not None:
+        if st["position"] is None:
+            st["macd_simple_breakeven_triggered"] = False
+        else:
             entry = st["avg_entry_price"]
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if pnl_usd <= -cfg["macd_simple_sl_usd"]:
-                await execute_exit(symbol, price, "SL")
+            sl_floor = -cfg["macd_simple_sl_usd"]
+            if cfg.get("macd_simple_breakeven_enabled", False):
+                if not st["macd_simple_breakeven_triggered"] and pnl_usd >= cfg.get("macd_simple_breakeven_trigger_usd", 3):
+                    st["macd_simple_breakeven_triggered"] = True
+                if st["macd_simple_breakeven_triggered"]:
+                    sl_floor = cfg.get("macd_simple_breakeven_lock_usd", 0.5)
+            if pnl_usd <= sl_floor:
+                await execute_exit(symbol, price, "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
             elif cfg.get("macd_simple_exit_mode", "tp_sl") == "tp_sl" and pnl_usd >= cfg["macd_simple_tp_usd"]:
                 await execute_exit(symbol, price, "TP")
         return
