@@ -230,6 +230,17 @@ def default_config():
         "stoch_cross_overbought": float(os.getenv("STOCH_CROSS_OVERBOUGHT", "80")),
         "stoch_cross_tp_usd": float(os.getenv("STOCH_CROSS_TP_USD", "3")),
         "stoch_cross_sl_usd": float(os.getenv("STOCH_CROSS_SL_USD", "3")),
+        "stoch_cross_trend_filter_enabled": os.getenv("STOCH_CROSS_TREND_FILTER_ENABLED", "false").lower() == "true",
+        "stoch_cross_trend_ema_period": int(os.getenv("STOCH_CROSS_TREND_EMA_PERIOD", "200")),
+        "stoch_cross_sl_tp_mode": os.getenv("STOCH_CROSS_SL_TP_MODE", "fixed"),  # "fixed" oder "atr"
+        "stoch_cross_atr_period": int(os.getenv("STOCH_CROSS_ATR_PERIOD", "14")),
+        "stoch_cross_sl_atr_mult": float(os.getenv("STOCH_CROSS_SL_ATR_MULT", "1.5")),
+        "stoch_cross_tp_atr_mult": float(os.getenv("STOCH_CROSS_TP_ATR_MULT", "1.5")),
+        "stoch_cross_rp_filter_enabled": os.getenv("STOCH_CROSS_RP_FILTER_ENABLED", "false").lower() == "true",
+        "stoch_cross_rp_lookback": int(os.getenv("STOCH_CROSS_RP_LOOKBACK", "110")),
+        "stoch_cross_require_squeeze": os.getenv("STOCH_CROSS_REQUIRE_SQUEEZE", "false").lower() == "true",
+        "stoch_cross_squeeze_lookback": int(os.getenv("STOCH_CROSS_SQUEEZE_LOOKBACK", "50")),
+        "stoch_cross_squeeze_threshold_pct": float(os.getenv("STOCH_CROSS_SQUEEZE_THRESHOLD_PCT", "70")),
         "rp_mode": os.getenv("RP_MODE", "reversion"),  # "reversion" (empfohlen) oder "momentum"
         "rp_resolution": os.getenv("RP_RESOLUTION", "1m"),
         "rp_lookback": int(os.getenv("RP_LOOKBACK", "110")),
@@ -237,6 +248,9 @@ def default_config():
         "rp_atr_period": int(os.getenv("RP_ATR_PERIOD", "14")),
         "rp_sl_atr_mult": float(os.getenv("RP_SL_ATR_MULT", "1.5")),
         "rp_tp_rr": float(os.getenv("RP_TP_RR", "1.0")),  # nur im momentum-Modus genutzt
+        "rp_squeeze_lookback": int(os.getenv("RP_SQUEEZE_LOOKBACK", "50")),
+        "rp_squeeze_threshold_pct": float(os.getenv("RP_SQUEEZE_THRESHOLD_PCT", "70")),
+        "rp_require_squeeze": os.getenv("RP_REQUIRE_SQUEEZE", "false").lower() == "true",
     }
 
 
@@ -258,8 +272,13 @@ def default_state():
         "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
         "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "stoch_cross_k": None, "stoch_cross_d": None,
+        "stoch_cross_sl_price": None, "stoch_cross_tp_price": None,
+        "stoch_cross_rp_mid": None, "stoch_cross_channel_width": None, "stoch_cross_avg_width": None,
+        "stoch_cross_squeeze_active": False, "stoch_cross_width_history": [],
         "rp_osc": None, "rp_mid_price": None, "rp_range_high": None, "rp_range_low": None,
         "rp_sl_price": None, "rp_tp_price": None,
+        "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
+        "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -812,6 +831,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="stoch_cross"><label>Überkauft-Schwelle (Short-Kreuzung)</label><input type="number" step="1" id="stoch_cross_overbought"></div>
   <div data-mode="stoch_cross"><label>TP ($, fest)</label><input type="number" step="any" id="stoch_cross_tp_usd"></div>
   <div data-mode="stoch_cross"><label>SL ($, fest)</label><input type="number" step="any" id="stoch_cross_sl_usd"></div>
+  <div data-mode="stoch_cross"><label>Trendfilter (EMA)</label>
+    <select class="cfg" id="stoch_cross_trend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - nur Long über EMA, nur Short unter EMA</option>
+    </select>
+  </div>
+  <div data-mode="stoch_cross"><label>Trend-EMA Periode</label><input type="number" step="1" id="stoch_cross_trend_ema_period"></div>
+  <div data-mode="stoch_cross"><label>SL/TP-Modus</label>
+    <select class="cfg" id="stoch_cross_sl_tp_mode">
+      <option value="fixed">Fest ($-Betrag oben)</option>
+      <option value="atr">ATR-basiert (marktadaptiv)</option>
+    </select>
+  </div>
+  <div data-mode="stoch_cross"><label>ATR-Periode</label><input type="number" step="1" id="stoch_cross_atr_period"></div>
+  <div data-mode="stoch_cross"><label>SL ATR-Multiplikator</label><input type="number" step="0.1" id="stoch_cross_sl_atr_mult"></div>
+  <div data-mode="stoch_cross"><label>TP ATR-Multiplikator</label><input type="number" step="0.1" id="stoch_cross_tp_atr_mult"></div>
+  <div data-mode="stoch_cross"><label>Range-Profile-Kontext-Filter</label>
+    <select class="cfg" id="stoch_cross_rp_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Long nur unter, Short nur über der POC-Mittellinie</option>
+    </select>
+  </div>
+  <div data-mode="stoch_cross"><label>Range-Profile Lookback (Kerzen)</label><input type="number" step="1" id="stoch_cross_rp_lookback"></div>
+  <div data-mode="stoch_cross"><label>Nur nach Squeeze einsteigen</label>
+    <select class="cfg" id="stoch_cross_require_squeeze">
+      <option value="false">Aus</option>
+      <option value="true">An - nur wenn direkt vorher Kanal-Squeeze aktiv war</option>
+    </select>
+  </div>
+  <div data-mode="stoch_cross"><label>Squeeze Lookback (Kerzen)</label><input type="number" step="1" id="stoch_cross_squeeze_lookback"></div>
+  <div data-mode="stoch_cross"><label>Squeeze-Schwelle (%)</label><input type="number" step="5" id="stoch_cross_squeeze_threshold_pct"></div>
   <div data-mode="range_profile"><label>Modus</label>
     <select class="cfg" id="rp_mode">
       <option value="reversion">Reversion - Ausbruch = Gegenrichtung, TP = Mittellinie</option>
@@ -831,6 +881,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="range_profile"><label>ATR-Periode</label><input type="number" step="1" id="rp_atr_period"></div>
   <div data-mode="range_profile"><label>SL ATR-Multiplikator</label><input type="number" step="0.1" id="rp_sl_atr_mult"></div>
   <div data-mode="range_profile"><label>TP Risk/Reward (nur Momentum-Modus)</label><input type="number" step="0.1" id="rp_tp_rr"></div>
+  <div data-mode="range_profile"><label>Squeeze Lookback (Kerzen)</label><input type="number" step="1" id="rp_squeeze_lookback"></div>
+  <div data-mode="range_profile"><label>Squeeze-Schwelle (%)</label><input type="number" step="5" id="rp_squeeze_threshold_pct"></div>
+  <div data-mode="range_profile"><label>Nur nach Squeeze einsteigen</label>
+    <select class="cfg" id="rp_require_squeeze">
+      <option value="false">Aus - Squeeze nur zur Anzeige</option>
+      <option value="true">An - Einstieg nur wenn direkt vorher ein Squeeze aktiv war</option>
+    </select>
+  </div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1010,9 +1068,14 @@ async function refresh() {
     <div class="card"><div class="label">Fib Einstieg 1 / 2</div><div class="value">${data.fib?.entry1_price ?? '-'} / ${data.fib?.entry2_price ?? '-'}</div></div>
     <div class="card"><div class="label">Fib TP1 / TP2 / SL</div><div class="value">${data.fib?.tp1_price ?? '-'} / ${data.fib?.tp2_price ?? '-'} / ${data.fib?.sl_price ?? '-'}</div></div>
     <div class="card"><div class="label">Stochastic-Cross %K / %D (${data.config.entry_mode==='stoch_cross'?'aktiv':'inaktiv'})</div><div class="value">${data.stoch_cross_k ?? '-'} / ${data.stoch_cross_d ?? '-'}</div></div>
+    <div class="card"><div class="label">Stochastic-Cross SL / TP (aktive Position)</div><div class="value">${data.stoch_cross_sl_price ?? '-'} / ${data.stoch_cross_tp_price ?? '-'}</div></div>
+    <div class="card"><div class="label">Stochastic-Cross POC-Mittellinie</div><div class="value">${data.stoch_cross_rp_mid ?? '-'}</div></div>
+    <div class="card"><div class="label">Stochastic-Cross ⚠ Squeeze</div><div class="value ${data.stoch_cross_squeeze_active?'red':'green'}">${data.stoch_cross_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
     <div class="card"><div class="label">Range-Profile Oszillator (${data.config.entry_mode==='range_profile'?'aktiv':'inaktiv'})</div><div class="value ${(data.rp_osc??0)>=0?'green':'red'}">${data.rp_osc ?? '-'}</div></div>
     <div class="card"><div class="label">Range-Profile Mitte / Kanal</div><div class="value">${data.rp_mid_price ?? '-'} (${data.rp_range_low ?? '-'} – ${data.rp_range_high ?? '-'})</div></div>
     <div class="card"><div class="label">Range-Profile SL / TP (aktive Position)</div><div class="value">${data.rp_sl_price ?? '-'} / ${data.rp_tp_price ?? '-'}</div></div>
+    <div class="card"><div class="label">Range-Profile Kanalbreite (Ø)</div><div class="value">${data.rp_channel_width ?? '-'} (Ø ${data.rp_avg_width ?? '-'})</div></div>
+    <div class="card"><div class="label">⚠ Squeeze (Ausbruch könnte bevorstehen)</div><div class="value ${data.rp_squeeze_active?'red':'green'}">${data.rp_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -1072,6 +1135,17 @@ async function refresh() {
     document.getElementById('stoch_cross_overbought').value = data.config.stoch_cross_overbought;
     document.getElementById('stoch_cross_tp_usd').value = data.config.stoch_cross_tp_usd;
     document.getElementById('stoch_cross_sl_usd').value = data.config.stoch_cross_sl_usd;
+    document.getElementById('stoch_cross_trend_filter_enabled').value = String(data.config.stoch_cross_trend_filter_enabled);
+    document.getElementById('stoch_cross_trend_ema_period').value = data.config.stoch_cross_trend_ema_period;
+    document.getElementById('stoch_cross_sl_tp_mode').value = data.config.stoch_cross_sl_tp_mode;
+    document.getElementById('stoch_cross_atr_period').value = data.config.stoch_cross_atr_period;
+    document.getElementById('stoch_cross_sl_atr_mult').value = data.config.stoch_cross_sl_atr_mult;
+    document.getElementById('stoch_cross_tp_atr_mult').value = data.config.stoch_cross_tp_atr_mult;
+    document.getElementById('stoch_cross_rp_filter_enabled').value = String(data.config.stoch_cross_rp_filter_enabled);
+    document.getElementById('stoch_cross_rp_lookback').value = data.config.stoch_cross_rp_lookback;
+    document.getElementById('stoch_cross_require_squeeze').value = String(data.config.stoch_cross_require_squeeze);
+    document.getElementById('stoch_cross_squeeze_lookback').value = data.config.stoch_cross_squeeze_lookback;
+    document.getElementById('stoch_cross_squeeze_threshold_pct').value = data.config.stoch_cross_squeeze_threshold_pct;
     document.getElementById('rp_mode').value = data.config.rp_mode;
     document.getElementById('rp_resolution').value = data.config.rp_resolution;
     document.getElementById('rp_lookback').value = data.config.rp_lookback;
@@ -1079,6 +1153,9 @@ async function refresh() {
     document.getElementById('rp_atr_period').value = data.config.rp_atr_period;
     document.getElementById('rp_sl_atr_mult').value = data.config.rp_sl_atr_mult;
     document.getElementById('rp_tp_rr').value = data.config.rp_tp_rr;
+    document.getElementById('rp_squeeze_lookback').value = data.config.rp_squeeze_lookback;
+    document.getElementById('rp_squeeze_threshold_pct').value = data.config.rp_squeeze_threshold_pct;
+    document.getElementById('rp_require_squeeze').value = String(data.config.rp_require_squeeze);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -1233,6 +1310,17 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     stoch_cross_overbought: parseFloat(document.getElementById('stoch_cross_overbought').value),
     stoch_cross_tp_usd: parseFloat(document.getElementById('stoch_cross_tp_usd').value),
     stoch_cross_sl_usd: parseFloat(document.getElementById('stoch_cross_sl_usd').value),
+    stoch_cross_trend_filter_enabled: document.getElementById('stoch_cross_trend_filter_enabled').value === 'true',
+    stoch_cross_trend_ema_period: parseInt(document.getElementById('stoch_cross_trend_ema_period').value),
+    stoch_cross_sl_tp_mode: document.getElementById('stoch_cross_sl_tp_mode').value,
+    stoch_cross_atr_period: parseInt(document.getElementById('stoch_cross_atr_period').value),
+    stoch_cross_sl_atr_mult: parseFloat(document.getElementById('stoch_cross_sl_atr_mult').value),
+    stoch_cross_tp_atr_mult: parseFloat(document.getElementById('stoch_cross_tp_atr_mult').value),
+    stoch_cross_rp_filter_enabled: document.getElementById('stoch_cross_rp_filter_enabled').value === 'true',
+    stoch_cross_rp_lookback: parseInt(document.getElementById('stoch_cross_rp_lookback').value),
+    stoch_cross_require_squeeze: document.getElementById('stoch_cross_require_squeeze').value === 'true',
+    stoch_cross_squeeze_lookback: parseInt(document.getElementById('stoch_cross_squeeze_lookback').value),
+    stoch_cross_squeeze_threshold_pct: parseFloat(document.getElementById('stoch_cross_squeeze_threshold_pct').value),
     rp_mode: document.getElementById('rp_mode').value,
     rp_resolution: document.getElementById('rp_resolution').value,
     rp_lookback: parseInt(document.getElementById('rp_lookback').value),
@@ -1240,6 +1328,9 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     rp_atr_period: parseInt(document.getElementById('rp_atr_period').value),
     rp_sl_atr_mult: parseFloat(document.getElementById('rp_sl_atr_mult').value),
     rp_tp_rr: parseFloat(document.getElementById('rp_tp_rr').value),
+    rp_squeeze_lookback: parseInt(document.getElementById('rp_squeeze_lookback').value),
+    rp_squeeze_threshold_pct: parseFloat(document.getElementById('rp_squeeze_threshold_pct').value),
+    rp_require_squeeze: document.getElementById('rp_require_squeeze').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -1254,7 +1345,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1310,9 +1401,13 @@ async def handle_status(request):
         "macd_stoch_k": st.get("macd_stoch_k"), "macd_stoch_d": st.get("macd_stoch_d"),
         "fib": st.get("fib"),
         "stoch_cross_k": st.get("stoch_cross_k"), "stoch_cross_d": st.get("stoch_cross_d"),
+        "stoch_cross_sl_price": st.get("stoch_cross_sl_price"), "stoch_cross_tp_price": st.get("stoch_cross_tp_price"),
+        "stoch_cross_rp_mid": st.get("stoch_cross_rp_mid"), "stoch_cross_squeeze_active": st.get("stoch_cross_squeeze_active"),
         "rp_osc": st.get("rp_osc"), "rp_mid_price": st.get("rp_mid_price"),
         "rp_range_high": st.get("rp_range_high"), "rp_range_low": st.get("rp_range_low"),
         "rp_sl_price": st.get("rp_sl_price"), "rp_tp_price": st.get("rp_tp_price"),
+        "rp_channel_width": st.get("rp_channel_width"), "rp_avg_width": st.get("rp_avg_width"),
+        "rp_squeeze_active": st.get("rp_squeeze_active"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -1342,7 +1437,12 @@ async def handle_config_update(request):
                 "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds",
                 "stoch_cross_resolution", "stoch_cross_k_period", "stoch_cross_k_smooth", "stoch_cross_d_period",
                 "stoch_cross_oversold", "stoch_cross_overbought", "stoch_cross_tp_usd", "stoch_cross_sl_usd",
-                "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_atr_period", "rp_sl_atr_mult", "rp_tp_rr"]:
+                "stoch_cross_trend_filter_enabled", "stoch_cross_trend_ema_period",
+                "stoch_cross_sl_tp_mode", "stoch_cross_atr_period", "stoch_cross_sl_atr_mult", "stoch_cross_tp_atr_mult",
+                "stoch_cross_rp_filter_enabled", "stoch_cross_rp_lookback",
+                "stoch_cross_require_squeeze", "stoch_cross_squeeze_lookback", "stoch_cross_squeeze_threshold_pct",
+                "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_atr_period", "rp_sl_atr_mult", "rp_tp_rr",
+                "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

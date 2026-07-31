@@ -32,7 +32,7 @@ async def fetch_candles_binance(symbol, resolution, count_back=150):
     if not pair:
         return None
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 500)}"
+        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
@@ -359,7 +359,13 @@ async def fib_reversal_poll_loop(symbol):
 async def stoch_cross_poll_loop(symbol):
     """Einfache Stochastic-Cross-Strategie: %K kreuzt von unten nach oben durch die
     Ueberverkauft-Schwelle (Standard 20) -> Long. %K kreuzt von oben nach unten durch
-    die Ueberkauft-Schwelle (Standard 80) -> Short. TP/SL sind feste $-Betraege."""
+    die Ueberkauft-Schwelle (Standard 80) -> Short.
+    Optionale, standardmaessig AUSgeschaltete Erweiterungen (aendern nichts, solange
+    nicht im Dashboard aktiviert):
+    - Trendfilter: nur Long ueber, nur Short unter einer EMA
+    - ATR-basiertes SL/TP statt festem $-Betrag
+    - Range-Profile-Kontext: nur Long unter, nur Short ueber der POC-Mittellinie
+    - Squeeze-Bestaetigung: nur Einstieg, wenn direkt vorher eine Kanal-Verengung war"""
     b = BOTS[symbol]
     last_k = None
     last_processed_ts = None
@@ -369,12 +375,21 @@ async def stoch_cross_poll_loop(symbol):
         try:
             cfg = b["config"]
             if cfg["entry_mode"] == "stoch_cross":
-                needed_bars = max(60, cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"] + 20)
+                base_needed = cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"] + 20
+                needed_bars = max(60, base_needed)
+                if cfg.get("stoch_cross_trend_filter_enabled", False):
+                    needed_bars = max(needed_bars, cfg["stoch_cross_trend_ema_period"] * 5)
+                if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr":
+                    needed_bars = max(needed_bars, cfg["stoch_cross_atr_period"] * 5 + 20)
+                if cfg.get("stoch_cross_rp_filter_enabled", False) or cfg.get("stoch_cross_require_squeeze", False):
+                    needed_bars = max(needed_bars, cfg["stoch_cross_rp_lookback"] + 10)
+                needed_bars = min(1000, needed_bars)
+
                 data = await fetch_candles_binance_multi(symbol, cfg["stoch_cross_resolution"], count_back=needed_bars)
                 if data:
                     timestamps, opens, highs, lows, closes = data
                     closed_ts = timestamps[:-1]
-                    closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
+                    closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
 
                     if len(closed_c) >= cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"]:
                         k_series, d_series = compute_stochastic(closed_h, closed_l, closed_c,
@@ -389,6 +404,36 @@ async def stoch_cross_poll_loop(symbol):
                             # Nur einmal pro tatsaechlich neu geschlossener Kerze auswerten
                             signal_key = closed_ts[-1]
                             if last_processed_ts != signal_key:
+                                # Optionaler Range-Profile-Kontext + Squeeze (teilen sich denselben Snapshot)
+                                rp_snap = None
+                                squeeze_before_entry = False
+                                if cfg.get("stoch_cross_rp_filter_enabled", False) or cfg.get("stoch_cross_require_squeeze", False):
+                                    rp_lookback = cfg["stoch_cross_rp_lookback"]
+                                    if len(closed_c) > rp_lookback + 2:
+                                        rp_snap = compute_range_profile_snapshot(closed_h, closed_l, closed_c, closed_o, rp_lookback, 50, 80.0)
+                                        if rp_snap:
+                                            st["stoch_cross_rp_mid"] = round(rp_snap["mid_price"], 4)
+                                            channel_width = rp_snap["range_high"] - rp_snap["range_low"]
+                                            squeeze_before_entry = st.get("stoch_cross_squeeze_active", False)
+                                            width_history = st.get("stoch_cross_width_history", [])
+                                            avg_width = sum(width_history) / len(width_history) if len(width_history) >= 5 else None
+                                            squeeze_now = (avg_width is not None
+                                                           and channel_width < avg_width * (cfg["stoch_cross_squeeze_threshold_pct"] / 100))
+                                            st["stoch_cross_channel_width"] = round(channel_width, 4)
+                                            st["stoch_cross_avg_width"] = round(avg_width, 4) if avg_width is not None else None
+                                            st["stoch_cross_squeeze_active"] = squeeze_now
+                                            width_history.append(channel_width)
+                                            if len(width_history) > cfg["stoch_cross_squeeze_lookback"]:
+                                                width_history = width_history[-cfg["stoch_cross_squeeze_lookback"]:]
+                                            st["stoch_cross_width_history"] = width_history
+
+                                # Optionaler ATR-Wert (fuer SL/TP-Modus "atr")
+                                atr_val = None
+                                if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr":
+                                    atr_series = compute_atr(closed_h, closed_l, closed_c, cfg["stoch_cross_atr_period"])
+                                    if atr_series:
+                                        atr_val = atr_series[-1]
+
                                 if (st["position"] is None and cfg["bot_active"]
                                         and last_entry_signal_ts != signal_key and last_k is not None):
                                     direction = None
@@ -397,9 +442,44 @@ async def stoch_cross_poll_loop(symbol):
                                     elif last_k >= cfg["stoch_cross_overbought"] and curr_k < cfg["stoch_cross_overbought"]:
                                         direction = "short"
 
+                                    # Optionaler Trendfilter
+                                    if direction and cfg.get("stoch_cross_trend_filter_enabled", False):
+                                        ema_series = _ema_series(closed_c, cfg["stoch_cross_trend_ema_period"])
+                                        trend_ema = ema_series[-1] if ema_series else None
+                                        if trend_ema is not None:
+                                            price_now = closed_c[-1]
+                                            if direction == "long" and price_now <= trend_ema:
+                                                direction = None
+                                            elif direction == "short" and price_now >= trend_ema:
+                                                direction = None
+
+                                    # Optionaler Range-Profile-Kontextfilter
+                                    if direction and cfg.get("stoch_cross_rp_filter_enabled", False) and rp_snap:
+                                        price_now = closed_c[-1]
+                                        if direction == "long" and price_now >= rp_snap["mid_price"]:
+                                            direction = None
+                                        elif direction == "short" and price_now <= rp_snap["mid_price"]:
+                                            direction = None
+
+                                    # Optionale Squeeze-Bestaetigung
+                                    if direction and cfg.get("stoch_cross_require_squeeze", False) and not squeeze_before_entry:
+                                        direction = None
+
                                     if direction:
                                         last_entry_signal_ts = signal_key
                                         price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                                        if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr" and atr_val:
+                                            risk_dist = atr_val * cfg["stoch_cross_sl_atr_mult"]
+                                            reward_dist = atr_val * cfg["stoch_cross_tp_atr_mult"]
+                                            sl_price = price - risk_dist if direction == "long" else price + risk_dist
+                                            tp_price = price + reward_dist if direction == "long" else price - reward_dist
+                                            st["stoch_cross_sl_price"] = sl_price
+                                            st["stoch_cross_tp_price"] = tp_price
+                                        else:
+                                            st["stoch_cross_sl_price"] = None
+                                            st["stoch_cross_tp_price"] = None
+
                                         debug_log(f"📡 [{symbol}] Stochastic-Cross Signal: {direction.upper()} @ {price} (%K {round(curr_k,2)})")
                                         await execute_entry(symbol, direction, price, is_add_on=False)
 
@@ -530,6 +610,23 @@ async def range_profile_poll_loop(symbol):
 
                             signal_key = closed_ts[-1]
                             if last_processed_ts != signal_key:
+                                # Squeeze-Erkennung: Kanalbreite dieser Kerze vs. Durchschnitt der
+                                # letzten rp_squeeze_lookback Kerzen. squeeze_before_entry ist der
+                                # Zustand VOR dieser Kerze - das ist die eigentliche Vorwarnung.
+                                channel_width = snap["range_high"] - snap["range_low"]
+                                squeeze_before_entry = st.get("rp_squeeze_active", False)
+                                width_history = st.get("rp_width_history", [])
+                                avg_width = sum(width_history) / len(width_history) if len(width_history) >= 5 else None
+                                squeeze_now = (avg_width is not None
+                                               and channel_width < avg_width * (cfg["rp_squeeze_threshold_pct"] / 100))
+                                st["rp_channel_width"] = round(channel_width, 4)
+                                st["rp_avg_width"] = round(avg_width, 4) if avg_width is not None else None
+                                st["rp_squeeze_active"] = squeeze_now
+                                width_history.append(channel_width)
+                                if len(width_history) > cfg["rp_squeeze_lookback"]:
+                                    width_history = width_history[-cfg["rp_squeeze_lookback"]:]
+                                st["rp_width_history"] = width_history
+
                                 if (st["position"] is None and cfg["bot_active"]
                                         and last_entry_signal_ts != signal_key and last_osc is not None):
                                     ob = cfg["rp_ob_os_level"]
@@ -542,6 +639,9 @@ async def range_profile_poll_loop(symbol):
                                         direction = "short" if mode == "reversion" else "long"
                                     elif breakout_down:
                                         direction = "long" if mode == "reversion" else "short"
+
+                                    if direction and cfg.get("rp_require_squeeze", False) and not squeeze_before_entry:
+                                        direction = None
 
                                     if direction:
                                         last_entry_signal_ts = signal_key
@@ -888,12 +988,26 @@ async def on_price_update(symbol, price):
 
     if cfg["entry_mode"] == "stoch_cross":
         if st["position"] is not None:
-            entry = st["avg_entry_price"]
-            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if pnl_usd <= -cfg["stoch_cross_sl_usd"]:
-                await execute_exit(symbol, price, "SL")
-            elif pnl_usd >= cfg["stoch_cross_tp_usd"]:
-                await execute_exit(symbol, price, "TP")
+            if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr" and st.get("stoch_cross_sl_price") is not None:
+                sl_price = st["stoch_cross_sl_price"]
+                tp_price = st["stoch_cross_tp_price"]
+                sl_hit = price <= sl_price if st["position"] == "long" else price >= sl_price
+                tp_hit = price >= tp_price if st["position"] == "long" else price <= tp_price
+                if sl_hit:
+                    await execute_exit(symbol, price, "SL")
+                    st["stoch_cross_sl_price"] = None
+                    st["stoch_cross_tp_price"] = None
+                elif tp_hit:
+                    await execute_exit(symbol, price, "TP")
+                    st["stoch_cross_sl_price"] = None
+                    st["stoch_cross_tp_price"] = None
+            else:
+                entry = st["avg_entry_price"]
+                pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+                if pnl_usd <= -cfg["stoch_cross_sl_usd"]:
+                    await execute_exit(symbol, price, "SL")
+                elif pnl_usd >= cfg["stoch_cross_tp_usd"]:
+                    await execute_exit(symbol, price, "TP")
         return
 
     if cfg["entry_mode"] == "range_profile":
