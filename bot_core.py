@@ -290,6 +290,9 @@ def default_state():
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "macd_simple_hist": None, "macd_simple_hist_history": [],
         "binance_1s_buffer": [],
+        "local_1s_bucket_start": None, "local_1s_candle_open": None,
+        "local_1s_candle_high": None, "local_1s_candle_low": None, "local_1s_candle_last": None,
+        "local_1s_buffer": [],
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -1198,6 +1201,7 @@ async function refresh() {
     <div class="card"><div class="label">⚠ Squeeze (Ausbruch könnte bevorstehen)</div><div class="value ${data.rp_squeeze_active?'red':'green'}">${data.rp_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
     <div class="card"><div class="label">MACD-Simple Histogramm (${data.config.entry_mode==='macd_simple'?'aktiv':'inaktiv'})</div><div class="value ${(data.macd_simple_hist??0)>=0?'green':'red'}">${data.macd_simple_hist ?? '-'}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
+    <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -1585,6 +1589,7 @@ async def handle_status(request):
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
             if len(st.get("binance_1s_buffer", [])) > 1 else 0
         ),
+        "local_1s_buffer_size": len(st.get("local_1s_buffer", [])),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],

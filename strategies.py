@@ -154,19 +154,22 @@ def resample_candles(data, factor):
 SUB_MINUTE_RESOLUTIONS = {"10s": 10, "15s": 15, "30s": 30}  # Sekunden je Kerze, alle aus dem 1s-Puffer
 
 
-def get_binance_seconds_candles(state, seconds, needed_bars):
-    """Baut Kerzen mit 'seconds' Sekunden Laenge (10/15/30) aus dem wachsenden Puffer
-    ECHTER Binance-1s-Kerzen (siehe binance_1s_poll_loop) - viel zuverlaessiger als aus
-    den eigenen, oft zu spaerlichen Lighter-Preis-Ticks. Der Puffer waechst mit der Zeit;
-    ist noch nicht genug drin (frisch gestartet), liefert die Funktion None."""
-    buffer = state.get("binance_1s_buffer", [])
-    if len(buffer) < seconds:
+def get_seconds_candles(state, seconds, needed_bars):
+    """Baut Kerzen mit 'seconds' Sekunden Laenge (10/15/30). Bevorzugt den Puffer echter
+    Binance-1s-Kerzen (siehe binance_1s_poll_loop) - reicht der noch nicht (frisch
+    gestartet oder Coin nicht auf Binance gelistet), faellt die Funktion automatisch auf
+    die selbst aus Live-Lighter-Ticks gebauten 1s-Kerzen zurueck (siehe on_price_update),
+    damit wirklich JEDER Coin Sekunden-Zeitrahmen nutzen kann. Liefert None, wenn auch
+    davon noch nicht genug da ist."""
+    binance_buf = state.get("binance_1s_buffer", [])
+    source = binance_buf if len(binance_buf) >= seconds else state.get("local_1s_buffer", [])
+    if len(source) < seconds:
         return None
-    ts = [c["ts"] for c in buffer]
-    o = [c["o"] for c in buffer]
-    h = [c["h"] for c in buffer]
-    l = [c["l"] for c in buffer]
-    cl = [c["c"] for c in buffer]
+    ts = [c["ts"] for c in source]
+    o = [c["o"] for c in source]
+    h = [c["h"] for c in source]
+    l = [c["l"] for c in source]
+    cl = [c["c"] for c in source]
     r_ts, r_o, r_h, r_l, r_c = resample_candles((ts, o, h, l, cl), seconds)
     if len(r_c) > needed_bars:
         return r_ts[-needed_bars:], r_o[-needed_bars:], r_h[-needed_bars:], r_l[-needed_bars:], r_c[-needed_bars:]
@@ -315,7 +318,7 @@ async def macd_stoch_poll_loop(symbol):
                 needed_bars = min(500, cfg["macd_slow_slow"] + cfg["macd_slow_signal"] + 60)
                 resolution = cfg["macd_resolution"]
                 if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_binance_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     if local:
                         closed_ts, _, closed_h, closed_l, closed_c = local
                     else:
@@ -494,7 +497,7 @@ async def fib_reversal_poll_loop(symbol):
                     needed_bars = cfg["fib_lookback_candles"] + 5
                     resolution = cfg["fib_resolution"]
                     if resolution in SUB_MINUTE_RESOLUTIONS:
-                        local = get_binance_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                        local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                         if local:
                             _, _, closed_h, closed_l, _ = local
                         else:
@@ -547,7 +550,7 @@ async def stoch_cross_poll_loop(symbol):
 
                 resolution = cfg["stoch_cross_resolution"]
                 if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_binance_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     if local:
                         closed_ts, closed_o, closed_h, closed_l, closed_c = local
                     else:
@@ -763,7 +766,7 @@ async def range_profile_poll_loop(symbol):
                 needed_bars = min(1000, lookback + max(cfg["rp_atr_period"] * 5, 60) + 5)
                 resolution = cfg["rp_resolution"]
                 if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_binance_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     if local:
                         closed_ts, closed_o, closed_h, closed_l, closed_c = local
                     else:
@@ -871,7 +874,7 @@ async def macd_simple_poll_loop(symbol):
                 resolution = cfg.get("macd_simple_resolution", "30s")
 
                 if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_binance_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     if local and len(local[4]) > slow_p + signal_p:
                         closed_ts, closed_c = local[0], local[4]
                     else:
@@ -1123,6 +1126,41 @@ async def on_price_update(symbol, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     st["last_price"] = price
+
+    # 1s-Mini-Kerzen aus dem Live-Tick bauen - laeuft fuer JEDEN Coin mit, dient als
+    # Fallback fuer Sekunden-Zeitrahmen (10s/15s/30s) bei Coins, die es auf Binance nicht
+    # gibt (HYPE, XAU, XAG, WTI, Forex-Paare, ...). Bei Binance-Coins wird bevorzugt der
+    # echte binance_1s_buffer genutzt (siehe get_seconds_candles), das hier ist nur der
+    # Rueckfall, damit wirklich JEDER Coin Sekunden-Zeitrahmen nutzen kann.
+    now_epoch = time.time()
+    bucket_start = int(now_epoch)
+    if st["local_1s_bucket_start"] is None:
+        st["local_1s_bucket_start"] = bucket_start
+        st["local_1s_candle_open"] = price
+        st["local_1s_candle_high"] = price
+        st["local_1s_candle_low"] = price
+        st["local_1s_candle_last"] = price
+    elif bucket_start != st["local_1s_bucket_start"]:
+        # Als Close den letzten Preis nehmen, der noch IN der alten Sekunde lag -
+        # NICHT den neuen Tick, der schon zur naechsten Sekunde gehoert.
+        buffer = st["local_1s_buffer"]
+        buffer.append({
+            "ts": st["local_1s_bucket_start"] * 1000, "o": st["local_1s_candle_open"],
+            "h": st["local_1s_candle_high"], "l": st["local_1s_candle_low"],
+            "c": st["local_1s_candle_last"],
+        })
+        if len(buffer) > 20000:  # ~5.5 Stunden
+            buffer = buffer[-20000:]
+        st["local_1s_buffer"] = buffer
+        st["local_1s_bucket_start"] = bucket_start
+        st["local_1s_candle_open"] = price
+        st["local_1s_candle_high"] = price
+        st["local_1s_candle_low"] = price
+        st["local_1s_candle_last"] = price
+    else:
+        st["local_1s_candle_high"] = max(st["local_1s_candle_high"], price)
+        st["local_1s_candle_low"] = min(st["local_1s_candle_low"], price)
+        st["local_1s_candle_last"] = price
 
     st["price_history"].append({"ts": int(time.time() * 1000), "price": price})
     if len(st["price_history"]) > 500:
@@ -1386,9 +1424,11 @@ async def trading_loop():
                     now = time.time()
                     if now - last_status_log >= 20:
                         last_status_log = now
+                        active_symbols = [s for s in SYMBOLS if BOTS[s]["config"]["bot_active"]]
                         summary = {s: {"pos": BOTS[s]["state"]["position"] or "flach", "preis": BOTS[s]["state"]["last_price"],
-                                       "trades": BOTS[s]["state"]["stats"]["trades"]} for s in SYMBOLS}
-                        debug_log("📊 Multi-Coin Status", summary)
+                                       "trades": BOTS[s]["state"]["stats"]["trades"]} for s in active_symbols}
+                        if summary:
+                            debug_log("📊 Multi-Coin Status", summary)
         except Exception as e:
             debug_log("⚠️ Verbindung verloren, reconnect in 5s", {"error": str(e), "traceback": traceback.format_exc()})
             await asyncio.sleep(5)
