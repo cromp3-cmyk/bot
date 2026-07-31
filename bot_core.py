@@ -250,6 +250,12 @@ def default_config():
         "rp_tp_rr": float(os.getenv("RP_TP_RR", "1.0")),  # nur im momentum-Modus genutzt
         "rp_squeeze_lookback": int(os.getenv("RP_SQUEEZE_LOOKBACK", "50")),
         "rp_squeeze_threshold_pct": float(os.getenv("RP_SQUEEZE_THRESHOLD_PCT", "70")),
+        "macd_simple_resolution": os.getenv("MACD_SIMPLE_RESOLUTION", "30s"),  # "30s","1m","2m","5m","15m"
+        "macd_simple_fast": int(os.getenv("MACD_SIMPLE_FAST", "13")),
+        "macd_simple_slow": int(os.getenv("MACD_SIMPLE_SLOW", "21")),
+        "macd_simple_signal": int(os.getenv("MACD_SIMPLE_SIGNAL", "9")),
+        "macd_simple_tp_usd": float(os.getenv("MACD_SIMPLE_TP_USD", "3")),
+        "macd_simple_sl_usd": float(os.getenv("MACD_SIMPLE_SL_USD", "3")),
         "rp_require_squeeze": os.getenv("RP_REQUIRE_SQUEEZE", "false").lower() == "true",
     }
 
@@ -279,6 +285,10 @@ def default_state():
         "rp_sl_price": None, "rp_tp_price": None,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
+        "macd_simple_hist": None,
+        "macd_simple_bucket_start": None, "macd_simple_candle_open": None,
+        "macd_simple_candle_high": None, "macd_simple_candle_low": None, "macd_simple_candle_last": None,
+        "macd_simple_completed_candles": [],
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -718,6 +728,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
       <option value="stoch_cross">Stochastic-Cross (unter 20 = Long, über 80 = Short, fester TP/SL)</option>
       <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, ATR-SL)</option>
+      <option value="macd_simple">MACD-Simple (schnelles Histogramm wird grün/rot = Buy/Sell, fester TP/SL, auch 30s)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -883,6 +894,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="range_profile"><label>TP Risk/Reward (nur Momentum-Modus)</label><input type="number" step="0.1" id="rp_tp_rr"></div>
   <div data-mode="range_profile"><label>Squeeze Lookback (Kerzen)</label><input type="number" step="1" id="rp_squeeze_lookback"></div>
   <div data-mode="range_profile"><label>Squeeze-Schwelle (%)</label><input type="number" step="5" id="rp_squeeze_threshold_pct"></div>
+  <div data-mode="macd_simple"><label>Zeitrahmen</label>
+    <select class="cfg" id="macd_simple_resolution">
+      <option value="30s">30 Sekunden (eigene Mini-Kerzen aus Live-Preis)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+    </select>
+  </div>
+  <div data-mode="macd_simple"><label>MACD Fast</label><input type="number" step="1" id="macd_simple_fast"></div>
+  <div data-mode="macd_simple"><label>MACD Slow</label><input type="number" step="1" id="macd_simple_slow"></div>
+  <div data-mode="macd_simple"><label>MACD Signal</label><input type="number" step="1" id="macd_simple_signal"></div>
+  <div data-mode="macd_simple"><label>TP ($, fest)</label><input type="number" step="any" id="macd_simple_tp_usd"></div>
+  <div data-mode="macd_simple"><label>SL ($, fest)</label><input type="number" step="any" id="macd_simple_sl_usd"></div>
   <div data-mode="range_profile"><label>Nur nach Squeeze einsteigen</label>
     <select class="cfg" id="rp_require_squeeze">
       <option value="false">Aus - Squeeze nur zur Anzeige</option>
@@ -1137,6 +1162,7 @@ async function refresh() {
     <div class="card"><div class="label">Range-Profile SL / TP (aktive Position)</div><div class="value">${data.rp_sl_price ?? '-'} / ${data.rp_tp_price ?? '-'}</div></div>
     <div class="card"><div class="label">Range-Profile Kanalbreite (Ø)</div><div class="value">${data.rp_channel_width ?? '-'} (Ø ${data.rp_avg_width ?? '-'})</div></div>
     <div class="card"><div class="label">⚠ Squeeze (Ausbruch könnte bevorstehen)</div><div class="value ${data.rp_squeeze_active?'red':'green'}">${data.rp_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
+    <div class="card"><div class="label">MACD-Simple Histogramm (${data.config.entry_mode==='macd_simple'?'aktiv':'inaktiv'})</div><div class="value ${(data.macd_simple_hist??0)>=0?'green':'red'}">${data.macd_simple_hist ?? '-'}</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -1216,6 +1242,12 @@ async function refresh() {
     document.getElementById('rp_tp_rr').value = data.config.rp_tp_rr;
     document.getElementById('rp_squeeze_lookback').value = data.config.rp_squeeze_lookback;
     document.getElementById('rp_squeeze_threshold_pct').value = data.config.rp_squeeze_threshold_pct;
+    document.getElementById('macd_simple_resolution').value = data.config.macd_simple_resolution;
+    document.getElementById('macd_simple_fast').value = data.config.macd_simple_fast;
+    document.getElementById('macd_simple_slow').value = data.config.macd_simple_slow;
+    document.getElementById('macd_simple_signal').value = data.config.macd_simple_signal;
+    document.getElementById('macd_simple_tp_usd').value = data.config.macd_simple_tp_usd;
+    document.getElementById('macd_simple_sl_usd').value = data.config.macd_simple_sl_usd;
     document.getElementById('rp_require_squeeze').value = String(data.config.rp_require_squeeze);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -1391,6 +1423,12 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     rp_tp_rr: parseFloat(document.getElementById('rp_tp_rr').value),
     rp_squeeze_lookback: parseInt(document.getElementById('rp_squeeze_lookback').value),
     rp_squeeze_threshold_pct: parseFloat(document.getElementById('rp_squeeze_threshold_pct').value),
+    macd_simple_resolution: document.getElementById('macd_simple_resolution').value,
+    macd_simple_fast: parseInt(document.getElementById('macd_simple_fast').value),
+    macd_simple_slow: parseInt(document.getElementById('macd_simple_slow').value),
+    macd_simple_signal: parseInt(document.getElementById('macd_simple_signal').value),
+    macd_simple_tp_usd: parseFloat(document.getElementById('macd_simple_tp_usd').value),
+    macd_simple_sl_usd: parseFloat(document.getElementById('macd_simple_sl_usd').value),
     rp_require_squeeze: document.getElementById('rp_require_squeeze').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -1406,7 +1444,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1469,6 +1507,7 @@ async def handle_status(request):
         "rp_sl_price": st.get("rp_sl_price"), "rp_tp_price": st.get("rp_tp_price"),
         "rp_channel_width": st.get("rp_channel_width"), "rp_avg_width": st.get("rp_avg_width"),
         "rp_squeeze_active": st.get("rp_squeeze_active"),
+        "macd_simple_hist": st.get("macd_simple_hist"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -1503,7 +1542,9 @@ async def handle_config_update(request):
                 "stoch_cross_rp_filter_enabled", "stoch_cross_rp_lookback",
                 "stoch_cross_require_squeeze", "stoch_cross_squeeze_lookback", "stoch_cross_squeeze_threshold_pct",
                 "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_atr_period", "rp_sl_atr_mult", "rp_tp_rr",
-                "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze"]:
+                "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
+                "macd_simple_resolution", "macd_simple_fast", "macd_simple_slow", "macd_simple_signal",
+                "macd_simple_tp_usd", "macd_simple_sl_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

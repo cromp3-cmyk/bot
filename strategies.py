@@ -736,6 +736,72 @@ async def range_profile_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+async def macd_simple_poll_loop(symbol):
+    """MACD-Simple: eigenstaendige Strategie, nutzt NUR das schnelle Histogramm ohne
+    Trendfilter/Pullback-Logik. Kreuzt es die Nulllinie nach oben -> Long, nach unten
+    -> Short. TP und SL sind feste, vom Nutzer eingegebene $-Betraege.
+    Zeitrahmen 30s: nutzt die selbst gebauten Mini-Kerzen aus dem Live-Tick (siehe
+    on_price_update), da Binance kein 30s-Intervall anbietet. Andere Zeitrahmen: normale
+    Binance-Kerzen wie bei den anderen Strategien."""
+    b = BOTS[symbol]
+    last_fast = None
+    last_processed_ts = None
+    last_entry_signal_ts = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "macd_simple":
+                fast_p, slow_p, signal_p = cfg["macd_simple_fast"], cfg["macd_simple_slow"], cfg["macd_simple_signal"]
+                needed_bars = max(60, slow_p + signal_p + 20)
+                resolution = cfg.get("macd_simple_resolution", "30s")
+
+                if resolution == "30s":
+                    st = b["state"]
+                    local_candles = st.get("macd_simple_completed_candles", [])
+                    if len(local_candles) >= slow_p + signal_p:
+                        recent = local_candles[-needed_bars:]
+                        closed_ts = [x["ts"] for x in recent]
+                        closed_c = [x["c"] for x in recent]
+                    else:
+                        closed_ts = closed_c = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_c = timestamps[:-1], closes[:-1]
+                    else:
+                        closed_ts = closed_c = None
+
+                if closed_c and len(closed_c) > slow_p + signal_p:
+                    fast_hist = compute_macd_histogram(closed_c, fast_p, slow_p, signal_p)
+                    st = b["state"]
+                    curr_fast = fast_hist[-1]
+                    st["macd_simple_hist"] = round(curr_fast, 4)
+
+                    signal_key = closed_ts[-1]
+                    if last_processed_ts != signal_key:
+                        if (st["position"] is None and cfg["bot_active"]
+                                and last_entry_signal_ts != signal_key and last_fast is not None):
+                            direction = None
+                            if last_fast <= 0 and curr_fast > 0:
+                                direction = "long"
+                            elif last_fast >= 0 and curr_fast < 0:
+                                direction = "short"
+                            if direction:
+                                last_entry_signal_ts = signal_key
+                                price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                                debug_log(f"📡 [{symbol}] MACD-Simple Signal: {direction.upper()} @ {price} (Histogramm {round(curr_fast,4)})")
+                                await execute_entry(symbol, direction, price, is_add_on=False)
+
+                        last_fast = curr_fast
+                        last_processed_ts = signal_key
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] MACD-Simple-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(5)
+
+
 def calc_obi(symbol, levels):
     book = BOTS[symbol]["state"]["obi_book"]
     bids_sorted = sorted(book["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:levels]
@@ -909,6 +975,38 @@ async def on_price_update(symbol, price):
     st, cfg = b["state"], b["config"]
     st["last_price"] = price
 
+    # 30s-Mini-Kerzen aus dem Live-Tick bauen (Binance bietet 30s nicht an) - laeuft immer
+    # mit, kostet praktisch nichts, damit sie schon gefuellt sind falls der Modus aktiviert wird.
+    now_epoch = time.time()
+    bucket_start = int(now_epoch // 30) * 30
+    if st["macd_simple_bucket_start"] is None:
+        st["macd_simple_bucket_start"] = bucket_start
+        st["macd_simple_candle_open"] = price
+        st["macd_simple_candle_high"] = price
+        st["macd_simple_candle_low"] = price
+        st["macd_simple_candle_last"] = price
+    elif bucket_start != st["macd_simple_bucket_start"]:
+        # WICHTIG: als Close den letzten Preis nehmen, der noch IN der alten Kerze lag
+        # (macd_simple_candle_last) - NICHT den neuen Tick, der schon zur naechsten gehoert.
+        candles = st["macd_simple_completed_candles"]
+        candles.append({
+            "ts": st["macd_simple_bucket_start"] * 1000, "o": st["macd_simple_candle_open"],
+            "h": st["macd_simple_candle_high"], "l": st["macd_simple_candle_low"],
+            "c": st["macd_simple_candle_last"],
+        })
+        if len(candles) > 500:
+            candles = candles[-500:]
+        st["macd_simple_completed_candles"] = candles
+        st["macd_simple_bucket_start"] = bucket_start
+        st["macd_simple_candle_open"] = price
+        st["macd_simple_candle_high"] = price
+        st["macd_simple_candle_low"] = price
+        st["macd_simple_candle_last"] = price
+    else:
+        st["macd_simple_candle_high"] = max(st["macd_simple_candle_high"], price)
+        st["macd_simple_candle_low"] = min(st["macd_simple_candle_low"], price)
+        st["macd_simple_candle_last"] = price
+
     st["price_history"].append({"ts": int(time.time() * 1000), "price": price})
     if len(st["price_history"]) > 500:
         st["price_history"].pop(0)
@@ -918,6 +1016,16 @@ async def on_price_update(symbol, price):
         return
 
     bot_active = cfg["bot_active"]
+
+    if cfg["entry_mode"] == "macd_simple":
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if pnl_usd <= -cfg["macd_simple_sl_usd"]:
+                await execute_exit(symbol, price, "SL")
+            elif pnl_usd >= cfg["macd_simple_tp_usd"]:
+                await execute_exit(symbol, price, "TP")
+        return
 
     if cfg["entry_mode"] == "obi_scalp":
         if cfg["obi_trend_filter"]:
