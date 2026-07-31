@@ -759,6 +759,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="momentum">Momentum (mit dem Ungleichgewicht)</option>
       <option value="mean_reversion">Mean-Reversion (dagegen, wie RSI)</option>
       <option value="reversal">Reversal (separater Long/Short-Einstieg bei Umkehr aus Extremzone)</option>
+      <option value="reversal_instant">Reversal-Sofort (getrennte Long/Short-Schwellen, sofort bei Durchbruch, ohne Rückprall-Wartezeit)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>Reversal OBI-Wert Long (überverkauft, negativ)</label><input type="number" step="0.01" id="obi_long_threshold"></div>

@@ -1173,6 +1173,23 @@ async def handle_obi_order_book_update(symbol, msg):
         )
         if direction is None:
             return
+    elif obi_mode == "reversal_instant":
+        # Wie "reversal", aber OHNE auf eine bestaetigte Umkehr zu warten - sobald die
+        # jeweilige Schwelle durchbrochen wird, wird sofort gehandelt. Getrennte
+        # Long-/Short-Schwellen wie bei "reversal", nur ohne Rueckprall-Verzoegerung.
+        long_th = cfg.get("obi_long_threshold", 0.20)
+        short_th = cfg.get("obi_short_threshold", 0.30)
+        direction = None
+        if fast >= short_th:
+            direction = "short"
+        elif fast <= -long_th:
+            direction = "long"
+
+        if direction is None:
+            st["obi_last_signal_direction"] = None
+            return
+        if direction == st["obi_last_signal_direction"]:
+            return
     else:
         mean_reversion = obi_mode == "mean_reversion"
 
