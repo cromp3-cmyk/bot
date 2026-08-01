@@ -655,6 +655,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   button.danger { background:linear-gradient(135deg,#ef4444,#b91c1c); }
   button.neutral { background:linear-gradient(135deg,#475569,#334155); }
   table { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
+  th.sortable { cursor:pointer; user-select:none; }
+  th.sortable:hover { color:var(--accent); }
   th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--panel-border); }
   th { color: var(--text-dim); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.03em; }
   tr:hover td { background: rgba(59,130,246,0.05); }
@@ -982,16 +984,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
   <div id="sweep-pp-results" style="display:none; margin-top:20px;">
-    <div class="label" style="margin-bottom:8px;">Perioden/ATR-Sweep-Rangliste (beste zuerst)</div>
+    <div class="label" style="margin-bottom:8px;">Perioden/ATR-Sweep-Rangliste (beste zuerst, nur profitable Kombinationen)</div>
     <table id="sweep-pp-table">
-      <thead><tr><th>#</th><th>Periode</th><th>ATR-Faktor</th><th>Trades</th><th>Trefferquote</th><th>Gesamt-PnL $</th><th>Max Drawdown $</th></tr></thead>
+      <thead><tr>
+        <th>#</th>
+        <th class="sortable" data-key="period">Periode ⇅</th>
+        <th class="sortable" data-key="atr_factor">ATR-Faktor ⇅</th>
+        <th class="sortable" data-key="trades">Trades ⇅</th>
+        <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+        <th class="sortable" data-key="total_pnl_usd">Gesamt-PnL $ ⇅</th>
+        <th class="sortable" data-key="max_drawdown_usd">Max Drawdown $ ⇅</th>
+      </tr></thead>
       <tbody></tbody>
     </table>
   </div>
   <div id="sweep-pp-tpsl-results" style="display:none; margin-top:20px;">
-    <div class="label" style="margin-bottom:8px;">TP/SL-Sweep-Rangliste (beste zuerst)</div>
+    <div class="label" style="margin-bottom:8px;">TP/SL-Sweep-Rangliste (beste zuerst, nur profitable Kombinationen)</div>
     <table id="sweep-pp-tpsl-table">
-      <thead><tr><th>#</th><th>TP $</th><th>SL $</th><th>Trades</th><th>Trefferquote</th><th>Gesamt-PnL $</th><th>Max Drawdown $</th></tr></thead>
+      <thead><tr>
+        <th>#</th>
+        <th class="sortable" data-key="tp_usd">TP $ ⇅</th>
+        <th class="sortable" data-key="sl_usd">SL $ ⇅</th>
+        <th class="sortable" data-key="trades">Trades ⇅</th>
+        <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+        <th class="sortable" data-key="total_pnl_usd">Gesamt-PnL $ ⇅</th>
+        <th class="sortable" data-key="max_drawdown_usd">Max Drawdown $ ⇅</th>
+      </tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -1143,6 +1161,57 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
   btn.disabled = false;
 });
 
+function makeSortableTable(tableId, getData, rowHtml) {
+  let sortKey = null, sortAsc = true;
+  function render() {
+    let rows = [...getData()];
+    if (sortKey) {
+      rows.sort((a, b) => {
+        let av = a[sortKey], bv = b[sortKey];
+        if (av === null || av === undefined) av = -Infinity;
+        if (bv === null || bv === undefined) bv = -Infinity;
+        if (av < bv) return sortAsc ? -1 : 1;
+        if (av > bv) return sortAsc ? 1 : -1;
+        return 0;
+      });
+    }
+    document.querySelector(`#${tableId} tbody`).innerHTML = rows.map(rowHtml).join('');
+  }
+  document.querySelectorAll(`#${tableId} th.sortable`).forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.key;
+      if (sortKey === key) { sortAsc = !sortAsc; } else { sortKey = key; sortAsc = true; }
+      render();
+    });
+  });
+  return render;
+}
+
+window.sweepPpData = [];
+window.sweepPpTpslData = [];
+
+const renderSweepPp = makeSortableTable('sweep-pp-table', () => window.sweepPpData, (r, i) => `
+  <tr>
+    <td>${i + 1}</td>
+    <td>${r.period}</td>
+    <td>${r.atr_factor}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+  </tr>`);
+
+const renderSweepPpTpsl = makeSortableTable('sweep-pp-tpsl-table', () => window.sweepPpTpslData, (r, i) => `
+  <tr>
+    <td>${i + 1}</td>
+    <td>${r.tp_usd}</td>
+    <td>${r.sl_usd}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+  </tr>`);
+
 document.getElementById('btn-sweep-pp').addEventListener('click', async () => {
   const days = parseInt(document.getElementById('backtest-days').value) || 30;
   const btn = document.getElementById('btn-sweep-pp');
@@ -1159,19 +1228,13 @@ document.getElementById('btn-sweep-pp').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `✅ ${data.combinations_tested} Kombinationen getestet - ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})`;
-      const tbody = document.querySelector('#sweep-pp-table tbody');
-      tbody.innerHTML = data.results.map((r, i) => `
-        <tr>
-          <td>${i + 1}</td>
-          <td>${r.period}</td>
-          <td>${r.atr_factor}</td>
-          <td>${r.stats.trades}</td>
-          <td>${r.stats.win_rate_pct}%</td>
-          <td class="${r.stats.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.stats.total_pnl_usd}</td>
-          <td>${r.stats.max_drawdown_usd}</td>
-        </tr>
-      `).join('');
+      statusEl.innerText = `✅ ${data.combinations_tested} profitable Kombinationen - ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})`;
+      window.sweepPpData = data.results.map(r => ({
+        period: r.period, atr_factor: r.atr_factor,
+        trades: r.stats.trades, win_rate_pct: r.stats.win_rate_pct,
+        total_pnl_usd: r.stats.total_pnl_usd, max_drawdown_usd: r.stats.max_drawdown_usd,
+      }));
+      renderSweepPp();
       sweepEl.style.display = 'block';
     }
   } catch (e) {
@@ -1196,19 +1259,13 @@ document.getElementById('btn-sweep-pp-tpsl').addEventListener('click', async () 
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `✅ ${data.combinations_tested} Kombinationen getestet - ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})`;
-      const tbody = document.querySelector('#sweep-pp-tpsl-table tbody');
-      tbody.innerHTML = data.results.map((r, i) => `
-        <tr>
-          <td>${i + 1}</td>
-          <td>${r.tp_usd}</td>
-          <td>${r.sl_usd}</td>
-          <td>${r.stats.trades}</td>
-          <td>${r.stats.win_rate_pct}%</td>
-          <td class="${r.stats.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.stats.total_pnl_usd}</td>
-          <td>${r.stats.max_drawdown_usd}</td>
-        </tr>
-      `).join('');
+      statusEl.innerText = `✅ ${data.combinations_tested} profitable Kombinationen - ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})`;
+      window.sweepPpTpslData = data.results.map(r => ({
+        tp_usd: r.tp_usd, sl_usd: r.sl_usd,
+        trades: r.stats.trades, win_rate_pct: r.stats.win_rate_pct,
+        total_pnl_usd: r.stats.total_pnl_usd, max_drawdown_usd: r.stats.max_drawdown_usd,
+      }));
+      renderSweepPpTpsl();
       sweepEl.style.display = 'block';
     }
   } catch (e) {

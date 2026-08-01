@@ -1948,6 +1948,7 @@ async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
                 "stats": stats,
             })
 
+    results = [r for r in results if r["stats"]["total_pnl_usd"] > 0]  # nur profitable Kombinationen
     results.sort(key=lambda r: r["stats"]["total_pnl_usd"], reverse=True)
     n_candles = len(c)
     actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
@@ -2033,6 +2034,7 @@ async def run_backtest_sweep_pp_tpsl(symbol, base_cfg, days):
                 "stats": stats,
             })
 
+    results = [r for r in results if r["stats"]["total_pnl_usd"] > 0]  # nur profitable Kombinationen
     results.sort(key=lambda r: r["stats"]["total_pnl_usd"], reverse=True)
     n_candles = len(c)
     actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
