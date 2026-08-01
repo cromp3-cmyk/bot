@@ -898,13 +898,24 @@ async def macd_simple_poll_loop(symbol):
                                 closing_direction = st["position"]
                                 await execute_exit(symbol, price, "MACD-EARLY-FADE")
                                 shrink_streak = 0
-                                # Optional: statt nur zu schliessen, sofort in die Gegenrichtung drehen
+                                # Optional: statt nur zu schliessen, sofort in die Gegenrichtung drehen -
+                                # ABER nur, wenn das Histogramm zu diesem Zeitpunkt tatsaechlich schon die
+                                # Gegenfarbe hat (nicht nur schwaecher wird, sondern wirklich schon rot/gruen
+                                # ist). Ist es nur schwaecher aber noch nicht umgeschlagen, wird nur
+                                # geschlossen und flach geblieben, bis ein echter Farbwechsel kommt.
                                 if cfg.get("macd_simple_early_exit_reverse", False):
                                     opposite = "short" if closing_direction == "long" else "long"
-                                    price_after = st["last_price"] if st["last_price"] is not None else price
-                                    debug_log(f"🔄 [{symbol}] MACD-Simple Früh-Exit-Umkehr: {opposite.upper()} @ {price_after}")
-                                    last_entry_signal_ts = signal_key
-                                    await execute_entry(symbol, opposite, price_after, is_add_on=False)
+                                    color_confirms_reverse = (
+                                        (opposite == "short" and curr_fast < 0)
+                                        or (opposite == "long" and curr_fast > 0)
+                                    )
+                                    if color_confirms_reverse:
+                                        price_after = st["last_price"] if st["last_price"] is not None else price
+                                        debug_log(f"🔄 [{symbol}] MACD-Simple Früh-Exit-Umkehr: {opposite.upper()} @ {price_after} (Histogramm {round(curr_fast,4)} bestätigt Gegenfarbe)")
+                                        last_entry_signal_ts = signal_key
+                                        await execute_entry(symbol, opposite, price_after, is_add_on=False)
+                                    else:
+                                        debug_log(f"⏸️ [{symbol}] MACD-Simple Früh-Exit ohne Umkehr: Histogramm ({round(curr_fast,4)}) noch nicht auf Gegenfarbe umgeschlagen")
                         else:
                             shrink_streak = 0
 
@@ -1972,8 +1983,13 @@ def backtest_macd_simple(candles, cfg):
                 shrink_streak = 0
                 if early_exit_reverse:
                     opposite = "short" if closing_dir == "long" else "long"
-                    size = (margin * leverage) / price
-                    position = {"dir": opposite, "entry": price, "size": size, "entry_i": i}
+                    color_confirms_reverse = (
+                        (opposite == "short" and curr_fast < 0)
+                        or (opposite == "long" and curr_fast > 0)
+                    )
+                    if color_confirms_reverse:
+                        size = (margin * leverage) / price
+                        position = {"dir": opposite, "entry": price, "size": size, "entry_i": i}
         elif position is None:
             shrink_streak = 0
 
