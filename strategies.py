@@ -215,8 +215,8 @@ async def binance_1s_poll_loop(symbol):
                     if timestamps[i] not in existing_ts:
                         buffer.append({"ts": timestamps[i], "o": opens[i], "h": highs[i], "l": lows[i], "c": closes[i]})
                 buffer.sort(key=lambda c: c["ts"])
-                if len(buffer) > 20000:  # ~5.5 Stunden 1s-Historie
-                    buffer = buffer[-20000:]
+                if len(buffer) > 10000:  # ~2.75 Stunden 1s-Historie (reduziert wegen Speicherlimit)
+                    buffer = buffer[-10000:]
                 st["binance_1s_buffer"] = buffer
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Binance-1s-Puffer-Abfrage fehlgeschlagen", {"error": str(e)})
@@ -246,30 +246,6 @@ def _ema_series(values, length):
     return out
 
 
-def ema_step(prev_ema, value, period):
-    """Ein einzelner EMA-Rechenschritt - damit kann eine bestehende EMA (Stand: letzte
-    geschlossene Kerze) mit einem einzelnen Live-Preis-Tick weitergerechnet werden,
-    ohne die komplette Historie neu zu holen. Fuer den Live-Zero-Cross-Exit noetig."""
-    k = 2 / (period + 1)
-    return value * k + prev_ema * (1 - k)
-
-
-def compute_macd_histogram(closes, fast_period, slow_period, signal_period, return_components=False):
-    """MACD-Histogramm = MACD-Linie (EMA-schnell minus EMA-langsam) minus Signallinie
-    (EMA der MACD-Linie). Nur das Histogramm wird fuer die Strategie genutzt.
-    Mit return_components=True werden zusaetzlich die letzten EMA-Werte (ema_fast,
-    ema_slow, signal) zurueckgegeben, um das Histogramm live mit dem aktuellen
-    Preis-Tick weiterzurechnen (siehe ema_step)."""
-    ema_fast = _ema_series(closes, fast_period)
-    ema_slow = _ema_series(closes, slow_period)
-    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
-    signal_line = _ema_series(macd_line, signal_period)
-    histogram = [m - s for m, s in zip(macd_line, signal_line)]
-    if return_components:
-        return histogram, ema_fast[-1], ema_slow[-1], signal_line[-1]
-    return histogram
-
-
 def compute_stochastic(highs, lows, closes, k_period, k_smooth, d_period):
     """%K (geglaettet) und %D fuer den Stochastic-Oszillator."""
     n = len(closes)
@@ -297,147 +273,6 @@ def compute_stochastic(highs, lows, closes, k_period, k_smooth, d_period):
     k_smoothed = sma(raw_k, k_smooth)
     d_line = sma(k_smoothed, d_period)
     return k_smoothed, d_line
-
-
-async def macd_stoch_poll_loop(symbol):
-    """MACD-Dual + Stochastic: Einstieg wenn der langsame MACD-Histogramm-Trend
-    (34/144/9) und ein Nulldurchgang des schnellen Histogramms (13/21/9) in dieselbe
-    Richtung zeigen, optional bestaetigt durch die Stochastic-%K/%D-Lage.
-    TP: fester $-Wert ODER schnelles Histogramm faerbt sich hell (Momentum laesst nach).
-    SL: immer fester $-Wert (siehe on_price_update)."""
-    b = BOTS[symbol]
-    last_fast_hist = None
-    last_slow_hist = None
-    last_processed_ts = None
-    last_entry_signal_ts = None
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "macd_stoch":
-                needed_bars = min(500, cfg["macd_slow_slow"] + cfg["macd_slow_signal"] + 60)
-                resolution = cfg["macd_resolution"]
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, _, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts = timestamps[:-1]
-                        closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                if closed_ts:
-                    if len(closed_c) > cfg["macd_slow_slow"] + cfg["macd_slow_signal"]:
-                        fast_hist, fast_ema_fast_val, fast_ema_slow_val, fast_signal_val = compute_macd_histogram(
-                            closed_c, cfg["macd_fast_fast"], cfg["macd_fast_slow"], cfg["macd_fast_signal"], return_components=True)
-                        slow_hist = compute_macd_histogram(closed_c, cfg["macd_slow_fast"], cfg["macd_slow_slow"], cfg["macd_slow_signal"])
-                        st = b["state"]
-                        curr_fast = fast_hist[-1]
-                        curr_slow = slow_hist[-1]
-                        st["macd_fast_hist"] = round(curr_fast, 4)
-                        st["macd_slow_hist"] = round(curr_slow, 4)
-                        # Basiswerte (Stand: letzte geschlossene Kerze) fuer den Live-Zero-Cross-Exit
-                        st["macd_fast_ema_fast_val"] = fast_ema_fast_val
-                        st["macd_fast_ema_slow_val"] = fast_ema_slow_val
-                        st["macd_fast_signal_val"] = fast_signal_val
-
-                        stoch_k = stoch_d = None
-                        if cfg.get("macd_use_stochastic", True):
-                            k_series, d_series = compute_stochastic(closed_h, closed_l, closed_c,
-                                                                      cfg["stoch_k_period"], cfg["stoch_k_smooth"], cfg["stoch_d_period"])
-                            if k_series and d_series:
-                                stoch_k, stoch_d = k_series[-1], d_series[-1]
-                                st["macd_stoch_k"] = round(stoch_k, 2)
-                                st["macd_stoch_d"] = round(stoch_d, 2)
-
-                        # WICHTIG: Faerbung/Signal nur EINMAL pro tatsaechlich neu geschlossener
-                        # Kerze auswerten - nicht bei jedem 5-Sek-Poll, sonst wird der noch offene
-                        # letzte Kerzenwert mit sich selbst verglichen und faelschlich als "heller"
-                        # (Fade) gewertet, bevor die Kerze ueberhaupt geschlossen hat.
-                        signal_key = closed_ts[-1]
-                        if last_processed_ts != signal_key:
-                            # Fade-Erkennung fuer eine offene Position: schnelles Histogramm
-                            # ist noch in Positions-Richtung, wird aber schwaecher (hell statt dunkel)
-                            if st["position"] is not None and last_fast_hist is not None:
-                                if st["position"] == "long" and curr_fast > 0 and curr_fast <= last_fast_hist:
-                                    st["macd_fade_exit"] = True
-                                elif st["position"] == "short" and curr_fast < 0 and curr_fast >= last_fast_hist:
-                                    st["macd_fade_exit"] = True
-
-                            # Optionale zusaetzliche Fade-Erkennung auf dem LANGSAMEN Histogramm
-                            if (cfg.get("macd_slow_fade_exit_enabled", False)
-                                    and st["position"] is not None and last_slow_hist is not None):
-                                if st["position"] == "long" and curr_slow > 0 and curr_slow <= last_slow_hist:
-                                    st["macd_slow_fade_exit"] = True
-                                elif st["position"] == "short" and curr_slow < 0 and curr_slow >= last_slow_hist:
-                                    st["macd_slow_fade_exit"] = True
-
-                            # Trendumkehr: langsames Histogramm wechselt komplett das Vorzeichen
-                            # gegen die Position (nicht nur schwaecher, sondern die Trend-Praemisse
-                            # der Pullback-Strategie ist hinfaellig) -> sofortiger Exit
-                            if (cfg.get("macd_slow_reversal_exit_enabled", True) and st["position"] is not None):
-                                if st["position"] == "long" and curr_slow < 0:
-                                    st["macd_slow_reversal_exit"] = True
-                                elif st["position"] == "short" and curr_slow > 0:
-                                    st["macd_slow_reversal_exit"] = True
-
-                            # TP-Zero-Cross wird jetzt LIVE in on_price_update mit dem aktuellen
-                            # Preis-Tick geprueft (siehe ema_step) statt hier auf den naechsten
-                            # Kerzenschluss zu warten - kein Poll-Loop-Flag mehr noetig.
-
-                            # Einstieg (Pullback-faehig): langsames Histogramm gibt die Trendrichtung
-                            # vor (jeder Gruen-/Rot-Ton reicht), schnelles Histogramm wird GERADE
-                            # dunkler in Trendrichtung (steigt bei Gruen, faellt bei Rot gegenueber
-                            # dem letzten Balken) - das deckt sowohl den ersten Nulllinien-Durchgang
-                            # als auch ein Wiederaufleben nach einem kurzen Gegenfarben-Dip
-                            # (Pullback) ab, da waehrend einer offenen Position ohnehin nicht neu
-                            # eingestiegen wird.
-                            if (st["position"] is None and cfg["bot_active"]
-                                    and last_entry_signal_ts != signal_key and last_fast_hist is not None):
-                                direction = None
-                                if curr_slow > 0 and curr_fast > 0 and curr_fast > last_fast_hist:
-                                    direction = "long"
-                                elif curr_slow < 0 and curr_fast < 0 and curr_fast < last_fast_hist:
-                                    direction = "short"
-
-                                if direction and cfg.get("macd_use_stochastic", True):
-                                    if stoch_k is None or stoch_d is None:
-                                        direction = None
-                                    elif direction == "long" and stoch_k <= stoch_d:
-                                        direction = None
-                                    elif direction == "short" and stoch_k >= stoch_d:
-                                        direction = None
-
-                                if direction:
-                                    last_entry_signal_ts = signal_key
-                                    # WICHTIG: fuer den tatsaechlichen Einstieg den LIVE-Preis nutzen,
-                                    # nicht den (ggf. Sekunden bis Minuten alten) Kerzenschlusspreis -
-                                    # sonst weicht avg_entry_price vom echten Fuellpreis ab und SL/TP
-                                    # feuern sofort falsch, weil on_price_update mit dem Live-Preis rechnet.
-                                    signal_price = closed_c[-1]
-                                    price = st["last_price"] if st["last_price"] is not None else signal_price
-                                    debug_log(f"📡 [{symbol}] MACD-Dual Signal: {direction.upper()} @ {price} "
-                                              f"(Signal-Kerze {signal_price} / schnell {round(curr_fast,4)} / langsam {round(curr_slow,4)}"
-                                              f"{f' / Stoch %K={round(stoch_k,1)} %D={round(stoch_d,1)}' if stoch_k is not None else ''})")
-                                    st["macd_fade_exit"] = False
-                                    st["macd_slow_fade_exit"] = False
-                                    st["macd_slow_reversal_exit"] = False
-                                    st["macd_fast_zero_cross_exit"] = False
-                                    await execute_entry(symbol, direction, price, is_add_on=False)
-
-                            last_fast_hist = curr_fast
-                            last_slow_hist = curr_slow
-                            last_processed_ts = signal_key
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] MACD-Dual-Abfrage fehlgeschlagen", {"error": str(e)})
-
-        await asyncio.sleep(5)
 
 
 def compute_fib_swing(highs, lows, lookback):
@@ -839,272 +674,6 @@ async def range_profile_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
-async def macd_simple_poll_loop(symbol):
-    """MACD-Simple: eigenstaendige Strategie, nutzt NUR das schnelle Histogramm ohne
-    Trendfilter/Pullback-Logik. Kreuzt es die Nulllinie nach oben -> Long, nach unten
-    -> Short. TP und SL sind feste, vom Nutzer eingegebene $-Betraege.
-    Zeitrahmen 30s: nutzt die selbst gebauten Mini-Kerzen aus dem Live-Tick (siehe
-    on_price_update), da Binance kein 30s-Intervall anbietet. Andere Zeitrahmen: normale
-    Binance-Kerzen wie bei den anderen Strategien."""
-    b = BOTS[symbol]
-    last_fast = None
-    last_processed_ts = None
-    last_entry_signal_ts = None
-    shrink_streak = 0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "macd_simple":
-                fast_p, slow_p, signal_p = cfg["macd_simple_fast"], cfg["macd_simple_slow"], cfg["macd_simple_signal"]
-                needed_bars = max(60, slow_p + signal_p + 20)
-                resolution = cfg.get("macd_simple_resolution", "30s")
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local and len(local[4]) > slow_p + signal_p:
-                        closed_ts, closed_c = local[0], local[4]
-                    else:
-                        closed_ts = closed_c = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_c = timestamps[:-1], closes[:-1]
-                    else:
-                        closed_ts = closed_c = None
-
-                if closed_c and len(closed_c) > slow_p + signal_p:
-                    fast_hist = compute_macd_histogram(closed_c, fast_p, slow_p, signal_p)
-                    st = b["state"]
-                    curr_fast = fast_hist[-1]
-                    st["macd_simple_hist"] = round(curr_fast, 4)
-
-                    signal_key = closed_ts[-1]
-                    if last_processed_ts != signal_key:
-                        # Fruehzeitiger Exit: schliesst schon VOR dem vollen Farbwechsel, wenn
-                        # das Histogramm mehrere Kerzen in Folge in Positionsrichtung schwaecher
-                        # wird (schrumpft) - schneller als auf die volle Nulllinien-Kreuzung
-                        # zu warten, dafuer aber ohne die Sicherheit einer bestaetigten Umkehr.
-                        if (cfg.get("macd_simple_early_exit_enabled", False)
-                                and st["position"] is not None and last_fast is not None):
-                            shrinking = ((st["position"] == "long" and curr_fast < last_fast)
-                                         or (st["position"] == "short" and curr_fast > last_fast))
-                            shrink_streak = shrink_streak + 1 if shrinking else 0
-                            needed_streak = cfg.get("macd_simple_early_exit_bars", 3)
-                            if shrink_streak >= needed_streak:
-                                price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                                debug_log(f"📉 [{symbol}] MACD-Simple Früh-Exit: {shrink_streak} Kerzen in Folge schwächer (Histogramm {round(curr_fast,4)})")
-                                closing_direction = st["position"]
-                                await execute_exit(symbol, price, "MACD-EARLY-FADE")
-                                shrink_streak = 0
-                                # Optional: statt nur zu schliessen, sofort in die Gegenrichtung drehen -
-                                # ABER nur, wenn das Histogramm zu diesem Zeitpunkt tatsaechlich schon die
-                                # Gegenfarbe hat (nicht nur schwaecher wird, sondern wirklich schon rot/gruen
-                                # ist). Ist es nur schwaecher aber noch nicht umgeschlagen, wird nur
-                                # geschlossen und flach geblieben, bis ein echter Farbwechsel kommt.
-                                if cfg.get("macd_simple_early_exit_reverse", False):
-                                    opposite = "short" if closing_direction == "long" else "long"
-                                    color_confirms_reverse = (
-                                        (opposite == "short" and curr_fast < 0)
-                                        or (opposite == "long" and curr_fast > 0)
-                                    )
-                                    if color_confirms_reverse:
-                                        price_after = st["last_price"] if st["last_price"] is not None else price
-                                        debug_log(f"🔄 [{symbol}] MACD-Simple Früh-Exit-Umkehr: {opposite.upper()} @ {price_after} (Histogramm {round(curr_fast,4)} bestätigt Gegenfarbe)")
-                                        last_entry_signal_ts = signal_key
-                                        await execute_entry(symbol, opposite, price_after, is_add_on=False)
-                                    else:
-                                        debug_log(f"⏸️ [{symbol}] MACD-Simple Früh-Exit ohne Umkehr: Histogramm ({round(curr_fast,4)}) noch nicht auf Gegenfarbe umgeschlagen")
-                        else:
-                            shrink_streak = 0
-
-                        if cfg["bot_active"] and last_entry_signal_ts != signal_key and last_fast is not None:
-                            direction = None
-                            if last_fast <= 0 and curr_fast > 0:
-                                direction = "long"
-                            elif last_fast >= 0 and curr_fast < 0:
-                                direction = "short"
-
-                            if direction:
-                                exit_mode = cfg.get("macd_simple_exit_mode", "tp_sl")
-                                price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-
-                                if st["position"] is None:
-                                    last_entry_signal_ts = signal_key
-                                    shrink_streak = 0
-                                    debug_log(f"📡 [{symbol}] MACD-Simple Signal: {direction.upper()} @ {price} (Histogramm {round(curr_fast,4)})")
-                                    await execute_entry(symbol, direction, price, is_add_on=False)
-                                elif exit_mode == "reverse" and st["position"] != direction:
-                                    # Stop-and-Reverse: Farbwechsel dreht die Position sofort um,
-                                    # statt auf ein TP-Kursziel zu warten. Der feste SL bleibt
-                                    # unabhaengig davon als Kapitalschutz aktiv (siehe on_price_update).
-                                    last_entry_signal_ts = signal_key
-                                    shrink_streak = 0
-                                    debug_log(f"🔄 [{symbol}] MACD-Simple Farbwechsel-Umkehr: {direction.upper()} @ {price} (Histogramm {round(curr_fast,4)})")
-                                    await execute_exit(symbol, price, "MACD-REVERSE")
-                                    price_after_exit = st["last_price"] if st["last_price"] is not None else price
-                                    await execute_entry(symbol, direction, price_after_exit, is_add_on=False)
-
-                        last_fast = curr_fast
-                        last_processed_ts = signal_key
-
-                        hist_history = st.get("macd_simple_hist_history", [])
-                        hist_history.append({"ts": signal_key, "hist": round(curr_fast, 4)})
-                        if len(hist_history) > 200:
-                            hist_history = hist_history[-200:]
-                        st["macd_simple_hist_history"] = hist_history
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] MACD-Simple-Abfrage fehlgeschlagen", {"error": str(e)})
-
-        await asyncio.sleep(5)
-
-
-async def candle_flip_poll_loop(symbol):
-    """Candle-Flip: immer im Markt, dreht bei jedem Kerzenfarbwechsel sofort um.
-    Grün (Close > Open) -> Long, Rot (Close < Open) -> Short. Kein TP - der Gewinn
-    kommt daher, mit der jeweils letzten Kerze auf der richtigen Seite zu stehen.
-    Fester SL bleibt als Sicherheitsnetz. Optionaler Mindest-Kerzenkoerper filtert
-    Rauschen/Doji-Kerzen raus, damit nicht auf jedes Zittern reagiert wird.
-    Nur sinnvoll auf gebuehrenfreien Boersen wie Lighter - bei Gebuehren wuerde die
-    hohe Handelsfrequenz jeden Gewinn auffressen."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "candle_flip":
-                resolution = cfg["cf_resolution"]
-                needed_bars = 5  # nur die letzte abgeschlossene Kerze wird gebraucht
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, _, _, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars + 1)
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts = timestamps[:-1]
-                        closed_o, closed_c = opens[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                if closed_ts and len(closed_c) >= 1:
-                    st = b["state"]
-                    signal_key = closed_ts[-1]
-                    if last_processed_ts != signal_key:
-                        last_processed_ts = signal_key
-                        open_p, close_p = closed_o[-1], closed_c[-1]
-                        body_pct = abs(close_p - open_p) / open_p * 100 if open_p else 0
-                        st["cf_last_body_pct"] = round(body_pct, 4)
-
-                        color = None
-                        if close_p > open_p:
-                            color = "green"
-                        elif close_p < open_p:
-                            color = "red"
-                        st["cf_last_color"] = color
-
-                        if color and body_pct >= cfg.get("cf_min_body_pct", 0) and cfg["bot_active"]:
-                            direction = "long" if color == "green" else "short"
-                            price = st["last_price"] if st["last_price"] is not None else close_p
-
-                            if st["position"] is None:
-                                debug_log(f"📡 [{symbol}] Candle-Flip Einstieg: {direction.upper()} @ {price} (Körper {round(body_pct,4)}%)")
-                                await execute_entry(symbol, direction, price, is_add_on=False)
-                            elif st["position"] != direction:
-                                debug_log(f"🔄 [{symbol}] Candle-Flip Umkehr: {direction.upper()} @ {price} (Körper {round(body_pct,4)}%)")
-                                await execute_exit(symbol, price, "CANDLE-FLIP")
-                                price_after = st["last_price"] if st["last_price"] is not None else price
-                                await execute_entry(symbol, direction, price_after, is_add_on=False)
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Candle-Flip-Abfrage fehlgeschlagen", {"error": str(e)})
-
-        await asyncio.sleep(2)  # kurzes Intervall, damit Flips bei sehr schnellen Zeitrahmen nicht verpasst werden
-
-
-async def triple_candle_poll_loop(symbol):
-    """3-Kerzen-Momentum: N (Standard 3) aufeinanderfolgende gruene Kerzen mit jeweils
-    hoeherem Schlusskurs als die vorherige (nicht nur gruen, sondern auch steigend) ->
-    Long. Spiegelbildlich N aufeinanderfolgende rote Kerzen mit jeweils tieferem
-    Schlusskurs -> Short. TP/SL sind feste $-Betraege, danach wiederholt sich der Prozess."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_close = None
-    streak_count = 0
-    streak_direction = None
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "triple_candle":
-                needed_streak = cfg.get("tc_streak", 3)
-                needed_bars = needed_streak + 3
-                resolution = cfg["tc_resolution"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, _, _, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars + 1)
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts = timestamps[:-1]
-                        closed_o, closed_c = opens[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                if closed_ts and len(closed_c) >= 1:
-                    st = b["state"]
-                    signal_key = closed_ts[-1]
-                    if last_processed_ts != signal_key:
-                        last_processed_ts = signal_key
-                        open_p, close_p = closed_o[-1], closed_c[-1]
-                        color = "green" if close_p > open_p else ("red" if close_p < open_p else None)
-                        rising = last_close is not None and close_p > last_close
-                        falling = last_close is not None and close_p < last_close
-
-                        this_direction = None
-                        if color == "green" and rising:
-                            this_direction = "long"
-                        elif color == "red" and falling:
-                            this_direction = "short"
-
-                        if this_direction is not None and this_direction == streak_direction:
-                            streak_count += 1
-                        elif this_direction is not None:
-                            streak_direction = this_direction
-                            streak_count = 1
-                        else:
-                            streak_direction = None
-                            streak_count = 0
-
-                        st["tc_streak_count"] = streak_count
-                        st["tc_streak_direction"] = streak_direction
-
-                        if (streak_count >= needed_streak and st["position"] is None and cfg["bot_active"]):
-                            price = st["last_price"] if st["last_price"] is not None else close_p
-                            debug_log(f"📡 [{symbol}] 3-Kerzen-Momentum Signal: {streak_direction.upper()} @ {price} ({streak_count} Kerzen in Folge)")
-                            await execute_entry(symbol, streak_direction, price, is_add_on=False)
-                            streak_count = 0
-                            streak_direction = None
-                            st["tc_streak_count"] = 0
-                            st["tc_streak_direction"] = None
-
-                        last_close = close_p
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] 3-Kerzen-Momentum-Abfrage fehlgeschlagen", {"error": str(e)})
-
-        await asyncio.sleep(2)
-
-
 def calc_obi(symbol, levels, depth_weighting=False, min_liquidity=0.0):
     """Berechnet das Orderbuch-Ungleichgewicht ueber die naechsten 'levels' Preisstufen.
     depth_weighting: gewichtet Level naeher am aktuellen Kurs staerker (1/(i+1)) statt
@@ -1365,8 +934,8 @@ async def on_price_update(symbol, price):
             "h": st["local_1s_candle_high"], "l": st["local_1s_candle_low"],
             "c": st["local_1s_candle_last"],
         })
-        if len(buffer) > 20000:  # ~5.5 Stunden
-            buffer = buffer[-20000:]
+        if len(buffer) > 10000:  # ~2.75 Stunden (reduziert wegen Speicherlimit)
+            buffer = buffer[-10000:]
         st["local_1s_buffer"] = buffer
         st["local_1s_bucket_start"] = bucket_start
         st["local_1s_candle_open"] = price
@@ -1387,42 +956,6 @@ async def on_price_update(symbol, price):
         return
 
     bot_active = cfg["bot_active"]
-
-    if cfg["entry_mode"] == "macd_simple":
-        if st["position"] is None:
-            st["macd_simple_breakeven_triggered"] = False
-        else:
-            entry = st["avg_entry_price"]
-            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            sl_floor = -cfg["macd_simple_sl_usd"]
-            if cfg.get("macd_simple_breakeven_enabled", False):
-                if not st["macd_simple_breakeven_triggered"] and pnl_usd >= cfg.get("macd_simple_breakeven_trigger_usd", 3):
-                    st["macd_simple_breakeven_triggered"] = True
-                if st["macd_simple_breakeven_triggered"]:
-                    sl_floor = cfg.get("macd_simple_breakeven_lock_usd", 0.5)
-            if pnl_usd <= sl_floor:
-                await execute_exit(symbol, price, "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
-            elif cfg.get("macd_simple_exit_mode", "tp_sl") == "tp_sl" and pnl_usd >= cfg["macd_simple_tp_usd"]:
-                await execute_exit(symbol, price, "TP")
-        return
-
-    if cfg["entry_mode"] == "candle_flip":
-        if st["position"] is not None:
-            entry = st["avg_entry_price"]
-            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if pnl_usd <= -cfg["cf_sl_usd"]:
-                await execute_exit(symbol, price, "SL")
-        return
-
-    if cfg["entry_mode"] == "triple_candle":
-        if st["position"] is not None:
-            entry = st["avg_entry_price"]
-            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if pnl_usd <= -cfg["tc_sl_usd"]:
-                await execute_exit(symbol, price, "SL")
-            elif pnl_usd >= cfg["tc_tp_usd"]:
-                await execute_exit(symbol, price, "TP")
-        return
 
     if cfg["entry_mode"] == "obi_scalp":
         if cfg["obi_trend_filter"]:
@@ -1458,58 +991,6 @@ async def on_price_update(symbol, price):
                     await execute_exit(symbol, price, "TP")
                 elif pnl_pct <= sl_floor:
                     await execute_exit(symbol, price, "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
-        return
-
-    if cfg["entry_mode"] == "macd_stoch":
-        if st["position"] is not None:
-            entry = st["avg_entry_price"]
-            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-
-            # Live-Zero-Cross: rechnet die schnelle MACD-EMA mit dem AKTUELLEN Preis-Tick
-            # weiter (ausgehend vom Stand der letzten geschlossenen Kerze), statt auf den
-            # naechsten Kerzenschluss zu warten - reagiert also sofort, sobald der Live-Preis
-            # die Nulllinie ueberschreiten wuerde.
-            live_zero_cross = False
-            if cfg.get("macd_fast_zero_cross_exit_enabled", True):
-                base_ema_fast = st.get("macd_fast_ema_fast_val")
-                base_ema_slow = st.get("macd_fast_ema_slow_val")
-                base_signal = st.get("macd_fast_signal_val")
-                last_closed_fast = st.get("macd_fast_hist")
-                if base_ema_fast is not None and base_ema_slow is not None and base_signal is not None and last_closed_fast is not None:
-                    live_ema_fast = ema_step(base_ema_fast, price, cfg["macd_fast_fast"])
-                    live_ema_slow = ema_step(base_ema_slow, price, cfg["macd_fast_slow"])
-                    live_macd_line = live_ema_fast - live_ema_slow
-                    live_signal = ema_step(base_signal, live_macd_line, cfg["macd_fast_signal"])
-                    live_fast_hist = live_macd_line - live_signal
-                    if st["position"] == "short" and last_closed_fast <= 0 and live_fast_hist > 0:
-                        live_zero_cross = True
-                    elif st["position"] == "long" and last_closed_fast >= 0 and live_fast_hist < 0:
-                        live_zero_cross = True
-
-            if pnl_usd <= -cfg["macd_sl_usd"]:
-                await execute_exit(symbol, price, "SL")
-                st["macd_fade_exit"] = False
-            elif not cfg.get("macd_fast_zero_cross_exit_enabled", True) and pnl_usd >= cfg["macd_tp_usd"]:
-                # Fester TP-Betrag greift nur, wenn der Nulllinien-Exit AUS ist - sonst wuerde er
-                # die Position ja genau in dem Moment schliessen, den der Nulllinien-Exit bewusst
-                # laufen lassen soll (Pullback-Trend geht weiter).
-                await execute_exit(symbol, price, "TP")
-                st["macd_fade_exit"] = False
-            elif cfg.get("macd_slow_reversal_exit_enabled", True) and st.get("macd_slow_reversal_exit"):
-                await execute_exit(symbol, price, "MACD-SLOW-REVERSAL")
-                st["macd_slow_reversal_exit"] = False
-                st["macd_fade_exit"] = False
-                st["macd_slow_fade_exit"] = False
-            elif live_zero_cross:
-                await execute_exit(symbol, price, "MACD-ZERO-CROSS")
-                st["macd_fast_zero_cross_exit"] = False
-                st["macd_fade_exit"] = False
-            elif cfg.get("macd_fast_fade_exit_enabled", True) and st.get("macd_fade_exit"):
-                await execute_exit(symbol, price, "MACD-FADE")
-                st["macd_fade_exit"] = False
-            elif cfg.get("macd_slow_fade_exit_enabled", False) and st.get("macd_slow_fade_exit"):
-                await execute_exit(symbol, price, "MACD-SLOW-FADE")
-                st["macd_slow_fade_exit"] = False
         return
 
     if cfg["entry_mode"] == "fib_reversal":
@@ -1706,8 +1187,7 @@ async def trading_loop():
 # Lighter.xyz ist gebuehrenfrei - es werden daher keine Handelsgebuehren simuliert.
 
 BACKTEST_MAX_CANDLES = {
-    "macd_stoch": 500_000, "stoch_cross": 500_000, "fib_reversal": 500_000, "range_profile": 30_000,
-    "macd_simple": 500_000, "candle_flip": 500_000, "triple_candle": 500_000,
+    "stoch_cross": 100_000, "fib_reversal": 100_000, "range_profile": 30_000,
 }
 
 
@@ -1715,74 +1195,6 @@ def _bt_close_trade(trades, direction, entry, exit_price, size, i, entry_i, reas
     pnl = (exit_price - entry) * size if direction == "long" else (entry - exit_price) * size
     trades.append({"dir": direction, "entry": entry, "exit": exit_price, "reason": reason,
                     "pnl": pnl, "bars_held": i - entry_i})
-
-
-def backtest_macd_stoch(candles, cfg):
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-
-    fast_hist = compute_macd_histogram(c, cfg["macd_fast_fast"], cfg["macd_fast_slow"], cfg["macd_fast_signal"])
-    slow_hist = compute_macd_histogram(c, cfg["macd_slow_fast"], cfg["macd_slow_slow"], cfg["macd_slow_signal"])
-    use_stoch = cfg.get("macd_use_stochastic", True)
-    k_series = d_series = None
-    if use_stoch:
-        k_series, d_series = compute_stochastic(h, l, c, cfg["stoch_k_period"], cfg["stoch_k_smooth"], cfg["stoch_d_period"])
-
-    warmup = cfg["macd_slow_slow"] + cfg["macd_slow_signal"] + 5
-    position = None
-    trades = []
-    last_fast = last_slow = None
-
-    for i in range(warmup, n):
-        curr_fast, curr_slow, price = fast_hist[i], slow_hist[i], c[i]
-
-        if position is not None:
-            size, entry, direction = position["size"], position["entry"], position["dir"]
-            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            reason = None
-            if pnl_usd <= -cfg["macd_sl_usd"]:
-                reason = "SL"
-            elif not cfg.get("macd_fast_zero_cross_exit_enabled", True) and pnl_usd >= cfg["macd_tp_usd"]:
-                reason = "TP"
-            elif cfg.get("macd_slow_reversal_exit_enabled", True) and (
-                    (direction == "long" and curr_slow < 0) or (direction == "short" and curr_slow > 0)):
-                reason = "MACD-SLOW-REVERSAL"
-            elif cfg.get("macd_fast_zero_cross_exit_enabled", True) and last_fast is not None and (
-                    (direction == "short" and last_fast <= 0 and curr_fast > 0) or
-                    (direction == "long" and last_fast >= 0 and curr_fast < 0)):
-                reason = "MACD-ZERO-CROSS"
-            elif cfg.get("macd_fast_fade_exit_enabled", True) and last_fast is not None and (
-                    (direction == "long" and curr_fast > 0 and curr_fast <= last_fast) or
-                    (direction == "short" and curr_fast < 0 and curr_fast >= last_fast)):
-                reason = "MACD-FADE"
-            elif cfg.get("macd_slow_fade_exit_enabled", False) and last_slow is not None and (
-                    (direction == "long" and curr_slow > 0 and curr_slow <= last_slow) or
-                    (direction == "short" and curr_slow < 0 and curr_slow >= last_slow)):
-                reason = "MACD-SLOW-FADE"
-            if reason:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], reason)
-                position = None
-
-        if position is None and last_fast is not None:
-            direction = None
-            if curr_slow > 0 and curr_fast > 0 and curr_fast > last_fast:
-                direction = "long"
-            elif curr_slow < 0 and curr_fast < 0 and curr_fast < last_fast:
-                direction = "short"
-            if direction and use_stoch and k_series:
-                stoch_k, stoch_d = k_series[i], d_series[i]
-                if direction == "long" and stoch_k <= stoch_d:
-                    direction = None
-                elif direction == "short" and stoch_k >= stoch_d:
-                    direction = None
-            if direction:
-                size = (margin * leverage) / price
-                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-
-        last_fast, last_slow = curr_fast, curr_slow
-
-    return trades
 
 
 def backtest_stoch_cross(candles, cfg):
@@ -2017,196 +1429,11 @@ def backtest_fib_reversal(candles, cfg):
     return trades
 
 
-def backtest_macd_simple(candles, cfg):
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    fast_p, slow_p, signal_p = cfg["macd_simple_fast"], cfg["macd_simple_slow"], cfg["macd_simple_signal"]
-    exit_mode = cfg.get("macd_simple_exit_mode", "tp_sl")
-    breakeven_enabled = cfg.get("macd_simple_breakeven_enabled", False)
-    breakeven_trigger = cfg.get("macd_simple_breakeven_trigger_usd", 3)
-    breakeven_lock = cfg.get("macd_simple_breakeven_lock_usd", 0.5)
-    early_exit_reverse = cfg.get("macd_simple_early_exit_reverse", False)
-
-    fast_hist = compute_macd_histogram(c, fast_p, slow_p, signal_p)
-    warmup = slow_p + signal_p + 5
-    position = None
-    trades = []
-    last_fast = None
-    shrink_streak = 0
-    breakeven_triggered = False
-    early_exit_enabled = cfg.get("macd_simple_early_exit_enabled", False)
-    early_exit_bars = cfg.get("macd_simple_early_exit_bars", 3)
-
-    for i in range(warmup, n):
-        curr_fast, price = fast_hist[i], c[i]
-
-        if position is not None:
-            direction, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            sl_floor = -cfg["macd_simple_sl_usd"]
-            if breakeven_enabled:
-                if not breakeven_triggered and pnl_usd >= breakeven_trigger:
-                    breakeven_triggered = True
-                if breakeven_triggered:
-                    sl_floor = breakeven_lock
-            if pnl_usd <= sl_floor:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
-                position = None
-                breakeven_triggered = False
-            elif exit_mode == "tp_sl" and pnl_usd >= cfg["macd_simple_tp_usd"]:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
-                position = None
-                breakeven_triggered = False
-
-        if position is not None and early_exit_enabled and last_fast is not None:
-            shrinking = ((position["dir"] == "long" and curr_fast < last_fast)
-                         or (position["dir"] == "short" and curr_fast > last_fast))
-            shrink_streak = shrink_streak + 1 if shrinking else 0
-            if shrink_streak >= early_exit_bars:
-                closing_dir = position["dir"]
-                _bt_close_trade(trades, closing_dir, position["entry"], price, position["size"], i, position["entry_i"], "MACD-EARLY-FADE")
-                position = None
-                breakeven_triggered = False
-                shrink_streak = 0
-                if early_exit_reverse:
-                    opposite = "short" if closing_dir == "long" else "long"
-                    color_confirms_reverse = (
-                        (opposite == "short" and curr_fast < 0)
-                        or (opposite == "long" and curr_fast > 0)
-                    )
-                    if color_confirms_reverse:
-                        size = (margin * leverage) / price
-                        position = {"dir": opposite, "entry": price, "size": size, "entry_i": i}
-        elif position is None:
-            shrink_streak = 0
-
-        direction = None
-        if last_fast is not None:
-            if last_fast <= 0 and curr_fast > 0:
-                direction = "long"
-            elif last_fast >= 0 and curr_fast < 0:
-                direction = "short"
-
-        if direction:
-            if position is None:
-                size = (margin * leverage) / price
-                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                shrink_streak = 0
-                breakeven_triggered = False
-            elif exit_mode == "reverse" and position["dir"] != direction:
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MACD-REVERSE")
-                size = (margin * leverage) / price
-                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                breakeven_triggered = False
-
-        last_fast = curr_fast
-
-    return trades
-
-
-def backtest_candle_flip(candles, cfg):
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    min_body_pct = cfg.get("cf_min_body_pct", 0)
-    sl_usd = cfg["cf_sl_usd"]
-
-    position = None
-    trades = []
-
-    for i in range(1, n):
-        open_p, close_p = o[i], c[i]
-        price = close_p
-
-        if position is not None:
-            direction, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            if pnl_usd <= -sl_usd:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
-                position = None
-
-        body_pct = abs(close_p - open_p) / open_p * 100 if open_p else 0
-        color = "green" if close_p > open_p else ("red" if close_p < open_p else None)
-
-        if color and body_pct >= min_body_pct:
-            direction = "long" if color == "green" else "short"
-            if position is None:
-                size = (margin * leverage) / price
-                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-            elif position["dir"] != direction:
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "CANDLE-FLIP")
-                size = (margin * leverage) / price
-                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-
-    return trades
-
-
-def backtest_triple_candle(candles, cfg):
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    needed_streak = cfg.get("tc_streak", 3)
-    tp_usd = cfg["tc_tp_usd"]
-    sl_usd = cfg["tc_sl_usd"]
-
-    position = None
-    trades = []
-    last_close = None
-    streak_count = 0
-    streak_direction = None
-
-    for i in range(1, n):
-        open_p, close_p, price = o[i], c[i], c[i]
-
-        if position is not None:
-            direction, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            if pnl_usd <= -sl_usd:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
-                position = None
-            elif pnl_usd >= tp_usd:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
-                position = None
-
-        color = "green" if close_p > open_p else ("red" if close_p < open_p else None)
-        rising = last_close is not None and close_p > last_close
-        falling = last_close is not None and close_p < last_close
-
-        this_direction = None
-        if color == "green" and rising:
-            this_direction = "long"
-        elif color == "red" and falling:
-            this_direction = "short"
-
-        if this_direction is not None and this_direction == streak_direction:
-            streak_count += 1
-        elif this_direction is not None:
-            streak_direction = this_direction
-            streak_count = 1
-        else:
-            streak_direction = None
-            streak_count = 0
-
-        if streak_count >= needed_streak and position is None:
-            size = (margin * leverage) / price
-            position = {"dir": streak_direction, "entry": price, "size": size, "entry_i": i}
-            streak_count = 0
-            streak_direction = None
-
-        last_close = close_p
-
-    return trades
-
 
 BACKTEST_FUNCS = {
-    "macd_stoch": backtest_macd_stoch,
     "stoch_cross": backtest_stoch_cross,
     "range_profile": backtest_range_profile,
     "fib_reversal": backtest_fib_reversal,
-    "macd_simple": backtest_macd_simple,
-    "candle_flip": backtest_candle_flip,
-    "triple_candle": backtest_triple_candle,
 }
 
 
@@ -2234,8 +1461,28 @@ def summarize_backtest_trades(trades):
     }
 
 
-_backtest_candle_cache = {}  # key: (symbol, resolution) -> {"fetched_at": float, "days": int, "candles": (...)}
+from collections import OrderedDict
+
+_backtest_candle_cache = OrderedDict()  # key: (symbol, resolution) -> {"fetched_at": float, "days": int, "candles": (...)}
 BACKTEST_CACHE_TTL_SECONDS = 300  # 5 Minuten - danach gilt der Cache als zu alt und wird neu geladen
+BACKTEST_CACHE_MAX_ENTRIES = 5  # Hartes Limit: nur die 5 zuletzt genutzten Coin+Zeitrahmen-Kombinationen
+# werden im Speicher gehalten (LRU) - sonst wuerde jede je getestete Kombination fuer immer im
+# Arbeitsspeicher bleiben (bis zu ~500.000 Kerzen pro Eintrag = mehrere hundert MB) und den
+# Render-Server irgendwann zum Absturz wegen Speicherueberlauf bringen.
+
+
+def _backtest_cache_get(cache_key):
+    entry = _backtest_candle_cache.get(cache_key)
+    if entry is not None:
+        _backtest_candle_cache.move_to_end(cache_key)  # als zuletzt genutzt markieren
+    return entry
+
+
+def _backtest_cache_set(cache_key, entry):
+    _backtest_candle_cache[cache_key] = entry
+    _backtest_candle_cache.move_to_end(cache_key)
+    while len(_backtest_candle_cache) > BACKTEST_CACHE_MAX_ENTRIES:
+        _backtest_candle_cache.popitem(last=False)  # aeltesten (am laengsten ungenutzten) Eintrag entfernen
 
 
 def _trim_candles_to_days(candles, days, max_candles):
@@ -2256,12 +1503,10 @@ def _trim_candles_to_days(candles, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur macd_stoch, stoch_cross, range_profile, fib_reversal, macd_simple, candle_flip, triple_candle - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur stoch_cross, range_profile, fib_reversal - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
-    resolution_key = {"macd_stoch": "macd_resolution", "stoch_cross": "stoch_cross_resolution",
-                       "range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
-                       "macd_simple": "macd_simple_resolution", "candle_flip": "cf_resolution",
-                       "triple_candle": "tc_resolution"}[entry_mode]
+    resolution_key = {"stoch_cross": "stoch_cross_resolution",
+                       "range_profile": "rp_resolution", "fib_reversal": "fib_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
     if resolution in SUB_MINUTE_RESOLUTIONS:
@@ -2271,7 +1516,7 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         max_candles = min(max_candles, 5000)
 
     cache_key = (symbol, resolution)
-    cached = _backtest_candle_cache.get(cache_key)
+    cached = _backtest_cache_get(cache_key)
     now = time.time()
     cache_used = False
 
@@ -2288,7 +1533,7 @@ async def run_backtest(symbol, entry_mode, cfg, days):
     else:
         candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
         if candles:
-            _backtest_candle_cache[cache_key] = {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles}
+            _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
 
     if err:
         return {"error": err}
@@ -2308,86 +1553,3 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         "stats": stats, "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
     }
 
-
-# ========== PARAMETER-SWEEP (mehrere Kombinationen gegeneinander testen) ==========
-
-MACD_SIMPLE_PRESETS = [
-    {"name": "Standard", "fast": 13, "slow": 21, "signal": 9},
-    {"name": "Sehr schnell", "fast": 5, "slow": 13, "signal": 6},
-    {"name": "Schnell", "fast": 8, "slow": 17, "signal": 9},
-    {"name": "Klassisch", "fast": 12, "slow": 26, "signal": 9},
-    {"name": "Kurzes Signal", "fast": 13, "slow": 21, "signal": 5},
-    {"name": "Mittel", "fast": 10, "slow": 20, "signal": 7},
-    {"name": "Reaktiv", "fast": 6, "slow": 19, "signal": 9},
-    {"name": "Weiter Abstand", "fast": 13, "slow": 34, "signal": 9},
-    {"name": "Langsam", "fast": 21, "slow": 55, "signal": 13},
-    {"name": "Extrem breit", "fast": 5, "slow": 35, "signal": 5},
-]
-
-
-async def run_backtest_sweep(symbol, entry_mode, base_cfg, days):
-    """Testet mehrere Parameter-Kombinationen gegeneinander (aehnlich einer Monte-Carlo-
-    artigen Parameter-Suche, aber deterministisch ueber vordefinierte Presets statt
-    Zufallsstichproben) und liefert eine nach Gesamt-PnL sortierte Rangliste zurueck.
-    Die Kerzen werden nur EINMAL geholt (nutzt denselben Cache wie der normale Backtest)
-    und dann fuer alle Kombinationen wiederverwendet - das macht den Sweep schnell."""
-    if entry_mode != "macd_simple":
-        return {"error": "Preset-Sweep ist aktuell nur für MACD-Simple verfügbar."}
-
-    resolution = base_cfg.get("macd_simple_resolution", "1m")
-    if resolution == "30s":
-        return {"error": "Preset-Sweep für 30s nicht sinnvoll (zu wenig historische Daten in vertretbarer Zeit). Wähle einen anderen Zeitrahmen."}
-    max_candles = BACKTEST_MAX_CANDLES["macd_simple"]
-    if resolution in SUB_MINUTE_RESOLUTIONS:
-        max_candles = min(max_candles, 5000)
-
-    cache_key = (symbol, resolution)
-    cached = _backtest_candle_cache.get(cache_key)
-    now = time.time()
-
-    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
-            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
-            and len(cached["candles"][4]) >= 100):
-        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
-    else:
-        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
-        if err:
-            return {"error": err}
-        if candles:
-            _backtest_candle_cache[cache_key] = {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles}
-
-    if not candles or len(candles[4]) < 100:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-
-    results = []
-    for preset in MACD_SIMPLE_PRESETS:
-        for breakeven_variant in (False, True):
-            cfg_variant = dict(base_cfg)
-            cfg_variant["macd_simple_fast"] = preset["fast"]
-            cfg_variant["macd_simple_slow"] = preset["slow"]
-            cfg_variant["macd_simple_signal"] = preset["signal"]
-            cfg_variant["macd_simple_breakeven_enabled"] = breakeven_variant
-            if breakeven_variant:
-                cfg_variant.setdefault("macd_simple_breakeven_trigger_usd", round(cfg_variant.get("macd_simple_tp_usd", 3) * 0.5, 2))
-                cfg_variant.setdefault("macd_simple_breakeven_lock_usd", 0.5)
-
-            trades = backtest_macd_simple(candles, cfg_variant)
-            stats = summarize_backtest_trades(trades)
-            results.append({
-                "label": f"{preset['name']} ({preset['fast']},{preset['slow']},{preset['signal']})" + (" + Breakeven" if breakeven_variant else ""),
-                "fast": preset["fast"], "slow": preset["slow"], "signal": preset["signal"],
-                "breakeven_enabled": breakeven_variant,
-                "breakeven_trigger_usd": cfg_variant.get("macd_simple_breakeven_trigger_usd") if breakeven_variant else None,
-                "breakeven_lock_usd": cfg_variant.get("macd_simple_breakeven_lock_usd") if breakeven_variant else None,
-                "stats": stats,
-            })
-
-    results.sort(key=lambda r: r["stats"]["total_pnl_usd"], reverse=True)
-    n_candles = len(candles[4])
-    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
-        "candles_processed": n_candles, "actual_days_covered": round(actual_days, 1),
-        "combinations_tested": len(results),
-        "results": results,
-    }

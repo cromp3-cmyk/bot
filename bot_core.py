@@ -170,7 +170,7 @@ def default_config():
         "dry_run": os.getenv("DRY_RUN", "true").lower() == "true",
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
-        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "obi_scalp" oder "macd_stoch"
+        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "obi_scalp", "fib_reversal", "stoch_cross" oder "range_profile"
         "grid_mode": os.getenv("GRID_MODE", "pct"),  # "pct" oder "usd"
         "grid_step_pct": float(os.getenv("GRID_STEP_PCT", "0.25")),
         "tp_step_pct": float(os.getenv("TP_STEP_PCT", "0.25")),
@@ -204,23 +204,6 @@ def default_config():
         "obi_cooldown_seconds": float(os.getenv("OBI_COOLDOWN_SECONDS", "7")),
         "obi_trend_filter": os.getenv("OBI_TREND_FILTER", "false").lower() == "true",
         "obi_trend_ema_length": int(os.getenv("OBI_TREND_EMA_LENGTH", "300")),
-        "macd_resolution": os.getenv("MACD_RESOLUTION", "1m"),  # "1m", "5m" oder "15m"
-        "macd_fast_fast": int(os.getenv("MACD_FAST_FAST", "13")),
-        "macd_fast_slow": int(os.getenv("MACD_FAST_SLOW", "21")),
-        "macd_fast_signal": int(os.getenv("MACD_FAST_SIGNAL", "9")),
-        "macd_slow_fast": int(os.getenv("MACD_SLOW_FAST", "34")),
-        "macd_slow_slow": int(os.getenv("MACD_SLOW_SLOW", "144")),
-        "macd_slow_signal": int(os.getenv("MACD_SLOW_SIGNAL", "9")),
-        "macd_use_stochastic": os.getenv("MACD_USE_STOCHASTIC", "true").lower() == "true",
-        "stoch_k_period": int(os.getenv("STOCH_K_PERIOD", "7")),
-        "stoch_k_smooth": int(os.getenv("STOCH_K_SMOOTH", "3")),
-        "stoch_d_period": int(os.getenv("STOCH_D_PERIOD", "3")),
-        "macd_tp_usd": float(os.getenv("MACD_TP_USD", "1")),
-        "macd_sl_usd": float(os.getenv("MACD_SL_USD", "1")),
-        "macd_fast_fade_exit_enabled": os.getenv("MACD_FAST_FADE_EXIT_ENABLED", "false").lower() == "true",
-        "macd_slow_fade_exit_enabled": os.getenv("MACD_SLOW_FADE_EXIT_ENABLED", "false").lower() == "true",
-        "macd_slow_reversal_exit_enabled": os.getenv("MACD_SLOW_REVERSAL_EXIT_ENABLED", "true").lower() == "true",
-        "macd_fast_zero_cross_exit_enabled": os.getenv("MACD_FAST_ZERO_CROSS_EXIT_ENABLED", "true").lower() == "true",
         "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
         "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
         "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
@@ -260,27 +243,7 @@ def default_config():
         "rp_breakeven_lock_usd": float(os.getenv("RP_BREAKEVEN_LOCK_USD", "0.5")),
         "rp_squeeze_lookback": int(os.getenv("RP_SQUEEZE_LOOKBACK", "50")),
         "rp_squeeze_threshold_pct": float(os.getenv("RP_SQUEEZE_THRESHOLD_PCT", "70")),
-        "macd_simple_resolution": os.getenv("MACD_SIMPLE_RESOLUTION", "30s"),  # "30s","1m","2m","5m","15m"
-        "macd_simple_fast": int(os.getenv("MACD_SIMPLE_FAST", "13")),
-        "macd_simple_slow": int(os.getenv("MACD_SIMPLE_SLOW", "21")),
-        "macd_simple_signal": int(os.getenv("MACD_SIMPLE_SIGNAL", "9")),
-        "macd_simple_tp_usd": float(os.getenv("MACD_SIMPLE_TP_USD", "3")),
-        "macd_simple_sl_usd": float(os.getenv("MACD_SIMPLE_SL_USD", "3")),
-        "macd_simple_exit_mode": os.getenv("MACD_SIMPLE_EXIT_MODE", "tp_sl"),  # "tp_sl" oder "reverse"
-        "macd_simple_early_exit_enabled": os.getenv("MACD_SIMPLE_EARLY_EXIT_ENABLED", "false").lower() == "true",
-        "macd_simple_early_exit_bars": int(os.getenv("MACD_SIMPLE_EARLY_EXIT_BARS", "3")),
-        "macd_simple_early_exit_reverse": os.getenv("MACD_SIMPLE_EARLY_EXIT_REVERSE", "false").lower() == "true",
-        "macd_simple_breakeven_enabled": os.getenv("MACD_SIMPLE_BREAKEVEN_ENABLED", "false").lower() == "true",
-        "macd_simple_breakeven_trigger_usd": float(os.getenv("MACD_SIMPLE_BREAKEVEN_TRIGGER_USD", "3")),
-        "macd_simple_breakeven_lock_usd": float(os.getenv("MACD_SIMPLE_BREAKEVEN_LOCK_USD", "0.5")),
         "rp_require_squeeze": os.getenv("RP_REQUIRE_SQUEEZE", "false").lower() == "true",
-        "cf_resolution": os.getenv("CF_RESOLUTION", "10s"),  # "10s","15s","30s","1m","2m","5m"
-        "cf_min_body_pct": float(os.getenv("CF_MIN_BODY_PCT", "0")),
-        "cf_sl_usd": float(os.getenv("CF_SL_USD", "5")),
-        "tc_resolution": os.getenv("TC_RESOLUTION", "1m"),  # "10s","15s","30s","1m","2m","5m","15m"
-        "tc_streak": int(os.getenv("TC_STREAK", "3")),
-        "tc_tp_usd": float(os.getenv("TC_TP_USD", "50")),
-        "tc_sl_usd": float(os.getenv("TC_SL_USD", "10")),
     }
 
 
@@ -297,10 +260,6 @@ def default_state():
         "last_entry_price": None,
         "obi_last_trade_time": 0.0, "obi_trend_ema": None, "obi_current": None,
         "obi_extreme_zone": None, "obi_extreme_value": None, "obi_prev_fast": None,
-        "macd_fast_hist": None, "macd_slow_hist": None, "macd_stoch_k": None, "macd_stoch_d": None,
-        "macd_fade_exit": False, "macd_slow_fade_exit": False, "macd_slow_reversal_exit": False,
-        "macd_fast_zero_cross_exit": False,
-        "macd_fast_ema_fast_val": None, "macd_fast_ema_slow_val": None, "macd_fast_signal_val": None,
         "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
         "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "stoch_cross_k": None, "stoch_cross_d": None,
@@ -311,14 +270,10 @@ def default_state():
         "rp_breakeven_triggered": False,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
-        "macd_simple_hist": None, "macd_simple_hist_history": [],
-        "macd_simple_breakeven_triggered": False,
         "binance_1s_buffer": [],
         "local_1s_bucket_start": None, "local_1s_candle_open": None,
         "local_1s_candle_high": None, "local_1s_candle_low": None, "local_1s_candle_last": None,
         "local_1s_buffer": [],
-        "cf_last_color": None, "cf_last_body_pct": None,
-        "tc_streak_count": 0, "tc_streak_direction": None,
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
     }
@@ -744,11 +699,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="position:relative; height:250px;"><canvas id="obiChart"></canvas></div>
 </div>
 
-<div id="macd-simple-chart-section" style="display:none;">
-  <h2 class="section-title">MACD-Simple Histogramm-Verlauf</h2>
-  <div style="position:relative; height:250px;"><canvas id="macdSimpleChart"></canvas></div>
-</div>
-
 <h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
 <div class="panel-card">
 <form id="config-form">
@@ -759,13 +709,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="entry_mode">
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="obi_scalp">OBI-Scalp (Orderbuch-Ungleichgewicht, symmetrisches TP/SL)</option>
-      <option value="macd_stoch">MACD-Dual + Stochastic (Histogramm-Trend, optional Stochastic-Filter)</option>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
       <option value="stoch_cross">Stochastic-Cross (unter 20 = Long, über 80 = Short, fester TP/SL)</option>
-      <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, ATR-SL)</option>
-      <option value="macd_simple">MACD-Simple (schnelles Histogramm wird grün/rot = Buy/Sell, fester TP/SL, auch 30s)</option>
-      <option value="candle_flip">Candle-Flip (immer im Markt, dreht bei jedem Kerzenfarbwechsel, nur SL als Schutz)</option>
-      <option value="triple_candle">3-Kerzen-Momentum (3x steigende grüne = Long, 3x fallende rote = Short, fester TP/SL)</option>
+      <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, fester TP/SL)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -825,58 +771,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>Trend-EMA Länge (Trades)</label><input type="number" step="1" id="obi_trend_ema_length"></div>
-  <div data-mode="macd_stoch"><label>Zeitrahmen</label>
-    <select class="cfg" id="macd_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten (synthetisch aus 1m-Kerzen zusammengesetzt)</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-    </select>
-  </div>
-  <div data-mode="macd_stoch"><label>MACD schnell - Fast</label><input type="number" step="1" id="macd_fast_fast"></div>
-  <div data-mode="macd_stoch"><label>MACD schnell - Slow</label><input type="number" step="1" id="macd_fast_slow"></div>
-  <div data-mode="macd_stoch"><label>MACD schnell - Signal</label><input type="number" step="1" id="macd_fast_signal"></div>
-  <div data-mode="macd_stoch"><label>MACD langsam - Fast</label><input type="number" step="1" id="macd_slow_fast"></div>
-  <div data-mode="macd_stoch"><label>MACD langsam - Slow</label><input type="number" step="1" id="macd_slow_slow"></div>
-  <div data-mode="macd_stoch"><label>MACD langsam - Signal</label><input type="number" step="1" id="macd_slow_signal"></div>
-  <div data-mode="macd_stoch"><label>Stochastic-Filter</label>
-    <select class="cfg" id="macd_use_stochastic">
-      <option value="true">An - nur bei %K/%D in Signal-Richtung</option>
-      <option value="false">Aus - nur MACD-Histogramme</option>
-    </select>
-  </div>
-  <div data-mode="macd_stoch"><label>Stochastic %K-Periode</label><input type="number" step="1" id="stoch_k_period"></div>
-  <div data-mode="macd_stoch"><label>Stochastic %K-Glättung</label><input type="number" step="1" id="stoch_k_smooth"></div>
-  <div data-mode="macd_stoch"><label>Stochastic %D-Periode</label><input type="number" step="1" id="stoch_d_period"></div>
-  <div data-mode="macd_stoch"><label>TP ($, fest)</label><input type="number" step="any" id="macd_tp_usd"></div>
-  <div data-mode="macd_stoch"><label>SL ($, fest)</label><input type="number" step="any" id="macd_sl_usd"></div>
-  <div data-mode="macd_stoch"><label>TP bei Farbwechsel schnelles Histogramm</label>
-    <select class="cfg" id="macd_fast_fade_exit_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus - nur noch fester $-Betrag als TP</option>
-    </select>
-  </div>
-  <div data-mode="macd_stoch"><label>Zusätzlicher TP bei Farbwechsel langsames Histogramm</label>
-    <select class="cfg" id="macd_slow_fade_exit_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - zusätzlich zum schnellen Histogramm</option>
-    </select>
-  </div>
-  <div data-mode="macd_stoch"><label>Sofort-Exit bei Trendumkehr (langsamer MACD wechselt Vorzeichen)</label>
-    <select class="cfg" id="macd_slow_reversal_exit_enabled">
-      <option value="true">An - empfohlen für Pullback-Strategie</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="macd_stoch"><label>TP bei Nulllinien-Durchgang schnelles Histogramm</label>
-    <select class="cfg" id="macd_fast_zero_cross_exit_enabled">
-      <option value="true">An - lässt Trend durch Pullback-Dips laufen, exit erst bei echtem Rückkreuzen</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
       <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -974,75 +868,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="range_profile"><label>Abgesicherter Gewinn ($)</label><input type="number" step="any" id="rp_breakeven_lock_usd"></div>
   <div data-mode="range_profile"><label>Squeeze Lookback (Kerzen)</label><input type="number" step="1" id="rp_squeeze_lookback"></div>
   <div data-mode="range_profile"><label>Squeeze-Schwelle (%)</label><input type="number" step="5" id="rp_squeeze_threshold_pct"></div>
-  <div data-mode="macd_simple"><label>Zeitrahmen</label>
-    <select class="cfg" id="macd_simple_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten (synthetisch)</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-    </select>
-  </div>
-  <div data-mode="macd_simple"><label>MACD Fast</label><input type="number" step="1" id="macd_simple_fast"></div>
-  <div data-mode="macd_simple"><label>MACD Slow</label><input type="number" step="1" id="macd_simple_slow"></div>
-  <div data-mode="macd_simple"><label>MACD Signal</label><input type="number" step="1" id="macd_simple_signal"></div>
-  <div data-mode="macd_simple"><label>TP ($, fest)</label><input type="number" step="any" id="macd_simple_tp_usd"></div>
-  <div data-mode="macd_simple"><label>SL ($, fest)</label><input type="number" step="any" id="macd_simple_sl_usd"></div>
-  <div data-mode="macd_simple"><label>Exit-Modus</label>
-    <select class="cfg" id="macd_simple_exit_mode">
-      <option value="tp_sl">Fester TP/SL</option>
-      <option value="reverse">Position bei Farbwechsel drehen (SL bleibt als Schutz aktiv, TP entfällt)</option>
-    </select>
-  </div>
-  <div data-mode="macd_simple"><label>Früh-Exit bei schwächer werdendem Histogramm</label>
-    <select class="cfg" id="macd_simple_early_exit_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - schließt schon vor dem vollen Farbwechsel</option>
-    </select>
-  </div>
-  <div data-mode="macd_simple"><label>Früh-Exit nach X Kerzen in Folge schwächer</label><input type="number" step="1" id="macd_simple_early_exit_bars"></div>
-  <div data-mode="macd_simple"><label>Früh-Exit dreht sofort in Gegenrichtung</label>
-    <select class="cfg" id="macd_simple_early_exit_reverse">
-      <option value="false">Aus - schließt nur</option>
-      <option value="true">An - öffnet direkt die Gegenposition</option>
-    </select>
-  </div>
-  <div data-mode="macd_simple"><label>Gewinn absichern (SL springt bei X$ auf kleinen Gewinn)</label>
-    <select class="cfg" id="macd_simple_breakeven_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="macd_simple"><label>Auslöser ($, z.B. 3)</label><input type="number" step="any" id="macd_simple_breakeven_trigger_usd"></div>
-  <div data-mode="macd_simple"><label>Abgesicherter Gewinn ($)</label><input type="number" step="any" id="macd_simple_breakeven_lock_usd"></div>
-  <div data-mode="candle_flip"><label>Zeitrahmen</label>
-    <select class="cfg" id="cf_resolution">
-      <option value="10s">10 Sekunden</option>
-      <option value="15s">15 Sekunden</option>
-      <option value="30s">30 Sekunden</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten (synthetisch)</option>
-      <option value="5m">5 Minuten</option>
-    </select>
-  </div>
-  <div data-mode="candle_flip"><label>Mindest-Kerzenkörper (%) - filtert Rauschen</label><input type="number" step="0.01" id="cf_min_body_pct"></div>
-  <div data-mode="candle_flip"><label>SL ($, fest - Sicherheitsnetz)</label><input type="number" step="any" id="cf_sl_usd"></div>
-  <div data-mode="triple_candle"><label>Zeitrahmen</label>
-    <select class="cfg" id="tc_resolution">
-      <option value="10s">10 Sekunden</option>
-      <option value="15s">15 Sekunden</option>
-      <option value="30s">30 Sekunden</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten (synthetisch)</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-    </select>
-  </div>
-  <div data-mode="triple_candle"><label>Anzahl Kerzen in Folge</label><input type="number" step="1" id="tc_streak"></div>
-  <div data-mode="triple_candle"><label>TP ($, fest)</label><input type="number" step="any" id="tc_tp_usd"></div>
-  <div data-mode="triple_candle"><label>SL ($, fest)</label><input type="number" step="any" id="tc_sl_usd"></div>
   <div data-mode="range_profile"><label>Nur nach Squeeze einsteigen</label>
     <select class="cfg" id="rp_require_squeeze">
       <option value="false">Aus - Squeeze nur zur Anzeige</option>
@@ -1082,14 +907,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
     Testet die aktuell gespeicherten Strategie-Einstellungen gegen echte historische Binance-Kerzen.
-    Nur für MACD-Dual, MACD-Simple, Candle-Flip, 3-Kerzen-Momentum, Stochastic-Cross, Range-Profile und Fibonacci-Reversal (Grid/OBI-Scalp brauchen
+    Nur für Stochastic-Cross, Range-Profile und Fibonacci-Reversal (Grid/OBI-Scalp brauchen
     historische Orderbuch-Daten, die es nicht gibt). SL/TP werden pro Kerze am Schlusskurs geprüft,
     nicht Tick-für-Tick wie live. Lighter ist gebührenfrei, es werden also keine Gebühren simuliert.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="backtest-days" value="30" style="width:100px;"></div>
     <button id="btn-backtest" style="padding:12px 24px;">▶️ Backtest starten</button>
-    <button id="btn-sweep" style="padding:12px 24px;">🔬 Preset-Sweep starten (nur MACD-Simple)</button>
   </div>
   <div id="backtest-status" style="color:var(--text-dim); font-size:13px;"></div>
   <div id="backtest-results" style="display:none; margin-top:16px;">
@@ -1103,13 +927,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div><div class="label">Ø Gewinn / Ø Verlust $</div><div class="value" id="bt-avg">-</div></div>
     </div>
   </div>
-  <div id="sweep-results" style="display:none; margin-top:20px;">
-    <div class="label" style="margin-bottom:8px;">Preset-Sweep-Rangliste (beste zuerst)</div>
-    <table id="sweep-table">
-      <thead><tr><th>#</th><th>Kombination</th><th>Trades</th><th>Trefferquote</th><th>Gesamt-PnL $</th><th>Max Drawdown $</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
 </div>
 
 <h2 class="section-title">Letzte abgeschlossene Trades</h2>
@@ -1121,7 +938,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 let priceChart;
 let obiChart;
-let macdSimpleChart;
 let currentSymbol = null;
 let allSymbols = [];
 
@@ -1259,42 +1075,6 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
   btn.disabled = false;
 });
 
-document.getElementById('btn-sweep').addEventListener('click', async () => {
-  const days = parseInt(document.getElementById('backtest-days').value) || 30;
-  const btn = document.getElementById('btn-sweep');
-  const statusEl = document.getElementById('backtest-status');
-  const sweepEl = document.getElementById('sweep-results');
-  btn.disabled = true;
-  sweepEl.style.display = 'none';
-  statusEl.innerText = `⏳ Lade Kerzen und teste bis zu 20 Kombinationen durch... kann 1-2 Minuten dauern.`;
-  try {
-    const res = await fetch(`/api/backtest_sweep?symbol=${currentSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days})
-    });
-    const data = await res.json();
-    if (data.error) {
-      statusEl.innerText = `❌ ${data.error}`;
-    } else {
-      statusEl.innerText = `✅ ${data.combinations_tested} Kombinationen getestet - ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})`;
-      const tbody = document.querySelector('#sweep-table tbody');
-      tbody.innerHTML = data.results.map((r, i) => `
-        <tr>
-          <td>${i + 1}</td>
-          <td>${r.label}</td>
-          <td>${r.stats.trades}</td>
-          <td>${r.stats.win_rate_pct}%</td>
-          <td class="${r.stats.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.stats.total_pnl_usd}</td>
-          <td>${r.stats.max_drawdown_usd}</td>
-        </tr>
-      `).join('');
-      sweepEl.style.display = 'block';
-    }
-  } catch (e) {
-    statusEl.innerText = `❌ Fehler: ${e}`;
-  }
-  btn.disabled = false;
-});
-
 async function refresh() {
   if (!currentSymbol) return;
   const res = await fetch(`/api/status?symbol=${currentSymbol}`);
@@ -1327,9 +1107,6 @@ async function refresh() {
     <div class="card"><div class="label">OBI schnell (${data.config.entry_mode==='obi_scalp'?'aktiv':'inaktiv'})</div><div class="value ${data.obi_fast>=0?'green':'red'}">${data.obi_fast ?? '-'}</div></div>
     <div class="card"><div class="label">OBI mittel</div><div class="value ${data.obi_medium>=0?'green':'red'}">${data.obi_medium ?? '-'}</div></div>
     <div class="card"><div class="label">OBI langsam</div><div class="value ${data.obi_slow>=0?'green':'red'}">${data.obi_slow ?? '-'}</div></div>
-    <div class="card"><div class="label">MACD schnell (${data.config.entry_mode==='macd_stoch'?'aktiv':'inaktiv'})</div><div class="value ${data.macd_fast_hist>=0?'green':'red'}">${data.macd_fast_hist ?? '-'}</div></div>
-    <div class="card"><div class="label">MACD langsam</div><div class="value ${data.macd_slow_hist>=0?'green':'red'}">${data.macd_slow_hist ?? '-'}</div></div>
-    <div class="card"><div class="label">Stochastic %K / %D</div><div class="value">${data.macd_stoch_k ?? '-'} / ${data.macd_stoch_d ?? '-'}</div></div>
     <div class="card"><div class="label">Fib High / Low (${data.config.entry_mode==='fib_reversal'?'aktiv':'inaktiv'})</div><div class="value">${data.fib?.high ?? '-'} / ${data.fib?.low ?? '-'}</div></div>
     <div class="card"><div class="label">Fib Einstieg 1 / 2</div><div class="value">${data.fib?.entry1_price ?? '-'} / ${data.fib?.entry2_price ?? '-'}</div></div>
     <div class="card"><div class="label">Fib TP1 / TP2 / SL</div><div class="value">${data.fib?.tp1_price ?? '-'} / ${data.fib?.tp2_price ?? '-'} / ${data.fib?.sl_price ?? '-'}</div></div>
@@ -1342,10 +1119,8 @@ async function refresh() {
     <div class="card"><div class="label">Range-Profile TP / SL (fest, $)</div><div class="value">${data.config.rp_tp_usd ?? '-'} / ${data.config.rp_sl_usd ?? '-'}${data.rp_breakeven_triggered ? ' 🔒' : ''}</div></div>
     <div class="card"><div class="label">Range-Profile Kanalbreite (Ø)</div><div class="value">${data.rp_channel_width ?? '-'} (Ø ${data.rp_avg_width ?? '-'})</div></div>
     <div class="card"><div class="label">⚠ Squeeze (Ausbruch könnte bevorstehen)</div><div class="value ${data.rp_squeeze_active?'red':'green'}">${data.rp_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
-    <div class="card"><div class="label">MACD-Simple Histogramm (${data.config.entry_mode==='macd_simple'?'aktiv':'inaktiv'})</div><div class="value ${(data.macd_simple_hist??0)>=0?'green':'red'}">${data.macd_simple_hist ?? '-'}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
-    <div class="card"><div class="label">Candle-Flip letzte Farbe (${data.config.entry_mode==='candle_flip'?'aktiv':'inaktiv'})</div><div class="value ${data.cf_last_color==='green'?'green':data.cf_last_color==='red'?'red':''}">${data.cf_last_color ?? '-'} (${data.cf_last_body_pct ?? '-'}%)</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
     <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
   `;
@@ -1379,23 +1154,6 @@ async function refresh() {
     document.getElementById('obi_cooldown_seconds').value = data.config.obi_cooldown_seconds;
     document.getElementById('obi_trend_filter').value = String(data.config.obi_trend_filter);
     document.getElementById('obi_trend_ema_length').value = data.config.obi_trend_ema_length;
-    document.getElementById('macd_resolution').value = data.config.macd_resolution;
-    document.getElementById('macd_fast_fast').value = data.config.macd_fast_fast;
-    document.getElementById('macd_fast_slow').value = data.config.macd_fast_slow;
-    document.getElementById('macd_fast_signal').value = data.config.macd_fast_signal;
-    document.getElementById('macd_slow_fast').value = data.config.macd_slow_fast;
-    document.getElementById('macd_slow_slow').value = data.config.macd_slow_slow;
-    document.getElementById('macd_slow_signal').value = data.config.macd_slow_signal;
-    document.getElementById('macd_use_stochastic').value = String(data.config.macd_use_stochastic);
-    document.getElementById('stoch_k_period').value = data.config.stoch_k_period;
-    document.getElementById('stoch_k_smooth').value = data.config.stoch_k_smooth;
-    document.getElementById('stoch_d_period').value = data.config.stoch_d_period;
-    document.getElementById('macd_tp_usd').value = data.config.macd_tp_usd;
-    document.getElementById('macd_sl_usd').value = data.config.macd_sl_usd;
-    document.getElementById('macd_fast_fade_exit_enabled').value = String(data.config.macd_fast_fade_exit_enabled);
-    document.getElementById('macd_slow_fade_exit_enabled').value = String(data.config.macd_slow_fade_exit_enabled);
-    document.getElementById('macd_slow_reversal_exit_enabled').value = String(data.config.macd_slow_reversal_exit_enabled);
-    document.getElementById('macd_fast_zero_cross_exit_enabled').value = String(data.config.macd_fast_zero_cross_exit_enabled);
     document.getElementById('fib_resolution').value = data.config.fib_resolution;
     document.getElementById('fib_lookback_candles').value = data.config.fib_lookback_candles;
     document.getElementById('fib_entry1_level').value = data.config.fib_entry1_level;
@@ -1435,26 +1193,6 @@ async function refresh() {
     document.getElementById('rp_breakeven_lock_usd').value = data.config.rp_breakeven_lock_usd;
     document.getElementById('rp_squeeze_lookback').value = data.config.rp_squeeze_lookback;
     document.getElementById('rp_squeeze_threshold_pct').value = data.config.rp_squeeze_threshold_pct;
-    document.getElementById('macd_simple_resolution').value = data.config.macd_simple_resolution;
-    document.getElementById('macd_simple_fast').value = data.config.macd_simple_fast;
-    document.getElementById('macd_simple_slow').value = data.config.macd_simple_slow;
-    document.getElementById('macd_simple_signal').value = data.config.macd_simple_signal;
-    document.getElementById('macd_simple_tp_usd').value = data.config.macd_simple_tp_usd;
-    document.getElementById('macd_simple_sl_usd').value = data.config.macd_simple_sl_usd;
-    document.getElementById('macd_simple_exit_mode').value = data.config.macd_simple_exit_mode;
-    document.getElementById('macd_simple_early_exit_enabled').value = String(data.config.macd_simple_early_exit_enabled);
-    document.getElementById('macd_simple_early_exit_bars').value = data.config.macd_simple_early_exit_bars;
-    document.getElementById('macd_simple_early_exit_reverse').value = String(data.config.macd_simple_early_exit_reverse);
-    document.getElementById('macd_simple_breakeven_enabled').value = String(data.config.macd_simple_breakeven_enabled);
-    document.getElementById('macd_simple_breakeven_trigger_usd').value = data.config.macd_simple_breakeven_trigger_usd;
-    document.getElementById('macd_simple_breakeven_lock_usd').value = data.config.macd_simple_breakeven_lock_usd;
-    document.getElementById('cf_resolution').value = data.config.cf_resolution;
-    document.getElementById('cf_min_body_pct').value = data.config.cf_min_body_pct;
-    document.getElementById('cf_sl_usd').value = data.config.cf_sl_usd;
-    document.getElementById('tc_resolution').value = data.config.tc_resolution;
-    document.getElementById('tc_streak').value = data.config.tc_streak;
-    document.getElementById('tc_tp_usd').value = data.config.tc_tp_usd;
-    document.getElementById('tc_sl_usd').value = data.config.tc_sl_usd;
     document.getElementById('rp_require_squeeze').value = String(data.config.rp_require_squeeze);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -1531,36 +1269,6 @@ async function refresh() {
     obiSection.style.display = 'none';
   }
 
-  const macdSimpleSection = document.getElementById('macd-simple-chart-section');
-  if (data.config.entry_mode === 'macd_simple' && (data.macd_simple_hist_history || []).length > 0) {
-    macdSimpleSection.style.display = 'block';
-    const mHist = data.macd_simple_hist_history || [];
-    const mLabels = mHist.map(p => new Date(p.ts).toLocaleTimeString());
-    const mValues = mHist.map(p => p.hist);
-    const mColors = mValues.map(v => v >= 0 ? '#4ade80' : '#f87171');
-    const macdDatasets = [
-      { label: 'Histogramm', data: mValues, backgroundColor: mColors, borderWidth: 0, maxBarThickness: 14, categoryPercentage: 0.9, barPercentage: 0.9 },
-    ];
-    if (!macdSimpleChart) {
-      macdSimpleChart = new Chart(document.getElementById('macdSimpleChart'), {
-        type: 'bar',
-        data: { labels: mLabels, datasets: macdDatasets },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          scales: { x: { display: false }, y: { ticks: { color: '#9ca3af' } } },
-          plugins: { legend: { display: false } }
-        }
-      });
-    } else {
-      macdSimpleChart.data.labels = mLabels;
-      macdSimpleChart.data.datasets[0].data = mValues;
-      macdSimpleChart.data.datasets[0].backgroundColor = mColors;
-      macdSimpleChart.update('none');
-    }
-  } else {
-    macdSimpleSection.style.display = 'none';
-  }
-
   const pocketSection = document.getElementById('pocket-trading-section');
   if (data.config.entry_mode === 'obi_scalp') {
     pocketSection.style.display = 'block';
@@ -1614,23 +1322,6 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     obi_cooldown_seconds: parseFloat(document.getElementById('obi_cooldown_seconds').value),
     obi_trend_filter: document.getElementById('obi_trend_filter').value === 'true',
     obi_trend_ema_length: parseInt(document.getElementById('obi_trend_ema_length').value),
-    macd_resolution: document.getElementById('macd_resolution').value,
-    macd_fast_fast: parseInt(document.getElementById('macd_fast_fast').value),
-    macd_fast_slow: parseInt(document.getElementById('macd_fast_slow').value),
-    macd_fast_signal: parseInt(document.getElementById('macd_fast_signal').value),
-    macd_slow_fast: parseInt(document.getElementById('macd_slow_fast').value),
-    macd_slow_slow: parseInt(document.getElementById('macd_slow_slow').value),
-    macd_slow_signal: parseInt(document.getElementById('macd_slow_signal').value),
-    macd_use_stochastic: document.getElementById('macd_use_stochastic').value === 'true',
-    stoch_k_period: parseInt(document.getElementById('stoch_k_period').value),
-    stoch_k_smooth: parseInt(document.getElementById('stoch_k_smooth').value),
-    stoch_d_period: parseInt(document.getElementById('stoch_d_period').value),
-    macd_tp_usd: parseFloat(document.getElementById('macd_tp_usd').value),
-    macd_sl_usd: parseFloat(document.getElementById('macd_sl_usd').value),
-    macd_fast_fade_exit_enabled: document.getElementById('macd_fast_fade_exit_enabled').value === 'true',
-    macd_slow_fade_exit_enabled: document.getElementById('macd_slow_fade_exit_enabled').value === 'true',
-    macd_slow_reversal_exit_enabled: document.getElementById('macd_slow_reversal_exit_enabled').value === 'true',
-    macd_fast_zero_cross_exit_enabled: document.getElementById('macd_fast_zero_cross_exit_enabled').value === 'true',
     fib_resolution: document.getElementById('fib_resolution').value,
     fib_lookback_candles: parseInt(document.getElementById('fib_lookback_candles').value),
     fib_entry1_level: parseFloat(document.getElementById('fib_entry1_level').value),
@@ -1670,26 +1361,6 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     rp_breakeven_lock_usd: parseFloat(document.getElementById('rp_breakeven_lock_usd').value),
     rp_squeeze_lookback: parseInt(document.getElementById('rp_squeeze_lookback').value),
     rp_squeeze_threshold_pct: parseFloat(document.getElementById('rp_squeeze_threshold_pct').value),
-    macd_simple_resolution: document.getElementById('macd_simple_resolution').value,
-    macd_simple_fast: parseInt(document.getElementById('macd_simple_fast').value),
-    macd_simple_slow: parseInt(document.getElementById('macd_simple_slow').value),
-    macd_simple_signal: parseInt(document.getElementById('macd_simple_signal').value),
-    macd_simple_tp_usd: parseFloat(document.getElementById('macd_simple_tp_usd').value),
-    macd_simple_sl_usd: parseFloat(document.getElementById('macd_simple_sl_usd').value),
-    macd_simple_exit_mode: document.getElementById('macd_simple_exit_mode').value,
-    macd_simple_early_exit_enabled: document.getElementById('macd_simple_early_exit_enabled').value === 'true',
-    macd_simple_early_exit_bars: parseInt(document.getElementById('macd_simple_early_exit_bars').value),
-    macd_simple_early_exit_reverse: document.getElementById('macd_simple_early_exit_reverse').value === 'true',
-    macd_simple_breakeven_enabled: document.getElementById('macd_simple_breakeven_enabled').value === 'true',
-    macd_simple_breakeven_trigger_usd: parseFloat(document.getElementById('macd_simple_breakeven_trigger_usd').value),
-    macd_simple_breakeven_lock_usd: parseFloat(document.getElementById('macd_simple_breakeven_lock_usd').value),
-    cf_resolution: document.getElementById('cf_resolution').value,
-    cf_min_body_pct: parseFloat(document.getElementById('cf_min_body_pct').value),
-    cf_sl_usd: parseFloat(document.getElementById('cf_sl_usd').value),
-    tc_resolution: document.getElementById('tc_resolution').value,
-    tc_streak: parseInt(document.getElementById('tc_streak').value),
-    tc_tp_usd: parseFloat(document.getElementById('tc_tp_usd').value),
-    tc_sl_usd: parseFloat(document.getElementById('tc_sl_usd').value),
     rp_require_squeeze: document.getElementById('rp_require_squeeze').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -1705,7 +1376,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','macd_simple_exit_mode','macd_simple_early_exit_enabled','macd_simple_early_exit_bars','macd_simple_early_exit_reverse','macd_simple_breakeven_enabled','macd_simple_breakeven_trigger_usd','macd_simple_breakeven_lock_usd','cf_resolution','cf_min_body_pct','cf_sl_usd','tc_resolution','tc_streak','tc_tp_usd','tc_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1757,8 +1428,6 @@ async def handle_status(request):
         "obi_current": st.get("obi_current"), "obi_fast": st.get("obi_fast"),
         "obi_medium": st.get("obi_medium"), "obi_slow": st.get("obi_slow"),
         "obi_history": st.get("obi_history", [])[-300:],
-        "macd_fast_hist": st.get("macd_fast_hist"), "macd_slow_hist": st.get("macd_slow_hist"),
-        "macd_stoch_k": st.get("macd_stoch_k"), "macd_stoch_d": st.get("macd_stoch_d"),
         "fib": st.get("fib"),
         "stoch_cross_k": st.get("stoch_cross_k"), "stoch_cross_d": st.get("stoch_cross_d"),
         "stoch_cross_sl_price": st.get("stoch_cross_sl_price"), "stoch_cross_tp_price": st.get("stoch_cross_tp_price"),
@@ -1768,15 +1437,12 @@ async def handle_status(request):
         "rp_breakeven_triggered": st.get("rp_breakeven_triggered"),
         "rp_channel_width": st.get("rp_channel_width"), "rp_avg_width": st.get("rp_avg_width"),
         "rp_squeeze_active": st.get("rp_squeeze_active"),
-        "macd_simple_hist": st.get("macd_simple_hist"),
-        "macd_simple_hist_history": st.get("macd_simple_hist_history", [])[-200:],
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
             if len(st.get("binance_1s_buffer", [])) > 1 else 0
         ),
         "local_1s_buffer_size": len(st.get("local_1s_buffer", [])),
-        "cf_last_color": st.get("cf_last_color"), "cf_last_body_pct": st.get("cf_last_body_pct"),
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
@@ -1795,13 +1461,6 @@ async def handle_config_update(request):
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse",
                 "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_instant_reset_ratio", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_depth_weighting_enabled", "obi_use_median", "obi_min_liquidity", "obi_breakeven_enabled", "obi_breakeven_trigger_ratio", "obi_breakeven_lock_usd", "obi_breakeven_lock_pct", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
                 "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length",
-                "macd_resolution", "macd_fast_fast", "macd_fast_slow", "macd_fast_signal",
-                "macd_slow_fast", "macd_slow_slow", "macd_slow_signal", "macd_use_stochastic",
-                "stoch_k_period", "stoch_k_smooth", "stoch_d_period", "macd_tp_usd", "macd_sl_usd",
-                "macd_fast_fade_exit_enabled",
-                "macd_slow_fade_exit_enabled",
-                "macd_slow_reversal_exit_enabled",
-                "macd_fast_zero_cross_exit_enabled",
                 "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
                 "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds",
                 "stoch_cross_resolution", "stoch_cross_k_period", "stoch_cross_k_smooth", "stoch_cross_d_period",
@@ -1812,13 +1471,7 @@ async def handle_config_update(request):
                 "stoch_cross_require_squeeze", "stoch_cross_squeeze_lookback", "stoch_cross_squeeze_threshold_pct",
                 "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_tp_usd", "rp_sl_usd",
                 "rp_breakeven_enabled", "rp_breakeven_trigger_usd", "rp_breakeven_lock_usd",
-                "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
-                "macd_simple_resolution", "macd_simple_fast", "macd_simple_slow", "macd_simple_signal",
-                "macd_simple_tp_usd", "macd_simple_sl_usd", "macd_simple_exit_mode",
-                "macd_simple_early_exit_enabled", "macd_simple_early_exit_bars", "macd_simple_early_exit_reverse",
-                "macd_simple_breakeven_enabled", "macd_simple_breakeven_trigger_usd", "macd_simple_breakeven_lock_usd",
-                "cf_resolution", "cf_min_body_pct", "cf_sl_usd",
-                "tc_resolution", "tc_streak", "tc_tp_usd", "tc_sl_usd"]:
+                "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -1852,23 +1505,6 @@ async def handle_backtest(request):
     cfg = dict(BOTS[symbol]["config"])  # Kopie - Backtest darf die Live-Config nicht veraendern
     entry_mode = cfg["entry_mode"]
     result = await run_backtest(symbol, entry_mode, cfg, days)
-    return web.json_response(result)
-
-
-async def handle_backtest_sweep(request):
-    from strategies import run_backtest_sweep
-    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
-    if symbol not in BOTS:
-        return web.json_response({"error": "unknown symbol"}, status=404)
-    body = await request.json()
-    days = body.get("days", 30)
-    try:
-        days = max(1, min(365, int(days)))
-    except (TypeError, ValueError):
-        days = 30
-    cfg = dict(BOTS[symbol]["config"])  # Kopie - Sweep darf die Live-Config nicht veraendern
-    entry_mode = cfg["entry_mode"]
-    result = await run_backtest_sweep(symbol, entry_mode, cfg, days)
     return web.json_response(result)
 
 
