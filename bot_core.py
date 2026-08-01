@@ -244,6 +244,12 @@ def default_config():
         "rp_squeeze_lookback": int(os.getenv("RP_SQUEEZE_LOOKBACK", "50")),
         "rp_squeeze_threshold_pct": float(os.getenv("RP_SQUEEZE_THRESHOLD_PCT", "70")),
         "rp_require_squeeze": os.getenv("RP_REQUIRE_SQUEEZE", "false").lower() == "true",
+        "pps_resolution": os.getenv("PPS_RESOLUTION", "5m"),
+        "pps_period": int(os.getenv("PPS_PERIOD", "2")),
+        "pps_atr_factor": float(os.getenv("PPS_ATR_FACTOR", "3")),
+        "pps_atr_period": int(os.getenv("PPS_ATR_PERIOD", "10")),
+        "pps_tp_usd": float(os.getenv("PPS_TP_USD", "3")),
+        "pps_sl_usd": float(os.getenv("PPS_SL_USD", "3")),
     }
 
 
@@ -268,6 +274,7 @@ def default_state():
         "stoch_cross_squeeze_active": False, "stoch_cross_width_history": [],
         "rp_osc": None, "rp_mid_price": None, "rp_range_high": None, "rp_range_low": None,
         "rp_breakeven_triggered": False,
+        "pps_trend": None, "pps_trailing_sl": None,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -712,6 +719,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
       <option value="stoch_cross">Stochastic-Cross (unter 20 = Long, über 80 = Short, fester TP/SL)</option>
       <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, fester TP/SL)</option>
+      <option value="pp_supertrend">Pivot Point SuperTrend (Trail-Stop aus Pivot-Hochs/Tiefs, fester TP/SL)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -874,6 +882,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - Einstieg nur wenn direkt vorher ein Squeeze aktiv war</option>
     </select>
   </div>
+  <div data-mode="pp_supertrend"><label>Zeitrahmen</label>
+    <select class="cfg" id="pps_resolution">
+      <option value="10s">10 Sekunden</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="pp_supertrend"><label>Pivot Point Periode</label><input type="number" step="1" id="pps_period"></div>
+  <div data-mode="pp_supertrend"><label>ATR-Faktor</label><input type="number" step="0.1" id="pps_atr_factor"></div>
+  <div data-mode="pp_supertrend"><label>ATR-Periode</label><input type="number" step="1" id="pps_atr_period"></div>
+  <div data-mode="pp_supertrend"><label>TP ($, fest)</label><input type="number" step="any" id="pps_tp_usd"></div>
+  <div data-mode="pp_supertrend"><label>SL ($, fest)</label><input type="number" step="any" id="pps_sl_usd"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -907,13 +933,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
     Testet die aktuell gespeicherten Strategie-Einstellungen gegen echte historische Binance-Kerzen.
-    Nur für Stochastic-Cross, Range-Profile und Fibonacci-Reversal (Grid/OBI-Scalp brauchen
+    Nur für Stochastic-Cross, Range-Profile, Fibonacci-Reversal und Pivot-Point-SuperTrend (Grid/OBI-Scalp brauchen
     historische Orderbuch-Daten, die es nicht gibt). SL/TP werden pro Kerze am Schlusskurs geprüft,
     nicht Tick-für-Tick wie live. Lighter ist gebührenfrei, es werden also keine Gebühren simuliert.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="backtest-days" value="30" style="width:100px;"></div>
     <button id="btn-backtest" style="padding:12px 24px;">▶️ Backtest starten</button>
+    <button id="btn-sweep-pp" style="padding:12px 24px;">🔬 Perioden/ATR-Sweep starten (nur Pivot-SuperTrend)</button>
   </div>
   <div id="backtest-status" style="color:var(--text-dim); font-size:13px;"></div>
   <div id="backtest-results" style="display:none; margin-top:16px;">
@@ -926,6 +953,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div><div class="label">Max Drawdown $</div><div class="value" id="bt-dd">-</div></div>
       <div><div class="label">Ø Gewinn / Ø Verlust $</div><div class="value" id="bt-avg">-</div></div>
     </div>
+  </div>
+  <div id="sweep-pp-results" style="display:none; margin-top:20px;">
+    <div class="label" style="margin-bottom:8px;">Perioden/ATR-Sweep-Rangliste (beste zuerst)</div>
+    <table id="sweep-pp-table">
+      <thead><tr><th>#</th><th>Periode</th><th>ATR-Faktor</th><th>Trades</th><th>Trefferquote</th><th>Gesamt-PnL $</th><th>Max Drawdown $</th></tr></thead>
+      <tbody></tbody>
+    </table>
   </div>
 </div>
 
@@ -1075,6 +1109,43 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
   btn.disabled = false;
 });
 
+document.getElementById('btn-sweep-pp').addEventListener('click', async () => {
+  const days = parseInt(document.getElementById('backtest-days').value) || 30;
+  const btn = document.getElementById('btn-sweep-pp');
+  const statusEl = document.getElementById('backtest-status');
+  const sweepEl = document.getElementById('sweep-pp-results');
+  btn.disabled = true;
+  sweepEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste bis zu 460 Kombinationen durch... kann 1-2 Minuten dauern.`;
+  try {
+    const res = await fetch(`/api/backtest_sweep_pp?symbol=${currentSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days})
+    });
+    const data = await res.json();
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `✅ ${data.combinations_tested} Kombinationen getestet - ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})`;
+      const tbody = document.querySelector('#sweep-pp-table tbody');
+      tbody.innerHTML = data.results.map((r, i) => `
+        <tr>
+          <td>${i + 1}</td>
+          <td>${r.period}</td>
+          <td>${r.atr_factor}</td>
+          <td>${r.stats.trades}</td>
+          <td>${r.stats.win_rate_pct}%</td>
+          <td class="${r.stats.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.stats.total_pnl_usd}</td>
+          <td>${r.stats.max_drawdown_usd}</td>
+        </tr>
+      `).join('');
+      sweepEl.style.display = 'block';
+    }
+  } catch (e) {
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  btn.disabled = false;
+});
+
 async function refresh() {
   if (!currentSymbol) return;
   const res = await fetch(`/api/status?symbol=${currentSymbol}`);
@@ -1119,6 +1190,7 @@ async function refresh() {
     <div class="card"><div class="label">Range-Profile TP / SL (fest, $)</div><div class="value">${data.config.rp_tp_usd ?? '-'} / ${data.config.rp_sl_usd ?? '-'}${data.rp_breakeven_triggered ? ' 🔒' : ''}</div></div>
     <div class="card"><div class="label">Range-Profile Kanalbreite (Ø)</div><div class="value">${data.rp_channel_width ?? '-'} (Ø ${data.rp_avg_width ?? '-'})</div></div>
     <div class="card"><div class="label">⚠ Squeeze (Ausbruch könnte bevorstehen)</div><div class="value ${data.rp_squeeze_active?'red':'green'}">${data.rp_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
+    <div class="card"><div class="label">Pivot-SuperTrend (${data.config.entry_mode==='pp_supertrend'?'aktiv':'inaktiv'})</div><div class="value ${data.pps_trend===1?'green':data.pps_trend===-1?'red':''}">${data.pps_trend===1?'LONG-Trend':data.pps_trend===-1?'SHORT-Trend':'-'} (Stop ${data.pps_trailing_sl ?? '-'})</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
@@ -1194,6 +1266,12 @@ async function refresh() {
     document.getElementById('rp_squeeze_lookback').value = data.config.rp_squeeze_lookback;
     document.getElementById('rp_squeeze_threshold_pct').value = data.config.rp_squeeze_threshold_pct;
     document.getElementById('rp_require_squeeze').value = String(data.config.rp_require_squeeze);
+    document.getElementById('pps_resolution').value = data.config.pps_resolution;
+    document.getElementById('pps_period').value = data.config.pps_period;
+    document.getElementById('pps_atr_factor').value = data.config.pps_atr_factor;
+    document.getElementById('pps_atr_period').value = data.config.pps_atr_period;
+    document.getElementById('pps_tp_usd').value = data.config.pps_tp_usd;
+    document.getElementById('pps_sl_usd').value = data.config.pps_sl_usd;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -1362,6 +1440,12 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     rp_squeeze_lookback: parseInt(document.getElementById('rp_squeeze_lookback').value),
     rp_squeeze_threshold_pct: parseFloat(document.getElementById('rp_squeeze_threshold_pct').value),
     rp_require_squeeze: document.getElementById('rp_require_squeeze').value === 'true',
+    pps_resolution: document.getElementById('pps_resolution').value,
+    pps_period: parseInt(document.getElementById('pps_period').value),
+    pps_atr_factor: parseFloat(document.getElementById('pps_atr_factor').value),
+    pps_atr_period: parseInt(document.getElementById('pps_atr_period').value),
+    pps_tp_usd: parseFloat(document.getElementById('pps_tp_usd').value),
+    pps_sl_usd: parseFloat(document.getElementById('pps_sl_usd').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -1376,7 +1460,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','pps_resolution','pps_period','pps_atr_factor','pps_atr_period','pps_tp_usd','pps_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1437,6 +1521,7 @@ async def handle_status(request):
         "rp_breakeven_triggered": st.get("rp_breakeven_triggered"),
         "rp_channel_width": st.get("rp_channel_width"), "rp_avg_width": st.get("rp_avg_width"),
         "rp_squeeze_active": st.get("rp_squeeze_active"),
+        "pps_trend": st.get("pps_trend"), "pps_trailing_sl": st.get("pps_trailing_sl"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -1471,7 +1556,8 @@ async def handle_config_update(request):
                 "stoch_cross_require_squeeze", "stoch_cross_squeeze_lookback", "stoch_cross_squeeze_threshold_pct",
                 "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_tp_usd", "rp_sl_usd",
                 "rp_breakeven_enabled", "rp_breakeven_trigger_usd", "rp_breakeven_lock_usd",
-                "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze"]:
+                "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
+                "pps_resolution", "pps_period", "pps_atr_factor", "pps_atr_period", "pps_tp_usd", "pps_sl_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -1505,6 +1591,22 @@ async def handle_backtest(request):
     cfg = dict(BOTS[symbol]["config"])  # Kopie - Backtest darf die Live-Config nicht veraendern
     entry_mode = cfg["entry_mode"]
     result = await run_backtest(symbol, entry_mode, cfg, days)
+    return web.json_response(result)
+
+
+async def handle_backtest_sweep_pp(request):
+    from strategies import run_backtest_sweep_pp_supertrend
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    days = body.get("days", 30)
+    try:
+        days = max(1, min(365, int(days)))
+    except (TypeError, ValueError):
+        days = 30
+    cfg = dict(BOTS[symbol]["config"])  # Kopie - Sweep darf die Live-Config nicht veraendern
+    result = await run_backtest_sweep_pp_supertrend(symbol, cfg, days)
     return web.json_response(result)
 
 

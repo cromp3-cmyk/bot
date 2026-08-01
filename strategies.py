@@ -517,6 +517,67 @@ def compute_atr(highs, lows, closes, period):
     return atr
 
 
+def compute_pivot_centers(highs, lows, prd):
+    """Portiert die Pivot-Point-Center-Linie aus 'Pivot Point SuperTrend' (LonesomeTheBlue).
+    Ein Pivot-Hoch/-Tief bei Index j gilt erst als bestaetigt, sobald prd Kerzen NACH j
+    bekannt sind (kein Repainting) - deshalb bezieht sich Index i in der Rueckgabe auf
+    das Pivot bei i-prd, nicht auf i selbst. Haengt NUR von prd ab (nicht vom ATR-Faktor),
+    kann daher fuer alle Faktor-Varianten eines Sweeps wiederverwendet werden."""
+    n = len(highs)
+    center_arr = [None] * n
+    center = None
+    for i in range(n):
+        j = i - prd
+        lastpp = None
+        if j - prd >= 0 and j + prd == i:
+            window_h = highs[j - prd:j + prd + 1]
+            window_l = lows[j - prd:j + prd + 1]
+            if highs[j] == max(window_h):
+                lastpp = highs[j]
+            elif lows[j] == min(window_l):
+                lastpp = lows[j]
+        if lastpp is not None:
+            center = lastpp if center is None else (center * 2 + lastpp) / 3
+        center_arr[i] = center
+    return center_arr
+
+
+def compute_pivot_supertrend_trend(closes, atr_series, center_arr, factor):
+    """Baut aus der Center-Linie + ATR-Faktor die Trail-Stop-Linien (TUp/TDown) und den
+    Trend (+1/-1) - das ist der Teil, der vom ATR-Faktor abhaengt und pro Sweep-Kombination
+    neu gerechnet werden muss (aber billig ist, da nur O(n) ohne die teure Pivot-Suche)."""
+    n = len(closes)
+    trend = [1] * n
+    tup = [None] * n
+    tdown = [None] * n
+    for i in range(n):
+        center = center_arr[i]
+        a = atr_series[i] if i < len(atr_series) else None
+        if center is None or a is None:
+            tup[i] = tup[i - 1] if i > 0 else None
+            tdown[i] = tdown[i - 1] if i > 0 else None
+            trend[i] = trend[i - 1] if i > 0 else 1
+            continue
+        up = center - factor * a
+        dn = center + factor * a
+        prev_close = closes[i - 1] if i > 0 else closes[i]
+        prev_tup = tup[i - 1] if i > 0 and tup[i - 1] is not None else up
+        prev_tdown = tdown[i - 1] if i > 0 and tdown[i - 1] is not None else dn
+        cur_tup = max(up, prev_tup) if prev_close > prev_tup else up
+        cur_tdown = min(dn, prev_tdown) if prev_close < prev_tdown else dn
+        tup[i] = cur_tup
+        tdown[i] = cur_tdown
+        prev_trend = trend[i - 1] if i > 0 else 1
+        if closes[i] > prev_tdown:
+            cur_trend = 1
+        elif closes[i] < prev_tup:
+            cur_trend = -1
+        else:
+            cur_trend = prev_trend
+        trend[i] = cur_trend
+    return trend, tup, tdown
+
+
 def compute_range_profile_snapshot(highs, lows, closes, opens, lookback, bins, ob_os_level):
     """Portiert aus dem Pine-Script 'Range Profile Oscillator': baut ueber die letzten
     'lookback' Kerzen ein Bullen-/Baeren-gewichtetes Histogramm (Volumen-Profil-Prinzip,
@@ -670,6 +731,64 @@ async def range_profile_poll_loop(symbol):
                                 last_processed_ts = signal_key
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Range-Profile-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(5)
+
+
+async def pp_supertrend_poll_loop(symbol):
+    """Pivot Point SuperTrend (portiert aus dem Indikator von LonesomeTheBlue): Trail-Stop
+    aus Pivot-Hochs/-Tiefs statt einfachem Schlusskurs, dadurch ruhiger als klassischer
+    SuperTrend. Einstieg bei Trendwechsel (Buy: Trend -1 -> 1, Sell: Trend 1 -> -1).
+    TP/SL sind feste $-Betraege."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_trend = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "pp_supertrend":
+                prd = cfg["pps_period"]
+                atr_period = cfg["pps_atr_period"]
+                needed_bars = min(1000, max(prd * 4, atr_period * 5, 60) + 5)
+                resolution = cfg["pps_resolution"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts = timestamps[:-1]
+                        closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                if closed_ts and len(closed_c) > max(prd * 3, atr_period + 2):
+                    atr_series = compute_atr(closed_h, closed_l, closed_c, atr_period)
+                    centers = compute_pivot_centers(closed_h, closed_l, prd)
+                    trend, tup, tdown = compute_pivot_supertrend_trend(closed_c, atr_series, centers, cfg["pps_atr_factor"])
+                    st = b["state"]
+                    curr_trend = trend[-1]
+                    st["pps_trend"] = curr_trend
+                    st["pps_trailing_sl"] = round((tup[-1] if curr_trend == 1 else tdown[-1]) or 0, 4)
+
+                    signal_key = closed_ts[-1]
+                    if last_processed_ts != signal_key:
+                        last_processed_ts = signal_key
+                        if (last_trend is not None and curr_trend != last_trend
+                                and st["position"] is None and cfg["bot_active"]):
+                            direction = "long" if curr_trend == 1 else "short"
+                            price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                            debug_log(f"📡 [{symbol}] Pivot-SuperTrend Signal: {direction.upper()} @ {price} (Trend {last_trend}->{curr_trend})")
+                            await execute_entry(symbol, direction, price, is_add_on=False)
+                        last_trend = curr_trend
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Pivot-SuperTrend-Abfrage fehlgeschlagen", {"error": str(e)})
 
         await asyncio.sleep(5)
 
@@ -1100,6 +1219,16 @@ async def on_price_update(symbol, price):
                 await execute_exit(symbol, price, "TP")
         return
 
+    if cfg["entry_mode"] == "pp_supertrend":
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if pnl_usd <= -cfg["pps_sl_usd"]:
+                await execute_exit(symbol, price, "SL")
+            elif pnl_usd >= cfg["pps_tp_usd"]:
+                await execute_exit(symbol, price, "TP")
+        return
+
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
@@ -1187,7 +1316,7 @@ async def trading_loop():
 # Lighter.xyz ist gebuehrenfrei - es werden daher keine Handelsgebuehren simuliert.
 
 BACKTEST_MAX_CANDLES = {
-    "stoch_cross": 100_000, "fib_reversal": 100_000, "range_profile": 30_000,
+    "stoch_cross": 100_000, "fib_reversal": 100_000, "range_profile": 30_000, "pp_supertrend": 100_000,
 }
 
 
@@ -1429,11 +1558,53 @@ def backtest_fib_reversal(candles, cfg):
     return trades
 
 
+def backtest_pp_supertrend(candles, cfg):
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    prd = cfg["pps_period"]
+    factor = cfg["pps_atr_factor"]
+    atr_period = cfg["pps_atr_period"]
+    tp_usd = cfg["pps_tp_usd"]
+    sl_usd = cfg["pps_sl_usd"]
+
+    atr_series = compute_atr(h, l, c, atr_period)
+    centers = compute_pivot_centers(h, l, prd)
+    trend, _, _ = compute_pivot_supertrend_trend(c, atr_series, centers, factor)
+
+    warmup = max(prd * 3, atr_period + 2)
+    position = None
+    trades = []
+    last_trend = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            if pnl_usd <= -sl_usd:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                position = None
+            elif pnl_usd >= tp_usd:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
+                position = None
+
+        curr_trend = trend[i]
+        if last_trend is not None and curr_trend != last_trend and position is None:
+            direction = "long" if curr_trend == 1 else "short"
+            size = (margin * leverage) / price
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+        last_trend = curr_trend
+
+    return trades
+
 
 BACKTEST_FUNCS = {
     "stoch_cross": backtest_stoch_cross,
     "range_profile": backtest_range_profile,
     "fib_reversal": backtest_fib_reversal,
+    "pp_supertrend": backtest_pp_supertrend,
 }
 
 
@@ -1503,10 +1674,11 @@ def _trim_candles_to_days(candles, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur stoch_cross, range_profile, fib_reversal - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur stoch_cross, range_profile, fib_reversal, pp_supertrend - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     resolution_key = {"stoch_cross": "stoch_cross_resolution",
-                       "range_profile": "rp_resolution", "fib_reversal": "fib_resolution"}[entry_mode]
+                       "range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
+                       "pp_supertrend": "pps_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
     if resolution in SUB_MINUTE_RESOLUTIONS:
@@ -1553,3 +1725,89 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         "stats": stats, "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
     }
 
+
+async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
+    """2D-Parameter-Sweep fuer Pivot-Point-SuperTrend: Pivot-Periode (ganzzahlig 1-10)
+    x ATR-Faktor (0.5-5.0 in 0.1-Schritten, 46 Werte) = 460 Kombinationen. Zeitrahmen
+    und ATR-Periode bleiben fix (wie in den gespeicherten Einstellungen). Effizient, weil
+    die teure Pivot-Erkennung nur einmal pro Periode (10x) berechnet wird, nicht pro
+    Kombination (460x) - der ATR-Faktor beeinflusst nur die guenstige Trend-Berechnung."""
+    resolution = base_cfg.get("pps_resolution", "1m")
+    if resolution == "30s":
+        return {"error": "Sweep für 30 Sekunden nicht sinnvoll (zu wenig historische Daten in vertretbarer Zeit). Wähle einen anderen Zeitrahmen."}
+    max_candles = BACKTEST_MAX_CANDLES["pp_supertrend"]
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+
+    cache_key = (symbol, resolution)
+    cached = _backtest_cache_get(cache_key)
+    now = time.time()
+
+    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
+            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
+            and len(cached["candles"][4]) >= 100):
+        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
+    else:
+        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
+        if err:
+            return {"error": err}
+        if candles:
+            _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
+
+    if not candles or len(candles[4]) < 100:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    ts, o, h, l, c = candles
+    atr_period = base_cfg.get("pps_atr_period", 10)
+    tp_usd = base_cfg.get("pps_tp_usd", 3)
+    sl_usd = base_cfg.get("pps_sl_usd", 3)
+    margin, leverage = base_cfg["margin"], base_cfg["leverage"]
+    atr_series = compute_atr(h, l, c, atr_period)
+
+    periods = list(range(1, 11))  # 1..10
+    factors = [round(0.5 + i * 0.1, 1) for i in range(46)]  # 0.5..5.0 in 0.1-Schritten
+
+    results = []
+    for prd in periods:
+        centers = compute_pivot_centers(h, l, prd)  # teuer, nur 1x pro Periode
+        warmup = max(prd * 3, atr_period + 2)
+        for factor in factors:
+            trend, _, _ = compute_pivot_supertrend_trend(c, atr_series, centers, factor)  # billig
+
+            position = None
+            trades = []
+            last_trend = None
+            for i in range(warmup, len(c)):
+                price = c[i]
+                if position is not None:
+                    direction, entry, size = position["dir"], position["entry"], position["size"]
+                    pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+                    if pnl_usd <= -sl_usd:
+                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                        position = None
+                    elif pnl_usd >= tp_usd:
+                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
+                        position = None
+                curr_trend = trend[i]
+                if last_trend is not None and curr_trend != last_trend and position is None:
+                    direction = "long" if curr_trend == 1 else "short"
+                    size = (margin * leverage) / price
+                    position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                last_trend = curr_trend
+
+            stats = summarize_backtest_trades(trades)
+            results.append({
+                "label": f"Periode {prd}, ATR-Faktor {factor}",
+                "period": prd, "atr_factor": factor,
+                "stats": stats,
+            })
+
+    results.sort(key=lambda r: r["stats"]["total_pnl_usd"], reverse=True)
+    n_candles = len(c)
+    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "entry_mode": "pp_supertrend", "resolution": resolution,
+        "candles_processed": n_candles, "actual_days_covered": round(actual_days, 1),
+        "combinations_tested": len(results),
+        "results": results,
+    }
