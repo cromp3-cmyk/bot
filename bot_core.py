@@ -253,9 +253,11 @@ def default_config():
         "rp_resolution": os.getenv("RP_RESOLUTION", "1m"),
         "rp_lookback": int(os.getenv("RP_LOOKBACK", "110")),
         "rp_ob_os_level": float(os.getenv("RP_OB_OS_LEVEL", "80")),
-        "rp_atr_period": int(os.getenv("RP_ATR_PERIOD", "14")),
-        "rp_sl_atr_mult": float(os.getenv("RP_SL_ATR_MULT", "1.5")),
-        "rp_tp_rr": float(os.getenv("RP_TP_RR", "1.0")),  # nur im momentum-Modus genutzt
+        "rp_tp_usd": float(os.getenv("RP_TP_USD", "3")),
+        "rp_sl_usd": float(os.getenv("RP_SL_USD", "3")),
+        "rp_breakeven_enabled": os.getenv("RP_BREAKEVEN_ENABLED", "false").lower() == "true",
+        "rp_breakeven_trigger_usd": float(os.getenv("RP_BREAKEVEN_TRIGGER_USD", "3")),
+        "rp_breakeven_lock_usd": float(os.getenv("RP_BREAKEVEN_LOCK_USD", "0.5")),
         "rp_squeeze_lookback": int(os.getenv("RP_SQUEEZE_LOOKBACK", "50")),
         "rp_squeeze_threshold_pct": float(os.getenv("RP_SQUEEZE_THRESHOLD_PCT", "70")),
         "macd_simple_resolution": os.getenv("MACD_SIMPLE_RESOLUTION", "30s"),  # "30s","1m","2m","5m","15m"
@@ -302,7 +304,7 @@ def default_state():
         "stoch_cross_rp_mid": None, "stoch_cross_channel_width": None, "stoch_cross_avg_width": None,
         "stoch_cross_squeeze_active": False, "stoch_cross_width_history": [],
         "rp_osc": None, "rp_mid_price": None, "rp_range_high": None, "rp_range_low": None,
-        "rp_sl_price": None, "rp_tp_price": None,
+        "rp_breakeven_triggered": False,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "macd_simple_hist": None, "macd_simple_hist_history": [],
@@ -954,9 +956,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="range_profile"><label>Lookback (Kerzen)</label><input type="number" step="1" id="rp_lookback"></div>
   <div data-mode="range_profile"><label>OB/OS-Level (%)</label><input type="number" step="1" id="rp_ob_os_level"></div>
-  <div data-mode="range_profile"><label>ATR-Periode</label><input type="number" step="1" id="rp_atr_period"></div>
-  <div data-mode="range_profile"><label>SL ATR-Multiplikator</label><input type="number" step="0.1" id="rp_sl_atr_mult"></div>
-  <div data-mode="range_profile"><label>TP Risk/Reward (nur Momentum-Modus)</label><input type="number" step="0.1" id="rp_tp_rr"></div>
+  <div data-mode="range_profile"><label>TP ($, fest)</label><input type="number" step="any" id="rp_tp_usd"></div>
+  <div data-mode="range_profile"><label>SL ($, fest)</label><input type="number" step="any" id="rp_sl_usd"></div>
+  <div data-mode="range_profile"><label>Gewinn absichern (SL springt bei X$ auf kleinen Gewinn)</label>
+    <select class="cfg" id="rp_breakeven_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="range_profile"><label>Auslöser ($, z.B. 3)</label><input type="number" step="any" id="rp_breakeven_trigger_usd"></div>
+  <div data-mode="range_profile"><label>Abgesicherter Gewinn ($)</label><input type="number" step="any" id="rp_breakeven_lock_usd"></div>
   <div data-mode="range_profile"><label>Squeeze Lookback (Kerzen)</label><input type="number" step="1" id="rp_squeeze_lookback"></div>
   <div data-mode="range_profile"><label>Squeeze-Schwelle (%)</label><input type="number" step="5" id="rp_squeeze_threshold_pct"></div>
   <div data-mode="macd_simple"><label>Zeitrahmen</label>
@@ -1060,6 +1069,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="backtest-days" value="30" style="width:100px;"></div>
     <button id="btn-backtest" style="padding:12px 24px;">▶️ Backtest starten</button>
+    <button id="btn-sweep" style="padding:12px 24px;">🔬 Preset-Sweep starten (nur MACD-Simple)</button>
   </div>
   <div id="backtest-status" style="color:var(--text-dim); font-size:13px;"></div>
   <div id="backtest-results" style="display:none; margin-top:16px;">
@@ -1072,6 +1082,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div><div class="label">Max Drawdown $</div><div class="value" id="bt-dd">-</div></div>
       <div><div class="label">Ø Gewinn / Ø Verlust $</div><div class="value" id="bt-avg">-</div></div>
     </div>
+  </div>
+  <div id="sweep-results" style="display:none; margin-top:20px;">
+    <div class="label" style="margin-bottom:8px;">Preset-Sweep-Rangliste (beste zuerst)</div>
+    <table id="sweep-table">
+      <thead><tr><th>#</th><th>Kombination</th><th>Trades</th><th>Trefferquote</th><th>Gesamt-PnL $</th><th>Max Drawdown $</th></tr></thead>
+      <tbody></tbody>
+    </table>
   </div>
 </div>
 
@@ -1222,6 +1239,42 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
   btn.disabled = false;
 });
 
+document.getElementById('btn-sweep').addEventListener('click', async () => {
+  const days = parseInt(document.getElementById('backtest-days').value) || 30;
+  const btn = document.getElementById('btn-sweep');
+  const statusEl = document.getElementById('backtest-status');
+  const sweepEl = document.getElementById('sweep-results');
+  btn.disabled = true;
+  sweepEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste bis zu 20 Kombinationen durch... kann 1-2 Minuten dauern.`;
+  try {
+    const res = await fetch(`/api/backtest_sweep?symbol=${currentSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days})
+    });
+    const data = await res.json();
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `✅ ${data.combinations_tested} Kombinationen getestet - ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})`;
+      const tbody = document.querySelector('#sweep-table tbody');
+      tbody.innerHTML = data.results.map((r, i) => `
+        <tr>
+          <td>${i + 1}</td>
+          <td>${r.label}</td>
+          <td>${r.stats.trades}</td>
+          <td>${r.stats.win_rate_pct}%</td>
+          <td class="${r.stats.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.stats.total_pnl_usd}</td>
+          <td>${r.stats.max_drawdown_usd}</td>
+        </tr>
+      `).join('');
+      sweepEl.style.display = 'block';
+    }
+  } catch (e) {
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  btn.disabled = false;
+});
+
 async function refresh() {
   if (!currentSymbol) return;
   const res = await fetch(`/api/status?symbol=${currentSymbol}`);
@@ -1266,7 +1319,7 @@ async function refresh() {
     <div class="card"><div class="label">Stochastic-Cross ⚠ Squeeze</div><div class="value ${data.stoch_cross_squeeze_active?'red':'green'}">${data.stoch_cross_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
     <div class="card"><div class="label">Range-Profile Oszillator (${data.config.entry_mode==='range_profile'?'aktiv':'inaktiv'})</div><div class="value ${(data.rp_osc??0)>=0?'green':'red'}">${data.rp_osc ?? '-'}</div></div>
     <div class="card"><div class="label">Range-Profile Mitte / Kanal</div><div class="value">${data.rp_mid_price ?? '-'} (${data.rp_range_low ?? '-'} – ${data.rp_range_high ?? '-'})</div></div>
-    <div class="card"><div class="label">Range-Profile SL / TP (aktive Position)</div><div class="value">${data.rp_sl_price ?? '-'} / ${data.rp_tp_price ?? '-'}</div></div>
+    <div class="card"><div class="label">Range-Profile TP / SL (fest, $)</div><div class="value">${data.config.rp_tp_usd ?? '-'} / ${data.config.rp_sl_usd ?? '-'}${data.rp_breakeven_triggered ? ' 🔒' : ''}</div></div>
     <div class="card"><div class="label">Range-Profile Kanalbreite (Ø)</div><div class="value">${data.rp_channel_width ?? '-'} (Ø ${data.rp_avg_width ?? '-'})</div></div>
     <div class="card"><div class="label">⚠ Squeeze (Ausbruch könnte bevorstehen)</div><div class="value ${data.rp_squeeze_active?'red':'green'}">${data.rp_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
     <div class="card"><div class="label">MACD-Simple Histogramm (${data.config.entry_mode==='macd_simple'?'aktiv':'inaktiv'})</div><div class="value ${(data.macd_simple_hist??0)>=0?'green':'red'}">${data.macd_simple_hist ?? '-'}</div></div>
@@ -1355,9 +1408,11 @@ async function refresh() {
     document.getElementById('rp_resolution').value = data.config.rp_resolution;
     document.getElementById('rp_lookback').value = data.config.rp_lookback;
     document.getElementById('rp_ob_os_level').value = data.config.rp_ob_os_level;
-    document.getElementById('rp_atr_period').value = data.config.rp_atr_period;
-    document.getElementById('rp_sl_atr_mult').value = data.config.rp_sl_atr_mult;
-    document.getElementById('rp_tp_rr').value = data.config.rp_tp_rr;
+    document.getElementById('rp_tp_usd').value = data.config.rp_tp_usd;
+    document.getElementById('rp_sl_usd').value = data.config.rp_sl_usd;
+    document.getElementById('rp_breakeven_enabled').value = String(data.config.rp_breakeven_enabled);
+    document.getElementById('rp_breakeven_trigger_usd').value = data.config.rp_breakeven_trigger_usd;
+    document.getElementById('rp_breakeven_lock_usd').value = data.config.rp_breakeven_lock_usd;
     document.getElementById('rp_squeeze_lookback').value = data.config.rp_squeeze_lookback;
     document.getElementById('rp_squeeze_threshold_pct').value = data.config.rp_squeeze_threshold_pct;
     document.getElementById('macd_simple_resolution').value = data.config.macd_simple_resolution;
@@ -1584,9 +1639,11 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     rp_resolution: document.getElementById('rp_resolution').value,
     rp_lookback: parseInt(document.getElementById('rp_lookback').value),
     rp_ob_os_level: parseFloat(document.getElementById('rp_ob_os_level').value),
-    rp_atr_period: parseInt(document.getElementById('rp_atr_period').value),
-    rp_sl_atr_mult: parseFloat(document.getElementById('rp_sl_atr_mult').value),
-    rp_tp_rr: parseFloat(document.getElementById('rp_tp_rr').value),
+    rp_tp_usd: parseFloat(document.getElementById('rp_tp_usd').value),
+    rp_sl_usd: parseFloat(document.getElementById('rp_sl_usd').value),
+    rp_breakeven_enabled: document.getElementById('rp_breakeven_enabled').value === 'true',
+    rp_breakeven_trigger_usd: parseFloat(document.getElementById('rp_breakeven_trigger_usd').value),
+    rp_breakeven_lock_usd: parseFloat(document.getElementById('rp_breakeven_lock_usd').value),
     rp_squeeze_lookback: parseInt(document.getElementById('rp_squeeze_lookback').value),
     rp_squeeze_threshold_pct: parseFloat(document.getElementById('rp_squeeze_threshold_pct').value),
     macd_simple_resolution: document.getElementById('macd_simple_resolution').value,
@@ -1620,7 +1677,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_atr_period','rp_sl_atr_mult','rp_tp_rr','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','macd_simple_exit_mode','macd_simple_early_exit_enabled','macd_simple_early_exit_bars','macd_simple_early_exit_reverse','macd_simple_breakeven_enabled','macd_simple_breakeven_trigger_usd','macd_simple_breakeven_lock_usd','cf_resolution','cf_min_body_pct','cf_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','macd_resolution','macd_fast_fast','macd_fast_slow','macd_fast_signal','macd_slow_fast','macd_slow_slow','macd_slow_signal','macd_use_stochastic','stoch_k_period','stoch_k_smooth','stoch_d_period','macd_tp_usd','macd_sl_usd','macd_fast_fade_exit_enabled','macd_slow_fade_exit_enabled','macd_slow_reversal_exit_enabled','macd_fast_zero_cross_exit_enabled','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','macd_simple_resolution','macd_simple_fast','macd_simple_slow','macd_simple_signal','macd_simple_tp_usd','macd_simple_sl_usd','macd_simple_exit_mode','macd_simple_early_exit_enabled','macd_simple_early_exit_bars','macd_simple_early_exit_reverse','macd_simple_breakeven_enabled','macd_simple_breakeven_trigger_usd','macd_simple_breakeven_lock_usd','cf_resolution','cf_min_body_pct','cf_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1680,7 +1737,7 @@ async def handle_status(request):
         "stoch_cross_rp_mid": st.get("stoch_cross_rp_mid"), "stoch_cross_squeeze_active": st.get("stoch_cross_squeeze_active"),
         "rp_osc": st.get("rp_osc"), "rp_mid_price": st.get("rp_mid_price"),
         "rp_range_high": st.get("rp_range_high"), "rp_range_low": st.get("rp_range_low"),
-        "rp_sl_price": st.get("rp_sl_price"), "rp_tp_price": st.get("rp_tp_price"),
+        "rp_breakeven_triggered": st.get("rp_breakeven_triggered"),
         "rp_channel_width": st.get("rp_channel_width"), "rp_avg_width": st.get("rp_avg_width"),
         "rp_squeeze_active": st.get("rp_squeeze_active"),
         "macd_simple_hist": st.get("macd_simple_hist"),
@@ -1725,7 +1782,8 @@ async def handle_config_update(request):
                 "stoch_cross_sl_tp_mode", "stoch_cross_atr_period", "stoch_cross_sl_atr_mult", "stoch_cross_tp_atr_mult",
                 "stoch_cross_rp_filter_enabled", "stoch_cross_rp_lookback",
                 "stoch_cross_require_squeeze", "stoch_cross_squeeze_lookback", "stoch_cross_squeeze_threshold_pct",
-                "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_atr_period", "rp_sl_atr_mult", "rp_tp_rr",
+                "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_tp_usd", "rp_sl_usd",
+                "rp_breakeven_enabled", "rp_breakeven_trigger_usd", "rp_breakeven_lock_usd",
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
                 "macd_simple_resolution", "macd_simple_fast", "macd_simple_slow", "macd_simple_signal",
                 "macd_simple_tp_usd", "macd_simple_sl_usd", "macd_simple_exit_mode",
@@ -1765,6 +1823,23 @@ async def handle_backtest(request):
     cfg = dict(BOTS[symbol]["config"])  # Kopie - Backtest darf die Live-Config nicht veraendern
     entry_mode = cfg["entry_mode"]
     result = await run_backtest(symbol, entry_mode, cfg, days)
+    return web.json_response(result)
+
+
+async def handle_backtest_sweep(request):
+    from strategies import run_backtest_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    days = body.get("days", 30)
+    try:
+        days = max(1, min(365, int(days)))
+    except (TypeError, ValueError):
+        days = 30
+    cfg = dict(BOTS[symbol]["config"])  # Kopie - Sweep darf die Live-Config nicht veraendern
+    entry_mode = cfg["entry_mode"]
+    result = await run_backtest_sweep(symbol, entry_mode, cfg, days)
     return web.json_response(result)
 
 

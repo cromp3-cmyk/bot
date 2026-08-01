@@ -747,12 +747,10 @@ def compute_range_profile_snapshot(highs, lows, closes, opens, lookback, bins, o
 async def range_profile_poll_loop(symbol):
     """Range-Profile-Strategie (portiert aus dem 'Range Profile Oscillator'-Indikator),
     zwei waehlbare Modi:
-    - reversion (empfohlen): Ausbruch ueber/unter den Kanal wird als Gegenrichtung
-      gehandelt, TP ist die tatsaechlich berechnete Mittellinie (Point of Control) -
-      passt sich also automatisch der Marktlage an statt einem festen Betrag.
+    - reversion (empfohlen): Ausbruch ueber/unter den Kanal wird als Gegenrichtung gehandelt.
     - momentum: wie im Original-Indikator, Ausbruch wird in Ausbruchsrichtung gehandelt.
-    In beiden Modi ist der SL ATR-basiert (marktadaptiv), im Momentum-Modus ist das TP
-    ein Risk/Reward-Vielfaches des ATR-Risikos."""
+    TP und SL sind feste $-Betraege (siehe on_price_update), plus optionale Gewinn-
+    Absicherung (Breakeven-Lock), genau wie bei MACD-Simple."""
     b = BOTS[symbol]
     last_osc = None
     last_processed_ts = None
@@ -763,7 +761,7 @@ async def range_profile_poll_loop(symbol):
             cfg = b["config"]
             if cfg["entry_mode"] == "range_profile":
                 lookback = cfg["rp_lookback"]
-                needed_bars = min(1000, lookback + max(cfg["rp_atr_period"] * 5, 60) + 5)
+                needed_bars = min(1000, lookback + 60)
                 resolution = cfg["rp_resolution"]
                 if resolution in SUB_MINUTE_RESOLUTIONS:
                     local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
@@ -783,11 +781,9 @@ async def range_profile_poll_loop(symbol):
                 if closed_ts:
                     if len(closed_c) > lookback + 2:
                         snap = compute_range_profile_snapshot(closed_h, closed_l, closed_c, closed_o, lookback, 50, cfg["rp_ob_os_level"])
-                        atr_series = compute_atr(closed_h, closed_l, closed_c, cfg["rp_atr_period"])
-                        if snap and atr_series:
+                        if snap:
                             st = b["state"]
                             curr_osc = snap["osc"]
-                            curr_atr = atr_series[-1]
                             st["rp_osc"] = round(curr_osc, 2)
                             st["rp_mid_price"] = round(snap["mid_price"], 4)
                             st["rp_range_high"] = round(snap["range_high"], 4)
@@ -831,17 +827,8 @@ async def range_profile_poll_loop(symbol):
                                     if direction:
                                         last_entry_signal_ts = signal_key
                                         price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                                        risk_dist = curr_atr * cfg["rp_sl_atr_mult"]
-                                        sl_price = price - risk_dist if direction == "long" else price + risk_dist
-                                        if mode == "reversion":
-                                            tp_price = snap["mid_price"]
-                                        else:
-                                            tp_price = price + risk_dist * cfg["rp_tp_rr"] if direction == "long" else price - risk_dist * cfg["rp_tp_rr"]
-
                                         debug_log(f"📡 [{symbol}] Range-Profile Signal ({mode}): {direction.upper()} @ {price} "
-                                                  f"| Mitte {round(snap['mid_price'],4)} | SL {round(sl_price,4)} | TP {round(tp_price,4)} | Oszillator {round(curr_osc,2)}")
-                                        st["rp_sl_price"] = sl_price
-                                        st["rp_tp_price"] = tp_price
+                                                  f"| Mitte {round(snap['mid_price'],4)} | Oszillator {round(curr_osc,2)}")
                                         await execute_entry(symbol, direction, price, is_add_on=False)
 
                                 last_osc = curr_osc
@@ -1516,22 +1503,21 @@ async def on_price_update(symbol, price):
         return
 
     if cfg["entry_mode"] == "range_profile":
-        if st["position"] is not None:
-            sl_price = st.get("rp_sl_price")
-            tp_price = st.get("rp_tp_price")
-            if sl_price is not None:
-                sl_hit = price <= sl_price if st["position"] == "long" else price >= sl_price
-                if sl_hit:
-                    await execute_exit(symbol, price, "SL")
-                    st["rp_sl_price"] = None
-                    st["rp_tp_price"] = None
-                    return
-            if tp_price is not None:
-                tp_hit = price >= tp_price if st["position"] == "long" else price <= tp_price
-                if tp_hit:
-                    await execute_exit(symbol, price, "TP")
-                    st["rp_sl_price"] = None
-                    st["rp_tp_price"] = None
+        if st["position"] is None:
+            st["rp_breakeven_triggered"] = False
+        else:
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            sl_floor = -cfg["rp_sl_usd"]
+            if cfg.get("rp_breakeven_enabled", False):
+                if not st["rp_breakeven_triggered"] and pnl_usd >= cfg.get("rp_breakeven_trigger_usd", 3):
+                    st["rp_breakeven_triggered"] = True
+                if st["rp_breakeven_triggered"]:
+                    sl_floor = cfg.get("rp_breakeven_lock_usd", 0.5)
+            if pnl_usd <= sl_floor:
+                await execute_exit(symbol, price, "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
+            elif pnl_usd >= cfg["rp_tp_usd"]:
+                await execute_exit(symbol, price, "TP")
         return
 
     if st["position"] is None:
@@ -1802,32 +1788,42 @@ def backtest_range_profile(candles, cfg):
     lookback = cfg["rp_lookback"]
     ob = cfg["rp_ob_os_level"]
     mode = cfg.get("rp_mode", "reversion")
+    breakeven_enabled = cfg.get("rp_breakeven_enabled", False)
+    breakeven_trigger = cfg.get("rp_breakeven_trigger_usd", 3)
+    breakeven_lock = cfg.get("rp_breakeven_lock_usd", 0.5)
 
-    atr_series = compute_atr(h, l, c, cfg["rp_atr_period"])
-    warmup = lookback + cfg["rp_atr_period"] + 5
+    warmup = lookback + 5
     position = None
     trades = []
     last_osc = None
     width_history = []
     squeeze_active = False
+    breakeven_triggered = False
 
     for i in range(warmup, n):
         snap = compute_range_profile_snapshot(h[i - lookback + 1:i + 1], l[i - lookback + 1:i + 1],
                                                 c[i - lookback + 1:i + 1], o[i - lookback + 1:i + 1], lookback, 50, ob)
         if snap is None:
             continue
-        curr_osc, price, curr_atr = snap["osc"], c[i], atr_series[i]
+        curr_osc, price = snap["osc"], c[i]
 
         if position is not None:
             direction, entry, size = position["dir"], position["entry"], position["size"]
-            sl_hit = price <= position["sl"] if direction == "long" else price >= position["sl"]
-            tp_hit = price >= position["tp"] if direction == "long" else price <= position["tp"]
-            if sl_hit:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            sl_floor = -cfg["rp_sl_usd"]
+            if breakeven_enabled:
+                if not breakeven_triggered and pnl_usd >= breakeven_trigger:
+                    breakeven_triggered = True
+                if breakeven_triggered:
+                    sl_floor = breakeven_lock
+            if pnl_usd <= sl_floor:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
                 position = None
-            elif tp_hit:
+                breakeven_triggered = False
+            elif pnl_usd >= cfg["rp_tp_usd"]:
                 _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
                 position = None
+                breakeven_triggered = False
 
         squeeze_before_entry = squeeze_active
         channel_width = snap["range_high"] - snap["range_low"]
@@ -1849,19 +1845,10 @@ def backtest_range_profile(candles, cfg):
             if direction and cfg.get("rp_require_squeeze", False) and not squeeze_before_entry:
                 direction = None
 
-            if direction and curr_atr:
-                risk_dist = curr_atr * cfg["rp_sl_atr_mult"]
-                sl_price = price - risk_dist if direction == "long" else price + risk_dist
-                if mode == "momentum":
-                    tp_price = price + risk_dist * cfg["rp_tp_rr"] if direction == "long" else price - risk_dist * cfg["rp_tp_rr"]
-                else:
-                    tp_price = snap["mid_price"]
-                    valid = (direction == "long" and tp_price > price) or (direction == "short" and tp_price < price)
-                    if not valid:
-                        direction = None
-                if direction:
-                    size = (margin * leverage) / price
-                    position = {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl": sl_price, "tp": tp_price}
+            if direction:
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                breakeven_triggered = False
 
         last_osc = curr_osc
 
@@ -2156,4 +2143,88 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         "requested_days": days, "actual_days_covered": round(actual_days, 1),
         "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": cache_used,
         "stats": stats, "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
+    }
+
+
+# ========== PARAMETER-SWEEP (mehrere Kombinationen gegeneinander testen) ==========
+
+MACD_SIMPLE_PRESETS = [
+    {"name": "Standard", "fast": 13, "slow": 21, "signal": 9},
+    {"name": "Sehr schnell", "fast": 5, "slow": 13, "signal": 6},
+    {"name": "Schnell", "fast": 8, "slow": 17, "signal": 9},
+    {"name": "Klassisch", "fast": 12, "slow": 26, "signal": 9},
+    {"name": "Kurzes Signal", "fast": 13, "slow": 21, "signal": 5},
+    {"name": "Mittel", "fast": 10, "slow": 20, "signal": 7},
+    {"name": "Reaktiv", "fast": 6, "slow": 19, "signal": 9},
+    {"name": "Weiter Abstand", "fast": 13, "slow": 34, "signal": 9},
+    {"name": "Langsam", "fast": 21, "slow": 55, "signal": 13},
+    {"name": "Extrem breit", "fast": 5, "slow": 35, "signal": 5},
+]
+
+
+async def run_backtest_sweep(symbol, entry_mode, base_cfg, days):
+    """Testet mehrere Parameter-Kombinationen gegeneinander (aehnlich einer Monte-Carlo-
+    artigen Parameter-Suche, aber deterministisch ueber vordefinierte Presets statt
+    Zufallsstichproben) und liefert eine nach Gesamt-PnL sortierte Rangliste zurueck.
+    Die Kerzen werden nur EINMAL geholt (nutzt denselben Cache wie der normale Backtest)
+    und dann fuer alle Kombinationen wiederverwendet - das macht den Sweep schnell."""
+    if entry_mode != "macd_simple":
+        return {"error": "Preset-Sweep ist aktuell nur für MACD-Simple verfügbar."}
+
+    resolution = base_cfg.get("macd_simple_resolution", "1m")
+    if resolution == "30s":
+        return {"error": "Preset-Sweep für 30s nicht sinnvoll (zu wenig historische Daten in vertretbarer Zeit). Wähle einen anderen Zeitrahmen."}
+    max_candles = BACKTEST_MAX_CANDLES["macd_simple"]
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+
+    cache_key = (symbol, resolution)
+    cached = _backtest_candle_cache.get(cache_key)
+    now = time.time()
+
+    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
+            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
+            and len(cached["candles"][4]) >= 100):
+        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
+    else:
+        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
+        if err:
+            return {"error": err}
+        if candles:
+            _backtest_candle_cache[cache_key] = {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles}
+
+    if not candles or len(candles[4]) < 100:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    results = []
+    for preset in MACD_SIMPLE_PRESETS:
+        for breakeven_variant in (False, True):
+            cfg_variant = dict(base_cfg)
+            cfg_variant["macd_simple_fast"] = preset["fast"]
+            cfg_variant["macd_simple_slow"] = preset["slow"]
+            cfg_variant["macd_simple_signal"] = preset["signal"]
+            cfg_variant["macd_simple_breakeven_enabled"] = breakeven_variant
+            if breakeven_variant:
+                cfg_variant.setdefault("macd_simple_breakeven_trigger_usd", round(cfg_variant.get("macd_simple_tp_usd", 3) * 0.5, 2))
+                cfg_variant.setdefault("macd_simple_breakeven_lock_usd", 0.5)
+
+            trades = backtest_macd_simple(candles, cfg_variant)
+            stats = summarize_backtest_trades(trades)
+            results.append({
+                "label": f"{preset['name']} ({preset['fast']},{preset['slow']},{preset['signal']})" + (" + Breakeven" if breakeven_variant else ""),
+                "fast": preset["fast"], "slow": preset["slow"], "signal": preset["signal"],
+                "breakeven_enabled": breakeven_variant,
+                "breakeven_trigger_usd": cfg_variant.get("macd_simple_breakeven_trigger_usd") if breakeven_variant else None,
+                "breakeven_lock_usd": cfg_variant.get("macd_simple_breakeven_lock_usd") if breakeven_variant else None,
+                "stats": stats,
+            })
+
+    results.sort(key=lambda r: r["stats"]["total_pnl_usd"], reverse=True)
+    n_candles = len(candles[4])
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+        "candles_processed": n_candles, "actual_days_covered": round(actual_days, 1),
+        "combinations_tested": len(results),
+        "results": results,
     }
