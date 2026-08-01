@@ -1027,6 +1027,84 @@ async def candle_flip_poll_loop(symbol):
         await asyncio.sleep(2)  # kurzes Intervall, damit Flips bei sehr schnellen Zeitrahmen nicht verpasst werden
 
 
+async def triple_candle_poll_loop(symbol):
+    """3-Kerzen-Momentum: N (Standard 3) aufeinanderfolgende gruene Kerzen mit jeweils
+    hoeherem Schlusskurs als die vorherige (nicht nur gruen, sondern auch steigend) ->
+    Long. Spiegelbildlich N aufeinanderfolgende rote Kerzen mit jeweils tieferem
+    Schlusskurs -> Short. TP/SL sind feste $-Betraege, danach wiederholt sich der Prozess."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_close = None
+    streak_count = 0
+    streak_direction = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "triple_candle":
+                needed_streak = cfg.get("tc_streak", 3)
+                needed_bars = needed_streak + 3
+                resolution = cfg["tc_resolution"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, _, _, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars + 1)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts = timestamps[:-1]
+                        closed_o, closed_c = opens[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                if closed_ts and len(closed_c) >= 1:
+                    st = b["state"]
+                    signal_key = closed_ts[-1]
+                    if last_processed_ts != signal_key:
+                        last_processed_ts = signal_key
+                        open_p, close_p = closed_o[-1], closed_c[-1]
+                        color = "green" if close_p > open_p else ("red" if close_p < open_p else None)
+                        rising = last_close is not None and close_p > last_close
+                        falling = last_close is not None and close_p < last_close
+
+                        this_direction = None
+                        if color == "green" and rising:
+                            this_direction = "long"
+                        elif color == "red" and falling:
+                            this_direction = "short"
+
+                        if this_direction is not None and this_direction == streak_direction:
+                            streak_count += 1
+                        elif this_direction is not None:
+                            streak_direction = this_direction
+                            streak_count = 1
+                        else:
+                            streak_direction = None
+                            streak_count = 0
+
+                        st["tc_streak_count"] = streak_count
+                        st["tc_streak_direction"] = streak_direction
+
+                        if (streak_count >= needed_streak and st["position"] is None and cfg["bot_active"]):
+                            price = st["last_price"] if st["last_price"] is not None else close_p
+                            debug_log(f"📡 [{symbol}] 3-Kerzen-Momentum Signal: {streak_direction.upper()} @ {price} ({streak_count} Kerzen in Folge)")
+                            await execute_entry(symbol, streak_direction, price, is_add_on=False)
+                            streak_count = 0
+                            streak_direction = None
+                            st["tc_streak_count"] = 0
+                            st["tc_streak_direction"] = None
+
+                        last_close = close_p
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] 3-Kerzen-Momentum-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(2)
+
+
 def calc_obi(symbol, levels, depth_weighting=False, min_liquidity=0.0):
     """Berechnet das Orderbuch-Ungleichgewicht ueber die naechsten 'levels' Preisstufen.
     depth_weighting: gewichtet Level naeher am aktuellen Kurs staerker (1/(i+1)) statt
@@ -1336,6 +1414,16 @@ async def on_price_update(symbol, price):
                 await execute_exit(symbol, price, "SL")
         return
 
+    if cfg["entry_mode"] == "triple_candle":
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if pnl_usd <= -cfg["tc_sl_usd"]:
+                await execute_exit(symbol, price, "SL")
+            elif pnl_usd >= cfg["tc_tp_usd"]:
+                await execute_exit(symbol, price, "TP")
+        return
+
     if cfg["entry_mode"] == "obi_scalp":
         if cfg["obi_trend_filter"]:
             update_obi_trend_ema(symbol, price, cfg["obi_trend_ema_length"])
@@ -1619,7 +1707,7 @@ async def trading_loop():
 
 BACKTEST_MAX_CANDLES = {
     "macd_stoch": 500_000, "stoch_cross": 500_000, "fib_reversal": 500_000, "range_profile": 30_000,
-    "macd_simple": 500_000, "candle_flip": 500_000,
+    "macd_simple": 500_000, "candle_flip": 500_000, "triple_candle": 500_000,
 }
 
 
@@ -2054,6 +2142,63 @@ def backtest_candle_flip(candles, cfg):
     return trades
 
 
+def backtest_triple_candle(candles, cfg):
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    needed_streak = cfg.get("tc_streak", 3)
+    tp_usd = cfg["tc_tp_usd"]
+    sl_usd = cfg["tc_sl_usd"]
+
+    position = None
+    trades = []
+    last_close = None
+    streak_count = 0
+    streak_direction = None
+
+    for i in range(1, n):
+        open_p, close_p, price = o[i], c[i], c[i]
+
+        if position is not None:
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            if pnl_usd <= -sl_usd:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                position = None
+            elif pnl_usd >= tp_usd:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
+                position = None
+
+        color = "green" if close_p > open_p else ("red" if close_p < open_p else None)
+        rising = last_close is not None and close_p > last_close
+        falling = last_close is not None and close_p < last_close
+
+        this_direction = None
+        if color == "green" and rising:
+            this_direction = "long"
+        elif color == "red" and falling:
+            this_direction = "short"
+
+        if this_direction is not None and this_direction == streak_direction:
+            streak_count += 1
+        elif this_direction is not None:
+            streak_direction = this_direction
+            streak_count = 1
+        else:
+            streak_direction = None
+            streak_count = 0
+
+        if streak_count >= needed_streak and position is None:
+            size = (margin * leverage) / price
+            position = {"dir": streak_direction, "entry": price, "size": size, "entry_i": i}
+            streak_count = 0
+            streak_direction = None
+
+        last_close = close_p
+
+    return trades
+
+
 BACKTEST_FUNCS = {
     "macd_stoch": backtest_macd_stoch,
     "stoch_cross": backtest_stoch_cross,
@@ -2061,6 +2206,7 @@ BACKTEST_FUNCS = {
     "fib_reversal": backtest_fib_reversal,
     "macd_simple": backtest_macd_simple,
     "candle_flip": backtest_candle_flip,
+    "triple_candle": backtest_triple_candle,
 }
 
 
@@ -2110,11 +2256,12 @@ def _trim_candles_to_days(candles, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur macd_stoch, stoch_cross, range_profile, fib_reversal, macd_simple - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur macd_stoch, stoch_cross, range_profile, fib_reversal, macd_simple, candle_flip, triple_candle - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     resolution_key = {"macd_stoch": "macd_resolution", "stoch_cross": "stoch_cross_resolution",
                        "range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
-                       "macd_simple": "macd_simple_resolution", "candle_flip": "cf_resolution"}[entry_mode]
+                       "macd_simple": "macd_simple_resolution", "candle_flip": "cf_resolution",
+                       "triple_candle": "tc_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
     if resolution in SUB_MINUTE_RESOLUTIONS:
