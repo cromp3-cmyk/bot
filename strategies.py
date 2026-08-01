@@ -578,6 +578,33 @@ def compute_pivot_supertrend_trend(closes, atr_series, center_arr, factor):
     return trend, tup, tdown
 
 
+def compute_wma(values, length):
+    """Gewichteter gleitender Durchschnitt (linear steigende Gewichte, neuester Wert
+    zaehlt am staerksten) - wie Pine's ta.wma. Erste (length-1) Werte sind None (nicht
+    genug Historie fuer ein volles Fenster)."""
+    n = len(values)
+    out = [None] * n
+    weight_sum = length * (length + 1) / 2
+    for i in range(n):
+        if i < length - 1:
+            continue
+        window = values[i - length + 1:i + 1]
+        weighted = sum(v * (j + 1) for j, v in enumerate(window))
+        out[i] = weighted / weight_sum
+    return out
+
+
+def compute_nsdt_channel(highs, lows, length, upperspace, lowerspace):
+    """Portiert den 'NSDT Scalping Channel': obere Linie = WMA(High * upperspace),
+    untere Linie = WMA(Low * lowerspace). Long-Signal wenn die untere Linie 2 Kerzen
+    in Folge steigt, Short-Signal wenn die obere Linie 2 Kerzen in Folge faellt."""
+    upper_raw = [h * upperspace for h in highs]
+    lower_raw = [l * lowerspace for l in lows]
+    upper_line = compute_wma(upper_raw, length)
+    lower_line = compute_wma(lower_raw, length)
+    return upper_line, lower_line
+
+
 def compute_range_profile_snapshot(highs, lows, closes, opens, lookback, bins, ob_os_level):
     """Portiert aus dem Pine-Script 'Range Profile Oscillator': baut ueber die letzten
     'lookback' Kerzen ein Bullen-/Baeren-gewichtetes Histogramm (Volumen-Profil-Prinzip,
@@ -789,6 +816,66 @@ async def pp_supertrend_poll_loop(symbol):
                         last_trend = curr_trend
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Pivot-SuperTrend-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(5)
+
+
+async def nsdt_channel_poll_loop(symbol):
+    """NSDT Scalping Channel: obere Linie = WMA(High*upperspace, 9), untere Linie =
+    WMA(Low*lowerspace, 9). Long wenn die untere Linie 2 Kerzen in Folge steigt, Short
+    wenn die obere Linie 2 Kerzen in Folge faellt - reagiert auf die Richtungsaenderung
+    der Linien selbst, nicht erst auf einen Durchbruch. TP/SL sind feste $-Betraege."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "nsdt_channel":
+                length = cfg["nsdt_length"]
+                needed_bars = min(1000, length * 4 + 10)
+                resolution = cfg["nsdt_resolution"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts = timestamps[:-1]
+                        closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                if closed_ts and len(closed_c) > length + 3:
+                    upper, lower = compute_nsdt_channel(closed_h, closed_l, length, cfg["nsdt_upperspace"], cfg["nsdt_lowerspace"])
+                    if upper[-1] is not None and lower[-1] is not None and upper[-3] is not None and lower[-3] is not None:
+                        st = b["state"]
+                        st["nsdt_upper"] = round(upper[-1], 4)
+                        st["nsdt_lower"] = round(lower[-1], 4)
+
+                        signal_key = closed_ts[-1]
+                        if last_processed_ts != signal_key:
+                            last_processed_ts = signal_key
+                            go_long = lower[-1] > lower[-2] > lower[-3]  # ta.rising(lower, 2)
+                            go_short = upper[-1] < upper[-2] < upper[-3]  # ta.falling(upper, 2)
+
+                            direction = None
+                            if go_long and not go_short:
+                                direction = "long"
+                            elif go_short and not go_long:
+                                direction = "short"
+
+                            if direction and st["position"] is None and cfg["bot_active"]:
+                                price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                                debug_log(f"📡 [{symbol}] NSDT-Channel Signal: {direction.upper()} @ {price} (Obere {round(upper[-1],4)} / Untere {round(lower[-1],4)})")
+                                await execute_entry(symbol, direction, price, is_add_on=False)
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] NSDT-Channel-Abfrage fehlgeschlagen", {"error": str(e)})
 
         await asyncio.sleep(5)
 
@@ -1229,6 +1316,16 @@ async def on_price_update(symbol, price):
                 await execute_exit(symbol, price, "TP")
         return
 
+    if cfg["entry_mode"] == "nsdt_channel":
+        if st["position"] is not None:
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if pnl_usd <= -cfg["nsdt_sl_usd"]:
+                await execute_exit(symbol, price, "SL")
+            elif pnl_usd >= cfg["nsdt_tp_usd"]:
+                await execute_exit(symbol, price, "TP")
+        return
+
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
@@ -1317,6 +1414,7 @@ async def trading_loop():
 
 BACKTEST_MAX_CANDLES = {
     "stoch_cross": 100_000, "fib_reversal": 100_000, "range_profile": 30_000, "pp_supertrend": 100_000,
+    "nsdt_channel": 100_000,
 }
 
 
@@ -1600,11 +1698,59 @@ def backtest_pp_supertrend(candles, cfg):
     return trades
 
 
+def backtest_nsdt_channel(candles, cfg):
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    length = cfg["nsdt_length"]
+    upperspace = cfg["nsdt_upperspace"]
+    lowerspace = cfg["nsdt_lowerspace"]
+    tp_usd = cfg["nsdt_tp_usd"]
+    sl_usd = cfg["nsdt_sl_usd"]
+
+    upper, lower = compute_nsdt_channel(h, l, length, upperspace, lowerspace)
+
+    warmup = length + 3
+    position = None
+    trades = []
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            if pnl_usd <= -sl_usd:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                position = None
+            elif pnl_usd >= tp_usd:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
+                position = None
+
+        if upper[i] is None or lower[i] is None or upper[i - 2] is None or lower[i - 2] is None:
+            continue
+
+        go_long = lower[i] > lower[i - 1] > lower[i - 2]
+        go_short = upper[i] < upper[i - 1] < upper[i - 2]
+        direction = None
+        if go_long and not go_short:
+            direction = "long"
+        elif go_short and not go_long:
+            direction = "short"
+
+        if direction and position is None:
+            size = (margin * leverage) / price
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+
+    return trades
+
+
 BACKTEST_FUNCS = {
     "stoch_cross": backtest_stoch_cross,
     "range_profile": backtest_range_profile,
     "fib_reversal": backtest_fib_reversal,
     "pp_supertrend": backtest_pp_supertrend,
+    "nsdt_channel": backtest_nsdt_channel,
 }
 
 
@@ -1674,11 +1820,11 @@ def _trim_candles_to_days(candles, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur stoch_cross, range_profile, fib_reversal, pp_supertrend - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur stoch_cross, range_profile, fib_reversal, pp_supertrend, nsdt_channel - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     resolution_key = {"stoch_cross": "stoch_cross_resolution",
                        "range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
-                       "pp_supertrend": "pps_resolution"}[entry_mode]
+                       "pp_supertrend": "pps_resolution", "nsdt_channel": "nsdt_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
     if resolution in SUB_MINUTE_RESOLUTIONS:
@@ -1799,6 +1945,91 @@ async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
             results.append({
                 "label": f"Periode {prd}, ATR-Faktor {factor}",
                 "period": prd, "atr_factor": factor,
+                "stats": stats,
+            })
+
+    results.sort(key=lambda r: r["stats"]["total_pnl_usd"], reverse=True)
+    n_candles = len(c)
+    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "entry_mode": "pp_supertrend", "resolution": resolution,
+        "candles_processed": n_candles, "actual_days_covered": round(actual_days, 1),
+        "combinations_tested": len(results),
+        "results": results,
+    }
+
+
+async def run_backtest_sweep_pp_tpsl(symbol, base_cfg, days):
+    """TP/SL-Sweep fuer Pivot-Point-SuperTrend: Periode und ATR-Faktor bleiben bei den
+    gespeicherten Einstellungen fix, dafuer wird TP $1-20 x SL $1-20 komplett
+    durchgetestet (400 Kombinationen). Getrennt vom Perioden/ATR-Sweep, weil eine
+    Kombination aller vier Dimensionen (460 x 400 = 184.000) viel zu lange dauern wuerde -
+    die teure Trend-Berechnung laeuft hier nur EINMAL, danach nur noch die guenstige
+    SL/TP-Simulation pro Kombination."""
+    resolution = base_cfg.get("pps_resolution", "1m")
+    if resolution == "30s":
+        return {"error": "Sweep für 30 Sekunden nicht sinnvoll (zu wenig historische Daten in vertretbarer Zeit). Wähle einen anderen Zeitrahmen."}
+    max_candles = BACKTEST_MAX_CANDLES["pp_supertrend"]
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+
+    cache_key = (symbol, resolution)
+    cached = _backtest_cache_get(cache_key)
+    now = time.time()
+
+    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
+            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
+            and len(cached["candles"][4]) >= 100):
+        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
+    else:
+        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
+        if err:
+            return {"error": err}
+        if candles:
+            _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
+
+    if not candles or len(candles[4]) < 100:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    ts, o, h, l, c = candles
+    prd = base_cfg.get("pps_period", 2)
+    factor = base_cfg.get("pps_atr_factor", 3)
+    atr_period = base_cfg.get("pps_atr_period", 10)
+    margin, leverage = base_cfg["margin"], base_cfg["leverage"]
+
+    atr_series = compute_atr(h, l, c, atr_period)
+    centers = compute_pivot_centers(h, l, prd)  # nur EINMAL, teuer
+    trend, _, _ = compute_pivot_supertrend_trend(c, atr_series, centers, factor)  # nur EINMAL
+    warmup = max(prd * 3, atr_period + 2)
+
+    results = []
+    for tp_usd in range(1, 21):
+        for sl_usd in range(1, 21):
+            position = None
+            trades = []
+            last_trend = None
+            for i in range(warmup, len(c)):
+                price = c[i]
+                if position is not None:
+                    direction, entry, size = position["dir"], position["entry"], position["size"]
+                    pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+                    if pnl_usd <= -sl_usd:
+                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                        position = None
+                    elif pnl_usd >= tp_usd:
+                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
+                        position = None
+                curr_trend = trend[i]
+                if last_trend is not None and curr_trend != last_trend and position is None:
+                    direction = "long" if curr_trend == 1 else "short"
+                    size = (margin * leverage) / price
+                    position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                last_trend = curr_trend
+
+            stats = summarize_backtest_trades(trades)
+            results.append({
+                "label": f"TP ${tp_usd} / SL ${sl_usd}",
+                "tp_usd": tp_usd, "sl_usd": sl_usd,
                 "stats": stats,
             })
 
