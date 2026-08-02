@@ -1839,7 +1839,9 @@ def summarize_backtest_trades(trades):
 from collections import OrderedDict
 
 _backtest_candle_cache = OrderedDict()  # key: (symbol, resolution) -> {"fetched_at": float, "days": int, "candles": (...)}
-BACKTEST_CACHE_TTL_SECONDS = 300  # 5 Minuten - danach gilt der Cache als zu alt und wird neu geladen
+BACKTEST_CACHE_TTL_SECONDS = 900  # 15 Minuten - fuer Backtest-Zwecke muss die Historie nicht
+# sekundenaktuell sein, das erspart bei wiederholten Tests (z.B. nur SL geaendert) unnoetige
+# Neuabrufe derselben Coin+Zeitrahmen-Kombination
 BACKTEST_CACHE_MAX_ENTRIES = 5  # Hartes Limit: nur die 5 zuletzt genutzten Coin+Zeitrahmen-Kombinationen
 # werden im Speicher gehalten (LRU) - sonst wuerde jede je getestete Kombination fuer immer im
 # Arbeitsspeicher bleiben (bis zu ~500.000 Kerzen pro Eintrag = mehrere hundert MB) und den
