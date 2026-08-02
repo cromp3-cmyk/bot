@@ -883,6 +883,7 @@ async def pp_supertrend_poll_loop(symbol):
     last_processed_ts = None
     last_trend = None
     pending_direction = None  # Richtung eines geblockten Signals, wartet auf Nachtrigger
+    last_heartbeat = 0.0  # time.time() des letzten Heartbeat-Logs, alle 5 Min ein Lebenszeichen
 
     while True:
         try:
@@ -909,6 +910,9 @@ async def pp_supertrend_poll_loop(symbol):
                     else:
                         closed_ts = None
 
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300  # alle 5 Minuten ein Lebenszeichen im Log
+
                 if closed_ts and len(closed_c) > max(prd * 3, atr_period + 2):
                     atr_series = compute_atr(closed_h, closed_l, closed_c, atr_period)
                     centers = compute_pivot_centers(closed_h, closed_l, prd)
@@ -918,12 +922,30 @@ async def pp_supertrend_poll_loop(symbol):
                     st["pps_trend"] = curr_trend
                     st["pps_trailing_sl"] = round((tup[-1] if curr_trend == 1 else tdown[-1]) or 0, 4)
 
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        adx_info = ""
+                        if cfg.get("pps_adx_filter_enabled", False):
+                            adx_period = cfg.get("pps_adx_period", 14)
+                            if len(closed_c) > adx_period * 3:
+                                adx_val = compute_adx(closed_h, closed_l, closed_c, adx_period)[-1]
+                                adx_info = f", ADX={adx_val:.1f}/Schwelle {cfg.get('pps_adx_threshold', 20)}"
+                            else:
+                                adx_info = f", ADX noch nicht genug Kerzen ({len(closed_c)}/{adx_period * 3})"
+                        debug_log(f"💓 [{symbol}] Pivot-SuperTrend aktiv: Trend={curr_trend}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}{adx_info}, pending={pending_direction}, bot_active={cfg['bot_active']}")
+
                     signal_key = closed_ts[-1]
                     is_new_candle = last_processed_ts != signal_key
                     if is_new_candle:
                         last_processed_ts = signal_key
+                    # trend_flipped separat merken: die last_trend-Aktualisierung unten muss
+                    # bei jeder neuen Kerze laufen, unabhaengig davon ob ein Signal feuert -
+                    # sonst bleibt last_trend beim allerersten Durchlauf fuer immer None
+                    # (Henne-Ei-Problem, last_trend is not None wird ja hier selbst geprueft)
+                    # und es kann nie wieder ein Signal ausloesen.
+                    trend_flipped = is_new_candle and last_trend is not None and curr_trend != last_trend
 
-                    if is_new_candle and last_trend is not None and curr_trend != last_trend and cfg["bot_active"]:
+                    if trend_flipped and cfg["bot_active"]:
                         direction = "long" if curr_trend == 1 else "short"
                         price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
 
@@ -944,7 +966,6 @@ async def pp_supertrend_poll_loop(symbol):
                             else:
                                 debug_log(f"🚫 [{symbol}] Pivot-SuperTrend Signal geblockt ({filter_reason}): {direction.upper()} @ {price} - wird nachgetriggert sobald Filter passt")
                                 pending_direction = direction
-                        last_trend = curr_trend
 
                     elif (pending_direction is not None and st["position"] is None and cfg["bot_active"]
                           and curr_trend == (1 if pending_direction == "long" else -1)):
@@ -956,6 +977,15 @@ async def pp_supertrend_poll_loop(symbol):
                             debug_log(f"✅ [{symbol}] Pivot-SuperTrend Nachtrigger: {pending_direction.upper()} @ {price} (Filter jetzt erfüllt)")
                             await execute_entry(symbol, pending_direction, price, is_add_on=False)
                             pending_direction = None
+
+                    if is_new_candle:
+                        last_trend = curr_trend
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Pivot-SuperTrend wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Pivot-SuperTrend wartet: zu wenig Kerzen ({len(closed_c)}/{max(prd * 3, atr_period + 2) + 1} nötig)")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Pivot-SuperTrend-Abfrage fehlgeschlagen", {"error": str(e)})
 
