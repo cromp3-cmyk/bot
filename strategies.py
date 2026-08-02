@@ -9,6 +9,7 @@ import aiohttp
 import json
 import time
 import traceback
+import bisect
 
 from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
@@ -536,6 +537,56 @@ def compute_atr(highs, lows, closes, period):
     return atr
 
 
+def compute_adx(highs, lows, closes, period):
+    """ADX (Average Directional Index) mit Wilder-Glaettung - misst die Trendstaerke
+    unabhaengig von der Richtung (0 = keinerlei Trend/Seitwaerts, >25 = starker Trend).
+    Dient als Filter gegen Whipsaws in Seitwaertsphasen: Signale werden nur genommen,
+    wenn der Markt gerade tatsaechlich trendet."""
+    n = len(closes)
+    if n < 2:
+        return [0.0] * n
+
+    def _wilder_rma(values):
+        out = [values[0]] * n
+        for i in range(1, n):
+            if i < period:
+                out[i] = sum(values[:i + 1]) / (i + 1)
+            else:
+                out[i] = (out[i - 1] * (period - 1) + values[i]) / period
+        return out
+
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
+    for i in range(1, n):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
+        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+
+    tr_s = _wilder_rma(tr)
+    plus_dm_s = _wilder_rma(plus_dm)
+    minus_dm_s = _wilder_rma(minus_dm)
+    plus_di = [100 * (plus_dm_s[i] / tr_s[i]) if tr_s[i] else 0.0 for i in range(n)]
+    minus_di = [100 * (minus_dm_s[i] / tr_s[i]) if tr_s[i] else 0.0 for i in range(n)]
+    dx = [100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) else 0.0 for i in range(n)]
+    return _wilder_rma(dx)
+
+
+def _align_htf_direction(base_ts, htf_ts, htf_closes, htf_ema):
+    """Ordnet jedem Zeitstempel der Basis-Kerzen die Richtung ('long'/'short') der
+    zu diesem Zeitpunkt zuletzt geschlossenen Higher-Timeframe-Kerze relativ zu deren
+    EMA zu. Nutzt bisect statt Nachschlagen pro Kerze, da beide Zeitreihen aufsteigend
+    sortiert sind."""
+    out = [None] * len(base_ts)
+    for i, t in enumerate(base_ts):
+        j = bisect.bisect_right(htf_ts, t) - 1
+        if j >= 0:
+            out[i] = "long" if htf_closes[j] > htf_ema[j] else "short"
+    return out
+
+
 def compute_pivot_centers(highs, lows, prd):
     """Portiert die Pivot-Point-Center-Linie aus 'Pivot Point SuperTrend' (LonesomeTheBlue).
     Ein Pivot-Hoch/-Tief bei Index j gilt erst als bestaetigt, sobald prd Kerzen NACH j
@@ -781,14 +832,57 @@ async def range_profile_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+async def _pps_check_filters(symbol, cfg, direction, closed_h, closed_l, closed_c, st):
+    """Prueft die optionalen ADX- und Higher-Timeframe-Filter fuer ein Pivot-SuperTrend-
+    Signal. Gibt (ok, grund_falls_geblockt) zurueck und schreibt die aktuellen Filterwerte
+    in den State fuers Dashboard."""
+    ok = True
+    reasons = []
+
+    if cfg.get("pps_adx_filter_enabled", False):
+        adx_period = cfg.get("pps_adx_period", 14)
+        if len(closed_c) > adx_period * 3:
+            adx_series = compute_adx(closed_h, closed_l, closed_c, adx_period)
+            adx_val = adx_series[-1] if adx_series else 0.0
+            st["pps_adx"] = round(adx_val, 2)
+            threshold = cfg.get("pps_adx_threshold", 20)
+            if adx_val < threshold:
+                ok = False
+                reasons.append(f"ADX {adx_val:.1f}<{threshold}")
+
+    if cfg.get("pps_htf_filter_enabled", False):
+        htf_res = cfg.get("pps_htf_resolution", "1h")
+        ema_period = cfg.get("pps_htf_ema_period", 50)
+        htf_needed = min(1000, ema_period * 5 + 10)
+        data = await fetch_candles_binance_multi(symbol, htf_res, count_back=htf_needed)
+        if data:
+            _, _, _, _, htf_closes_all = data
+            htf_closed = htf_closes_all[:-1]
+            if len(htf_closed) > ema_period:
+                ema_series = _ema_series(htf_closed, ema_period)
+                htf_ema, htf_price = ema_series[-1], htf_closed[-1]
+                htf_dir = "long" if htf_price > htf_ema else "short"
+                st["pps_htf_ema"] = round(htf_ema, 4)
+                st["pps_htf_direction"] = htf_dir
+                if direction != htf_dir:
+                    ok = False
+                    reasons.append(f"HTF-Trend={htf_dir}")
+
+    return ok, ", ".join(reasons)
+
+
 async def pp_supertrend_poll_loop(symbol):
     """Pivot Point SuperTrend (portiert aus dem Indikator von LonesomeTheBlue): Trail-Stop
     aus Pivot-Hochs/-Tiefs statt einfachem Schlusskurs, dadurch ruhiger als klassischer
     SuperTrend. Einstieg bei Trendwechsel (Buy: Trend -1 -> 1, Sell: Trend 1 -> -1).
-    TP/SL sind feste $-Betraege."""
+    TP/SL sind feste $-Betraege. Wird ein Einstieg von ADX-/HTF-Filter geblockt, bleibt
+    die Richtung als 'pending' vorgemerkt: solange sich der Trend NICHT erneut dreht,
+    wird bei jedem Poll (alle 5 Sek.) neu geprueft, ob die Filter inzwischen erfuellt
+    sind, und bei Erfolg sofort nachgetriggert."""
     b = BOTS[symbol]
     last_processed_ts = None
     last_trend = None
+    pending_direction = None  # Richtung eines geblockten Signals, wartet auf Nachtrigger
 
     while True:
         try:
@@ -796,7 +890,8 @@ async def pp_supertrend_poll_loop(symbol):
             if cfg["entry_mode"] == "pp_supertrend":
                 prd = cfg["pps_period"]
                 atr_period = cfg["pps_atr_period"]
-                needed_bars = min(1000, max(prd * 4, atr_period * 5, 60) + 5)
+                adx_needed = cfg["pps_adx_period"] * 5 if cfg.get("pps_adx_filter_enabled", False) else 0
+                needed_bars = min(1000, max(prd * 4, atr_period * 5, adx_needed, 60) + 5)
                 resolution = cfg["pps_resolution"]
 
                 if resolution in SUB_MINUTE_RESOLUTIONS:
@@ -824,26 +919,43 @@ async def pp_supertrend_poll_loop(symbol):
                     st["pps_trailing_sl"] = round((tup[-1] if curr_trend == 1 else tdown[-1]) or 0, 4)
 
                     signal_key = closed_ts[-1]
-                    if last_processed_ts != signal_key:
+                    is_new_candle = last_processed_ts != signal_key
+                    if is_new_candle:
                         last_processed_ts = signal_key
-                        if last_trend is not None and curr_trend != last_trend and cfg["bot_active"]:
-                            direction = "long" if curr_trend == 1 else "short"
-                            price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
 
-                            if st["position"] is None:
+                    if is_new_candle and last_trend is not None and curr_trend != last_trend and cfg["bot_active"]:
+                        direction = "long" if curr_trend == 1 else "short"
+                        price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                        if st["position"] is not None and st["position"] != direction:
+                            # Ein Gegensignal macht die urspruengliche These zunichte -
+                            # die Position wird IMMER geschlossen, egal ob TP schon erreicht
+                            # war oder nicht (unabhaengig vom Exit-Modus).
+                            debug_log(f"🔄 [{symbol}] Pivot-SuperTrend Signal-Umkehr: {direction.upper()} @ {price} (Trend {last_trend}->{curr_trend})")
+                            await execute_exit(symbol, price, "PPS-REVERSE")
+
+                        if st["position"] is None:
+                            filter_ok, filter_reason = await _pps_check_filters(symbol, cfg, direction, closed_h, closed_l, closed_c, st)
+                            if filter_ok:
                                 debug_log(f"📡 [{symbol}] Pivot-SuperTrend Signal: {direction.upper()} @ {price} (Trend {last_trend}->{curr_trend})")
-                                await execute_entry(symbol, direction, price, is_add_on=False)
-                            elif st["position"] != direction:
-                                # Ein Gegensignal macht die urspruengliche These zunichte -
-                                # die Position wird IMMER umgedreht, egal ob TP schon erreicht
-                                # war oder nicht (unabhaengig vom Exit-Modus). Der Exit-Modus
-                                # steuert nur noch, ob TP zusaetzlich als fruehzeitiger Ausstieg
-                                # zaehlt (siehe on_price_update) - SL bleibt so oder so aktiv.
-                                debug_log(f"🔄 [{symbol}] Pivot-SuperTrend Signal-Umkehr: {direction.upper()} @ {price} (Trend {last_trend}->{curr_trend})")
-                                await execute_exit(symbol, price, "PPS-REVERSE")
                                 price_after = st["last_price"] if st["last_price"] is not None else price
                                 await execute_entry(symbol, direction, price_after, is_add_on=False)
+                                pending_direction = None
+                            else:
+                                debug_log(f"🚫 [{symbol}] Pivot-SuperTrend Signal geblockt ({filter_reason}): {direction.upper()} @ {price} - wird nachgetriggert sobald Filter passt")
+                                pending_direction = direction
                         last_trend = curr_trend
+
+                    elif (pending_direction is not None and st["position"] is None and cfg["bot_active"]
+                          and curr_trend == (1 if pending_direction == "long" else -1)):
+                        # Nachtriggern: Trend hat sich seit dem geblockten Signal nicht
+                        # geaendert - bei jedem Poll pruefen ob ADX/HTF jetzt passen.
+                        filter_ok, filter_reason = await _pps_check_filters(symbol, cfg, pending_direction, closed_h, closed_l, closed_c, st)
+                        if filter_ok:
+                            price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                            debug_log(f"✅ [{symbol}] Pivot-SuperTrend Nachtrigger: {pending_direction.upper()} @ {price} (Filter jetzt erfüllt)")
+                            await execute_entry(symbol, pending_direction, price, is_add_on=False)
+                            pending_direction = None
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Pivot-SuperTrend-Abfrage fehlgeschlagen", {"error": str(e)})
 
@@ -1694,7 +1806,7 @@ def backtest_fib_reversal(candles, cfg):
     return trades
 
 
-def backtest_pp_supertrend(candles, cfg):
+def backtest_pp_supertrend(candles, cfg, htf_candles=None):
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
@@ -1708,15 +1820,41 @@ def backtest_pp_supertrend(candles, cfg):
     breakeven_lock = cfg.get("pps_breakeven_lock_usd", 0.1)
     exit_mode = cfg.get("pps_exit_mode", "tp_sl")
 
+    adx_filter_enabled = cfg.get("pps_adx_filter_enabled", False)
+    adx_period = cfg.get("pps_adx_period", 14)
+    adx_threshold = cfg.get("pps_adx_threshold", 20)
+    adx_series = compute_adx(h, l, c, adx_period) if adx_filter_enabled else None
+
+    htf_filter_enabled = cfg.get("pps_htf_filter_enabled", False) and htf_candles is not None
+    htf_dir_per_bar = None
+    if htf_filter_enabled:
+        htf_ema_period = cfg.get("pps_htf_ema_period", 50)
+        htf_ts, _, _, _, htf_c = htf_candles
+        if len(htf_c) > htf_ema_period:
+            htf_ema = _ema_series(htf_c, htf_ema_period)
+            htf_dir_per_bar = _align_htf_direction(ts, htf_ts, htf_c, htf_ema)
+        else:
+            htf_filter_enabled = False
+
     atr_series = compute_atr(h, l, c, atr_period)
     centers = compute_pivot_centers(h, l, prd)
     trend, _, _ = compute_pivot_supertrend_trend(c, atr_series, centers, factor)
 
     warmup = max(prd * 3, atr_period + 2)
+    if adx_filter_enabled:
+        warmup = max(warmup, adx_period * 3)
     position = None
     trades = []
     last_trend = None
     breakeven_triggered = False
+    pending_direction = None  # Richtung eines geblockten Signals, wartet auf Nachtrigger
+
+    def _filter_ok(i, direction):
+        if adx_filter_enabled and adx_series is not None and adx_series[i] < adx_threshold:
+            return False
+        if htf_filter_enabled and htf_dir_per_bar is not None and htf_dir_per_bar[i] is not None and htf_dir_per_bar[i] != direction:
+            return False
+        return True
 
     for i in range(warmup, n):
         price = c[i]
@@ -1742,16 +1880,26 @@ def backtest_pp_supertrend(candles, cfg):
         curr_trend = trend[i]
         if last_trend is not None and curr_trend != last_trend:
             direction = "long" if curr_trend == 1 else "short"
-            if position is None:
-                size = (margin * leverage) / price
-                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                breakeven_triggered = False
-            elif position["dir"] != direction:
+            if position is not None and position["dir"] != direction:
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PPS-REVERSE")
-                size = (margin * leverage) / price
-                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                breakeven_triggered = False
-        last_trend = curr_trend
+                position = None
+            if position is None:
+                if _filter_ok(i, direction):
+                    size = (margin * leverage) / price
+                    position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                    breakeven_triggered = False
+                    pending_direction = None
+                else:
+                    pending_direction = direction
+            last_trend = curr_trend
+        elif (pending_direction is not None and position is None
+              and curr_trend == (1 if pending_direction == "long" else -1)
+              and _filter_ok(i, pending_direction)):
+            # Nachtriggern: Trend seit dem geblockten Signal unveraendert, Filter jetzt erfuellt
+            size = (margin * leverage) / price
+            position = {"dir": pending_direction, "entry": price, "size": size, "entry_i": i}
+            breakeven_triggered = False
+            pending_direction = None
 
     return trades
 
@@ -1919,8 +2067,15 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
 
     n_candles = len(candles[4])
-    backtest_fn = BACKTEST_FUNCS[entry_mode]
-    trades = backtest_fn(candles, cfg)
+    if entry_mode == "pp_supertrend" and cfg.get("pps_htf_filter_enabled", False):
+        htf_resolution = cfg.get("pps_htf_resolution", "1h")
+        htf_candles, htf_err = await fetch_historical_candles_binance(symbol, htf_resolution, days, max_candles)
+        if htf_err or not htf_candles:
+            return {"error": f"Higher-Timeframe-Kerzen ({htf_resolution}) konnten nicht geladen werden: {htf_err or 'keine Daten'}"}
+        trades = backtest_pp_supertrend(candles, cfg, htf_candles=htf_candles)
+    else:
+        backtest_fn = BACKTEST_FUNCS[entry_mode]
+        trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades)
 
     actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)

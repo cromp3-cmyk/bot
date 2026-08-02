@@ -254,6 +254,12 @@ def default_config():
         "pps_breakeven_trigger_usd": float(os.getenv("PPS_BREAKEVEN_TRIGGER_USD", "2")),
         "pps_breakeven_lock_usd": float(os.getenv("PPS_BREAKEVEN_LOCK_USD", "0.1")),
         "pps_exit_mode": os.getenv("PPS_EXIT_MODE", "tp_sl"),  # "tp_sl" oder "reverse"
+        "pps_adx_filter_enabled": os.getenv("PPS_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "pps_adx_period": int(os.getenv("PPS_ADX_PERIOD", "14")),
+        "pps_adx_threshold": float(os.getenv("PPS_ADX_THRESHOLD", "20")),
+        "pps_htf_filter_enabled": os.getenv("PPS_HTF_FILTER_ENABLED", "false").lower() == "true",
+        "pps_htf_resolution": os.getenv("PPS_HTF_RESOLUTION", "1h"),
+        "pps_htf_ema_period": int(os.getenv("PPS_HTF_EMA_PERIOD", "50")),
         "nsdt_resolution": os.getenv("NSDT_RESOLUTION", "5m"),
         "nsdt_length": int(os.getenv("NSDT_LENGTH", "9")),
         "nsdt_upperspace": float(os.getenv("NSDT_UPPERSPACE", "1.0005")),
@@ -933,6 +939,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="reverse">Position dreht bei jedem neuen Buy/Sell-Signal (SL bleibt als Schutz aktiv, TP entfällt)</option>
     </select>
   </div>
+  <div data-mode="pp_supertrend"><label>ADX-Trendfilter (Einstieg nur wenn Trend stark genug, sonst wird Signal übersprungen)</label>
+    <select class="cfg" id="pps_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="pp_supertrend"><label>ADX-Periode</label><input type="number" step="1" id="pps_adx_period"></div>
+  <div data-mode="pp_supertrend"><label>ADX-Schwelle (z.B. 20 = ab hier gilt der Markt als trendend)</label><input type="number" step="1" id="pps_adx_threshold"></div>
+  <div data-mode="pp_supertrend"><label>Higher-Timeframe-Filter (Einstieg nur in Richtung des übergeordneten Trends)</label>
+    <select class="cfg" id="pps_htf_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="pp_supertrend"><label>Higher-Timeframe Zeitrahmen</label>
+    <select class="cfg" id="pps_htf_resolution">
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+    </select>
+  </div>
+  <div data-mode="pp_supertrend"><label>Higher-Timeframe EMA-Periode</label><input type="number" step="1" id="pps_htf_ema_period"></div>
   <div data-mode="nsdt_channel"><label>Zeitrahmen</label>
     <select class="cfg" id="nsdt_resolution">
       <option value="10s">10 Sekunden</option>
@@ -1454,6 +1485,12 @@ async function refresh() {
     document.getElementById('pps_breakeven_trigger_usd').value = data.config.pps_breakeven_trigger_usd;
     document.getElementById('pps_breakeven_lock_usd').value = data.config.pps_breakeven_lock_usd;
     document.getElementById('pps_exit_mode').value = data.config.pps_exit_mode;
+    document.getElementById('pps_adx_filter_enabled').value = String(data.config.pps_adx_filter_enabled);
+    document.getElementById('pps_adx_period').value = data.config.pps_adx_period;
+    document.getElementById('pps_adx_threshold').value = data.config.pps_adx_threshold;
+    document.getElementById('pps_htf_filter_enabled').value = String(data.config.pps_htf_filter_enabled);
+    document.getElementById('pps_htf_resolution').value = data.config.pps_htf_resolution;
+    document.getElementById('pps_htf_ema_period').value = data.config.pps_htf_ema_period;
     document.getElementById('nsdt_resolution').value = data.config.nsdt_resolution;
     document.getElementById('nsdt_length').value = data.config.nsdt_length;
     document.getElementById('nsdt_upperspace').value = data.config.nsdt_upperspace;
@@ -1638,6 +1675,12 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     pps_breakeven_trigger_usd: parseFloat(document.getElementById('pps_breakeven_trigger_usd').value),
     pps_breakeven_lock_usd: parseFloat(document.getElementById('pps_breakeven_lock_usd').value),
     pps_exit_mode: document.getElementById('pps_exit_mode').value,
+    pps_adx_filter_enabled: document.getElementById('pps_adx_filter_enabled').value === 'true',
+    pps_adx_period: parseInt(document.getElementById('pps_adx_period').value),
+    pps_adx_threshold: parseFloat(document.getElementById('pps_adx_threshold').value),
+    pps_htf_filter_enabled: document.getElementById('pps_htf_filter_enabled').value === 'true',
+    pps_htf_resolution: document.getElementById('pps_htf_resolution').value,
+    pps_htf_ema_period: parseInt(document.getElementById('pps_htf_ema_period').value),
     nsdt_resolution: document.getElementById('nsdt_resolution').value,
     nsdt_length: parseInt(document.getElementById('nsdt_length').value),
     nsdt_upperspace: parseFloat(document.getElementById('nsdt_upperspace').value),
@@ -1672,7 +1715,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','pps_resolution','pps_period','pps_atr_factor','pps_atr_period','pps_tp_usd','pps_sl_usd','pps_breakeven_enabled','pps_breakeven_trigger_usd','pps_breakeven_lock_usd','pps_exit_mode','nsdt_resolution','nsdt_length','nsdt_upperspace','nsdt_lowerspace','nsdt_tp_usd','nsdt_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','pps_resolution','pps_period','pps_atr_factor','pps_atr_period','pps_tp_usd','pps_sl_usd','pps_breakeven_enabled','pps_breakeven_trigger_usd','pps_breakeven_lock_usd','pps_exit_mode','pps_adx_filter_enabled','pps_adx_period','pps_adx_threshold','pps_htf_filter_enabled','pps_htf_resolution','pps_htf_ema_period','nsdt_resolution','nsdt_length','nsdt_upperspace','nsdt_lowerspace','nsdt_tp_usd','nsdt_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1770,7 +1813,9 @@ async def handle_config_update(request):
                 "rp_breakeven_enabled", "rp_breakeven_trigger_usd", "rp_breakeven_lock_usd",
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
                 "pps_resolution", "pps_period", "pps_atr_factor", "pps_atr_period", "pps_tp_usd", "pps_sl_usd",
-                "pps_breakeven_enabled", "pps_breakeven_trigger_usd", "pps_breakeven_lock_usd", "pps_exit_mode"]:
+                "pps_breakeven_enabled", "pps_breakeven_trigger_usd", "pps_breakeven_lock_usd", "pps_exit_mode",
+                "pps_adx_filter_enabled", "pps_adx_period", "pps_adx_threshold",
+                "pps_htf_filter_enabled", "pps_htf_resolution", "pps_htf_ema_period"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
