@@ -1932,12 +1932,15 @@ async def run_backtest(symbol, entry_mode, cfg, days):
     }
 
 
-async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
-    """2D-Parameter-Sweep fuer Pivot-Point-SuperTrend: Pivot-Periode (ganzzahlig 1-10)
+async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days, sweep_atr_period=False):
+    """Parameter-Sweep fuer Pivot-Point-SuperTrend: Pivot-Periode (ganzzahlig 1-10)
     x ATR-Faktor (0.5-5.0 in 0.1-Schritten, 46 Werte) = 460 Kombinationen. Zeitrahmen
-    und ATR-Periode bleiben fix (wie in den gespeicherten Einstellungen). Effizient, weil
-    die teure Pivot-Erkennung nur einmal pro Periode (10x) berechnet wird, nicht pro
-    Kombination (460x) - der ATR-Faktor beeinflusst nur die guenstige Trend-Berechnung."""
+    bleibt fix (wie in den gespeicherten Einstellungen).
+    Optional (sweep_atr_period=True) wird zusaetzlich die ATR-Periode (ganzzahlig 5-20,
+    16 Werte) mitgetestet -> 460 x 16 = 7.360 Kombinationen. Das ist deutlich langsamer,
+    da die ATR-Reihe dann pro ATR-Periode neu berechnet werden muss (die teure
+    Pivot-Erkennung bleibt weiterhin nur 10x noetig, unabhaengig von der ATR-Periode).
+    Ist sweep_atr_period=False (Default), bleibt die ATR-Periode fix wie bisher."""
     resolution = base_cfg.get("pps_resolution", "1m")
     max_candles = BACKTEST_MAX_CANDLES["pp_supertrend"]
     if resolution in SUB_MINUTE_RESOLUTIONS:
@@ -1962,7 +1965,7 @@ async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
         return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
 
     ts, o, h, l, c = candles
-    atr_period = base_cfg.get("pps_atr_period", 10)
+    fixed_atr_period = base_cfg.get("pps_atr_period", 10)
     tp_usd = base_cfg.get("pps_tp_usd", 3)
     sl_usd = base_cfg.get("pps_sl_usd", 3)
     breakeven_enabled = base_cfg.get("pps_breakeven_enabled", False)
@@ -1970,61 +1973,66 @@ async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
     breakeven_lock = base_cfg.get("pps_breakeven_lock_usd", 0.1)
     exit_mode = base_cfg.get("pps_exit_mode", "tp_sl")
     margin, leverage = base_cfg["margin"], base_cfg["leverage"]
-    atr_series = compute_atr(h, l, c, atr_period)
 
     periods = list(range(1, 11))  # 1..10
     factors = [round(0.5 + i * 0.1, 1) for i in range(46)]  # 0.5..5.0 in 0.1-Schritten
+    atr_periods = list(range(5, 21)) if sweep_atr_period else [fixed_atr_period]  # 5..20 ganzzahlig, sonst fix
+
+    # Pivot-Erkennung haengt nur von prd ab -> unabhaengig von ATR-Periode/Faktor nur 1x pro Periode berechnen
+    centers_by_period = {prd: compute_pivot_centers(h, l, prd) for prd in periods}
 
     results = []
-    for prd in periods:
-        centers = compute_pivot_centers(h, l, prd)  # teuer, nur 1x pro Periode
-        warmup = max(prd * 3, atr_period + 2)
-        for factor in factors:
-            trend, _, _ = compute_pivot_supertrend_trend(c, atr_series, centers, factor)  # billig
+    for atr_period in atr_periods:
+        atr_series = compute_atr(h, l, c, atr_period)  # muss pro ATR-Periode neu berechnet werden
+        for prd in periods:
+            centers = centers_by_period[prd]
+            warmup = max(prd * 3, atr_period + 2)
+            for factor in factors:
+                trend, _, _ = compute_pivot_supertrend_trend(c, atr_series, centers, factor)  # billig
 
-            position = None
-            trades = []
-            last_trend = None
-            breakeven_triggered = False
-            for i in range(warmup, len(c)):
-                price = c[i]
-                if position is not None:
-                    direction, entry, size = position["dir"], position["entry"], position["size"]
-                    pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-                    sl_floor = -sl_usd
-                    if breakeven_enabled:
-                        if not breakeven_triggered and pnl_usd >= breakeven_trigger:
-                            breakeven_triggered = True
-                        if breakeven_triggered:
-                            sl_floor = breakeven_lock
-                    if pnl_usd <= sl_floor:
-                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
-                        position = None
-                        breakeven_triggered = False
-                    elif exit_mode == "tp_sl" and pnl_usd >= tp_usd:
-                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
-                        position = None
-                        breakeven_triggered = False
-                curr_trend = trend[i]
-                if last_trend is not None and curr_trend != last_trend:
-                    direction = "long" if curr_trend == 1 else "short"
-                    if position is None:
-                        size = (margin * leverage) / price
-                        position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                        breakeven_triggered = False
-                    elif position["dir"] != direction:
-                        _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PPS-REVERSE")
-                        size = (margin * leverage) / price
-                        position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                        breakeven_triggered = False
-                last_trend = curr_trend
+                position = None
+                trades = []
+                last_trend = None
+                breakeven_triggered = False
+                for i in range(warmup, len(c)):
+                    price = c[i]
+                    if position is not None:
+                        direction, entry, size = position["dir"], position["entry"], position["size"]
+                        pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+                        sl_floor = -sl_usd
+                        if breakeven_enabled:
+                            if not breakeven_triggered and pnl_usd >= breakeven_trigger:
+                                breakeven_triggered = True
+                            if breakeven_triggered:
+                                sl_floor = breakeven_lock
+                        if pnl_usd <= sl_floor:
+                            _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
+                            position = None
+                            breakeven_triggered = False
+                        elif exit_mode == "tp_sl" and pnl_usd >= tp_usd:
+                            _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
+                            position = None
+                            breakeven_triggered = False
+                    curr_trend = trend[i]
+                    if last_trend is not None and curr_trend != last_trend:
+                        direction = "long" if curr_trend == 1 else "short"
+                        if position is None:
+                            size = (margin * leverage) / price
+                            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                            breakeven_triggered = False
+                        elif position["dir"] != direction:
+                            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PPS-REVERSE")
+                            size = (margin * leverage) / price
+                            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                            breakeven_triggered = False
+                    last_trend = curr_trend
 
-            stats = summarize_backtest_trades(trades)
-            results.append({
-                "label": f"Periode {prd}, ATR-Faktor {factor}",
-                "period": prd, "atr_factor": factor,
-                "stats": stats,
-            })
+                stats = summarize_backtest_trades(trades)
+                results.append({
+                    "label": f"Periode {prd}, ATR-Faktor {factor}" + (f", ATR-Periode {atr_period}" if sweep_atr_period else ""),
+                    "period": prd, "atr_factor": factor, "atr_period": atr_period,
+                    "stats": stats,
+                })
 
     results = [r for r in results if r["stats"]["total_pnl_usd"] > 0]  # nur profitable Kombinationen
     results.sort(key=lambda r: r["stats"]["total_pnl_usd"], reverse=True)
@@ -2033,7 +2041,7 @@ async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
     return {
         "symbol": symbol, "entry_mode": "pp_supertrend", "resolution": resolution,
         "candles_processed": n_candles, "actual_days_covered": round(actual_days, 1),
-        "combinations_tested": len(results),
+        "combinations_tested": len(results), "sweep_atr_period": sweep_atr_period,
         "results": results,
     }
 

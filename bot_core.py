@@ -995,6 +995,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <button id="btn-sweep-pp" style="padding:12px 24px;">🔬 Perioden/ATR-Sweep starten (nur Pivot-SuperTrend)</button>
     <button id="btn-sweep-pp-tpsl" style="padding:12px 24px;">💰 TP/SL-Sweep starten (nur Pivot-SuperTrend, $1-20)</button>
   </div>
+  <div style="margin-bottom:16px;">
+    <label style="font-size:13px; color:var(--text-dim);"><input type="checkbox" id="sweep-pp-atr-toggle"> ATR-Periode mit durchtesten (5-20, ganzzahlig) - deutlich langsamer, bei Bedarf abwählen</label>
+  </div>
   <div id="backtest-status" style="color:var(--text-dim); font-size:13px;"></div>
   <div id="backtest-results" style="display:none; margin-top:16px;">
     <div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:12px;">
@@ -1014,6 +1017,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <th>#</th>
         <th class="sortable" data-key="period">Periode ⇅</th>
         <th class="sortable" data-key="atr_factor">ATR-Faktor ⇅</th>
+        <th class="sortable" data-key="atr_period">ATR-Periode ⇅</th>
         <th class="sortable" data-key="trades">Trades ⇅</th>
         <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
         <th class="sortable" data-key="total_pnl_usd">Gesamt-PnL $ ⇅</th>
@@ -1109,7 +1113,7 @@ async function loadSymbols() {
   sel.innerHTML = allSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
   currentSymbol = allSymbols[0];
   sel.value = currentSymbol;
-  sel.addEventListener('change', () => { currentSymbol = sel.value; window.formTouched = false; refresh(); });
+  sel.addEventListener('change', () => { currentSymbol = sel.value; window.formTouched = false; resetBacktestUI(); refresh(); });
 }
 
 document.getElementById('btn-start').addEventListener('click', async () => {
@@ -1155,14 +1159,16 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
   const btn = document.getElementById('btn-backtest');
   const statusEl = document.getElementById('backtest-status');
   const resultsEl = document.getElementById('backtest-results');
+  const btSymbol = currentSymbol;
   btn.disabled = true;
   resultsEl.style.display = 'none';
   statusEl.innerText = `⏳ Lade Kerzen von Binance und simuliere... kann bei langen Zeiträumen 1-2 Minuten dauern.`;
   try {
-    const res = await fetch(`/api/backtest?symbol=${currentSymbol}`, {
+    const res = await fetch(`/api/backtest?symbol=${btSymbol}`, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days})
     });
     const data = await res.json();
+    if (btSymbol !== currentSymbol) return;  // Coin wurde gewechselt während der Backtest lief
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
@@ -1180,9 +1186,10 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
       resultsEl.style.display = 'block';
     }
   } catch (e) {
+    if (btSymbol !== currentSymbol) return;
     statusEl.innerText = `❌ Fehler: ${e}`;
   }
-  btn.disabled = false;
+  if (btSymbol === currentSymbol) btn.disabled = false;
 });
 
 function makeSortableTable(tableId, getData, rowHtml) {
@@ -1214,11 +1221,21 @@ function makeSortableTable(tableId, getData, rowHtml) {
 window.sweepPpData = [];
 window.sweepPpTpslData = [];
 
+function resetBacktestUI() {
+  document.getElementById('backtest-results').style.display = 'none';
+  document.getElementById('sweep-pp-results').style.display = 'none';
+  document.getElementById('sweep-pp-tpsl-results').style.display = 'none';
+  document.getElementById('backtest-status').innerText = '';
+  window.sweepPpData = [];
+  window.sweepPpTpslData = [];
+}
+
 const renderSweepPp = makeSortableTable('sweep-pp-table', () => window.sweepPpData, (r, i) => `
   <tr>
     <td>${i + 1}</td>
     <td>${r.period}</td>
     <td>${r.atr_factor}</td>
+    <td>${r.atr_period}</td>
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
@@ -1238,23 +1255,28 @@ const renderSweepPpTpsl = makeSortableTable('sweep-pp-tpsl-table', () => window.
 
 document.getElementById('btn-sweep-pp').addEventListener('click', async () => {
   const days = parseInt(document.getElementById('backtest-days').value) || 30;
+  const sweepAtrPeriod = document.getElementById('sweep-pp-atr-toggle').checked;
   const btn = document.getElementById('btn-sweep-pp');
   const statusEl = document.getElementById('backtest-status');
   const sweepEl = document.getElementById('sweep-pp-results');
+  const sweepSymbol = currentSymbol;
   btn.disabled = true;
   sweepEl.style.display = 'none';
-  statusEl.innerText = `⏳ Lade Kerzen und teste bis zu 460 Kombinationen durch... kann 1-2 Minuten dauern.`;
+  statusEl.innerText = sweepAtrPeriod
+    ? `⏳ Lade Kerzen und teste bis zu 7.360 Kombinationen durch (inkl. ATR-Periode)... kann mehrere Minuten dauern.`
+    : `⏳ Lade Kerzen und teste bis zu 460 Kombinationen durch... kann 1-2 Minuten dauern.`;
   try {
-    const res = await fetch(`/api/backtest_sweep_pp?symbol=${currentSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days})
+    const res = await fetch(`/api/backtest_sweep_pp?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days, sweep_atr_period: sweepAtrPeriod})
     });
     const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;  // Coin wurde gewechselt während der Sweep lief - Ergebnis verwerfen
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
       statusEl.innerText = `✅ ${data.combinations_tested} profitable Kombinationen - ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})`;
       window.sweepPpData = data.results.map(r => ({
-        period: r.period, atr_factor: r.atr_factor,
+        period: r.period, atr_factor: r.atr_factor, atr_period: r.atr_period,
         trades: r.stats.trades, win_rate_pct: r.stats.win_rate_pct,
         total_pnl_usd: r.stats.total_pnl_usd, max_drawdown_usd: r.stats.max_drawdown_usd,
       }));
@@ -1262,9 +1284,10 @@ document.getElementById('btn-sweep-pp').addEventListener('click', async () => {
       sweepEl.style.display = 'block';
     }
   } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
     statusEl.innerText = `❌ Fehler: ${e}`;
   }
-  btn.disabled = false;
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
 document.getElementById('btn-sweep-pp-tpsl').addEventListener('click', async () => {
@@ -1272,14 +1295,16 @@ document.getElementById('btn-sweep-pp-tpsl').addEventListener('click', async () 
   const btn = document.getElementById('btn-sweep-pp-tpsl');
   const statusEl = document.getElementById('backtest-status');
   const sweepEl = document.getElementById('sweep-pp-tpsl-results');
+  const sweepSymbol = currentSymbol;
   btn.disabled = true;
   sweepEl.style.display = 'none';
   statusEl.innerText = `⏳ Lade Kerzen und teste 400 TP/SL-Kombinationen ($1-20) durch... kann bis zu einer Minute dauern.`;
   try {
-    const res = await fetch(`/api/backtest_sweep_pp_tpsl?symbol=${currentSymbol}`, {
+    const res = await fetch(`/api/backtest_sweep_pp_tpsl?symbol=${sweepSymbol}`, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days})
     });
     const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;  // Coin wurde gewechselt während der Sweep lief
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
@@ -1293,9 +1318,10 @@ document.getElementById('btn-sweep-pp-tpsl').addEventListener('click', async () 
       sweepEl.style.display = 'block';
     }
   } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
     statusEl.innerText = `❌ Fehler: ${e}`;
   }
-  btn.disabled = false;
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
 async function refresh() {
@@ -1792,8 +1818,9 @@ async def handle_backtest_sweep_pp(request):
         days = max(1, min(365, int(days)))
     except (TypeError, ValueError):
         days = 30
+    sweep_atr_period = bool(body.get("sweep_atr_period", False))
     cfg = dict(BOTS[symbol]["config"])  # Kopie - Sweep darf die Live-Config nicht veraendern
-    result = await run_backtest_sweep_pp_supertrend(symbol, cfg, days)
+    result = await run_backtest_sweep_pp_supertrend(symbol, cfg, days, sweep_atr_period=sweep_atr_period)
     return web.json_response(result)
 
 
