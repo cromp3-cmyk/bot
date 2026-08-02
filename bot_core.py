@@ -250,6 +250,10 @@ def default_config():
         "pps_atr_period": int(os.getenv("PPS_ATR_PERIOD", "10")),
         "pps_tp_usd": float(os.getenv("PPS_TP_USD", "3")),
         "pps_sl_usd": float(os.getenv("PPS_SL_USD", "3")),
+        "pps_breakeven_enabled": os.getenv("PPS_BREAKEVEN_ENABLED", "false").lower() == "true",
+        "pps_breakeven_trigger_usd": float(os.getenv("PPS_BREAKEVEN_TRIGGER_USD", "2")),
+        "pps_breakeven_lock_usd": float(os.getenv("PPS_BREAKEVEN_LOCK_USD", "0.1")),
+        "pps_exit_mode": os.getenv("PPS_EXIT_MODE", "tp_sl"),  # "tp_sl" oder "reverse"
         "nsdt_resolution": os.getenv("NSDT_RESOLUTION", "5m"),
         "nsdt_length": int(os.getenv("NSDT_LENGTH", "9")),
         "nsdt_upperspace": float(os.getenv("NSDT_UPPERSPACE", "1.0005")),
@@ -281,6 +285,7 @@ def default_state():
         "rp_osc": None, "rp_mid_price": None, "rp_range_high": None, "rp_range_low": None,
         "rp_breakeven_triggered": False,
         "pps_trend": None, "pps_trailing_sl": None,
+        "pps_breakeven_triggered": False,
         "nsdt_upper": None, "nsdt_lower": None,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
@@ -910,6 +915,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="pp_supertrend"><label>ATR-Periode</label><input type="number" step="1" id="pps_atr_period"></div>
   <div data-mode="pp_supertrend"><label>TP ($, fest)</label><input type="number" step="any" id="pps_tp_usd"></div>
   <div data-mode="pp_supertrend"><label>SL ($, fest)</label><input type="number" step="any" id="pps_sl_usd"></div>
+  <div data-mode="pp_supertrend"><label>Gewinn absichern (SL springt bei X$ auf kleinen Gewinn)</label>
+    <select class="cfg" id="pps_breakeven_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="pp_supertrend"><label>Auslöser ($, z.B. 2)</label><input type="number" step="any" id="pps_breakeven_trigger_usd"></div>
+  <div data-mode="pp_supertrend"><label>Abgesicherter Gewinn ($, z.B. 0.1)</label><input type="number" step="any" id="pps_breakeven_lock_usd"></div>
+  <div data-mode="pp_supertrend"><label>Exit-Modus</label>
+    <select class="cfg" id="pps_exit_mode">
+      <option value="tp_sl">Fester TP/SL</option>
+      <option value="reverse">Position dreht bei jedem neuen Buy/Sell-Signal (SL bleibt als Schutz aktiv, TP entfällt)</option>
+    </select>
+  </div>
   <div data-mode="nsdt_channel"><label>Zeitrahmen</label>
     <select class="cfg" id="nsdt_resolution">
       <option value="10s">10 Sekunden</option>
@@ -1400,6 +1419,10 @@ async function refresh() {
     document.getElementById('pps_atr_period').value = data.config.pps_atr_period;
     document.getElementById('pps_tp_usd').value = data.config.pps_tp_usd;
     document.getElementById('pps_sl_usd').value = data.config.pps_sl_usd;
+    document.getElementById('pps_breakeven_enabled').value = String(data.config.pps_breakeven_enabled);
+    document.getElementById('pps_breakeven_trigger_usd').value = data.config.pps_breakeven_trigger_usd;
+    document.getElementById('pps_breakeven_lock_usd').value = data.config.pps_breakeven_lock_usd;
+    document.getElementById('pps_exit_mode').value = data.config.pps_exit_mode;
     document.getElementById('nsdt_resolution').value = data.config.nsdt_resolution;
     document.getElementById('nsdt_length').value = data.config.nsdt_length;
     document.getElementById('nsdt_upperspace').value = data.config.nsdt_upperspace;
@@ -1580,6 +1603,10 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     pps_atr_period: parseInt(document.getElementById('pps_atr_period').value),
     pps_tp_usd: parseFloat(document.getElementById('pps_tp_usd').value),
     pps_sl_usd: parseFloat(document.getElementById('pps_sl_usd').value),
+    pps_breakeven_enabled: document.getElementById('pps_breakeven_enabled').value === 'true',
+    pps_breakeven_trigger_usd: parseFloat(document.getElementById('pps_breakeven_trigger_usd').value),
+    pps_breakeven_lock_usd: parseFloat(document.getElementById('pps_breakeven_lock_usd').value),
+    pps_exit_mode: document.getElementById('pps_exit_mode').value,
     nsdt_resolution: document.getElementById('nsdt_resolution').value,
     nsdt_length: parseInt(document.getElementById('nsdt_length').value),
     nsdt_upperspace: parseFloat(document.getElementById('nsdt_upperspace').value),
@@ -1600,7 +1627,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   alert(`Gespeichert für ${currentSymbol}!`);
 });
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','pps_resolution','pps_period','pps_atr_factor','pps_atr_period','pps_tp_usd','pps_sl_usd','nsdt_resolution','nsdt_length','nsdt_upperspace','nsdt_lowerspace','nsdt_tp_usd','nsdt_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','stoch_cross_resolution','stoch_cross_k_period','stoch_cross_k_smooth','stoch_cross_d_period','stoch_cross_oversold','stoch_cross_overbought','stoch_cross_tp_usd','stoch_cross_sl_usd','stoch_cross_trend_filter_enabled','stoch_cross_trend_ema_period','stoch_cross_sl_tp_mode','stoch_cross_atr_period','stoch_cross_sl_atr_mult','stoch_cross_tp_atr_mult','stoch_cross_rp_filter_enabled','stoch_cross_rp_lookback','stoch_cross_require_squeeze','stoch_cross_squeeze_lookback','stoch_cross_squeeze_threshold_pct','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','pps_resolution','pps_period','pps_atr_factor','pps_atr_period','pps_tp_usd','pps_sl_usd','pps_breakeven_enabled','pps_breakeven_trigger_usd','pps_breakeven_lock_usd','pps_exit_mode','nsdt_resolution','nsdt_length','nsdt_upperspace','nsdt_lowerspace','nsdt_tp_usd','nsdt_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1697,7 +1724,8 @@ async def handle_config_update(request):
                 "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_tp_usd", "rp_sl_usd",
                 "rp_breakeven_enabled", "rp_breakeven_trigger_usd", "rp_breakeven_lock_usd",
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
-                "pps_resolution", "pps_period", "pps_atr_factor", "pps_atr_period", "pps_tp_usd", "pps_sl_usd"]:
+                "pps_resolution", "pps_period", "pps_atr_factor", "pps_atr_period", "pps_tp_usd", "pps_sl_usd",
+                "pps_breakeven_enabled", "pps_breakeven_trigger_usd", "pps_breakeven_lock_usd", "pps_exit_mode"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

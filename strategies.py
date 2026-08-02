@@ -91,10 +91,29 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
         async with aiohttp.ClientSession() as session:
             while cursor > start_time and len(all_rows) < hard_candle_cap:
                 url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status != 200:
-                        break
-                    batch = await resp.json()
+                retry_count = 0
+                batch = None
+                while retry_count < 5:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status == 429 or resp.status == 418:
+                            # Rate-Limit erreicht - NICHT abbrechen, sondern warten und
+                            # denselben Request nochmal versuchen (mit steigender Wartezeit).
+                            # Wichtig bei 30s-Anfragen, da die 2x so viele Basis-Kerzen wie
+                            # 15s brauchen und dadurch viel eher an das Limit stossen.
+                            retry_after = resp.headers.get("Retry-After")
+                            wait_s = float(retry_after) if retry_after else (1.5 * (retry_count + 1))
+                            await asyncio.sleep(wait_s)
+                            retry_count += 1
+                            continue
+                        if resp.status != 200:
+                            batch = None
+                            break
+                        batch = await resp.json()
+                    break
+                if batch is None:
+                    if retry_count >= 5:
+                        return None, f"Binance-Ratelimit nach {requests_made} Anfragen und 5 Wiederholungsversuchen weiterhin aktiv - bitte kurz warten und erneut versuchen."
+                    break
                 requests_made += 1
                 if not batch:
                     break
@@ -102,7 +121,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
                 cursor = int(batch[0][0]) - 1
                 if len(batch) < 1000:
                     break
-                await asyncio.sleep(0.2)  # Binance-Ratelimit-freundlich
+                await asyncio.sleep(0.25)  # Binance-Ratelimit-freundlich (leicht erhoeht)
     except Exception as e:
         return None, f"Abruf fehlgeschlagen nach {requests_made} Anfragen: {e}"
 
@@ -807,12 +826,23 @@ async def pp_supertrend_poll_loop(symbol):
                     signal_key = closed_ts[-1]
                     if last_processed_ts != signal_key:
                         last_processed_ts = signal_key
-                        if (last_trend is not None and curr_trend != last_trend
-                                and st["position"] is None and cfg["bot_active"]):
+                        if last_trend is not None and curr_trend != last_trend and cfg["bot_active"]:
                             direction = "long" if curr_trend == 1 else "short"
                             price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                            debug_log(f"📡 [{symbol}] Pivot-SuperTrend Signal: {direction.upper()} @ {price} (Trend {last_trend}->{curr_trend})")
-                            await execute_entry(symbol, direction, price, is_add_on=False)
+
+                            if st["position"] is None:
+                                debug_log(f"📡 [{symbol}] Pivot-SuperTrend Signal: {direction.upper()} @ {price} (Trend {last_trend}->{curr_trend})")
+                                await execute_entry(symbol, direction, price, is_add_on=False)
+                            elif st["position"] != direction:
+                                # Ein Gegensignal macht die urspruengliche These zunichte -
+                                # die Position wird IMMER umgedreht, egal ob TP schon erreicht
+                                # war oder nicht (unabhaengig vom Exit-Modus). Der Exit-Modus
+                                # steuert nur noch, ob TP zusaetzlich als fruehzeitiger Ausstieg
+                                # zaehlt (siehe on_price_update) - SL bleibt so oder so aktiv.
+                                debug_log(f"🔄 [{symbol}] Pivot-SuperTrend Signal-Umkehr: {direction.upper()} @ {price} (Trend {last_trend}->{curr_trend})")
+                                await execute_exit(symbol, price, "PPS-REVERSE")
+                                price_after = st["last_price"] if st["last_price"] is not None else price
+                                await execute_entry(symbol, direction, price_after, is_add_on=False)
                         last_trend = curr_trend
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Pivot-SuperTrend-Abfrage fehlgeschlagen", {"error": str(e)})
@@ -1307,12 +1337,20 @@ async def on_price_update(symbol, price):
         return
 
     if cfg["entry_mode"] == "pp_supertrend":
-        if st["position"] is not None:
+        if st["position"] is None:
+            st["pps_breakeven_triggered"] = False
+        else:
             entry = st["avg_entry_price"]
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if pnl_usd <= -cfg["pps_sl_usd"]:
-                await execute_exit(symbol, price, "SL")
-            elif pnl_usd >= cfg["pps_tp_usd"]:
+            sl_floor = -cfg["pps_sl_usd"]
+            if cfg.get("pps_breakeven_enabled", False):
+                if not st["pps_breakeven_triggered"] and pnl_usd >= cfg.get("pps_breakeven_trigger_usd", 2):
+                    st["pps_breakeven_triggered"] = True
+                if st["pps_breakeven_triggered"]:
+                    sl_floor = cfg.get("pps_breakeven_lock_usd", 0.1)
+            if pnl_usd <= sl_floor:
+                await execute_exit(symbol, price, "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
+            elif cfg.get("pps_exit_mode", "tp_sl") == "tp_sl" and pnl_usd >= cfg["pps_tp_usd"]:
                 await execute_exit(symbol, price, "TP")
         return
 
@@ -1665,6 +1703,10 @@ def backtest_pp_supertrend(candles, cfg):
     atr_period = cfg["pps_atr_period"]
     tp_usd = cfg["pps_tp_usd"]
     sl_usd = cfg["pps_sl_usd"]
+    breakeven_enabled = cfg.get("pps_breakeven_enabled", False)
+    breakeven_trigger = cfg.get("pps_breakeven_trigger_usd", 2)
+    breakeven_lock = cfg.get("pps_breakeven_lock_usd", 0.1)
+    exit_mode = cfg.get("pps_exit_mode", "tp_sl")
 
     atr_series = compute_atr(h, l, c, atr_period)
     centers = compute_pivot_centers(h, l, prd)
@@ -1674,6 +1716,7 @@ def backtest_pp_supertrend(candles, cfg):
     position = None
     trades = []
     last_trend = None
+    breakeven_triggered = False
 
     for i in range(warmup, n):
         price = c[i]
@@ -1681,18 +1724,33 @@ def backtest_pp_supertrend(candles, cfg):
         if position is not None:
             direction, entry, size = position["dir"], position["entry"], position["size"]
             pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            if pnl_usd <= -sl_usd:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+            sl_floor = -sl_usd
+            if breakeven_enabled:
+                if not breakeven_triggered and pnl_usd >= breakeven_trigger:
+                    breakeven_triggered = True
+                if breakeven_triggered:
+                    sl_floor = breakeven_lock
+            if pnl_usd <= sl_floor:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
                 position = None
-            elif pnl_usd >= tp_usd:
+                breakeven_triggered = False
+            elif exit_mode == "tp_sl" and pnl_usd >= tp_usd:
                 _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
                 position = None
+                breakeven_triggered = False
 
         curr_trend = trend[i]
-        if last_trend is not None and curr_trend != last_trend and position is None:
+        if last_trend is not None and curr_trend != last_trend:
             direction = "long" if curr_trend == 1 else "short"
-            size = (margin * leverage) / price
-            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+            if position is None:
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                breakeven_triggered = False
+            elif position["dir"] != direction:
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PPS-REVERSE")
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                breakeven_triggered = False
         last_trend = curr_trend
 
     return trades
@@ -1907,6 +1965,10 @@ async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
     atr_period = base_cfg.get("pps_atr_period", 10)
     tp_usd = base_cfg.get("pps_tp_usd", 3)
     sl_usd = base_cfg.get("pps_sl_usd", 3)
+    breakeven_enabled = base_cfg.get("pps_breakeven_enabled", False)
+    breakeven_trigger = base_cfg.get("pps_breakeven_trigger_usd", 2)
+    breakeven_lock = base_cfg.get("pps_breakeven_lock_usd", 0.1)
+    exit_mode = base_cfg.get("pps_exit_mode", "tp_sl")
     margin, leverage = base_cfg["margin"], base_cfg["leverage"]
     atr_series = compute_atr(h, l, c, atr_period)
 
@@ -1923,22 +1985,38 @@ async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
             position = None
             trades = []
             last_trend = None
+            breakeven_triggered = False
             for i in range(warmup, len(c)):
                 price = c[i]
                 if position is not None:
                     direction, entry, size = position["dir"], position["entry"], position["size"]
                     pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-                    if pnl_usd <= -sl_usd:
-                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                    sl_floor = -sl_usd
+                    if breakeven_enabled:
+                        if not breakeven_triggered and pnl_usd >= breakeven_trigger:
+                            breakeven_triggered = True
+                        if breakeven_triggered:
+                            sl_floor = breakeven_lock
+                    if pnl_usd <= sl_floor:
+                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
                         position = None
-                    elif pnl_usd >= tp_usd:
+                        breakeven_triggered = False
+                    elif exit_mode == "tp_sl" and pnl_usd >= tp_usd:
                         _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
                         position = None
+                        breakeven_triggered = False
                 curr_trend = trend[i]
-                if last_trend is not None and curr_trend != last_trend and position is None:
+                if last_trend is not None and curr_trend != last_trend:
                     direction = "long" if curr_trend == 1 else "short"
-                    size = (margin * leverage) / price
-                    position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                    if position is None:
+                        size = (margin * leverage) / price
+                        position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                        breakeven_triggered = False
+                    elif position["dir"] != direction:
+                        _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PPS-REVERSE")
+                        size = (margin * leverage) / price
+                        position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                        breakeven_triggered = False
                 last_trend = curr_trend
 
             stats = summarize_backtest_trades(trades)
@@ -1996,6 +2074,10 @@ async def run_backtest_sweep_pp_tpsl(symbol, base_cfg, days):
     prd = base_cfg.get("pps_period", 2)
     factor = base_cfg.get("pps_atr_factor", 3)
     atr_period = base_cfg.get("pps_atr_period", 10)
+    breakeven_enabled = base_cfg.get("pps_breakeven_enabled", False)
+    breakeven_trigger = base_cfg.get("pps_breakeven_trigger_usd", 2)
+    breakeven_lock = base_cfg.get("pps_breakeven_lock_usd", 0.1)
+    exit_mode = base_cfg.get("pps_exit_mode", "tp_sl")
     margin, leverage = base_cfg["margin"], base_cfg["leverage"]
 
     atr_series = compute_atr(h, l, c, atr_period)
@@ -2009,22 +2091,38 @@ async def run_backtest_sweep_pp_tpsl(symbol, base_cfg, days):
             position = None
             trades = []
             last_trend = None
+            breakeven_triggered = False
             for i in range(warmup, len(c)):
                 price = c[i]
                 if position is not None:
                     direction, entry, size = position["dir"], position["entry"], position["size"]
                     pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-                    if pnl_usd <= -sl_usd:
-                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                    sl_floor = -sl_usd
+                    if breakeven_enabled:
+                        if not breakeven_triggered and pnl_usd >= breakeven_trigger:
+                            breakeven_triggered = True
+                        if breakeven_triggered:
+                            sl_floor = breakeven_lock
+                    if pnl_usd <= sl_floor:
+                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
                         position = None
-                    elif pnl_usd >= tp_usd:
+                        breakeven_triggered = False
+                    elif exit_mode == "tp_sl" and pnl_usd >= tp_usd:
                         _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
                         position = None
+                        breakeven_triggered = False
                 curr_trend = trend[i]
-                if last_trend is not None and curr_trend != last_trend and position is None:
+                if last_trend is not None and curr_trend != last_trend:
                     direction = "long" if curr_trend == 1 else "short"
-                    size = (margin * leverage) / price
-                    position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                    if position is None:
+                        size = (margin * leverage) / price
+                        position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                        breakeven_triggered = False
+                    elif position["dir"] != direction:
+                        _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PPS-REVERSE")
+                        size = (margin * leverage) / price
+                        position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                        breakeven_triggered = False
                 last_trend = curr_trend
 
             stats = summarize_backtest_trades(trades)
