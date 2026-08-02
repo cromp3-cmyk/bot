@@ -62,7 +62,7 @@ BINANCE_INTERVAL_MS = {
 }
 
 
-SYNTHETIC_RESOLUTIONS = {"2m": ("1m", 2), "10s": ("1s", 10), "15s": ("1s", 15), "30s": ("1s", 30)}  # Zeitrahmen, die Binance nicht nativ anbietet
+SYNTHETIC_RESOLUTIONS = {"2m": ("1m", 2), "10s": ("1s", 10), "15s": ("1s", 15), "30s": ("1s", 30), "45s": ("1s", 45)}  # Zeitrahmen, die Binance nicht nativ anbietet
 
 
 async def fetch_historical_candles_binance(symbol, resolution, days, max_candles):
@@ -170,7 +170,7 @@ def resample_candles(data, factor):
     return out_ts, out_o, out_h, out_l, out_c
 
 
-SUB_MINUTE_RESOLUTIONS = {"10s": 10, "15s": 15, "30s": 30}  # Sekunden je Kerze, alle aus dem 1s-Puffer
+SUB_MINUTE_RESOLUTIONS = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}  # Sekunden je Kerze, alle aus dem 1s-Puffer
 
 
 def get_seconds_candles(state, seconds, needed_bars):
@@ -1937,8 +1937,6 @@ async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days):
     die teure Pivot-Erkennung nur einmal pro Periode (10x) berechnet wird, nicht pro
     Kombination (460x) - der ATR-Faktor beeinflusst nur die guenstige Trend-Berechnung."""
     resolution = base_cfg.get("pps_resolution", "1m")
-    if resolution == "30s":
-        return {"error": "Sweep für 30 Sekunden nicht sinnvoll (zu wenig historische Daten in vertretbarer Zeit). Wähle einen anderen Zeitrahmen."}
     max_candles = BACKTEST_MAX_CANDLES["pp_supertrend"]
     if resolution in SUB_MINUTE_RESOLUTIONS:
         max_candles = min(max_candles, 5000)
@@ -2046,8 +2044,6 @@ async def run_backtest_sweep_pp_tpsl(symbol, base_cfg, days):
     die teure Trend-Berechnung laeuft hier nur EINMAL, danach nur noch die guenstige
     SL/TP-Simulation pro Kombination."""
     resolution = base_cfg.get("pps_resolution", "1m")
-    if resolution == "30s":
-        return {"error": "Sweep für 30 Sekunden nicht sinnvoll (zu wenig historische Daten in vertretbarer Zeit). Wähle einen anderen Zeitrahmen."}
     max_candles = BACKTEST_MAX_CANDLES["pp_supertrend"]
     if resolution in SUB_MINUTE_RESOLUTIONS:
         max_candles = min(max_candles, 5000)
