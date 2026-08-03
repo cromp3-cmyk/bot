@@ -9,7 +9,7 @@ import asyncio
 from aiohttp import web
 
 from bot_core import (
-    debug_log, PORT, SYMBOLS, BOTS, load_bot_configs,
+    debug_log, PORT, SYMBOLS, BOTS, load_bot_configs, load_bot_state, state_persist_loop,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reset,
     handle_manual_trade, handle_backtest, handle_backtest_sweep_pp, handle_backtest_sweep_pp_tpsl,
@@ -72,6 +72,7 @@ async def main():
     print("=" * 60)
 
     await load_bot_configs()
+    await load_bot_state()
     await load_ct_watched()
     await start_web_server()
     await asyncio.gather(
@@ -83,6 +84,7 @@ async def main():
         *[pp_supertrend_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
+        state_persist_loop(),
     )
 
 

@@ -363,6 +363,60 @@ async def load_bot_configs():
         debug_log("⚠️ Laden der Grid-Bot-Configs fehlgeschlagen", {"error": str(e)})
 
 
+# Nur diese State-Felder ueberleben einen Redeploy - bewusst OHNE die grossen/kurzlebigen
+# Arbeitspuffer (Preis-Historie, Orderbuch, 1s-Kerzen-Puffer etc.), die sich ohnehin
+# innerhalb von Sekunden bis Minuten nach dem Neustart von selbst wieder auffuellen.
+# Ohne das hier wuerde jeder Bot nach jedem Redeploy "vergessen", dass er gerade in
+# einer Position steckt, wie viele Nachkaeufe schon liefen und wie sein Ø-Einstieg war.
+PERSISTED_STATE_KEYS = [
+    "position", "avg_entry_price", "total_coin_size", "entry_count", "anchor_price",
+    "position_opened_at", "last_entry_price", "stats", "trade_log",
+    "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
+    "pps_breakeven_triggered", "rp_breakeven_triggered", "obi_breakeven_triggered",
+]
+
+
+async def save_bot_state():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        data = {}
+        for s in SYMBOLS:
+            st = BOTS[s]["state"]
+            entry = {k: st[k] for k in PERSISTED_STATE_KEYS if k in st}
+            if "trade_log" in entry:
+                entry["trade_log"] = entry["trade_log"][-200:]  # nicht unbegrenzt wachsen lassen
+            data[s] = entry
+        await r.set("gridbot:state", json.dumps(data, default=str))
+    except Exception as e:
+        debug_log("⚠️ Speichern des Bot-States fehlgeschlagen", {"error": str(e)})
+
+
+async def load_bot_state():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        raw_state = await r.get("gridbot:state")
+        if raw_state:
+            saved = json.loads(raw_state)
+            for s in SYMBOLS:
+                if s in saved:
+                    BOTS[s]["state"].update(saved[s])
+            debug_log("✅ Bot-State (offene Positionen etc.) aus Redis geladen", {"coins": list(saved.keys())})
+    except Exception as e:
+        debug_log("⚠️ Laden des Bot-States fehlgeschlagen", {"error": str(e)})
+
+
+async def state_persist_loop():
+    """Sicherheitsnetz: speichert den Bot-State auch periodisch, nicht nur direkt bei
+    Entry/Exit - faengt z.B. Breakeven-Trigger ab, die zwischen zwei Trades passieren."""
+    while True:
+        await asyncio.sleep(60)
+        await save_bot_state()
+
+
 # ========== LIGHTER CLIENT ==========
 def get_lighter_client():
     try:
@@ -494,6 +548,7 @@ async def execute_entry(symbol, direction, price, is_add_on):
     st["last_entry_price"] = price
     st["entry_count"] += 1
     debug_log(f"📈 [{symbol}] {'Nachkauf' if is_add_on else 'Neue Position'}: {direction.upper()} @ {price} | Ø-Einstieg {round(st['avg_entry_price'], 2)} | Stufe {st['entry_count']}")
+    await save_bot_state()
     return True
 
 
@@ -541,6 +596,7 @@ async def execute_partial_exit(symbol, price, fraction, reason):
 
     st["total_coin_size"] -= close_size
     debug_log(f"✂️ [{symbol}] Teil-Exit ({reason}): {position_side.upper()} {round(fraction*100)}% @ {price} | PnL ${round(pnl_usd,3)} | Rest {round(st['total_coin_size'],6)}")
+    await save_bot_state()
     return True
 
 
@@ -585,6 +641,7 @@ async def execute_exit(symbol, price, reason):
     st["anchor_price"] = price
     st["position_opened_at"] = None
     st["last_entry_price"] = None
+    await save_bot_state()
 
     if cfg.get("auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid":
         opposite = "short" if closing_side == "long" else "long"
@@ -1940,6 +1997,7 @@ async def handle_reset(request):
     st["anchor_price"] = st["last_price"]
     st["entry_count"] = 0
     debug_log(f"🔄 [{symbol}] Zurückgesetzt (Statistik, Trade-Log, neuer Anker)")
+    await save_bot_state()
     return web.json_response({"success": True})
 
 

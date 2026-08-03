@@ -230,11 +230,14 @@ async def binance_1s_poll_loop(symbol):
             if data:
                 timestamps, opens, highs, lows, closes = data
                 buffer = st.get("binance_1s_buffer", [])
-                existing_ts = {c["ts"] for c in buffer}
+                # Nur neue Kerzen anhaengen statt jedes Mal den kompletten Puffer zu
+                # deduplizieren+sortieren (war bei vielen Coins gleichzeitig ein spuerbarer
+                # Speicher-/CPU-Fresser). Binance liefert die Kerzen bereits aufsteigend
+                # sortiert, daher reicht ein einfacher Vergleich mit dem letzten Timestamp.
+                last_ts = buffer[-1]["ts"] if buffer else -1
                 for i in range(len(timestamps)):
-                    if timestamps[i] not in existing_ts:
+                    if timestamps[i] > last_ts:
                         buffer.append({"ts": timestamps[i], "o": opens[i], "h": highs[i], "l": lows[i], "c": closes[i]})
-                buffer.sort(key=lambda c: c["ts"])
                 if len(buffer) > 10000:  # ~2.75 Stunden 1s-Historie (reduziert wegen Speicherlimit)
                     buffer = buffer[-10000:]
                 st["binance_1s_buffer"] = buffer
