@@ -1872,7 +1872,9 @@ async def handle_config_update(request):
                 "pps_resolution", "pps_period", "pps_atr_factor", "pps_atr_period", "pps_tp_usd", "pps_sl_usd",
                 "pps_breakeven_enabled", "pps_breakeven_trigger_usd", "pps_breakeven_lock_usd", "pps_exit_mode",
                 "pps_adx_filter_enabled", "pps_adx_period", "pps_adx_threshold",
-                "pps_htf_filter_enabled", "pps_htf_resolution", "pps_htf_ema_period"]:
+                "pps_htf_filter_enabled", "pps_htf_resolution", "pps_htf_ema_period",
+                "nsdt_resolution", "nsdt_length", "nsdt_upperspace", "nsdt_lowerspace",
+                "nsdt_tp_usd", "nsdt_sl_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
