@@ -269,35 +269,6 @@ def _ema_series(values, length):
     return out
 
 
-def compute_stochastic(highs, lows, closes, k_period, k_smooth, d_period):
-    """%K (geglaettet) und %D fuer den Stochastic-Oszillator."""
-    n = len(closes)
-    if n < k_period + k_smooth + d_period:
-        return [], []
-    raw_k = []
-    for i in range(n):
-        if i < k_period - 1:
-            raw_k.append(50.0)
-            continue
-        window_h = highs[i - k_period + 1:i + 1]
-        window_l = lows[i - k_period + 1:i + 1]
-        hh, ll = max(window_h), min(window_l)
-        raw_k.append(50.0 if hh == ll else (closes[i] - ll) / (hh - ll) * 100)
-
-    def sma(values, length):
-        out = []
-        for i in range(len(values)):
-            if i < length - 1:
-                out.append(sum(values[:i + 1]) / (i + 1))
-            else:
-                out.append(sum(values[i - length + 1:i + 1]) / length)
-        return out
-
-    k_smoothed = sma(raw_k, k_smooth)
-    d_line = sma(k_smoothed, d_period)
-    return k_smoothed, d_line
-
-
 def compute_fib_swing(highs, lows, lookback):
     """Sucht im Lookback-Fenster den hoechsten High- und tiefsten Low-Punkt und leitet
     daraus die Fib-Richtung ab: kam das Low NACH dem High, ist der letzte Impuls ein
@@ -377,151 +348,6 @@ async def fib_reversal_poll_loop(symbol):
         await asyncio.sleep(30)
 
 
-async def stoch_cross_poll_loop(symbol):
-    """Einfache Stochastic-Cross-Strategie: %K kreuzt von unten nach oben durch die
-    Ueberverkauft-Schwelle (Standard 20) -> Long. %K kreuzt von oben nach unten durch
-    die Ueberkauft-Schwelle (Standard 80) -> Short.
-    Optionale, standardmaessig AUSgeschaltete Erweiterungen (aendern nichts, solange
-    nicht im Dashboard aktiviert):
-    - Trendfilter: nur Long ueber, nur Short unter einer EMA
-    - ATR-basiertes SL/TP statt festem $-Betrag
-    - Range-Profile-Kontext: nur Long unter, nur Short ueber der POC-Mittellinie
-    - Squeeze-Bestaetigung: nur Einstieg, wenn direkt vorher eine Kanal-Verengung war"""
-    b = BOTS[symbol]
-    last_k = None
-    last_processed_ts = None
-    last_entry_signal_ts = None
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "stoch_cross":
-                base_needed = cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"] + 20
-                needed_bars = max(60, base_needed)
-                if cfg.get("stoch_cross_trend_filter_enabled", False):
-                    needed_bars = max(needed_bars, cfg["stoch_cross_trend_ema_period"] * 5)
-                if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr":
-                    needed_bars = max(needed_bars, cfg["stoch_cross_atr_period"] * 5 + 20)
-                if cfg.get("stoch_cross_rp_filter_enabled", False) or cfg.get("stoch_cross_require_squeeze", False):
-                    needed_bars = max(needed_bars, cfg["stoch_cross_rp_lookback"] + 10)
-                needed_bars = min(1000, needed_bars)
-
-                resolution = cfg["stoch_cross_resolution"]
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts = timestamps[:-1]
-                        closed_o, closed_h, closed_l, closed_c = opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                if closed_ts:
-                    if len(closed_c) >= cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"]:
-                        k_series, d_series = compute_stochastic(closed_h, closed_l, closed_c,
-                                                                  cfg["stoch_cross_k_period"], cfg["stoch_cross_k_smooth"], cfg["stoch_cross_d_period"])
-                        if k_series:
-                            st = b["state"]
-                            curr_k = k_series[-1]
-                            curr_d = d_series[-1] if d_series else None
-                            st["stoch_cross_k"] = round(curr_k, 2)
-                            st["stoch_cross_d"] = round(curr_d, 2) if curr_d is not None else None
-
-                            # Nur einmal pro tatsaechlich neu geschlossener Kerze auswerten
-                            signal_key = closed_ts[-1]
-                            if last_processed_ts != signal_key:
-                                # Optionaler Range-Profile-Kontext + Squeeze (teilen sich denselben Snapshot)
-                                rp_snap = None
-                                squeeze_before_entry = False
-                                if cfg.get("stoch_cross_rp_filter_enabled", False) or cfg.get("stoch_cross_require_squeeze", False):
-                                    rp_lookback = cfg["stoch_cross_rp_lookback"]
-                                    if len(closed_c) > rp_lookback + 2:
-                                        rp_snap = compute_range_profile_snapshot(closed_h, closed_l, closed_c, closed_o, rp_lookback, 50, 80.0)
-                                        if rp_snap:
-                                            st["stoch_cross_rp_mid"] = round(rp_snap["mid_price"], 4)
-                                            channel_width = rp_snap["range_high"] - rp_snap["range_low"]
-                                            squeeze_before_entry = st.get("stoch_cross_squeeze_active", False)
-                                            width_history = st.get("stoch_cross_width_history", [])
-                                            avg_width = sum(width_history) / len(width_history) if len(width_history) >= 5 else None
-                                            squeeze_now = (avg_width is not None
-                                                           and channel_width < avg_width * (cfg["stoch_cross_squeeze_threshold_pct"] / 100))
-                                            st["stoch_cross_channel_width"] = round(channel_width, 4)
-                                            st["stoch_cross_avg_width"] = round(avg_width, 4) if avg_width is not None else None
-                                            st["stoch_cross_squeeze_active"] = squeeze_now
-                                            width_history.append(channel_width)
-                                            if len(width_history) > cfg["stoch_cross_squeeze_lookback"]:
-                                                width_history = width_history[-cfg["stoch_cross_squeeze_lookback"]:]
-                                            st["stoch_cross_width_history"] = width_history
-
-                                # Optionaler ATR-Wert (fuer SL/TP-Modus "atr")
-                                atr_val = None
-                                if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr":
-                                    atr_series = compute_atr(closed_h, closed_l, closed_c, cfg["stoch_cross_atr_period"])
-                                    if atr_series:
-                                        atr_val = atr_series[-1]
-
-                                if (st["position"] is None and cfg["bot_active"]
-                                        and last_entry_signal_ts != signal_key and last_k is not None):
-                                    direction = None
-                                    if last_k <= cfg["stoch_cross_oversold"] and curr_k > cfg["stoch_cross_oversold"]:
-                                        direction = "long"
-                                    elif last_k >= cfg["stoch_cross_overbought"] and curr_k < cfg["stoch_cross_overbought"]:
-                                        direction = "short"
-
-                                    # Optionaler Trendfilter
-                                    if direction and cfg.get("stoch_cross_trend_filter_enabled", False):
-                                        ema_series = _ema_series(closed_c, cfg["stoch_cross_trend_ema_period"])
-                                        trend_ema = ema_series[-1] if ema_series else None
-                                        if trend_ema is not None:
-                                            price_now = closed_c[-1]
-                                            if direction == "long" and price_now <= trend_ema:
-                                                direction = None
-                                            elif direction == "short" and price_now >= trend_ema:
-                                                direction = None
-
-                                    # Optionaler Range-Profile-Kontextfilter
-                                    if direction and cfg.get("stoch_cross_rp_filter_enabled", False) and rp_snap:
-                                        price_now = closed_c[-1]
-                                        if direction == "long" and price_now >= rp_snap["mid_price"]:
-                                            direction = None
-                                        elif direction == "short" and price_now <= rp_snap["mid_price"]:
-                                            direction = None
-
-                                    # Optionale Squeeze-Bestaetigung
-                                    if direction and cfg.get("stoch_cross_require_squeeze", False) and not squeeze_before_entry:
-                                        direction = None
-
-                                    if direction:
-                                        last_entry_signal_ts = signal_key
-                                        price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-
-                                        if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr" and atr_val:
-                                            risk_dist = atr_val * cfg["stoch_cross_sl_atr_mult"]
-                                            reward_dist = atr_val * cfg["stoch_cross_tp_atr_mult"]
-                                            sl_price = price - risk_dist if direction == "long" else price + risk_dist
-                                            tp_price = price + reward_dist if direction == "long" else price - reward_dist
-                                            st["stoch_cross_sl_price"] = sl_price
-                                            st["stoch_cross_tp_price"] = tp_price
-                                        else:
-                                            st["stoch_cross_sl_price"] = None
-                                            st["stoch_cross_tp_price"] = None
-
-                                        debug_log(f"📡 [{symbol}] Stochastic-Cross Signal: {direction.upper()} @ {price} (%K {round(curr_k,2)})")
-                                        await execute_entry(symbol, direction, price, is_add_on=False)
-
-                                last_k = curr_k
-                                last_processed_ts = signal_key
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Stochastic-Cross-Abfrage fehlgeschlagen", {"error": str(e)})
-
-        await asyncio.sleep(5)
-
 
 def compute_atr(highs, lows, closes, period):
     """ATR mit Wilder-RMA-Glaettung (wie Pine's ta.atr), fuer marktadaptive SL-Groesse."""
@@ -539,143 +365,6 @@ def compute_atr(highs, lows, closes, period):
             atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
     return atr
 
-
-def compute_adx(highs, lows, closes, period):
-    """ADX (Average Directional Index) mit Wilder-Glaettung - misst die Trendstaerke
-    unabhaengig von der Richtung (0 = keinerlei Trend/Seitwaerts, >25 = starker Trend).
-    Dient als Filter gegen Whipsaws in Seitwaertsphasen: Signale werden nur genommen,
-    wenn der Markt gerade tatsaechlich trendet."""
-    n = len(closes)
-    if n < 2:
-        return [0.0] * n
-
-    def _wilder_rma(values):
-        out = [values[0]] * n
-        for i in range(1, n):
-            if i < period:
-                out[i] = sum(values[:i + 1]) / (i + 1)
-            else:
-                out[i] = (out[i - 1] * (period - 1) + values[i]) / period
-        return out
-
-    plus_dm = [0.0] * n
-    minus_dm = [0.0] * n
-    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
-    for i in range(1, n):
-        up_move = highs[i] - highs[i - 1]
-        down_move = lows[i - 1] - lows[i]
-        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
-        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
-        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-
-    tr_s = _wilder_rma(tr)
-    plus_dm_s = _wilder_rma(plus_dm)
-    minus_dm_s = _wilder_rma(minus_dm)
-    plus_di = [100 * (plus_dm_s[i] / tr_s[i]) if tr_s[i] else 0.0 for i in range(n)]
-    minus_di = [100 * (minus_dm_s[i] / tr_s[i]) if tr_s[i] else 0.0 for i in range(n)]
-    dx = [100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) else 0.0 for i in range(n)]
-    return _wilder_rma(dx)
-
-
-def _align_htf_direction(base_ts, htf_ts, htf_closes, htf_ema):
-    """Ordnet jedem Zeitstempel der Basis-Kerzen die Richtung ('long'/'short') der
-    zu diesem Zeitpunkt zuletzt geschlossenen Higher-Timeframe-Kerze relativ zu deren
-    EMA zu. Nutzt bisect statt Nachschlagen pro Kerze, da beide Zeitreihen aufsteigend
-    sortiert sind."""
-    out = [None] * len(base_ts)
-    for i, t in enumerate(base_ts):
-        j = bisect.bisect_right(htf_ts, t) - 1
-        if j >= 0:
-            out[i] = "long" if htf_closes[j] > htf_ema[j] else "short"
-    return out
-
-
-def compute_pivot_centers(highs, lows, prd):
-    """Portiert die Pivot-Point-Center-Linie aus 'Pivot Point SuperTrend' (LonesomeTheBlue).
-    Ein Pivot-Hoch/-Tief bei Index j gilt erst als bestaetigt, sobald prd Kerzen NACH j
-    bekannt sind (kein Repainting) - deshalb bezieht sich Index i in der Rueckgabe auf
-    das Pivot bei i-prd, nicht auf i selbst. Haengt NUR von prd ab (nicht vom ATR-Faktor),
-    kann daher fuer alle Faktor-Varianten eines Sweeps wiederverwendet werden."""
-    n = len(highs)
-    center_arr = [None] * n
-    center = None
-    for i in range(n):
-        j = i - prd
-        lastpp = None
-        if j - prd >= 0 and j + prd == i:
-            window_h = highs[j - prd:j + prd + 1]
-            window_l = lows[j - prd:j + prd + 1]
-            if highs[j] == max(window_h):
-                lastpp = highs[j]
-            elif lows[j] == min(window_l):
-                lastpp = lows[j]
-        if lastpp is not None:
-            center = lastpp if center is None else (center * 2 + lastpp) / 3
-        center_arr[i] = center
-    return center_arr
-
-
-def compute_pivot_supertrend_trend(closes, atr_series, center_arr, factor):
-    """Baut aus der Center-Linie + ATR-Faktor die Trail-Stop-Linien (TUp/TDown) und den
-    Trend (+1/-1) - das ist der Teil, der vom ATR-Faktor abhaengt und pro Sweep-Kombination
-    neu gerechnet werden muss (aber billig ist, da nur O(n) ohne die teure Pivot-Suche)."""
-    n = len(closes)
-    trend = [1] * n
-    tup = [None] * n
-    tdown = [None] * n
-    for i in range(n):
-        center = center_arr[i]
-        a = atr_series[i] if i < len(atr_series) else None
-        if center is None or a is None:
-            tup[i] = tup[i - 1] if i > 0 else None
-            tdown[i] = tdown[i - 1] if i > 0 else None
-            trend[i] = trend[i - 1] if i > 0 else 1
-            continue
-        up = center - factor * a
-        dn = center + factor * a
-        prev_close = closes[i - 1] if i > 0 else closes[i]
-        prev_tup = tup[i - 1] if i > 0 and tup[i - 1] is not None else up
-        prev_tdown = tdown[i - 1] if i > 0 and tdown[i - 1] is not None else dn
-        cur_tup = max(up, prev_tup) if prev_close > prev_tup else up
-        cur_tdown = min(dn, prev_tdown) if prev_close < prev_tdown else dn
-        tup[i] = cur_tup
-        tdown[i] = cur_tdown
-        prev_trend = trend[i - 1] if i > 0 else 1
-        if closes[i] > prev_tdown:
-            cur_trend = 1
-        elif closes[i] < prev_tup:
-            cur_trend = -1
-        else:
-            cur_trend = prev_trend
-        trend[i] = cur_trend
-    return trend, tup, tdown
-
-
-def compute_wma(values, length):
-    """Gewichteter gleitender Durchschnitt (linear steigende Gewichte, neuester Wert
-    zaehlt am staerksten) - wie Pine's ta.wma. Erste (length-1) Werte sind None (nicht
-    genug Historie fuer ein volles Fenster)."""
-    n = len(values)
-    out = [None] * n
-    weight_sum = length * (length + 1) / 2
-    for i in range(n):
-        if i < length - 1:
-            continue
-        window = values[i - length + 1:i + 1]
-        weighted = sum(v * (j + 1) for j, v in enumerate(window))
-        out[i] = weighted / weight_sum
-    return out
-
-
-def compute_nsdt_channel(highs, lows, length, upperspace, lowerspace):
-    """Portiert den 'NSDT Scalping Channel': obere Linie = WMA(High * upperspace),
-    untere Linie = WMA(Low * lowerspace). Long-Signal wenn die untere Linie 2 Kerzen
-    in Folge steigt, Short-Signal wenn die obere Linie 2 Kerzen in Folge faellt."""
-    upper_raw = [h * upperspace for h in highs]
-    lower_raw = [l * lowerspace for l in lows]
-    upper_line = compute_wma(upper_raw, length)
-    lower_line = compute_wma(lower_raw, length)
-    return upper_line, lower_line
 
 
 def compute_range_profile_snapshot(highs, lows, closes, opens, lookback, bins, ob_os_level):
@@ -835,68 +524,49 @@ async def range_profile_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
-async def _pps_check_filters(symbol, cfg, direction, closed_h, closed_l, closed_c, st):
-    """Prueft die optionalen ADX- und Higher-Timeframe-Filter fuer ein Pivot-SuperTrend-
-    Signal. Gibt (ok, grund_falls_geblockt) zurueck und schreibt die aktuellen Filterwerte
-    in den State fuers Dashboard."""
-    ok = True
-    reasons = []
 
-    if cfg.get("pps_adx_filter_enabled", False):
-        adx_period = cfg.get("pps_adx_period", 14)
-        if len(closed_c) > adx_period * 3:
-            adx_series = compute_adx(closed_h, closed_l, closed_c, adx_period)
-            adx_val = adx_series[-1] if adx_series else 0.0
-            st["pps_adx"] = round(adx_val, 2)
-            threshold = cfg.get("pps_adx_threshold", 20)
-            if adx_val < threshold:
-                ok = False
-                reasons.append(f"ADX {adx_val:.1f}<{threshold}")
-
-    if cfg.get("pps_htf_filter_enabled", False):
-        htf_res = cfg.get("pps_htf_resolution", "1h")
-        ema_period = cfg.get("pps_htf_ema_period", 50)
-        htf_needed = min(1000, ema_period * 5 + 10)
-        data = await fetch_candles_binance_multi(symbol, htf_res, count_back=htf_needed)
-        if data:
-            _, _, _, _, htf_closes_all = data
-            htf_closed = htf_closes_all[:-1]
-            if len(htf_closed) > ema_period:
-                ema_series = _ema_series(htf_closed, ema_period)
-                htf_ema, htf_price = ema_series[-1], htf_closed[-1]
-                htf_dir = "long" if htf_price > htf_ema else "short"
-                st["pps_htf_ema"] = round(htf_ema, 4)
-                st["pps_htf_direction"] = htf_dir
-                if direction != htf_dir:
-                    ok = False
-                    reasons.append(f"HTF-Trend={htf_dir}")
-
-    return ok, ", ".join(reasons)
+def compute_zscore_trend(closes, lookback_period, ema_smooth):
+    """Rolling Z-Score Trend (portiert aus dem Indikator 'Rolling Z-Score Trend [QuantAlgo]'):
+    misst pro Kerze, wie viele Standardabweichungen der Schlusskurs vom gleitenden
+    Durchschnitt der letzten lookback_period Kerzen entfernt ist (Z-Score), geglaettet
+    mit einer kurzen EMA. Trend gilt als bullisch sobald der geglaettete Z-Score ueber 0
+    liegt (Kurs ueber seinem juengsten Mittelwert), baerisch darunter - das Signal ist
+    also der Nulllinien-Durchgang von smoothZ, wie im Original per alertcondition."""
+    n = len(closes)
+    if n < lookback_period + 1:
+        return [0.0] * n
+    z = [0.0] * n
+    for i in range(lookback_period - 1, n):
+        window = closes[i - lookback_period + 1:i + 1]
+        mean = sum(window) / lookback_period
+        variance = sum((x - mean) ** 2 for x in window) / lookback_period
+        stddev = variance ** 0.5
+        z[i] = (closes[i] - mean) / stddev if stddev > 0 else 0.0
+    return _ema_series(z, ema_smooth)
 
 
-async def pp_supertrend_poll_loop(symbol):
-    """Pivot Point SuperTrend (portiert aus dem Indikator von LonesomeTheBlue): Trail-Stop
-    aus Pivot-Hochs/-Tiefs statt einfachem Schlusskurs, dadurch ruhiger als klassischer
-    SuperTrend. Einstieg bei Trendwechsel (Buy: Trend -1 -> 1, Sell: Trend 1 -> -1).
-    TP/SL sind feste $-Betraege. Wird ein Einstieg von ADX-/HTF-Filter geblockt, bleibt
-    die Richtung als 'pending' vorgemerkt: solange sich der Trend NICHT erneut dreht,
-    wird bei jedem Poll (alle 5 Sek.) neu geprueft, ob die Filter inzwischen erfuellt
-    sind, und bei Erfolg sofort nachgetriggert."""
+async def zscore_trend_poll_loop(symbol):
+    """Eigene Strategie 'Z-Score-Trend': ueber der Nulllinie = long, unter der Nulllinie =
+    short (siehe compute_zscore_trend). TP1 (fester $-Betrag) schliesst einen Teil der
+    Position und setzt den SL auf Einstieg + Lock-Betrag (im Plus). TP2 (fester $-Betrag)
+    schliesst den Rest final. TP1/TP2/SL-Pruefung passiert pro Live-Tick in on_price_update,
+    hier wird nur das Signal (Nulllinien-Durchgang bei Kerzenschluss) erkannt. Ein
+    Gegensignal (Nulllinie in die andere Richtung gekreuzt) schliesst die Position sofort
+    komplett, egal ob TP1 schon erreicht war, und eroeffnet direkt die Gegenposition -
+    gleiches Verhalten wie bei Pivot-SuperTrend."""
     b = BOTS[symbol]
     last_processed_ts = None
     last_trend = None
-    pending_direction = None  # Richtung eines geblockten Signals, wartet auf Nachtrigger
-    last_heartbeat = 0.0  # time.time() des letzten Heartbeat-Logs, alle 5 Min ein Lebenszeichen
+    last_heartbeat = 0.0
 
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "pp_supertrend":
-                prd = cfg["pps_period"]
-                atr_period = cfg["pps_atr_period"]
-                adx_needed = cfg["pps_adx_period"] * 5 if cfg.get("pps_adx_filter_enabled", False) else 0
-                needed_bars = min(1000, max(prd * 4, atr_period * 5, adx_needed, 60) + 5)
-                resolution = cfg["pps_resolution"]
+            if cfg["entry_mode"] == "zscore_trend":
+                lookback = cfg["zscore_lookback_period"]
+                ema_smooth = cfg["zscore_ema_smooth"]
+                needed_bars = min(1000, max(lookback * 4, 60) + 5)
+                resolution = cfg["zscore_resolution"]
 
                 if resolution in SUB_MINUTE_RESOLUTIONS:
                     local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
@@ -909,43 +579,30 @@ async def pp_supertrend_poll_loop(symbol):
                     if data:
                         timestamps, opens, highs, lows, closes = data
                         closed_ts = timestamps[:-1]
-                        closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
+                        closed_c = closes[:-1]
                     else:
                         closed_ts = None
 
                 now = time.time()
-                due_heartbeat = now - last_heartbeat > 300  # alle 5 Minuten ein Lebenszeichen im Log
+                due_heartbeat = now - last_heartbeat > 300
 
-                if closed_ts and len(closed_c) > max(prd * 3, atr_period + 2):
-                    atr_series = compute_atr(closed_h, closed_l, closed_c, atr_period)
-                    centers = compute_pivot_centers(closed_h, closed_l, prd)
-                    trend, tup, tdown = compute_pivot_supertrend_trend(closed_c, atr_series, centers, cfg["pps_atr_factor"])
+                if closed_ts and len(closed_c) > lookback + 1:
+                    smooth_z = compute_zscore_trend(closed_c, lookback, ema_smooth)
                     st = b["state"]
-                    curr_trend = trend[-1]
-                    st["pps_trend"] = curr_trend
-                    st["pps_trailing_sl"] = round((tup[-1] if curr_trend == 1 else tdown[-1]) or 0, 4)
+                    curr_z = smooth_z[-1]
+                    curr_trend = 1 if curr_z > 0 else -1
+                    st["zscore_value"] = round(curr_z, 3)
+                    st["zscore_trend"] = curr_trend
 
                     if due_heartbeat:
                         last_heartbeat = now
-                        adx_info = ""
-                        if cfg.get("pps_adx_filter_enabled", False):
-                            adx_period = cfg.get("pps_adx_period", 14)
-                            if len(closed_c) > adx_period * 3:
-                                adx_val = compute_adx(closed_h, closed_l, closed_c, adx_period)[-1]
-                                adx_info = f", ADX={adx_val:.1f}/Schwelle {cfg.get('pps_adx_threshold', 20)}"
-                            else:
-                                adx_info = f", ADX noch nicht genug Kerzen ({len(closed_c)}/{adx_period * 3})"
-                        debug_log(f"💓 [{symbol}] Pivot-SuperTrend aktiv: Trend={curr_trend}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}{adx_info}, pending={pending_direction}, bot_active={cfg['bot_active']}")
+                        debug_log(f"💓 [{symbol}] Z-Score-Trend aktiv: Z={curr_z:.2f}, Trend={curr_trend}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
                     signal_key = closed_ts[-1]
                     is_new_candle = last_processed_ts != signal_key
                     if is_new_candle:
                         last_processed_ts = signal_key
-                    # trend_flipped separat merken: die last_trend-Aktualisierung unten muss
-                    # bei jeder neuen Kerze laufen, unabhaengig davon ob ein Signal feuert -
-                    # sonst bleibt last_trend beim allerersten Durchlauf fuer immer None
-                    # (Henne-Ei-Problem, last_trend is not None wird ja hier selbst geprueft)
-                    # und es kann nie wieder ein Signal ausloesen.
+
                     trend_flipped = is_new_candle and last_trend is not None and curr_trend != last_trend
 
                     if trend_flipped and cfg["bot_active"]:
@@ -953,106 +610,27 @@ async def pp_supertrend_poll_loop(symbol):
                         price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
 
                         if st["position"] is not None and st["position"] != direction:
-                            # Ein Gegensignal macht die urspruengliche These zunichte -
-                            # die Position wird IMMER geschlossen, egal ob TP schon erreicht
-                            # war oder nicht (unabhaengig vom Exit-Modus).
-                            debug_log(f"🔄 [{symbol}] Pivot-SuperTrend Signal-Umkehr: {direction.upper()} @ {price} (Trend {last_trend}->{curr_trend})")
-                            await execute_exit(symbol, price, "PPS-REVERSE")
+                            debug_log(f"🔄 [{symbol}] Z-Score-Trend Signal-Umkehr: {direction.upper()} @ {price} (Z {curr_z:.2f})")
+                            await execute_exit(symbol, price, "ZSCORE-REVERSE")
 
                         if st["position"] is None:
-                            filter_ok, filter_reason = await _pps_check_filters(symbol, cfg, direction, closed_h, closed_l, closed_c, st)
-                            if filter_ok:
-                                debug_log(f"📡 [{symbol}] Pivot-SuperTrend Signal: {direction.upper()} @ {price} (Trend {last_trend}->{curr_trend})")
-                                price_after = st["last_price"] if st["last_price"] is not None else price
-                                await execute_entry(symbol, direction, price_after, is_add_on=False)
-                                pending_direction = None
-                            else:
-                                debug_log(f"🚫 [{symbol}] Pivot-SuperTrend Signal geblockt ({filter_reason}): {direction.upper()} @ {price} - wird nachgetriggert sobald Filter passt")
-                                pending_direction = direction
-
-                    elif (pending_direction is not None and st["position"] is None and cfg["bot_active"]
-                          and curr_trend == (1 if pending_direction == "long" else -1)):
-                        # Nachtriggern: Trend hat sich seit dem geblockten Signal nicht
-                        # geaendert - bei jedem Poll pruefen ob ADX/HTF jetzt passen.
-                        filter_ok, filter_reason = await _pps_check_filters(symbol, cfg, pending_direction, closed_h, closed_l, closed_c, st)
-                        if filter_ok:
-                            price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                            debug_log(f"✅ [{symbol}] Pivot-SuperTrend Nachtrigger: {pending_direction.upper()} @ {price} (Filter jetzt erfüllt)")
-                            await execute_entry(symbol, pending_direction, price, is_add_on=False)
-                            pending_direction = None
+                            debug_log(f"📡 [{symbol}] Z-Score-Trend Signal: {direction.upper()} @ {price} (Z {curr_z:.2f})")
+                            price_after = st["last_price"] if st["last_price"] is not None else price
+                            await execute_entry(symbol, direction, price_after, is_add_on=False)
 
                     if is_new_candle:
                         last_trend = curr_trend
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] Pivot-SuperTrend wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                        debug_log(f"⏳ [{symbol}] Z-Score-Trend wartet: keine Kerzen erhalten (Auflösung {resolution})")
                     else:
-                        debug_log(f"⏳ [{symbol}] Pivot-SuperTrend wartet: zu wenig Kerzen ({len(closed_c)}/{max(prd * 3, atr_period + 2) + 1} nötig)")
+                        debug_log(f"⏳ [{symbol}] Z-Score-Trend wartet: zu wenig Kerzen ({len(closed_c)}/{lookback + 2} nötig)")
         except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Pivot-SuperTrend-Abfrage fehlgeschlagen", {"error": str(e)})
+            debug_log(f"⚠️ [{symbol}] Z-Score-Trend-Abfrage fehlgeschlagen", {"error": str(e)})
 
         await asyncio.sleep(5)
 
-
-async def nsdt_channel_poll_loop(symbol):
-    """NSDT Scalping Channel: obere Linie = WMA(High*upperspace, 9), untere Linie =
-    WMA(Low*lowerspace, 9). Long wenn die untere Linie 2 Kerzen in Folge steigt, Short
-    wenn die obere Linie 2 Kerzen in Folge faellt - reagiert auf die Richtungsaenderung
-    der Linien selbst, nicht erst auf einen Durchbruch. TP/SL sind feste $-Betraege."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "nsdt_channel":
-                length = cfg["nsdt_length"]
-                needed_bars = min(1000, length * 4 + 10)
-                resolution = cfg["nsdt_resolution"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, _, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts = timestamps[:-1]
-                        closed_h, closed_l, closed_c = highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                if closed_ts and len(closed_c) > length + 3:
-                    upper, lower = compute_nsdt_channel(closed_h, closed_l, length, cfg["nsdt_upperspace"], cfg["nsdt_lowerspace"])
-                    if upper[-1] is not None and lower[-1] is not None and upper[-3] is not None and lower[-3] is not None:
-                        st = b["state"]
-                        st["nsdt_upper"] = round(upper[-1], 4)
-                        st["nsdt_lower"] = round(lower[-1], 4)
-
-                        signal_key = closed_ts[-1]
-                        if last_processed_ts != signal_key:
-                            last_processed_ts = signal_key
-                            go_long = lower[-1] > lower[-2] > lower[-3]  # ta.rising(lower, 2)
-                            go_short = upper[-1] < upper[-2] < upper[-3]  # ta.falling(upper, 2)
-
-                            direction = None
-                            if go_long and not go_short:
-                                direction = "long"
-                            elif go_short and not go_long:
-                                direction = "short"
-
-                            if direction and st["position"] is None and cfg["bot_active"]:
-                                price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                                debug_log(f"📡 [{symbol}] NSDT-Channel Signal: {direction.upper()} @ {price} (Obere {round(upper[-1],4)} / Untere {round(lower[-1],4)})")
-                                await execute_entry(symbol, direction, price, is_add_on=False)
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] NSDT-Channel-Abfrage fehlgeschlagen", {"error": str(e)})
-
-        await asyncio.sleep(5)
 
 
 def calc_obi(symbol, levels, depth_weighting=False, min_liquidity=0.0):
@@ -1439,30 +1017,6 @@ async def on_price_update(symbol, price):
             st["fib"] = None
         return
 
-    if cfg["entry_mode"] == "stoch_cross":
-        if st["position"] is not None:
-            if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr" and st.get("stoch_cross_sl_price") is not None:
-                sl_price = st["stoch_cross_sl_price"]
-                tp_price = st["stoch_cross_tp_price"]
-                sl_hit = price <= sl_price if st["position"] == "long" else price >= sl_price
-                tp_hit = price >= tp_price if st["position"] == "long" else price <= tp_price
-                if sl_hit:
-                    await execute_exit(symbol, price, "SL")
-                    st["stoch_cross_sl_price"] = None
-                    st["stoch_cross_tp_price"] = None
-                elif tp_hit:
-                    await execute_exit(symbol, price, "TP")
-                    st["stoch_cross_sl_price"] = None
-                    st["stoch_cross_tp_price"] = None
-            else:
-                entry = st["avg_entry_price"]
-                pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-                if pnl_usd <= -cfg["stoch_cross_sl_usd"]:
-                    await execute_exit(symbol, price, "SL")
-                elif pnl_usd >= cfg["stoch_cross_tp_usd"]:
-                    await execute_exit(symbol, price, "TP")
-        return
-
     if cfg["entry_mode"] == "range_profile":
         if st["position"] is None:
             st["rp_breakeven_triggered"] = False
@@ -1481,32 +1035,28 @@ async def on_price_update(symbol, price):
                 await execute_exit(symbol, price, "TP")
         return
 
-    if cfg["entry_mode"] == "pp_supertrend":
+    if cfg["entry_mode"] == "zscore_trend":
         if st["position"] is None:
-            st["pps_breakeven_triggered"] = False
+            st["zscore_tp1_done"] = False
         else:
             entry = st["avg_entry_price"]
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            sl_floor = -cfg["pps_sl_usd"]
-            if cfg.get("pps_breakeven_enabled", False):
-                if not st["pps_breakeven_triggered"] and pnl_usd >= cfg.get("pps_breakeven_trigger_usd", 2):
-                    st["pps_breakeven_triggered"] = True
-                if st["pps_breakeven_triggered"]:
-                    sl_floor = cfg.get("pps_breakeven_lock_usd", 0.1)
-            if pnl_usd <= sl_floor:
-                await execute_exit(symbol, price, "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
-            elif cfg.get("pps_exit_mode", "tp_sl") == "tp_sl" and pnl_usd >= cfg["pps_tp_usd"]:
-                await execute_exit(symbol, price, "TP")
-        return
-
-    if cfg["entry_mode"] == "nsdt_channel":
-        if st["position"] is not None:
-            entry = st["avg_entry_price"]
-            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if pnl_usd <= -cfg["nsdt_sl_usd"]:
-                await execute_exit(symbol, price, "SL")
-            elif pnl_usd >= cfg["nsdt_tp_usd"]:
-                await execute_exit(symbol, price, "TP")
+            if not st["zscore_tp1_done"]:
+                # Vor TP1: normaler fester SL
+                if pnl_usd <= -cfg["zscore_sl_usd"]:
+                    await execute_exit(symbol, price, "SL")
+                elif pnl_usd >= cfg["zscore_tp1_usd"]:
+                    fraction = cfg["zscore_tp1_close_pct"] / 100
+                    ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+                    if ok:
+                        st["zscore_tp1_done"] = True
+                        debug_log(f"📡 [{symbol}] Z-Score-Trend TP1 erreicht - SL auf Einstieg+{cfg['zscore_breakeven_lock_usd']} gesetzt")
+            else:
+                # Nach TP1: SL liegt jetzt im Plus (Einstieg + Lock-Betrag), TP2 ist das finale Ziel
+                if pnl_usd <= cfg["zscore_breakeven_lock_usd"]:
+                    await execute_exit(symbol, price, "BREAKEVEN-LOCK")
+                elif pnl_usd >= cfg["zscore_tp2_usd"]:
+                    await execute_exit(symbol, price, "TP2")
         return
 
     if st["position"] is None:
@@ -1596,8 +1146,7 @@ async def trading_loop():
 # Lighter.xyz ist gebuehrenfrei - es werden daher keine Handelsgebuehren simuliert.
 
 BACKTEST_MAX_CANDLES = {
-    "stoch_cross": 100_000, "fib_reversal": 100_000, "range_profile": 30_000, "pp_supertrend": 100_000,
-    "nsdt_channel": 100_000,
+    "fib_reversal": 100_000, "range_profile": 30_000, "zscore_trend": 100_000,
 }
 
 
@@ -1606,100 +1155,6 @@ def _bt_close_trade(trades, direction, entry, exit_price, size, i, entry_i, reas
     trades.append({"dir": direction, "entry": entry, "exit": exit_price, "reason": reason,
                     "pnl": pnl, "bars_held": i - entry_i})
 
-
-def backtest_stoch_cross(candles, cfg):
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-
-    k_series, d_series = compute_stochastic(h, l, c, cfg["stoch_cross_k_period"], cfg["stoch_cross_k_smooth"], cfg["stoch_cross_d_period"])
-    trend_ema = _ema_series(c, cfg["stoch_cross_trend_ema_period"]) if cfg.get("stoch_cross_trend_filter_enabled", False) else None
-    atr_series = compute_atr(h, l, c, cfg["stoch_cross_atr_period"]) if cfg.get("stoch_cross_sl_tp_mode", "fixed") == "atr" else None
-
-    use_rp = cfg.get("stoch_cross_rp_filter_enabled", False) or cfg.get("stoch_cross_require_squeeze", False)
-    rp_lookback = cfg.get("stoch_cross_rp_lookback", 110)
-
-    warmup = max(cfg["stoch_cross_k_period"] + cfg["stoch_cross_k_smooth"] + cfg["stoch_cross_d_period"], rp_lookback if use_rp else 0) + 5
-    position = None
-    trades = []
-    last_k = None
-    width_history = []
-    squeeze_active = False
-
-    for i in range(warmup, n):
-        curr_k, price = k_series[i], c[i]
-
-        if position is not None:
-            direction, entry, size = position["dir"], position["entry"], position["size"]
-            reason = None
-            if position.get("sl_price") is not None:
-                sl_hit = price <= position["sl_price"] if direction == "long" else price >= position["sl_price"]
-                tp_hit = price >= position["tp_price"] if direction == "long" else price <= position["tp_price"]
-                if sl_hit:
-                    reason = "SL"
-                elif tp_hit:
-                    reason = "TP"
-            else:
-                pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-                if pnl_usd <= -cfg["stoch_cross_sl_usd"]:
-                    reason = "SL"
-                elif pnl_usd >= cfg["stoch_cross_tp_usd"]:
-                    reason = "TP"
-            if reason:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], reason)
-                position = None
-
-        squeeze_before_entry = squeeze_active
-        if use_rp and i >= rp_lookback:
-            snap = compute_range_profile_snapshot(h[i - rp_lookback + 1:i + 1], l[i - rp_lookback + 1:i + 1],
-                                                    c[i - rp_lookback + 1:i + 1], o[i - rp_lookback + 1:i + 1], rp_lookback, 50, 80.0)
-            if snap:
-                width = snap["range_high"] - snap["range_low"]
-                avg_width = sum(width_history) / len(width_history) if len(width_history) >= 5 else None
-                squeeze_active = avg_width is not None and width < avg_width * (cfg["stoch_cross_squeeze_threshold_pct"] / 100)
-                width_history.append(width)
-                if len(width_history) > cfg["stoch_cross_squeeze_lookback"]:
-                    width_history = width_history[-cfg["stoch_cross_squeeze_lookback"]:]
-            else:
-                snap = None
-        else:
-            snap = None
-
-        if position is None and last_k is not None:
-            direction = None
-            if last_k <= cfg["stoch_cross_oversold"] and curr_k > cfg["stoch_cross_oversold"]:
-                direction = "long"
-            elif last_k >= cfg["stoch_cross_overbought"] and curr_k < cfg["stoch_cross_overbought"]:
-                direction = "short"
-
-            if direction and trend_ema is not None:
-                if direction == "long" and price <= trend_ema[i]:
-                    direction = None
-                elif direction == "short" and price >= trend_ema[i]:
-                    direction = None
-
-            if direction and cfg.get("stoch_cross_rp_filter_enabled", False) and snap:
-                if direction == "long" and price >= snap["mid_price"]:
-                    direction = None
-                elif direction == "short" and price <= snap["mid_price"]:
-                    direction = None
-
-            if direction and cfg.get("stoch_cross_require_squeeze", False) and not squeeze_before_entry:
-                direction = None
-
-            if direction:
-                size = (margin * leverage) / price
-                position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
-                            "sl_price": None, "tp_price": None}
-                if atr_series and atr_series[i]:
-                    risk = atr_series[i] * cfg["stoch_cross_sl_atr_mult"]
-                    reward = atr_series[i] * cfg["stoch_cross_tp_atr_mult"]
-                    position["sl_price"] = price - risk if direction == "long" else price + risk
-                    position["tp_price"] = price + reward if direction == "long" else price - reward
-
-        last_k = curr_k
-
-    return trades
 
 
 def backtest_range_profile(candles, cfg):
@@ -1839,55 +1294,25 @@ def backtest_fib_reversal(candles, cfg):
     return trades
 
 
-def backtest_pp_supertrend(candles, cfg, htf_candles=None):
+def backtest_zscore_trend(candles, cfg):
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
-    prd = cfg["pps_period"]
-    factor = cfg["pps_atr_factor"]
-    atr_period = cfg["pps_atr_period"]
-    tp_usd = cfg["pps_tp_usd"]
-    sl_usd = cfg["pps_sl_usd"]
-    breakeven_enabled = cfg.get("pps_breakeven_enabled", False)
-    breakeven_trigger = cfg.get("pps_breakeven_trigger_usd", 2)
-    breakeven_lock = cfg.get("pps_breakeven_lock_usd", 0.1)
-    exit_mode = cfg.get("pps_exit_mode", "tp_sl")
+    lookback = cfg["zscore_lookback_period"]
+    ema_smooth = cfg["zscore_ema_smooth"]
+    sl_usd = cfg["zscore_sl_usd"]
+    tp1_usd = cfg["zscore_tp1_usd"]
+    tp1_close_pct = cfg["zscore_tp1_close_pct"] / 100
+    breakeven_lock = cfg["zscore_breakeven_lock_usd"]
+    tp2_usd = cfg["zscore_tp2_usd"]
 
-    adx_filter_enabled = cfg.get("pps_adx_filter_enabled", False)
-    adx_period = cfg.get("pps_adx_period", 14)
-    adx_threshold = cfg.get("pps_adx_threshold", 20)
-    adx_series = compute_adx(h, l, c, adx_period) if adx_filter_enabled else None
+    smooth_z = compute_zscore_trend(c, lookback, ema_smooth)
+    trend = [1 if z > 0 else -1 for z in smooth_z]
 
-    htf_filter_enabled = cfg.get("pps_htf_filter_enabled", False) and htf_candles is not None
-    htf_dir_per_bar = None
-    if htf_filter_enabled:
-        htf_ema_period = cfg.get("pps_htf_ema_period", 50)
-        htf_ts, _, _, _, htf_c = htf_candles
-        if len(htf_c) > htf_ema_period:
-            htf_ema = _ema_series(htf_c, htf_ema_period)
-            htf_dir_per_bar = _align_htf_direction(ts, htf_ts, htf_c, htf_ema)
-        else:
-            htf_filter_enabled = False
-
-    atr_series = compute_atr(h, l, c, atr_period)
-    centers = compute_pivot_centers(h, l, prd)
-    trend, _, _ = compute_pivot_supertrend_trend(c, atr_series, centers, factor)
-
-    warmup = max(prd * 3, atr_period + 2)
-    if adx_filter_enabled:
-        warmup = max(warmup, adx_period * 3)
-    position = None
+    warmup = lookback + 5
+    position = None  # {"dir","entry","size","tp1_done","entry_i"}
     trades = []
     last_trend = None
-    breakeven_triggered = False
-    pending_direction = None  # Richtung eines geblockten Signals, wartet auf Nachtrigger
-
-    def _filter_ok(i, direction):
-        if adx_filter_enabled and adx_series is not None and adx_series[i] < adx_threshold:
-            return False
-        if htf_filter_enabled and htf_dir_per_bar is not None and htf_dir_per_bar[i] is not None and htf_dir_per_bar[i] != direction:
-            return False
-        return True
 
     for i in range(warmup, n):
         price = c[i]
@@ -1895,101 +1320,41 @@ def backtest_pp_supertrend(candles, cfg, htf_candles=None):
         if position is not None:
             direction, entry, size = position["dir"], position["entry"], position["size"]
             pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            sl_floor = -sl_usd
-            if breakeven_enabled:
-                if not breakeven_triggered and pnl_usd >= breakeven_trigger:
-                    breakeven_triggered = True
-                if breakeven_triggered:
-                    sl_floor = breakeven_lock
-            if pnl_usd <= sl_floor:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
-                position = None
-                breakeven_triggered = False
-            elif exit_mode == "tp_sl" and pnl_usd >= tp_usd:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
-                position = None
-                breakeven_triggered = False
+            if not position["tp1_done"]:
+                if pnl_usd <= -sl_usd:
+                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                    position = None
+                elif pnl_usd >= tp1_usd:
+                    close_size = size * tp1_close_pct
+                    _bt_close_trade(trades, direction, entry, price, close_size, i, position["entry_i"], "TP1")
+                    position["size"] -= close_size
+                    position["tp1_done"] = True
+            else:
+                if pnl_usd <= breakeven_lock:
+                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "BREAKEVEN-LOCK")
+                    position = None
+                elif pnl_usd >= tp2_usd:
+                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP2")
+                    position = None
 
         curr_trend = trend[i]
         if last_trend is not None and curr_trend != last_trend:
             direction = "long" if curr_trend == 1 else "short"
             if position is not None and position["dir"] != direction:
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PPS-REVERSE")
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ZSCORE-REVERSE")
                 position = None
             if position is None:
-                if _filter_ok(i, direction):
-                    size = (margin * leverage) / price
-                    position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                    breakeven_triggered = False
-                    pending_direction = None
-                else:
-                    pending_direction = direction
-            last_trend = curr_trend
-        elif (pending_direction is not None and position is None
-              and curr_trend == (1 if pending_direction == "long" else -1)
-              and _filter_ok(i, pending_direction)):
-            # Nachtriggern: Trend seit dem geblockten Signal unveraendert, Filter jetzt erfuellt
-            size = (margin * leverage) / price
-            position = {"dir": pending_direction, "entry": price, "size": size, "entry_i": i}
-            breakeven_triggered = False
-            pending_direction = None
-
-    return trades
-
-
-def backtest_nsdt_channel(candles, cfg):
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    length = cfg["nsdt_length"]
-    upperspace = cfg["nsdt_upperspace"]
-    lowerspace = cfg["nsdt_lowerspace"]
-    tp_usd = cfg["nsdt_tp_usd"]
-    sl_usd = cfg["nsdt_sl_usd"]
-
-    upper, lower = compute_nsdt_channel(h, l, length, upperspace, lowerspace)
-
-    warmup = length + 3
-    position = None
-    trades = []
-
-    for i in range(warmup, n):
-        price = c[i]
-
-        if position is not None:
-            direction, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            if pnl_usd <= -sl_usd:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
-                position = None
-            elif pnl_usd >= tp_usd:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
-                position = None
-
-        if upper[i] is None or lower[i] is None or upper[i - 2] is None or lower[i - 2] is None:
-            continue
-
-        go_long = lower[i] > lower[i - 1] > lower[i - 2]
-        go_short = upper[i] < upper[i - 1] < upper[i - 2]
-        direction = None
-        if go_long and not go_short:
-            direction = "long"
-        elif go_short and not go_long:
-            direction = "short"
-
-        if direction and position is None:
-            size = (margin * leverage) / price
-            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "tp1_done": False, "entry_i": i}
+        last_trend = curr_trend
 
     return trades
 
 
 BACKTEST_FUNCS = {
-    "stoch_cross": backtest_stoch_cross,
     "range_profile": backtest_range_profile,
     "fib_reversal": backtest_fib_reversal,
-    "pp_supertrend": backtest_pp_supertrend,
-    "nsdt_channel": backtest_nsdt_channel,
+    "zscore_trend": backtest_zscore_trend,
 }
 
 
@@ -2061,11 +1426,10 @@ def _trim_candles_to_days(candles, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur stoch_cross, range_profile, fib_reversal, pp_supertrend, nsdt_channel - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
-    resolution_key = {"stoch_cross": "stoch_cross_resolution",
-                       "range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
-                       "pp_supertrend": "pps_resolution", "nsdt_channel": "nsdt_resolution"}[entry_mode]
+    resolution_key = {"range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
+                       "zscore_trend": "zscore_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
     if resolution in SUB_MINUTE_RESOLUTIONS:
@@ -2100,15 +1464,8 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
 
     n_candles = len(candles[4])
-    if entry_mode == "pp_supertrend" and cfg.get("pps_htf_filter_enabled", False):
-        htf_resolution = cfg.get("pps_htf_resolution", "1h")
-        htf_candles, htf_err = await fetch_historical_candles_binance(symbol, htf_resolution, days, max_candles)
-        if htf_err or not htf_candles:
-            return {"error": f"Higher-Timeframe-Kerzen ({htf_resolution}) konnten nicht geladen werden: {htf_err or 'keine Daten'}"}
-        trades = backtest_pp_supertrend(candles, cfg, htf_candles=htf_candles)
-    else:
-        backtest_fn = BACKTEST_FUNCS[entry_mode]
-        trades = backtest_fn(candles, cfg)
+    backtest_fn = BACKTEST_FUNCS[entry_mode]
+    trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades)
 
     actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
@@ -2119,220 +1476,3 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         "stats": stats, "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
     }
 
-
-async def run_backtest_sweep_pp_supertrend(symbol, base_cfg, days, sweep_atr_period=False):
-    """Parameter-Sweep fuer Pivot-Point-SuperTrend: Pivot-Periode (ganzzahlig 1-10)
-    x ATR-Faktor (0.5-5.0 in 0.1-Schritten, 46 Werte) = 460 Kombinationen. Zeitrahmen
-    bleibt fix (wie in den gespeicherten Einstellungen).
-    Optional (sweep_atr_period=True) wird zusaetzlich die ATR-Periode (ganzzahlig 5-20,
-    16 Werte) mitgetestet -> 460 x 16 = 7.360 Kombinationen. Das ist deutlich langsamer,
-    da die ATR-Reihe dann pro ATR-Periode neu berechnet werden muss (die teure
-    Pivot-Erkennung bleibt weiterhin nur 10x noetig, unabhaengig von der ATR-Periode).
-    Ist sweep_atr_period=False (Default), bleibt die ATR-Periode fix wie bisher."""
-    resolution = base_cfg.get("pps_resolution", "1m")
-    max_candles = BACKTEST_MAX_CANDLES["pp_supertrend"]
-    if resolution in SUB_MINUTE_RESOLUTIONS:
-        max_candles = min(max_candles, 5000)
-
-    cache_key = (symbol, resolution)
-    cached = _backtest_cache_get(cache_key)
-    now = time.time()
-
-    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
-            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
-            and len(cached["candles"][4]) >= 100):
-        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
-    else:
-        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
-        if err:
-            return {"error": err}
-        if candles:
-            _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
-
-    if not candles or len(candles[4]) < 100:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-
-    ts, o, h, l, c = candles
-    fixed_atr_period = base_cfg.get("pps_atr_period", 10)
-    tp_usd = base_cfg.get("pps_tp_usd", 3)
-    sl_usd = base_cfg.get("pps_sl_usd", 3)
-    breakeven_enabled = base_cfg.get("pps_breakeven_enabled", False)
-    breakeven_trigger = base_cfg.get("pps_breakeven_trigger_usd", 2)
-    breakeven_lock = base_cfg.get("pps_breakeven_lock_usd", 0.1)
-    exit_mode = base_cfg.get("pps_exit_mode", "tp_sl")
-    margin, leverage = base_cfg["margin"], base_cfg["leverage"]
-
-    periods = list(range(1, 11))  # 1..10
-    factors = [round(0.5 + i * 0.1, 1) for i in range(46)]  # 0.5..5.0 in 0.1-Schritten
-    atr_periods = list(range(5, 21)) if sweep_atr_period else [fixed_atr_period]  # 5..20 ganzzahlig, sonst fix
-
-    # Pivot-Erkennung haengt nur von prd ab -> unabhaengig von ATR-Periode/Faktor nur 1x pro Periode berechnen
-    centers_by_period = {prd: compute_pivot_centers(h, l, prd) for prd in periods}
-
-    results = []
-    for atr_period in atr_periods:
-        atr_series = compute_atr(h, l, c, atr_period)  # muss pro ATR-Periode neu berechnet werden
-        for prd in periods:
-            centers = centers_by_period[prd]
-            warmup = max(prd * 3, atr_period + 2)
-            for factor in factors:
-                trend, _, _ = compute_pivot_supertrend_trend(c, atr_series, centers, factor)  # billig
-
-                position = None
-                trades = []
-                last_trend = None
-                breakeven_triggered = False
-                for i in range(warmup, len(c)):
-                    price = c[i]
-                    if position is not None:
-                        direction, entry, size = position["dir"], position["entry"], position["size"]
-                        pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-                        sl_floor = -sl_usd
-                        if breakeven_enabled:
-                            if not breakeven_triggered and pnl_usd >= breakeven_trigger:
-                                breakeven_triggered = True
-                            if breakeven_triggered:
-                                sl_floor = breakeven_lock
-                        if pnl_usd <= sl_floor:
-                            _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
-                            position = None
-                            breakeven_triggered = False
-                        elif exit_mode == "tp_sl" and pnl_usd >= tp_usd:
-                            _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
-                            position = None
-                            breakeven_triggered = False
-                    curr_trend = trend[i]
-                    if last_trend is not None and curr_trend != last_trend:
-                        direction = "long" if curr_trend == 1 else "short"
-                        if position is None:
-                            size = (margin * leverage) / price
-                            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                            breakeven_triggered = False
-                        elif position["dir"] != direction:
-                            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PPS-REVERSE")
-                            size = (margin * leverage) / price
-                            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                            breakeven_triggered = False
-                    last_trend = curr_trend
-
-                stats = summarize_backtest_trades(trades)
-                results.append({
-                    "label": f"Periode {prd}, ATR-Faktor {factor}" + (f", ATR-Periode {atr_period}" if sweep_atr_period else ""),
-                    "period": prd, "atr_factor": factor, "atr_period": atr_period,
-                    "stats": stats,
-                })
-
-    results = [r for r in results if r["stats"]["total_pnl_usd"] > 0]  # nur profitable Kombinationen
-    results.sort(key=lambda r: r["stats"]["total_pnl_usd"], reverse=True)
-    n_candles = len(c)
-    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "entry_mode": "pp_supertrend", "resolution": resolution,
-        "candles_processed": n_candles, "actual_days_covered": round(actual_days, 1),
-        "combinations_tested": len(results), "sweep_atr_period": sweep_atr_period,
-        "results": results,
-    }
-
-
-async def run_backtest_sweep_pp_tpsl(symbol, base_cfg, days):
-    """TP/SL-Sweep fuer Pivot-Point-SuperTrend: Periode und ATR-Faktor bleiben bei den
-    gespeicherten Einstellungen fix, dafuer wird TP $1-20 x SL $1-20 komplett
-    durchgetestet (400 Kombinationen). Getrennt vom Perioden/ATR-Sweep, weil eine
-    Kombination aller vier Dimensionen (460 x 400 = 184.000) viel zu lange dauern wuerde -
-    die teure Trend-Berechnung laeuft hier nur EINMAL, danach nur noch die guenstige
-    SL/TP-Simulation pro Kombination."""
-    resolution = base_cfg.get("pps_resolution", "1m")
-    max_candles = BACKTEST_MAX_CANDLES["pp_supertrend"]
-    if resolution in SUB_MINUTE_RESOLUTIONS:
-        max_candles = min(max_candles, 5000)
-
-    cache_key = (symbol, resolution)
-    cached = _backtest_cache_get(cache_key)
-    now = time.time()
-
-    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
-            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
-            and len(cached["candles"][4]) >= 100):
-        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
-    else:
-        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
-        if err:
-            return {"error": err}
-        if candles:
-            _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
-
-    if not candles or len(candles[4]) < 100:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-
-    ts, o, h, l, c = candles
-    prd = base_cfg.get("pps_period", 2)
-    factor = base_cfg.get("pps_atr_factor", 3)
-    atr_period = base_cfg.get("pps_atr_period", 10)
-    breakeven_enabled = base_cfg.get("pps_breakeven_enabled", False)
-    breakeven_trigger = base_cfg.get("pps_breakeven_trigger_usd", 2)
-    breakeven_lock = base_cfg.get("pps_breakeven_lock_usd", 0.1)
-    exit_mode = base_cfg.get("pps_exit_mode", "tp_sl")
-    margin, leverage = base_cfg["margin"], base_cfg["leverage"]
-
-    atr_series = compute_atr(h, l, c, atr_period)
-    centers = compute_pivot_centers(h, l, prd)  # nur EINMAL, teuer
-    trend, _, _ = compute_pivot_supertrend_trend(c, atr_series, centers, factor)  # nur EINMAL
-    warmup = max(prd * 3, atr_period + 2)
-
-    results = []
-    for tp_usd in range(1, 21):
-        for sl_usd in range(1, 21):
-            position = None
-            trades = []
-            last_trend = None
-            breakeven_triggered = False
-            for i in range(warmup, len(c)):
-                price = c[i]
-                if position is not None:
-                    direction, entry, size = position["dir"], position["entry"], position["size"]
-                    pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-                    sl_floor = -sl_usd
-                    if breakeven_enabled:
-                        if not breakeven_triggered and pnl_usd >= breakeven_trigger:
-                            breakeven_triggered = True
-                        if breakeven_triggered:
-                            sl_floor = breakeven_lock
-                    if pnl_usd <= sl_floor:
-                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
-                        position = None
-                        breakeven_triggered = False
-                    elif exit_mode == "tp_sl" and pnl_usd >= tp_usd:
-                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
-                        position = None
-                        breakeven_triggered = False
-                curr_trend = trend[i]
-                if last_trend is not None and curr_trend != last_trend:
-                    direction = "long" if curr_trend == 1 else "short"
-                    if position is None:
-                        size = (margin * leverage) / price
-                        position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                        breakeven_triggered = False
-                    elif position["dir"] != direction:
-                        _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PPS-REVERSE")
-                        size = (margin * leverage) / price
-                        position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
-                        breakeven_triggered = False
-                last_trend = curr_trend
-
-            stats = summarize_backtest_trades(trades)
-            results.append({
-                "label": f"TP ${tp_usd} / SL ${sl_usd}",
-                "tp_usd": tp_usd, "sl_usd": sl_usd,
-                "stats": stats,
-            })
-
-    results = [r for r in results if r["stats"]["total_pnl_usd"] > 0]  # nur profitable Kombinationen
-    results.sort(key=lambda r: r["stats"]["total_pnl_usd"], reverse=True)
-    n_candles = len(c)
-    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "entry_mode": "pp_supertrend", "resolution": resolution,
-        "candles_processed": n_candles, "actual_days_covered": round(actual_days, 1),
-        "combinations_tested": len(results),
-        "results": results,
-    }
