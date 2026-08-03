@@ -546,17 +546,20 @@ def compute_zscore_trend(closes, lookback_period, ema_smooth):
 
 
 async def zscore_trend_poll_loop(symbol):
-    """Eigene Strategie 'Z-Score-Trend': ueber der Nulllinie = long, unter der Nulllinie =
-    short (siehe compute_zscore_trend). TP1 (fester $-Betrag) schliesst einen Teil der
-    Position und setzt den SL auf Einstieg + Lock-Betrag (im Plus). TP2 (fester $-Betrag)
-    schliesst den Rest final. TP1/TP2/SL-Pruefung passiert pro Live-Tick in on_price_update,
-    hier wird nur das Signal (Nulllinien-Durchgang bei Kerzenschluss) erkannt. Ein
-    Gegensignal (Nulllinie in die andere Richtung gekreuzt) schliesst die Position sofort
-    komplett, egal ob TP1 schon erreicht war, und eroeffnet direkt die Gegenposition -
+    """Eigene Strategie 'Z-Score-Trend': zwei getrennte, einstellbare Schwellen statt
+    starrem Nulllinien-Durchgang (siehe compute_zscore_trend fuer die Z-Score-Berechnung).
+    Long-Signal: die geglaettete Z-Score-Linie kommt von unten und kreuzt long_threshold
+    nach oben (gruen). Short-Signal: sie kommt von oben und kreuzt short_threshold nach
+    unten (rot). Die beiden Schwellen muessen nicht symmetrisch sein (z.B. Long bei 0.1,
+    Short erst bei 0.5). TP1 (fester $-Betrag) schliesst einen Teil der Position und setzt
+    den SL auf Einstieg + Lock-Betrag (im Plus). TP2 (fester $-Betrag) schliesst den Rest
+    final. TP1/TP2/SL-Pruefung passiert pro Live-Tick in on_price_update, hier wird nur
+    das Kreuzungs-Signal bei Kerzenschluss erkannt. Ein Gegensignal schliesst die Position
+    sofort komplett, egal ob TP1 schon erreicht war, und eroeffnet direkt die Gegenposition -
     gleiches Verhalten wie bei Pivot-SuperTrend."""
     b = BOTS[symbol]
     last_processed_ts = None
-    last_trend = None
+    prev_z = None
     last_heartbeat = 0.0
 
     while True:
@@ -565,6 +568,8 @@ async def zscore_trend_poll_loop(symbol):
             if cfg["entry_mode"] == "zscore_trend":
                 lookback = cfg["zscore_lookback_period"]
                 ema_smooth = cfg["zscore_ema_smooth"]
+                long_th = cfg["zscore_long_threshold"]
+                short_th = cfg["zscore_short_threshold"]
                 needed_bars = min(1000, max(lookback * 4, 60) + 5)
                 resolution = cfg["zscore_resolution"]
 
@@ -590,24 +595,25 @@ async def zscore_trend_poll_loop(symbol):
                     smooth_z = compute_zscore_trend(closed_c, lookback, ema_smooth)
                     st = b["state"]
                     curr_z = smooth_z[-1]
-                    curr_trend = 1 if curr_z > 0 else -1
                     st["zscore_value"] = round(curr_z, 3)
-                    st["zscore_trend"] = curr_trend
 
                     if due_heartbeat:
                         last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] Z-Score-Trend aktiv: Z={curr_z:.2f}, Trend={curr_trend}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                        debug_log(f"💓 [{symbol}] Z-Score-Trend aktiv: Z={curr_z:.2f} (Long-Schwelle {long_th}, Short-Schwelle {short_th}), Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
                     signal_key = closed_ts[-1]
                     is_new_candle = last_processed_ts != signal_key
                     if is_new_candle:
                         last_processed_ts = signal_key
 
-                    trend_flipped = is_new_candle and last_trend is not None and curr_trend != last_trend
+                    long_signal = is_new_candle and prev_z is not None and prev_z <= long_th and curr_z > long_th
+                    short_signal = is_new_candle and prev_z is not None and prev_z >= short_th and curr_z < short_th
 
-                    if trend_flipped and cfg["bot_active"]:
-                        direction = "long" if curr_trend == 1 else "short"
+                    direction = "long" if long_signal else ("short" if short_signal else None)
+
+                    if direction and cfg["bot_active"]:
                         price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                        st["zscore_trend"] = 1 if direction == "long" else -1
 
                         if st["position"] is not None and st["position"] != direction:
                             debug_log(f"🔄 [{symbol}] Z-Score-Trend Signal-Umkehr: {direction.upper()} @ {price} (Z {curr_z:.2f})")
@@ -619,7 +625,7 @@ async def zscore_trend_poll_loop(symbol):
                             await execute_entry(symbol, direction, price_after, is_add_on=False)
 
                     if is_new_candle:
-                        last_trend = curr_trend
+                        prev_z = curr_z
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -1300,6 +1306,8 @@ def backtest_zscore_trend(candles, cfg):
     margin, leverage = cfg["margin"], cfg["leverage"]
     lookback = cfg["zscore_lookback_period"]
     ema_smooth = cfg["zscore_ema_smooth"]
+    long_th = cfg["zscore_long_threshold"]
+    short_th = cfg["zscore_short_threshold"]
     sl_usd = cfg["zscore_sl_usd"]
     tp1_usd = cfg["zscore_tp1_usd"]
     tp1_close_pct = cfg["zscore_tp1_close_pct"] / 100
@@ -1307,12 +1315,10 @@ def backtest_zscore_trend(candles, cfg):
     tp2_usd = cfg["zscore_tp2_usd"]
 
     smooth_z = compute_zscore_trend(c, lookback, ema_smooth)
-    trend = [1 if z > 0 else -1 for z in smooth_z]
 
     warmup = lookback + 5
     position = None  # {"dir","entry","size","tp1_done","entry_i"}
     trades = []
-    last_trend = None
 
     for i in range(warmup, n):
         price = c[i]
@@ -1337,16 +1343,18 @@ def backtest_zscore_trend(candles, cfg):
                     _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP2")
                     position = None
 
-        curr_trend = trend[i]
-        if last_trend is not None and curr_trend != last_trend:
-            direction = "long" if curr_trend == 1 else "short"
+        prev_z, curr_z = smooth_z[i - 1], smooth_z[i]
+        long_signal = prev_z <= long_th and curr_z > long_th
+        short_signal = prev_z >= short_th and curr_z < short_th
+        direction = "long" if long_signal else ("short" if short_signal else None)
+
+        if direction:
             if position is not None and position["dir"] != direction:
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ZSCORE-REVERSE")
                 position = None
             if position is None:
                 size = (margin * leverage) / price
                 position = {"dir": direction, "entry": price, "size": size, "tp1_done": False, "entry_i": i}
-        last_trend = curr_trend
 
     return trades
 

@@ -228,6 +228,8 @@ def default_config():
         "zscore_resolution": os.getenv("ZSCORE_RESOLUTION", "1m"),
         "zscore_lookback_period": int(os.getenv("ZSCORE_LOOKBACK_PERIOD", "20")),
         "zscore_ema_smooth": int(os.getenv("ZSCORE_EMA_SMOOTH", "3")),
+        "zscore_long_threshold": float(os.getenv("ZSCORE_LONG_THRESHOLD", "0.1")),
+        "zscore_short_threshold": float(os.getenv("ZSCORE_SHORT_THRESHOLD", "0.5")),
         "zscore_sl_usd": float(os.getenv("ZSCORE_SL_USD", "3")),
         "zscore_tp1_usd": float(os.getenv("ZSCORE_TP1_USD", "3")),
         "zscore_tp1_close_pct": float(os.getenv("ZSCORE_TP1_CLOSE_PCT", "50")),
@@ -756,7 +758,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="obi_scalp">OBI-Scalp (Orderbuch-Ungleichgewicht, symmetrisches TP/SL)</option>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
       <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, fester TP/SL)</option>
-      <option value="zscore_trend">Z-Score-Trend (über 0 = Long, unter 0 = Short, TP1 Teilverkauf + Break-Even, TP2 final)</option>
+      <option value="zscore_trend">Z-Score-Trend (2 einstellbare Schwellen: Long-Kreuzung von unten, Short-Kreuzung von oben, TP1 Teilverkauf + Break-Even, TP2 final)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -888,6 +890,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="zscore_trend"><label>Lookback-Periode</label><input type="number" step="1" id="zscore_lookback_period"></div>
   <div data-mode="zscore_trend"><label>EMA-Glättung des Z-Score</label><input type="number" step="1" id="zscore_ema_smooth"></div>
+  <div data-mode="zscore_trend"><label>Long-Schwelle (grün, Kreuzung von unten nach oben)</label><input type="number" step="0.1" id="zscore_long_threshold"></div>
+  <div data-mode="zscore_trend"><label>Short-Schwelle (rot, Kreuzung von oben nach unten)</label><input type="number" step="0.1" id="zscore_short_threshold"></div>
   <div data-mode="zscore_trend"><label>SL vor TP1 ($, fest)</label><input type="number" step="any" id="zscore_sl_usd"></div>
   <div data-mode="zscore_trend"><label>TP1 ($, fest) - löst Teilverkauf + Break-Even aus</label><input type="number" step="any" id="zscore_tp1_usd"></div>
   <div data-mode="zscore_trend"><label>TP1 Teilverkauf (%)</label><input type="number" step="1" id="zscore_tp1_close_pct"></div>
@@ -1229,6 +1233,8 @@ async function refresh() {
     document.getElementById('zscore_resolution').value = data.config.zscore_resolution;
     document.getElementById('zscore_lookback_period').value = data.config.zscore_lookback_period;
     document.getElementById('zscore_ema_smooth').value = data.config.zscore_ema_smooth;
+    document.getElementById('zscore_long_threshold').value = data.config.zscore_long_threshold;
+    document.getElementById('zscore_short_threshold').value = data.config.zscore_short_threshold;
     document.getElementById('zscore_sl_usd').value = data.config.zscore_sl_usd;
     document.getElementById('zscore_tp1_usd').value = data.config.zscore_tp1_usd;
     document.getElementById('zscore_tp1_close_pct').value = data.config.zscore_tp1_close_pct;
@@ -1374,6 +1380,8 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     zscore_resolution: document.getElementById('zscore_resolution').value,
     zscore_lookback_period: parseInt(document.getElementById('zscore_lookback_period').value),
     zscore_ema_smooth: parseInt(document.getElementById('zscore_ema_smooth').value),
+    zscore_long_threshold: parseFloat(document.getElementById('zscore_long_threshold').value),
+    zscore_short_threshold: parseFloat(document.getElementById('zscore_short_threshold').value),
     zscore_sl_usd: parseFloat(document.getElementById('zscore_sl_usd').value),
     zscore_tp1_usd: parseFloat(document.getElementById('zscore_tp1_usd').value),
     zscore_tp1_close_pct: parseFloat(document.getElementById('zscore_tp1_close_pct').value),
@@ -1419,7 +1427,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_lock_usd','zscore_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_long_threshold','zscore_short_threshold','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_lock_usd','zscore_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1507,7 +1515,8 @@ async def handle_config_update(request):
                 "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_tp_usd", "rp_sl_usd",
                 "rp_breakeven_enabled", "rp_breakeven_trigger_usd", "rp_breakeven_lock_usd",
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
-                "zscore_resolution", "zscore_lookback_period", "zscore_ema_smooth", "zscore_sl_usd",
+                "zscore_resolution", "zscore_lookback_period", "zscore_ema_smooth",
+                "zscore_long_threshold", "zscore_short_threshold", "zscore_sl_usd",
                 "zscore_tp1_usd", "zscore_tp1_close_pct", "zscore_breakeven_lock_usd", "zscore_tp2_usd"]:
         if key in body:
             cfg[key] = body[key]
