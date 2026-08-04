@@ -612,6 +612,12 @@ async def zscore_trend_poll_loop(symbol):
                     long_signal = is_new_candle and prev_z is not None and prev_z <= long_th and curr_z > long_th
                     short_signal = is_new_candle and prev_z is not None and prev_z >= short_th and curr_z < short_th
 
+                    dir_mode = cfg.get("zscore_direction_mode", "both")
+                    if dir_mode == "long_only":
+                        short_signal = False
+                    elif dir_mode == "short_only":
+                        long_signal = False
+
                     direction = "long" if long_signal else ("short" if short_signal else None)
 
                     if direction and cfg["bot_active"]:
@@ -1319,6 +1325,7 @@ def backtest_zscore_trend(candles, cfg):
     sl_enabled = cfg.get("zscore_sl_enabled", True)
     breakeven_enabled = cfg.get("zscore_breakeven_enabled", True)
     tp2_enabled = cfg.get("zscore_tp2_enabled", True)
+    dir_mode = cfg.get("zscore_direction_mode", "both")
 
     smooth_z = compute_zscore_trend(c, lookback, ema_smooth)
 
@@ -1352,6 +1359,10 @@ def backtest_zscore_trend(candles, cfg):
         prev_z, curr_z = smooth_z[i - 1], smooth_z[i]
         long_signal = prev_z <= long_th and curr_z > long_th
         short_signal = prev_z >= short_th and curr_z < short_th
+        if dir_mode == "long_only":
+            short_signal = False
+        elif dir_mode == "short_only":
+            long_signal = False
         direction = "long" if long_signal else ("short" if short_signal else None)
 
         if direction:
