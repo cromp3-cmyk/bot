@@ -546,20 +546,18 @@ def compute_zscore_trend(closes, lookback_period, ema_smooth):
 
 
 async def zscore_trend_poll_loop(symbol):
-    """Eigene Strategie 'Z-Score-Trend': zwei getrennte, einstellbare Schwellen statt
-    starrem Nulllinien-Durchgang (siehe compute_zscore_trend fuer die Z-Score-Berechnung).
-    Long-Signal: die geglaettete Z-Score-Linie kommt von unten und kreuzt long_threshold
-    nach oben (gruen). Short-Signal: sie kommt von oben und kreuzt short_threshold nach
-    unten (rot). Die beiden Schwellen muessen nicht symmetrisch sein (z.B. Long bei 0.1,
-    Short erst bei 0.5). TP1 (fester $-Betrag) schliesst einen Teil der Position und setzt
-    den SL auf Einstieg + Lock-Betrag (im Plus). TP2 (fester $-Betrag) schliesst den Rest
-    final. TP1/TP2/SL-Pruefung passiert pro Live-Tick in on_price_update, hier wird nur
-    das Kreuzungs-Signal bei Kerzenschluss erkannt. Ein Gegensignal schliesst die Position
-    sofort komplett, egal ob TP1 schon erreicht war, und eroeffnet direkt die Gegenposition -
-    gleiches Verhalten wie bei Pivot-SuperTrend."""
+    """Eigene Strategie 'Z-Score-Trend': eine Schwelle X (Long bei +X, Short bei -X,
+    siehe compute_zscore_trend fuer die Z-Score-Berechnung). Ausstieg (falls TP noch
+    nicht erreicht): Rueckkreuzung der Nulllinie. TP1 (fester $-Betrag) schliesst einen
+    Teil der Position und setzt den SL auf Einstieg + Lock-Betrag (im Plus). TP2 (fester
+    $-Betrag) schliesst den Rest final.
+
+    Dieser Loop holt nur alle 5 Sek. die historischen (abgeschlossenen) Kerzen und
+    cached die Fensterdaten (letzte Schlusskurse + zuletzt bestaetigter geglaetteter
+    Z-Score als EMA-Ausgangswert). Die eigentliche Signal-Erkennung (Einstieg UND
+    Nulllinien-Exit) laeuft tick-basiert in on_price_update, damit kein Kerzenschluss
+    abgewartet werden muss."""
     b = BOTS[symbol]
-    last_processed_ts = None
-    prev_z = None
     last_heartbeat = 0.0
 
     while True:
@@ -571,7 +569,6 @@ async def zscore_trend_poll_loop(symbol):
                 threshold = cfg["zscore_threshold"]
                 needed_bars = min(1000, max(lookback * 4, 60) + 5)
                 resolution = cfg["zscore_resolution"]
-                use_live_candle = cfg.get("zscore_use_live_candle", False)
 
                 if resolution in SUB_MINUTE_RESOLUTIONS:
                     local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
@@ -583,17 +580,8 @@ async def zscore_trend_poll_loop(symbol):
                     data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
                     if data:
                         timestamps, opens, highs, lows, closes = data
-                        if use_live_candle:
-                            # Optional: auch die noch laufende (unfertige) Kerze verwenden,
-                            # damit auf Kreuzungen reagiert wird sobald sie live passieren
-                            # (wie bei TradingView) statt erst beim naechsten Kerzenschluss.
-                            # Achtung Repainting: das Signal kann sich nochmal aendern,
-                            # bevor die Kerze wirklich schliesst.
-                            closed_ts = timestamps
-                            closed_c = closes
-                        else:
-                            closed_ts = timestamps[:-1]
-                            closed_c = closes[:-1]
+                        closed_ts = timestamps[:-1]
+                        closed_c = closes[:-1]
                     else:
                         closed_ts = None
 
@@ -604,6 +592,11 @@ async def zscore_trend_poll_loop(symbol):
                     smooth_z = compute_zscore_trend(closed_c, lookback, ema_smooth)
                     st = b["state"]
                     curr_z = smooth_z[-1]
+
+                    # Cache fuer die tick-basierte Live-Auswertung in on_price_update
+                    st["zscore_window_closes"] = closed_c[-(lookback - 1):]
+                    st["zscore_ema_seed"] = curr_z
+
                     st["zscore_value"] = round(curr_z, 3)
                     st["zscore_history"].append({"ts": int(time.time() * 1000), "z": round(curr_z, 3)})
                     if len(st["zscore_history"]) > 300:
@@ -612,50 +605,6 @@ async def zscore_trend_poll_loop(symbol):
                     if due_heartbeat:
                         last_heartbeat = now
                         debug_log(f"💓 [{symbol}] Z-Score-Trend aktiv: Z={curr_z:.2f} (Schwelle ±{threshold}), Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    signal_key = closed_ts[-1]
-                    is_new_candle = last_processed_ts != signal_key
-                    if is_new_candle:
-                        last_processed_ts = signal_key
-                    # Im Live-Kerzen-Modus jeden Poll auswerten (die letzte Kerze aendert
-                    # sich ja staendig), sonst nur bei tatsaechlichem Kerzenschluss
-                    eval_now = True if use_live_candle else is_new_candle
-
-                    # Einstieg: Kreuzung der Schwelle (+threshold fuer Long, -threshold fuer Short).
-                    # Ausstieg (falls TP noch nicht erreicht): Rueckkreuzung der Nulllinie -
-                    # unabhaengig von der Einstiegsschwelle, naeher an 0 dran, damit die Position
-                    # nicht bis zur (weiter entfernten) Gegenschwelle offen bleibt.
-                    long_entry = eval_now and prev_z is not None and prev_z <= threshold and curr_z > threshold
-                    short_entry = eval_now and prev_z is not None and prev_z >= -threshold and curr_z < -threshold
-                    long_exit = eval_now and prev_z is not None and prev_z >= 0 and curr_z < 0
-                    short_exit = eval_now and prev_z is not None and prev_z <= 0 and curr_z > 0
-
-                    dir_mode = cfg.get("zscore_direction_mode", "both")
-                    if dir_mode == "long_only":
-                        short_entry = False
-                    elif dir_mode == "short_only":
-                        long_entry = False
-
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-
-                    # Exit zuerst: falls TP noch nicht (vollstaendig) erreicht wurde, schliesst
-                    # die Nulllinien-Rueckkreuzung die Position, ohne automatisch umzudrehen
-                    if cfg["bot_active"] and st["position"] is not None:
-                        if (st["position"] == "long" and long_exit) or (st["position"] == "short" and short_exit):
-                            debug_log(f"🚪 [{symbol}] Z-Score-Trend Nulllinien-Exit: {st['position'].upper()} @ {price} (Z {curr_z:.2f})")
-                            await execute_exit(symbol, price, "ZSCORE-ZERO-EXIT")
-
-                    # Danach Einstieg pruefen (auch direkt im selben Takt moeglich, falls die
-                    # Position gerade erst durch den Exit oben frei wurde)
-                    direction = "long" if long_entry else ("short" if short_entry else None)
-                    if direction and cfg["bot_active"] and st["position"] is None:
-                        st["zscore_trend"] = 1 if direction == "long" else -1
-                        debug_log(f"📡 [{symbol}] Z-Score-Trend Signal: {direction.upper()} @ {price} (Z {curr_z:.2f})")
-                        price_after = st["last_price"] if st["last_price"] is not None else price
-                        await execute_entry(symbol, direction, price_after, is_add_on=False)
-
-                    if eval_now:
-                        prev_z = curr_z
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -1072,6 +1021,53 @@ async def on_price_update(symbol, price):
         return
 
     if cfg["entry_mode"] == "zscore_trend":
+        # Live-Tick-basierte Signal-Erkennung: kein Warten auf Kerzenschluss mehr, weder
+        # fuer Einstieg noch fuer den Nulllinien-Exit. Die Fensterdaten (Schlusskurse der
+        # letzten abgeschlossenen Kerzen + der zuletzt bestaetigte geglaettete Z-Score als
+        # EMA-Ausgangswert) werden alle 5 Sek. im Poll-Loop aktualisiert; hier wird bei
+        # JEDEM Preis-Tick ein neuer Z-Score mit dem aktuellen Live-Preis als juengstem
+        # Punkt berechnet (ein einzelner EMA-Schritt ab dem gecachten Ausgangswert) -
+        # exakt wie TradingViews live nachgezeichnete, noch nicht abgeschlossene Kerze.
+        window = st.get("zscore_window_closes")
+        seed = st.get("zscore_ema_seed")
+        lookback = cfg.get("zscore_lookback_period")
+        ema_smooth = cfg.get("zscore_ema_smooth")
+        if window and seed is not None and lookback and len(window) >= lookback - 1:
+            full_window = window[-(lookback - 1):] + [price]
+            mean = sum(full_window) / lookback
+            variance = sum((x - mean) ** 2 for x in full_window) / lookback
+            stddev = variance ** 0.5
+            raw_z = (price - mean) / stddev if stddev > 0 else 0.0
+            k = 2 / (ema_smooth + 1)
+            live_z = raw_z * k + seed * (1 - k)
+            st["zscore_value"] = round(live_z, 3)
+
+            threshold = cfg["zscore_threshold"]
+            prev_live_z = st.get("zscore_live_prev_z")
+            long_entry = prev_live_z is not None and prev_live_z <= threshold and live_z > threshold
+            short_entry = prev_live_z is not None and prev_live_z >= -threshold and live_z < -threshold
+            long_exit = prev_live_z is not None and prev_live_z >= 0 and live_z < 0
+            short_exit = prev_live_z is not None and prev_live_z <= 0 and live_z > 0
+            st["zscore_live_prev_z"] = live_z
+
+            dir_mode = cfg.get("zscore_direction_mode", "both")
+            if dir_mode == "long_only":
+                short_entry = False
+            elif dir_mode == "short_only":
+                long_entry = False
+
+            # Exit zuerst: Nulllinien-Rueckkreuzung schliesst sofort, ohne umzudrehen
+            if cfg["bot_active"] and st["position"] is not None:
+                if (st["position"] == "long" and long_exit) or (st["position"] == "short" and short_exit):
+                    debug_log(f"🚪 [{symbol}] Z-Score-Trend Nulllinien-Exit (live): {st['position'].upper()} @ {price} (Z {live_z:.2f})")
+                    await execute_exit(symbol, price, "ZSCORE-ZERO-EXIT")
+
+            direction = "long" if long_entry else ("short" if short_entry else None)
+            if direction and cfg["bot_active"] and st["position"] is None:
+                st["zscore_trend"] = 1 if direction == "long" else -1
+                debug_log(f"📡 [{symbol}] Z-Score-Trend Signal (live): {direction.upper()} @ {price} (Z {live_z:.2f})")
+                await execute_entry(symbol, direction, price, is_add_on=False)
+
         if st["position"] is None:
             st["zscore_tp1_done"] = False
         else:

@@ -229,7 +229,6 @@ def default_config():
         "zscore_lookback_period": int(os.getenv("ZSCORE_LOOKBACK_PERIOD", "20")),
         "zscore_ema_smooth": int(os.getenv("ZSCORE_EMA_SMOOTH", "3")),
         "zscore_threshold": float(os.getenv("ZSCORE_THRESHOLD", "0.1")),  # Long bei +Schwelle, Short bei -Schwelle
-        "zscore_use_live_candle": os.getenv("ZSCORE_USE_LIVE_CANDLE", "false").lower() == "true",
         "zscore_direction_mode": os.getenv("ZSCORE_DIRECTION_MODE", "both"),  # "both", "long_only" oder "short_only"
         "zscore_sl_enabled": os.getenv("ZSCORE_SL_ENABLED", "true").lower() == "true",
         "zscore_breakeven_enabled": os.getenv("ZSCORE_BREAKEVEN_ENABLED", "true").lower() == "true",
@@ -260,6 +259,7 @@ def default_state():
         "rp_osc": None, "rp_mid_price": None, "rp_range_high": None, "rp_range_low": None,
         "rp_breakeven_triggered": False,
         "zscore_value": None, "zscore_trend": None, "zscore_tp1_done": False, "zscore_history": [],
+        "zscore_window_closes": [], "zscore_ema_seed": None, "zscore_live_prev_z": None,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -908,13 +908,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="zscore_trend"><label>Lookback-Periode</label><input type="number" step="1" id="zscore_lookback_period"></div>
   <div data-mode="zscore_trend"><label>EMA-Glättung des Z-Score</label><input type="number" step="1" id="zscore_ema_smooth"></div>
-  <div data-mode="zscore_trend"><label>Schwelle (Long bei +Wert, Short bei -Wert, Nulllinie schließt falls TP nicht erreicht)</label><input type="number" step="0.1" id="zscore_threshold"></div>
-  <div data-mode="zscore_trend"><label>Laufende Kerze verwenden (wie TradingView live, statt erst bei Kerzenschluss zu reagieren)</label>
-    <select class="cfg" id="zscore_use_live_candle">
-      <option value="false">Aus - wartet auf abgeschlossene Kerze (sicherer, kein Repainting, bis zu 1 Min. Verzögerung)</option>
-      <option value="true">An - reagiert sofort auf die noch laufende Kerze (schneller, aber Signal kann sich vor Kerzenschluss nochmal ändern)</option>
-    </select>
-  </div>
+  <div data-mode="zscore_trend"><label>Schwelle (Long bei +Wert, Short bei -Wert, Nulllinie schließt falls TP nicht erreicht - reagiert live pro Tick, kein Warten auf Kerzenschluss)</label><input type="number" step="0.1" id="zscore_threshold"></div>
   <div data-mode="zscore_trend"><label>Richtung</label>
     <select class="cfg" id="zscore_direction_mode">
       <option value="both">Beide (Long + Short)</option>
@@ -1347,7 +1341,6 @@ async function refresh() {
     document.getElementById('zscore_lookback_period').value = data.config.zscore_lookback_period;
     document.getElementById('zscore_ema_smooth').value = data.config.zscore_ema_smooth;
     document.getElementById('zscore_threshold').value = data.config.zscore_threshold;
-    document.getElementById('zscore_use_live_candle').value = String(data.config.zscore_use_live_candle);
     document.getElementById('zscore_direction_mode').value = data.config.zscore_direction_mode;
     document.getElementById('zscore_sl_enabled').value = String(data.config.zscore_sl_enabled);
     document.getElementById('zscore_breakeven_enabled').value = String(data.config.zscore_breakeven_enabled);
@@ -1529,7 +1522,6 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     zscore_lookback_period: parseInt(document.getElementById('zscore_lookback_period').value),
     zscore_ema_smooth: parseInt(document.getElementById('zscore_ema_smooth').value),
     zscore_threshold: parseFloat(document.getElementById('zscore_threshold').value),
-    zscore_use_live_candle: document.getElementById('zscore_use_live_candle').value === 'true',
     zscore_direction_mode: document.getElementById('zscore_direction_mode').value,
     zscore_sl_enabled: document.getElementById('zscore_sl_enabled').value === 'true',
     zscore_breakeven_enabled: document.getElementById('zscore_breakeven_enabled').value === 'true',
@@ -1579,7 +1571,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_use_live_candle','zscore_direction_mode','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1669,7 +1661,7 @@ async def handle_config_update(request):
                 "rp_breakeven_enabled", "rp_breakeven_trigger_usd", "rp_breakeven_lock_usd",
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
                 "zscore_resolution", "zscore_lookback_period", "zscore_ema_smooth",
-                "zscore_threshold", "zscore_use_live_candle", "zscore_direction_mode", "zscore_sl_enabled", "zscore_sl_usd",
+                "zscore_threshold", "zscore_direction_mode", "zscore_sl_enabled", "zscore_sl_usd",
                 "zscore_tp1_usd", "zscore_tp1_close_pct", "zscore_breakeven_enabled", "zscore_breakeven_lock_usd",
                 "zscore_tp2_enabled", "zscore_tp2_usd"]:
         if key in body:
