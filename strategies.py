@@ -1373,6 +1373,12 @@ def backtest_zscore_trend(candles, cfg):
                 size = (margin * leverage) / price
                 position = {"dir": direction, "entry": price, "size": size, "tp1_done": False, "entry_i": i}
 
+    if position is not None:
+        # Position am Ende des Testzeitraums noch offen - nicht stillschweigend fallen
+        # lassen (sonst wuerde ein evtl. Verlust komplett aus der Statistik verschwinden),
+        # sondern zum letzten bekannten Kurs schliessen und klar als solche markieren.
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST")
+
     return trades
 
 
