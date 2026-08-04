@@ -571,6 +571,7 @@ async def zscore_trend_poll_loop(symbol):
                 threshold = cfg["zscore_threshold"]
                 needed_bars = min(1000, max(lookback * 4, 60) + 5)
                 resolution = cfg["zscore_resolution"]
+                use_live_candle = cfg.get("zscore_use_live_candle", False)
 
                 if resolution in SUB_MINUTE_RESOLUTIONS:
                     local = get_seconds_candles(b["state"], SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
@@ -582,8 +583,17 @@ async def zscore_trend_poll_loop(symbol):
                     data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
                     if data:
                         timestamps, opens, highs, lows, closes = data
-                        closed_ts = timestamps[:-1]
-                        closed_c = closes[:-1]
+                        if use_live_candle:
+                            # Optional: auch die noch laufende (unfertige) Kerze verwenden,
+                            # damit auf Kreuzungen reagiert wird sobald sie live passieren
+                            # (wie bei TradingView) statt erst beim naechsten Kerzenschluss.
+                            # Achtung Repainting: das Signal kann sich nochmal aendern,
+                            # bevor die Kerze wirklich schliesst.
+                            closed_ts = timestamps
+                            closed_c = closes
+                        else:
+                            closed_ts = timestamps[:-1]
+                            closed_c = closes[:-1]
                     else:
                         closed_ts = None
 
@@ -607,15 +617,18 @@ async def zscore_trend_poll_loop(symbol):
                     is_new_candle = last_processed_ts != signal_key
                     if is_new_candle:
                         last_processed_ts = signal_key
+                    # Im Live-Kerzen-Modus jeden Poll auswerten (die letzte Kerze aendert
+                    # sich ja staendig), sonst nur bei tatsaechlichem Kerzenschluss
+                    eval_now = True if use_live_candle else is_new_candle
 
                     # Einstieg: Kreuzung der Schwelle (+threshold fuer Long, -threshold fuer Short).
                     # Ausstieg (falls TP noch nicht erreicht): Rueckkreuzung der Nulllinie -
                     # unabhaengig von der Einstiegsschwelle, naeher an 0 dran, damit die Position
                     # nicht bis zur (weiter entfernten) Gegenschwelle offen bleibt.
-                    long_entry = is_new_candle and prev_z is not None and prev_z <= threshold and curr_z > threshold
-                    short_entry = is_new_candle and prev_z is not None and prev_z >= -threshold and curr_z < -threshold
-                    long_exit = is_new_candle and prev_z is not None and prev_z >= 0 and curr_z < 0
-                    short_exit = is_new_candle and prev_z is not None and prev_z <= 0 and curr_z > 0
+                    long_entry = eval_now and prev_z is not None and prev_z <= threshold and curr_z > threshold
+                    short_entry = eval_now and prev_z is not None and prev_z >= -threshold and curr_z < -threshold
+                    long_exit = eval_now and prev_z is not None and prev_z >= 0 and curr_z < 0
+                    short_exit = eval_now and prev_z is not None and prev_z <= 0 and curr_z > 0
 
                     dir_mode = cfg.get("zscore_direction_mode", "both")
                     if dir_mode == "long_only":
@@ -641,7 +654,7 @@ async def zscore_trend_poll_loop(symbol):
                         price_after = st["last_price"] if st["last_price"] is not None else price
                         await execute_entry(symbol, direction, price_after, is_add_on=False)
 
-                    if is_new_candle:
+                    if eval_now:
                         prev_z = curr_z
                 elif due_heartbeat:
                     last_heartbeat = now
