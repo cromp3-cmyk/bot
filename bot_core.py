@@ -1393,89 +1393,104 @@ async function refresh() {
     priceChart.update('none');
   }
 
-  const obiSection = document.getElementById('obi-chart-section');
-  if (data.config.entry_mode === 'obi_scalp' && (data.obi_history || []).length > 0) {
-    obiSection.style.display = 'block';
-    const obiHist = data.obi_history || [];
-    const obiLabels = obiHist.map(p => new Date(p.ts).toLocaleTimeString());
-    const obiDatasets = [
-      { label:'Schnell', data: obiHist.map(p=>p.fast), borderColor:'#f87171', pointRadius:0, borderWidth:2 },
-      { label:'Mittel', data: obiHist.map(p=>p.medium), borderColor:'#fbbf24', pointRadius:0, borderWidth:2 },
-      { label:'Langsam', data: obiHist.map(p=>p.slow), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
-      { label:'Schwelle +', data: Array(obiHist.length).fill(data.config.obi_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
-      { label:'Schwelle -', data: Array(obiHist.length).fill(-data.config.obi_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
-      { label:'Null', data: Array(obiHist.length).fill(0), borderColor:'#4b5563', pointRadius:0, borderWidth:1 },
-    ];
-    if (!obiChart) {
-      obiChart = new Chart(document.getElementById('obiChart'), {
-        type: 'line',
-        data: { labels: obiLabels, datasets: obiDatasets },
-        options: {
-          responsive:true, maintainAspectRatio:false, animation:false,
-          scales: { x:{ display:false }, y:{ min:-1, max:1, ticks:{color:'#9ca3af'} } },
-          plugins:{legend:{labels:{color:'#e5e7eb'}}}
-        }
-      });
+  try {
+    const obiSection = document.getElementById('obi-chart-section');
+    if (data.config.entry_mode === 'obi_scalp' && (data.obi_history || []).length > 0) {
+      obiSection.style.display = 'block';
+      const obiHist = data.obi_history || [];
+      const obiLabels = obiHist.map(p => new Date(p.ts).toLocaleTimeString());
+      const obiDatasets = [
+        { label:'Schnell', data: obiHist.map(p=>p.fast), borderColor:'#f87171', pointRadius:0, borderWidth:2 },
+        { label:'Mittel', data: obiHist.map(p=>p.medium), borderColor:'#fbbf24', pointRadius:0, borderWidth:2 },
+        { label:'Langsam', data: obiHist.map(p=>p.slow), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
+        { label:'Schwelle +', data: Array(obiHist.length).fill(data.config.obi_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+        { label:'Schwelle -', data: Array(obiHist.length).fill(-data.config.obi_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+        { label:'Null', data: Array(obiHist.length).fill(0), borderColor:'#4b5563', pointRadius:0, borderWidth:1 },
+      ];
+      if (!obiChart) {
+        obiChart = new Chart(document.getElementById('obiChart'), {
+          type: 'line',
+          data: { labels: obiLabels, datasets: obiDatasets },
+          options: {
+            responsive:true, maintainAspectRatio:false, animation:false,
+            scales: { x:{ display:false }, y:{ min:-1, max:1, ticks:{color:'#9ca3af'} } },
+            plugins:{legend:{labels:{color:'#e5e7eb'}}}
+          }
+        });
+      } else {
+        obiChart.data.labels = obiLabels;
+        obiChart.data.datasets = obiDatasets;
+        obiChart.update('none');
+      }
     } else {
-      obiChart.data.labels = obiLabels;
-      obiChart.data.datasets = obiDatasets;
-      obiChart.update('none');
+      obiSection.style.display = 'none';
     }
-  } else {
-    obiSection.style.display = 'none';
+  } catch (e) {
+    console.error('OBI-Chart-Fehler:', e);
   }
 
-  let zscoreChart;
-  const zscoreSection = document.getElementById('zscore-chart-section');
-  if (data.config.entry_mode === 'zscore_trend' && (data.zscore_history || []).length > 0) {
-    zscoreSection.style.display = 'block';
-    const zHist = data.zscore_history || [];
-    const zLabels = zHist.map(p => new Date(p.ts).toLocaleTimeString());
-    const zDatasets = [
-      { label:'Z-Score', data: zHist.map(p=>p.z), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
-      { label:'Long-Schwelle (+)', data: Array(zHist.length).fill(data.config.zscore_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
-      { label:'Short-Schwelle (-)', data: Array(zHist.length).fill(-data.config.zscore_threshold), borderColor:'#f87171', borderDash:[4,4], pointRadius:0, borderWidth:1 },
-      { label:'Nulllinie (Exit)', data: Array(zHist.length).fill(0), borderColor:'#9ca3af', pointRadius:0, borderWidth:1.5 },
-    ];
-    if (!window.zscoreChart) {
-      window.zscoreChart = new Chart(document.getElementById('zscoreChart'), {
-        type: 'line',
-        data: { labels: zLabels, datasets: zDatasets },
-        options: {
-          responsive:true, maintainAspectRatio:false, animation:false,
-          scales: { x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } },
-          plugins:{legend:{labels:{color:'#e5e7eb'}}}
-        }
-      });
+  try {
+    const zscoreSection = document.getElementById('zscore-chart-section');
+    if (data.config.entry_mode === 'zscore_trend' && (data.zscore_history || []).length > 0) {
+      zscoreSection.style.display = 'block';
+      const zHist = data.zscore_history || [];
+      const zLabels = zHist.map(p => new Date(p.ts).toLocaleTimeString());
+      const zDatasets = [
+        { label:'Z-Score', data: zHist.map(p=>p.z), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
+        { label:'Long-Schwelle (+)', data: Array(zHist.length).fill(data.config.zscore_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+        { label:'Short-Schwelle (-)', data: Array(zHist.length).fill(-data.config.zscore_threshold), borderColor:'#f87171', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+        { label:'Nulllinie (Exit)', data: Array(zHist.length).fill(0), borderColor:'#9ca3af', pointRadius:0, borderWidth:1.5 },
+      ];
+      if (!window.zscoreChart) {
+        window.zscoreChart = new Chart(document.getElementById('zscoreChart'), {
+          type: 'line',
+          data: { labels: zLabels, datasets: zDatasets },
+          options: {
+            responsive:true, maintainAspectRatio:false, animation:false,
+            scales: { x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } },
+            plugins:{legend:{labels:{color:'#e5e7eb'}}}
+          }
+        });
+      } else {
+        window.zscoreChart.data.labels = zLabels;
+        window.zscoreChart.data.datasets = zDatasets;
+        window.zscoreChart.update('none');
+      }
     } else {
-      window.zscoreChart.data.labels = zLabels;
-      window.zscoreChart.data.datasets = zDatasets;
-      window.zscoreChart.update('none');
+      zscoreSection.style.display = 'none';
     }
-  } else {
-    zscoreSection.style.display = 'none';
+  } catch (e) {
+    console.error('Z-Score-Chart-Fehler:', e);
   }
 
-  const pocketSection = document.getElementById('pocket-trading-section');
-  if (data.config.entry_mode === 'obi_scalp') {
-    pocketSection.style.display = 'block';
-    document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
-    document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
-    document.getElementById('pocket-entry').innerText = data.avg_entry_price ?? '-';
-    const pnlEl = document.getElementById('pocket-pnl');
-    pnlEl.innerText = data.unrealized_pnl_usd ?? '-';
-    pnlEl.className = (data.unrealized_pnl_usd ?? 0) >= 0 ? 'value green' : 'value red';
-    renderMiniCandles(hist);
-  } else {
-    pocketSection.style.display = 'none';
+  try {
+    const pocketSection = document.getElementById('pocket-trading-section');
+    if (data.config.entry_mode === 'obi_scalp') {
+      pocketSection.style.display = 'block';
+      document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
+      document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
+      document.getElementById('pocket-entry').innerText = data.avg_entry_price ?? '-';
+      const pnlEl = document.getElementById('pocket-pnl');
+      pnlEl.innerText = data.unrealized_pnl_usd ?? '-';
+      pnlEl.className = (data.unrealized_pnl_usd ?? 0) >= 0 ? 'value green' : 'value red';
+      renderMiniCandles(hist);
+    } else {
+      pocketSection.style.display = 'none';
+    }
+  } catch (e) {
+    console.error('Pocket-Trading-Fehler:', e);
   }
 
-  const trades = (data.trade_log || []).slice(-15).reverse();
-  const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
-  document.querySelector('#trades-table tbody').innerHTML = trades.map(t => `
-    <tr><td>${fmtTime(t.opened_at)}</td><td>${fmtTime(t.closed_at)}</td><td>${t.side}</td><td>${t.avg_entry}</td><td>${t.exit}</td><td>${t.entries}</td><td>${t.reason ?? '-'}</td>
-    <td class="${t.pnl_usd>=0?'green':'red'}">${t.pnl_usd}</td></tr>
-  `).join('');
+  try {
+    const trades = (data.trade_log || []).slice(-15).reverse();
+    const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
+    document.querySelector('#trades-table tbody').innerHTML = trades.map(t => `
+      <tr><td>${fmtTime(t.opened_at)}</td><td>${fmtTime(t.closed_at)}</td><td>${t.side}</td><td>${t.avg_entry}</td><td>${t.exit}</td><td>${t.entries}</td><td>${t.reason ?? '-'}</td>
+      <td class="${t.pnl_usd>=0?'green':'red'}">${t.pnl_usd}</td></tr>
+    `).join('');
+  } catch (e) {
+    console.error('Trade-Tabelle-Fehler:', e);
+  }
 }
 
 document.getElementById('config-form').addEventListener('submit', async (e) => {
