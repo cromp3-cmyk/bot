@@ -596,6 +596,9 @@ async def zscore_trend_poll_loop(symbol):
                     st = b["state"]
                     curr_z = smooth_z[-1]
                     st["zscore_value"] = round(curr_z, 3)
+                    st["zscore_history"].append({"ts": int(time.time() * 1000), "z": round(curr_z, 3)})
+                    if len(st["zscore_history"]) > 300:
+                        st["zscore_history"].pop(0)
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -1048,20 +1051,20 @@ async def on_price_update(symbol, price):
             entry = st["avg_entry_price"]
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
             if not st["zscore_tp1_done"]:
-                # Vor TP1: normaler fester SL
-                if pnl_usd <= -cfg["zscore_sl_usd"]:
+                # Vor TP1: normaler fester SL (abschaltbar)
+                if cfg.get("zscore_sl_enabled", True) and pnl_usd <= -cfg["zscore_sl_usd"]:
                     await execute_exit(symbol, price, "SL")
                 elif pnl_usd >= cfg["zscore_tp1_usd"]:
                     fraction = cfg["zscore_tp1_close_pct"] / 100
                     ok = await execute_partial_exit(symbol, price, fraction, "TP1")
                     if ok:
                         st["zscore_tp1_done"] = True
-                        debug_log(f"📡 [{symbol}] Z-Score-Trend TP1 erreicht - SL auf Einstieg+{cfg['zscore_breakeven_lock_usd']} gesetzt")
+                        debug_log(f"📡 [{symbol}] Z-Score-Trend TP1 erreicht" + (f" - SL auf Einstieg+{cfg['zscore_breakeven_lock_usd']} gesetzt" if cfg.get("zscore_breakeven_enabled", True) else " - kein Break-Even-Stop aktiv, laeuft bis TP2/Gegensignal"))
             else:
-                # Nach TP1: SL liegt jetzt im Plus (Einstieg + Lock-Betrag), TP2 ist das finale Ziel
-                if pnl_usd <= cfg["zscore_breakeven_lock_usd"]:
+                # Nach TP1: SL liegt jetzt im Plus (Einstieg + Lock-Betrag, abschaltbar), TP2 ist das finale Ziel (abschaltbar)
+                if cfg.get("zscore_breakeven_enabled", True) and pnl_usd <= cfg["zscore_breakeven_lock_usd"]:
                     await execute_exit(symbol, price, "BREAKEVEN-LOCK")
-                elif pnl_usd >= cfg["zscore_tp2_usd"]:
+                elif cfg.get("zscore_tp2_enabled", True) and pnl_usd >= cfg["zscore_tp2_usd"]:
                     await execute_exit(symbol, price, "TP2")
         return
 
@@ -1313,6 +1316,9 @@ def backtest_zscore_trend(candles, cfg):
     tp1_close_pct = cfg["zscore_tp1_close_pct"] / 100
     breakeven_lock = cfg["zscore_breakeven_lock_usd"]
     tp2_usd = cfg["zscore_tp2_usd"]
+    sl_enabled = cfg.get("zscore_sl_enabled", True)
+    breakeven_enabled = cfg.get("zscore_breakeven_enabled", True)
+    tp2_enabled = cfg.get("zscore_tp2_enabled", True)
 
     smooth_z = compute_zscore_trend(c, lookback, ema_smooth)
 
@@ -1327,7 +1333,7 @@ def backtest_zscore_trend(candles, cfg):
             direction, entry, size = position["dir"], position["entry"], position["size"]
             pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
             if not position["tp1_done"]:
-                if pnl_usd <= -sl_usd:
+                if sl_enabled and pnl_usd <= -sl_usd:
                     _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
                     position = None
                 elif pnl_usd >= tp1_usd:
@@ -1336,10 +1342,10 @@ def backtest_zscore_trend(candles, cfg):
                     position["size"] -= close_size
                     position["tp1_done"] = True
             else:
-                if pnl_usd <= breakeven_lock:
+                if breakeven_enabled and pnl_usd <= breakeven_lock:
                     _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "BREAKEVEN-LOCK")
                     position = None
-                elif pnl_usd >= tp2_usd:
+                elif tp2_enabled and pnl_usd >= tp2_usd:
                     _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP2")
                     position = None
 
@@ -1475,12 +1481,15 @@ async def run_backtest(symbol, entry_mode, cfg, days):
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades)
+    stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"])
+    stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"])
 
     actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
     return {
         "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
         "requested_days": days, "actual_days_covered": round(actual_days, 1),
         "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": cache_used,
-        "stats": stats, "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
+        "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+        "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
     }
 

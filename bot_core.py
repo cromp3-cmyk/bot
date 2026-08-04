@@ -230,6 +230,9 @@ def default_config():
         "zscore_ema_smooth": int(os.getenv("ZSCORE_EMA_SMOOTH", "3")),
         "zscore_long_threshold": float(os.getenv("ZSCORE_LONG_THRESHOLD", "0.1")),
         "zscore_short_threshold": float(os.getenv("ZSCORE_SHORT_THRESHOLD", "0.5")),
+        "zscore_sl_enabled": os.getenv("ZSCORE_SL_ENABLED", "true").lower() == "true",
+        "zscore_breakeven_enabled": os.getenv("ZSCORE_BREAKEVEN_ENABLED", "true").lower() == "true",
+        "zscore_tp2_enabled": os.getenv("ZSCORE_TP2_ENABLED", "true").lower() == "true",
         "zscore_sl_usd": float(os.getenv("ZSCORE_SL_USD", "3")),
         "zscore_tp1_usd": float(os.getenv("ZSCORE_TP1_USD", "3")),
         "zscore_tp1_close_pct": float(os.getenv("ZSCORE_TP1_CLOSE_PCT", "50")),
@@ -255,7 +258,7 @@ def default_state():
         "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "rp_osc": None, "rp_mid_price": None, "rp_range_high": None, "rp_range_low": None,
         "rp_breakeven_triggered": False,
-        "zscore_value": None, "zscore_trend": None, "zscore_tp1_done": False,
+        "zscore_value": None, "zscore_trend": None, "zscore_tp1_done": False, "zscore_history": [],
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -746,6 +749,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="position:relative; height:250px;"><canvas id="obiChart"></canvas></div>
 </div>
 
+<div id="zscore-chart-section" style="display:none;">
+  <h2 class="section-title">Z-Score-Oszillator</h2>
+  <div style="position:relative; height:250px;"><canvas id="zscoreChart"></canvas></div>
+</div>
+
 <h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
 <div class="panel-card">
 <form id="config-form">
@@ -888,15 +896,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="4h">4 Stunden</option>
     </select>
   </div>
+  <div data-mode="zscore_trend"><label>Preset (aus dem Original-Indikator, setzt nur die Lookback-Periode)</label>
+    <select id="zscore_preset" onchange="if(this.value){document.getElementById('zscore_lookback_period').value=this.value; window.formTouched=true;} this.value='';">
+      <option value="">- auswählen -</option>
+      <option value="10">Scalping (Lookback 10) - 1-15min Charts, sehr reaktionsschnell</option>
+      <option value="20">Default (Lookback 20) - universell einsetzbar</option>
+      <option value="25">Swing Trading (Lookback 25) - 1-4h/Tages-Charts</option>
+      <option value="40">Trend Following (Lookback 40) - nur etablierte Trends, Tages-/Wochen-Charts</option>
+    </select>
+  </div>
   <div data-mode="zscore_trend"><label>Lookback-Periode</label><input type="number" step="1" id="zscore_lookback_period"></div>
   <div data-mode="zscore_trend"><label>EMA-Glättung des Z-Score</label><input type="number" step="1" id="zscore_ema_smooth"></div>
   <div data-mode="zscore_trend"><label>Long-Schwelle (grün, Kreuzung von unten nach oben)</label><input type="number" step="0.1" id="zscore_long_threshold"></div>
   <div data-mode="zscore_trend"><label>Short-Schwelle (rot, Kreuzung von oben nach unten)</label><input type="number" step="0.1" id="zscore_short_threshold"></div>
-  <div data-mode="zscore_trend"><label>SL vor TP1 ($, fest)</label><input type="number" step="any" id="zscore_sl_usd"></div>
+  <div data-mode="zscore_trend"><label>SL vor TP1</label>
+    <select class="cfg" id="zscore_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus - Position läuft bis TP1 ungeschützt</option>
+    </select>
+  </div>
+  <div data-mode="zscore_trend"><label>SL-Betrag vor TP1 ($, fest)</label><input type="number" step="any" id="zscore_sl_usd"></div>
   <div data-mode="zscore_trend"><label>TP1 ($, fest) - löst Teilverkauf + Break-Even aus</label><input type="number" step="any" id="zscore_tp1_usd"></div>
   <div data-mode="zscore_trend"><label>TP1 Teilverkauf (%)</label><input type="number" step="1" id="zscore_tp1_close_pct"></div>
+  <div data-mode="zscore_trend"><label>SL auf Break-Even nach TP1</label>
+    <select class="cfg" id="zscore_breakeven_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus - nach TP1 kein Stop mehr, läuft bis TP2/Gegensignal</option>
+    </select>
+  </div>
   <div data-mode="zscore_trend"><label>Abgesicherter Gewinn nach TP1 ($, z.B. 0.3)</label><input type="number" step="any" id="zscore_breakeven_lock_usd"></div>
-  <div data-mode="zscore_trend"><label>TP2 ($, fest) - finaler Ausstieg für den Rest</label><input type="number" step="any" id="zscore_tp2_usd"></div>
+  <div data-mode="zscore_trend"><label>TP2 (finaler Ausstieg)</label>
+    <select class="cfg" id="zscore_tp2_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus - Rest läuft bis Break-Even-Stop/Gegensignal</option>
+    </select>
+  </div>
+  <div data-mode="zscore_trend"><label>TP2-Betrag ($, fest)</label><input type="number" step="any" id="zscore_tp2_usd"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -948,6 +983,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div><div class="label">Gesamt-PnL $</div><div class="value" id="bt-pnl">-</div></div>
       <div><div class="label">Max Drawdown $</div><div class="value" id="bt-dd">-</div></div>
       <div><div class="label">Ø Gewinn / Ø Verlust $</div><div class="value" id="bt-avg">-</div></div>
+    </div>
+    <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:8px; padding-top:12px; border-top:1px solid var(--border);">
+      <div>
+        <div class="label" style="margin-bottom:6px;">🟢 Nur Long</div>
+        <div style="display:flex; gap:16px; flex-wrap:wrap;">
+          <div><div class="label">Trades</div><div class="value" id="bt-long-trades">-</div></div>
+          <div><div class="label">Trefferquote</div><div class="value" id="bt-long-winrate">-</div></div>
+          <div><div class="label">PnL $</div><div class="value" id="bt-long-pnl">-</div></div>
+          <div><div class="label">Ø Gewinn / Ø Verlust $</div><div class="value" id="bt-long-avg">-</div></div>
+        </div>
+      </div>
+      <div>
+        <div class="label" style="margin-bottom:6px;">🔴 Nur Short</div>
+        <div style="display:flex; gap:16px; flex-wrap:wrap;">
+          <div><div class="label">Trades</div><div class="value" id="bt-short-trades">-</div></div>
+          <div><div class="label">Trefferquote</div><div class="value" id="bt-short-winrate">-</div></div>
+          <div><div class="label">PnL $</div><div class="value" id="bt-short-pnl">-</div></div>
+          <div><div class="label">Ø Gewinn / Ø Verlust $</div><div class="value" id="bt-short-avg">-</div></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -1092,6 +1147,18 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
       pnlEl.className = data.stats.total_pnl_usd >= 0 ? 'value green' : 'value red';
       document.getElementById('bt-dd').innerText = data.stats.max_drawdown_usd;
       document.getElementById('bt-avg').innerText = `${data.stats.avg_win_usd} / ${data.stats.avg_loss_usd}`;
+      document.getElementById('bt-long-trades').innerText = data.stats_long.trades;
+      document.getElementById('bt-long-winrate').innerText = data.stats_long.win_rate_pct + '%';
+      const longPnlEl = document.getElementById('bt-long-pnl');
+      longPnlEl.innerText = data.stats_long.total_pnl_usd;
+      longPnlEl.className = data.stats_long.total_pnl_usd >= 0 ? 'value green' : 'value red';
+      document.getElementById('bt-long-avg').innerText = `${data.stats_long.avg_win_usd} / ${data.stats_long.avg_loss_usd}`;
+      document.getElementById('bt-short-trades').innerText = data.stats_short.trades;
+      document.getElementById('bt-short-winrate').innerText = data.stats_short.win_rate_pct + '%';
+      const shortPnlEl = document.getElementById('bt-short-pnl');
+      shortPnlEl.innerText = data.stats_short.total_pnl_usd;
+      shortPnlEl.className = data.stats_short.total_pnl_usd >= 0 ? 'value green' : 'value red';
+      document.getElementById('bt-short-avg').innerText = `${data.stats_short.avg_win_usd} / ${data.stats_short.avg_loss_usd}`;
       resultsEl.style.display = 'block';
     }
   } catch (e) {
@@ -1235,6 +1302,9 @@ async function refresh() {
     document.getElementById('zscore_ema_smooth').value = data.config.zscore_ema_smooth;
     document.getElementById('zscore_long_threshold').value = data.config.zscore_long_threshold;
     document.getElementById('zscore_short_threshold').value = data.config.zscore_short_threshold;
+    document.getElementById('zscore_sl_enabled').value = String(data.config.zscore_sl_enabled);
+    document.getElementById('zscore_breakeven_enabled').value = String(data.config.zscore_breakeven_enabled);
+    document.getElementById('zscore_tp2_enabled').value = String(data.config.zscore_tp2_enabled);
     document.getElementById('zscore_sl_usd').value = data.config.zscore_sl_usd;
     document.getElementById('zscore_tp1_usd').value = data.config.zscore_tp1_usd;
     document.getElementById('zscore_tp1_close_pct').value = data.config.zscore_tp1_close_pct;
@@ -1315,6 +1385,37 @@ async function refresh() {
     obiSection.style.display = 'none';
   }
 
+  let zscoreChart;
+  const zscoreSection = document.getElementById('zscore-chart-section');
+  if (data.config.entry_mode === 'zscore_trend' && (data.zscore_history || []).length > 0) {
+    zscoreSection.style.display = 'block';
+    const zHist = data.zscore_history || [];
+    const zLabels = zHist.map(p => new Date(p.ts).toLocaleTimeString());
+    const zDatasets = [
+      { label:'Z-Score', data: zHist.map(p=>p.z), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
+      { label:'Long-Schwelle', data: Array(zHist.length).fill(data.config.zscore_long_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+      { label:'Short-Schwelle', data: Array(zHist.length).fill(data.config.zscore_short_threshold), borderColor:'#f87171', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+      { label:'Null', data: Array(zHist.length).fill(0), borderColor:'#4b5563', pointRadius:0, borderWidth:1 },
+    ];
+    if (!window.zscoreChart) {
+      window.zscoreChart = new Chart(document.getElementById('zscoreChart'), {
+        type: 'line',
+        data: { labels: zLabels, datasets: zDatasets },
+        options: {
+          responsive:true, maintainAspectRatio:false, animation:false,
+          scales: { x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } },
+          plugins:{legend:{labels:{color:'#e5e7eb'}}}
+        }
+      });
+    } else {
+      window.zscoreChart.data.labels = zLabels;
+      window.zscoreChart.data.datasets = zDatasets;
+      window.zscoreChart.update('none');
+    }
+  } else {
+    zscoreSection.style.display = 'none';
+  }
+
   const pocketSection = document.getElementById('pocket-trading-section');
   if (data.config.entry_mode === 'obi_scalp') {
     pocketSection.style.display = 'block';
@@ -1382,6 +1483,9 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     zscore_ema_smooth: parseInt(document.getElementById('zscore_ema_smooth').value),
     zscore_long_threshold: parseFloat(document.getElementById('zscore_long_threshold').value),
     zscore_short_threshold: parseFloat(document.getElementById('zscore_short_threshold').value),
+    zscore_sl_enabled: document.getElementById('zscore_sl_enabled').value === 'true',
+    zscore_breakeven_enabled: document.getElementById('zscore_breakeven_enabled').value === 'true',
+    zscore_tp2_enabled: document.getElementById('zscore_tp2_enabled').value === 'true',
     zscore_sl_usd: parseFloat(document.getElementById('zscore_sl_usd').value),
     zscore_tp1_usd: parseFloat(document.getElementById('zscore_tp1_usd').value),
     zscore_tp1_close_pct: parseFloat(document.getElementById('zscore_tp1_close_pct').value),
@@ -1427,7 +1531,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_long_threshold','zscore_short_threshold','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_lock_usd','zscore_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_long_threshold','zscore_short_threshold','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1486,6 +1590,7 @@ async def handle_status(request):
         "rp_channel_width": st.get("rp_channel_width"), "rp_avg_width": st.get("rp_avg_width"),
         "rp_squeeze_active": st.get("rp_squeeze_active"),
         "zscore_value": st.get("zscore_value"), "zscore_trend": st.get("zscore_trend"),
+        "zscore_history": st.get("zscore_history", [])[-300:],
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -1516,8 +1621,9 @@ async def handle_config_update(request):
                 "rp_breakeven_enabled", "rp_breakeven_trigger_usd", "rp_breakeven_lock_usd",
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
                 "zscore_resolution", "zscore_lookback_period", "zscore_ema_smooth",
-                "zscore_long_threshold", "zscore_short_threshold", "zscore_sl_usd",
-                "zscore_tp1_usd", "zscore_tp1_close_pct", "zscore_breakeven_lock_usd", "zscore_tp2_usd"]:
+                "zscore_long_threshold", "zscore_short_threshold", "zscore_sl_enabled", "zscore_sl_usd",
+                "zscore_tp1_usd", "zscore_tp1_close_pct", "zscore_breakeven_enabled", "zscore_breakeven_lock_usd",
+                "zscore_tp2_enabled", "zscore_tp2_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
