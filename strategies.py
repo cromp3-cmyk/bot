@@ -1069,11 +1069,15 @@ async def on_price_update(symbol, price):
                 if cfg.get("zscore_sl_enabled", True) and pnl_usd <= -cfg["zscore_sl_usd"]:
                     await execute_exit(symbol, price, "SL")
                 elif pnl_usd >= cfg["zscore_tp1_usd"]:
-                    fraction = cfg["zscore_tp1_close_pct"] / 100
-                    ok = await execute_partial_exit(symbol, price, fraction, "TP1")
-                    if ok:
-                        st["zscore_tp1_done"] = True
-                        debug_log(f"📡 [{symbol}] Z-Score-Trend TP1 erreicht" + (f" - SL auf Einstieg+{cfg['zscore_breakeven_lock_usd']} gesetzt" if cfg.get("zscore_breakeven_enabled", True) else " - kein Break-Even-Stop aktiv, laeuft bis TP2/Gegensignal"))
+                    if cfg.get("zscore_tp2_enabled", True):
+                        fraction = cfg["zscore_tp1_close_pct"] / 100
+                        ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+                        if ok:
+                            st["zscore_tp1_done"] = True
+                            debug_log(f"📡 [{symbol}] Z-Score-Trend TP1 erreicht" + (f" - SL auf Einstieg+{cfg['zscore_breakeven_lock_usd']} gesetzt" if cfg.get("zscore_breakeven_enabled", True) else " - kein Break-Even-Stop aktiv, laeuft bis TP2/Gegensignal"))
+                    else:
+                        # TP2 aus: TP1 ist der finale, vollstaendige Ausstieg
+                        await execute_exit(symbol, price, "TP1")
             else:
                 # Nach TP1: SL liegt jetzt im Plus (Einstieg + Lock-Betrag, abschaltbar), TP2 ist das finale Ziel (abschaltbar)
                 if cfg.get("zscore_breakeven_enabled", True) and pnl_usd <= cfg["zscore_breakeven_lock_usd"]:
@@ -1351,10 +1355,15 @@ def backtest_zscore_trend(candles, cfg):
                     _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
                     position = None
                 elif pnl_usd >= tp1_usd:
-                    close_size = size * tp1_close_pct
-                    _bt_close_trade(trades, direction, entry, price, close_size, i, position["entry_i"], "TP1")
-                    position["size"] -= close_size
-                    position["tp1_done"] = True
+                    if tp2_enabled:
+                        close_size = size * tp1_close_pct
+                        _bt_close_trade(trades, direction, entry, price, close_size, i, position["entry_i"], "TP1")
+                        position["size"] -= close_size
+                        position["tp1_done"] = True
+                    else:
+                        # TP2 aus: TP1 ist der finale, vollstaendige Ausstieg
+                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP1")
+                        position = None
             else:
                 if breakeven_enabled and pnl_usd <= breakeven_lock:
                     _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "BREAKEVEN-LOCK")

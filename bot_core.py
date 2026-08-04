@@ -922,22 +922,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="zscore_trend"><label>SL-Betrag vor TP1 ($, fest)</label><input type="number" step="any" id="zscore_sl_usd"></div>
-  <div data-mode="zscore_trend"><label>TP1 ($, fest) - löst Teilverkauf + Break-Even aus</label><input type="number" step="any" id="zscore_tp1_usd"></div>
-  <div data-mode="zscore_trend"><label>TP1 Teilverkauf (%)</label><input type="number" step="1" id="zscore_tp1_close_pct"></div>
-  <div data-mode="zscore_trend"><label>SL auf Break-Even nach TP1</label>
+  <div data-mode="zscore_trend"><label>TP1 ($, fest)</label><input type="number" step="any" id="zscore_tp1_usd"></div>
+  <div data-mode="zscore_trend"><label>TP1 Teilverkauf (%, nur wenn TP2 an - sonst schließt TP1 komplett)</label><input type="number" step="1" id="zscore_tp1_close_pct"></div>
+  <div data-mode="zscore_trend"><label>SL auf Break-Even nach TP1 (nur wenn TP2 an)</label>
     <select class="cfg" id="zscore_breakeven_enabled">
       <option value="true">An</option>
       <option value="false">Aus - nach TP1 kein Stop mehr, läuft bis TP2/Gegensignal</option>
     </select>
   </div>
   <div data-mode="zscore_trend"><label>Abgesicherter Gewinn nach TP1 ($, z.B. 0.3)</label><input type="number" step="any" id="zscore_breakeven_lock_usd"></div>
-  <div data-mode="zscore_trend"><label>TP2 (finaler Ausstieg)</label>
+  <div data-mode="zscore_trend"><label>TP2</label>
     <select class="cfg" id="zscore_tp2_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus - Rest läuft bis Break-Even-Stop/Gegensignal</option>
+      <option value="true">An - TP1 löst Teilverkauf + Break-Even aus, TP2 ist der finale Ausstieg</option>
+      <option value="false">Aus - TP1 wird zum finalen, vollständigen Ausstieg (kein Teilverkauf mehr)</option>
     </select>
   </div>
-  <div data-mode="zscore_trend"><label>TP2-Betrag ($, fest)</label><input type="number" step="any" id="zscore_tp2_usd"></div>
+  <div data-mode="zscore_trend"><label>TP2-Betrag ($, fest, nur wenn TP2 an)</label><input type="number" step="any" id="zscore_tp2_usd"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
