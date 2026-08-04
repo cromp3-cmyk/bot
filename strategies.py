@@ -568,8 +568,7 @@ async def zscore_trend_poll_loop(symbol):
             if cfg["entry_mode"] == "zscore_trend":
                 lookback = cfg["zscore_lookback_period"]
                 ema_smooth = cfg["zscore_ema_smooth"]
-                long_th = cfg["zscore_long_threshold"]
-                short_th = cfg["zscore_short_threshold"]
+                threshold = cfg["zscore_threshold"]
                 needed_bars = min(1000, max(lookback * 4, 60) + 5)
                 resolution = cfg["zscore_resolution"]
 
@@ -602,36 +601,45 @@ async def zscore_trend_poll_loop(symbol):
 
                     if due_heartbeat:
                         last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] Z-Score-Trend aktiv: Z={curr_z:.2f} (Long-Schwelle {long_th}, Short-Schwelle {short_th}), Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                        debug_log(f"💓 [{symbol}] Z-Score-Trend aktiv: Z={curr_z:.2f} (Schwelle ±{threshold}), Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
                     signal_key = closed_ts[-1]
                     is_new_candle = last_processed_ts != signal_key
                     if is_new_candle:
                         last_processed_ts = signal_key
 
-                    long_signal = is_new_candle and prev_z is not None and prev_z <= long_th and curr_z > long_th
-                    short_signal = is_new_candle and prev_z is not None and prev_z >= short_th and curr_z < short_th
+                    # Einstieg: Kreuzung der Schwelle (+threshold fuer Long, -threshold fuer Short).
+                    # Ausstieg (falls TP noch nicht erreicht): Rueckkreuzung der Nulllinie -
+                    # unabhaengig von der Einstiegsschwelle, naeher an 0 dran, damit die Position
+                    # nicht bis zur (weiter entfernten) Gegenschwelle offen bleibt.
+                    long_entry = is_new_candle and prev_z is not None and prev_z <= threshold and curr_z > threshold
+                    short_entry = is_new_candle and prev_z is not None and prev_z >= -threshold and curr_z < -threshold
+                    long_exit = is_new_candle and prev_z is not None and prev_z >= 0 and curr_z < 0
+                    short_exit = is_new_candle and prev_z is not None and prev_z <= 0 and curr_z > 0
 
                     dir_mode = cfg.get("zscore_direction_mode", "both")
                     if dir_mode == "long_only":
-                        short_signal = False
+                        short_entry = False
                     elif dir_mode == "short_only":
-                        long_signal = False
+                        long_entry = False
 
-                    direction = "long" if long_signal else ("short" if short_signal else None)
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
 
-                    if direction and cfg["bot_active"]:
-                        price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    # Exit zuerst: falls TP noch nicht (vollstaendig) erreicht wurde, schliesst
+                    # die Nulllinien-Rueckkreuzung die Position, ohne automatisch umzudrehen
+                    if cfg["bot_active"] and st["position"] is not None:
+                        if (st["position"] == "long" and long_exit) or (st["position"] == "short" and short_exit):
+                            debug_log(f"🚪 [{symbol}] Z-Score-Trend Nulllinien-Exit: {st['position'].upper()} @ {price} (Z {curr_z:.2f})")
+                            await execute_exit(symbol, price, "ZSCORE-ZERO-EXIT")
+
+                    # Danach Einstieg pruefen (auch direkt im selben Takt moeglich, falls die
+                    # Position gerade erst durch den Exit oben frei wurde)
+                    direction = "long" if long_entry else ("short" if short_entry else None)
+                    if direction and cfg["bot_active"] and st["position"] is None:
                         st["zscore_trend"] = 1 if direction == "long" else -1
-
-                        if st["position"] is not None and st["position"] != direction:
-                            debug_log(f"🔄 [{symbol}] Z-Score-Trend Signal-Umkehr: {direction.upper()} @ {price} (Z {curr_z:.2f})")
-                            await execute_exit(symbol, price, "ZSCORE-REVERSE")
-
-                        if st["position"] is None:
-                            debug_log(f"📡 [{symbol}] Z-Score-Trend Signal: {direction.upper()} @ {price} (Z {curr_z:.2f})")
-                            price_after = st["last_price"] if st["last_price"] is not None else price
-                            await execute_entry(symbol, direction, price_after, is_add_on=False)
+                        debug_log(f"📡 [{symbol}] Z-Score-Trend Signal: {direction.upper()} @ {price} (Z {curr_z:.2f})")
+                        price_after = st["last_price"] if st["last_price"] is not None else price
+                        await execute_entry(symbol, direction, price_after, is_add_on=False)
 
                     if is_new_candle:
                         prev_z = curr_z
@@ -1315,8 +1323,7 @@ def backtest_zscore_trend(candles, cfg):
     margin, leverage = cfg["margin"], cfg["leverage"]
     lookback = cfg["zscore_lookback_period"]
     ema_smooth = cfg["zscore_ema_smooth"]
-    long_th = cfg["zscore_long_threshold"]
-    short_th = cfg["zscore_short_threshold"]
+    threshold = cfg["zscore_threshold"]
     sl_usd = cfg["zscore_sl_usd"]
     tp1_usd = cfg["zscore_tp1_usd"]
     tp1_close_pct = cfg["zscore_tp1_close_pct"] / 100
@@ -1357,21 +1364,26 @@ def backtest_zscore_trend(candles, cfg):
                     position = None
 
         prev_z, curr_z = smooth_z[i - 1], smooth_z[i]
-        long_signal = prev_z <= long_th and curr_z > long_th
-        short_signal = prev_z >= short_th and curr_z < short_th
+        long_entry = prev_z <= threshold and curr_z > threshold
+        short_entry = prev_z >= -threshold and curr_z < -threshold
+        long_exit = prev_z >= 0 and curr_z < 0
+        short_exit = prev_z <= 0 and curr_z > 0
         if dir_mode == "long_only":
-            short_signal = False
+            short_entry = False
         elif dir_mode == "short_only":
-            long_signal = False
-        direction = "long" if long_signal else ("short" if short_signal else None)
+            long_entry = False
 
-        if direction:
-            if position is not None and position["dir"] != direction:
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ZSCORE-REVERSE")
+        # Exit zuerst: Nulllinien-Rueckkreuzung schliesst eine noch offene Position
+        # (falls TP nicht schon vorher lief), ohne automatisch umzudrehen
+        if position is not None:
+            if (position["dir"] == "long" and long_exit) or (position["dir"] == "short" and short_exit):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ZSCORE-ZERO-EXIT")
                 position = None
-            if position is None:
-                size = (margin * leverage) / price
-                position = {"dir": direction, "entry": price, "size": size, "tp1_done": False, "entry_i": i}
+
+        direction = "long" if long_entry else ("short" if short_entry else None)
+        if direction and position is None:
+            size = (margin * leverage) / price
+            position = {"dir": direction, "entry": price, "size": size, "tp1_done": False, "entry_i": i}
 
     if position is not None:
         # Position am Ende des Testzeitraums noch offen - nicht stillschweigend fallen
