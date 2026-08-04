@@ -1177,10 +1177,14 @@ BACKTEST_MAX_CANDLES = {
 }
 
 
-def _bt_close_trade(trades, direction, entry, exit_price, size, i, entry_i, reason):
+def _bt_close_trade(trades, direction, entry, exit_price, size, i, entry_i, reason, ts=None):
     pnl = (exit_price - entry) * size if direction == "long" else (entry - exit_price) * size
-    trades.append({"dir": direction, "entry": entry, "exit": exit_price, "reason": reason,
-                    "pnl": pnl, "bars_held": i - entry_i})
+    trade = {"dir": direction, "entry": entry, "exit": exit_price, "reason": reason,
+             "pnl": pnl, "bars_held": i - entry_i}
+    if ts is not None:
+        trade["entry_ts"] = ts[entry_i]
+        trade["exit_ts"] = ts[i]
+    trades.append(trade)
 
 
 
@@ -1220,11 +1224,11 @@ def backtest_range_profile(candles, cfg):
                 if breakeven_triggered:
                     sl_floor = breakeven_lock
             if pnl_usd <= sl_floor:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK", ts=ts)
                 position = None
                 breakeven_triggered = False
             elif pnl_usd >= cfg["rp_tp_usd"]:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP")
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
                 breakeven_triggered = False
 
@@ -1298,7 +1302,7 @@ def backtest_fib_reversal(candles, cfg):
 
         sl_hit = price <= position["sl_active"] if direction == "long" else price >= position["sl_active"]
         if sl_hit:
-            _bt_close_trade(trades, direction, position["avg_entry"], price, position["size"], i, position["entry_i"], "SL")
+            _bt_close_trade(trades, direction, position["avg_entry"], price, position["size"], i, position["entry_i"], "SL", ts=ts)
             position = None
             continue
 
@@ -1307,7 +1311,7 @@ def backtest_fib_reversal(candles, cfg):
             if tp1_hit:
                 fraction = cfg["fib_tp1_close_pct"] / 100
                 close_size = position["size"] * fraction
-                _bt_close_trade(trades, direction, position["avg_entry"], price, close_size, i, position["entry_i"], "TP1")
+                _bt_close_trade(trades, direction, position["avg_entry"], price, close_size, i, position["entry_i"], "TP1", ts=ts)
                 position["size"] -= close_size
                 position["tp1_done"] = True
                 position["sl_active"] = position["avg_entry"]
@@ -1315,7 +1319,7 @@ def backtest_fib_reversal(candles, cfg):
 
         tp2_hit = price >= fib["tp2_price"] if direction == "long" else price <= fib["tp2_price"]
         if tp2_hit:
-            _bt_close_trade(trades, direction, position["avg_entry"], price, position["size"], i, position["entry_i"], "TP2")
+            _bt_close_trade(trades, direction, position["avg_entry"], price, position["size"], i, position["entry_i"], "TP2", ts=ts)
             position = None
 
     return trades
@@ -1352,24 +1356,24 @@ def backtest_zscore_trend(candles, cfg):
             pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
             if not position["tp1_done"]:
                 if sl_enabled and pnl_usd <= -sl_usd:
-                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL")
+                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL", ts=ts)
                     position = None
                 elif pnl_usd >= tp1_usd:
                     if tp2_enabled:
                         close_size = size * tp1_close_pct
-                        _bt_close_trade(trades, direction, entry, price, close_size, i, position["entry_i"], "TP1")
+                        _bt_close_trade(trades, direction, entry, price, close_size, i, position["entry_i"], "TP1", ts=ts)
                         position["size"] -= close_size
                         position["tp1_done"] = True
                     else:
                         # TP2 aus: TP1 ist der finale, vollstaendige Ausstieg
-                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP1")
+                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP1", ts=ts)
                         position = None
             else:
                 if breakeven_enabled and pnl_usd <= breakeven_lock:
-                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "BREAKEVEN-LOCK")
+                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "BREAKEVEN-LOCK", ts=ts)
                     position = None
                 elif tp2_enabled and pnl_usd >= tp2_usd:
-                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP2")
+                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP2", ts=ts)
                     position = None
 
         prev_z, curr_z = smooth_z[i - 1], smooth_z[i]
@@ -1386,7 +1390,7 @@ def backtest_zscore_trend(candles, cfg):
         # (falls TP nicht schon vorher lief), ohne automatisch umzudrehen
         if position is not None:
             if (position["dir"] == "long" and long_exit) or (position["dir"] == "short" and short_exit):
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ZSCORE-ZERO-EXIT")
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ZSCORE-ZERO-EXIT", ts=ts)
                 position = None
 
         direction = "long" if long_entry else ("short" if short_entry else None)
@@ -1398,7 +1402,7 @@ def backtest_zscore_trend(candles, cfg):
         # Position am Ende des Testzeitraums noch offen - nicht stillschweigend fallen
         # lassen (sonst wuerde ein evtl. Verlust komplett aus der Statistik verschwinden),
         # sondern zum letzten bekannten Kurs schliessen und klar als solche markieren.
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST")
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
 
     return trades
 

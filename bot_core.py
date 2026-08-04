@@ -1010,6 +1010,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
     </div>
+    <div class="label" style="margin-top:16px; margin-bottom:8px;">Letzte Trades (max. 50, neueste zuerst)</div>
+    <table id="bt-trades-table">
+      <thead><tr>
+        <th class="sortable" data-key="entry_ts">Start ⇅</th>
+        <th class="sortable" data-key="dir">Richtung ⇅</th>
+        <th class="sortable" data-key="entry">Einstieg $ ⇅</th>
+        <th class="sortable" data-key="exit_ts">Ende ⇅</th>
+        <th class="sortable" data-key="exit">Ausstieg $ ⇅</th>
+        <th class="sortable" data-key="reason">Grund ⇅</th>
+        <th class="sortable" data-key="pnl">PnL $ ⇅</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
   </div>
 </div>
 
@@ -1165,6 +1178,8 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
       shortPnlEl.innerText = data.stats_short.total_pnl_usd;
       shortPnlEl.className = data.stats_short.total_pnl_usd >= 0 ? 'value green' : 'value red';
       document.getElementById('bt-short-avg').innerText = `${data.stats_short.avg_win_usd} / ${data.stats_short.avg_loss_usd}`;
+      window.btTradesData = [...(data.trades || [])].reverse();  // neueste zuerst
+      renderBtTrades();
       resultsEl.style.display = 'block';
     }
   } catch (e) {
@@ -1200,9 +1215,27 @@ function makeSortableTable(tableId, getData, rowHtml) {
   return render;
 }
 
+function fmtTs(ts) {
+  if (!ts) return '-';
+  return new Date(ts).toLocaleString('de-DE', {timeZone: 'Europe/Berlin', day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+
+window.btTradesData = [];
+const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTradesData, (r, i) => `
+  <tr>
+    <td>${fmtTs(r.entry_ts)}</td>
+    <td>${r.dir === 'long' ? '🟢 Long' : '🔴 Short'}</td>
+    <td>${r.entry}</td>
+    <td>${fmtTs(r.exit_ts)}</td>
+    <td>${r.exit}</td>
+    <td>${r.reason}</td>
+    <td class="${r.pnl >= 0 ? 'green' : 'red'}">${r.pnl.toFixed(2)}</td>
+  </tr>`);
+
 function resetBacktestUI() {
   document.getElementById('backtest-results').style.display = 'none';
   document.getElementById('backtest-status').innerText = '';
+  window.btTradesData = [];
 }
 
 
