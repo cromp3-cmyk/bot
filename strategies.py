@@ -1028,45 +1028,50 @@ async def on_price_update(symbol, price):
         # JEDEM Preis-Tick ein neuer Z-Score mit dem aktuellen Live-Preis als juengstem
         # Punkt berechnet (ein einzelner EMA-Schritt ab dem gecachten Ausgangswert) -
         # exakt wie TradingViews live nachgezeichnete, noch nicht abgeschlossene Kerze.
-        window = st.get("zscore_window_closes")
-        seed = st.get("zscore_ema_seed")
-        lookback = cfg.get("zscore_lookback_period")
-        ema_smooth = cfg.get("zscore_ema_smooth")
-        if window and seed is not None and lookback and len(window) >= lookback - 1:
-            full_window = window[-(lookback - 1):] + [price]
-            mean = sum(full_window) / lookback
-            variance = sum((x - mean) ** 2 for x in full_window) / lookback
-            stddev = variance ** 0.5
-            raw_z = (price - mean) / stddev if stddev > 0 else 0.0
-            k = 2 / (ema_smooth + 1)
-            live_z = raw_z * k + seed * (1 - k)
-            st["zscore_value"] = round(live_z, 3)
+        # WICHTIG: eigenes try/except, damit ein Fehler hier nicht die komplette
+        # WebSocket-Verbindung (und damit ALLE Coins/Strategien) abreisst.
+        try:
+            window = st.get("zscore_window_closes")
+            seed = st.get("zscore_ema_seed")
+            lookback = cfg.get("zscore_lookback_period")
+            ema_smooth = cfg.get("zscore_ema_smooth")
+            if window and seed is not None and lookback and len(window) >= lookback - 1:
+                full_window = window[-(lookback - 1):] + [price]
+                mean = sum(full_window) / lookback
+                variance = sum((x - mean) ** 2 for x in full_window) / lookback
+                stddev = variance ** 0.5
+                raw_z = (price - mean) / stddev if stddev > 0 else 0.0
+                k = 2 / (ema_smooth + 1)
+                live_z = raw_z * k + seed * (1 - k)
+                st["zscore_value"] = round(live_z, 3)
 
-            threshold = cfg["zscore_threshold"]
-            prev_live_z = st.get("zscore_live_prev_z")
-            long_entry = prev_live_z is not None and prev_live_z <= threshold and live_z > threshold
-            short_entry = prev_live_z is not None and prev_live_z >= -threshold and live_z < -threshold
-            long_exit = prev_live_z is not None and prev_live_z >= 0 and live_z < 0
-            short_exit = prev_live_z is not None and prev_live_z <= 0 and live_z > 0
-            st["zscore_live_prev_z"] = live_z
+                threshold = cfg["zscore_threshold"]
+                prev_live_z = st.get("zscore_live_prev_z")
+                long_entry = prev_live_z is not None and prev_live_z <= threshold and live_z > threshold
+                short_entry = prev_live_z is not None and prev_live_z >= -threshold and live_z < -threshold
+                long_exit = prev_live_z is not None and prev_live_z >= 0 and live_z < 0
+                short_exit = prev_live_z is not None and prev_live_z <= 0 and live_z > 0
+                st["zscore_live_prev_z"] = live_z
 
-            dir_mode = cfg.get("zscore_direction_mode", "both")
-            if dir_mode == "long_only":
-                short_entry = False
-            elif dir_mode == "short_only":
-                long_entry = False
+                dir_mode = cfg.get("zscore_direction_mode", "both")
+                if dir_mode == "long_only":
+                    short_entry = False
+                elif dir_mode == "short_only":
+                    long_entry = False
 
-            # Exit zuerst: Nulllinien-Rueckkreuzung schliesst sofort, ohne umzudrehen
-            if cfg["bot_active"] and st["position"] is not None:
-                if (st["position"] == "long" and long_exit) or (st["position"] == "short" and short_exit):
-                    debug_log(f"🚪 [{symbol}] Z-Score-Trend Nulllinien-Exit (live): {st['position'].upper()} @ {price} (Z {live_z:.2f})")
-                    await execute_exit(symbol, price, "ZSCORE-ZERO-EXIT")
+                # Exit zuerst: Nulllinien-Rueckkreuzung schliesst sofort, ohne umzudrehen
+                if cfg["bot_active"] and st["position"] is not None:
+                    if (st["position"] == "long" and long_exit) or (st["position"] == "short" and short_exit):
+                        debug_log(f"🚪 [{symbol}] Z-Score-Trend Nulllinien-Exit (live): {st['position'].upper()} @ {price} (Z {live_z:.2f})")
+                        await execute_exit(symbol, price, "ZSCORE-ZERO-EXIT")
 
-            direction = "long" if long_entry else ("short" if short_entry else None)
-            if direction and cfg["bot_active"] and st["position"] is None:
-                st["zscore_trend"] = 1 if direction == "long" else -1
-                debug_log(f"📡 [{symbol}] Z-Score-Trend Signal (live): {direction.upper()} @ {price} (Z {live_z:.2f})")
-                await execute_entry(symbol, direction, price, is_add_on=False)
+                direction = "long" if long_entry else ("short" if short_entry else None)
+                if direction and cfg["bot_active"] and st["position"] is None:
+                    st["zscore_trend"] = 1 if direction == "long" else -1
+                    debug_log(f"📡 [{symbol}] Z-Score-Trend Signal (live): {direction.upper()} @ {price} (Z {live_z:.2f})")
+                    await execute_entry(symbol, direction, price, is_add_on=False)
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Z-Score-Trend Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         if st["position"] is None:
             st["zscore_tp1_done"] = False
@@ -1151,7 +1156,10 @@ async def trading_loop():
                         trades = msg.get("trades", [])
                         if trades:
                             price = float(trades[-1]["price"])
-                            await on_price_update(symbol, price)
+                            try:
+                                await on_price_update(symbol, price)
+                            except Exception as e:
+                                debug_log(f"⚠️ [{symbol}] on_price_update fehlgeschlagen (Verbindung bleibt bestehen)", {"error": str(e), "traceback": traceback.format_exc()})
                     elif channel.startswith("order_book") and symbol:
                         await handle_obi_order_book_update(symbol, msg)
 
