@@ -230,6 +230,7 @@ def default_config():
         "zscore_ema_smooth": int(os.getenv("ZSCORE_EMA_SMOOTH", "3")),
         "zscore_threshold": float(os.getenv("ZSCORE_THRESHOLD", "0.1")),  # Long bei +Schwelle, Short bei -Schwelle
         "zscore_direction_mode": os.getenv("ZSCORE_DIRECTION_MODE", "both"),  # "both", "long_only" oder "short_only"
+        "zscore_cooldown_seconds": float(os.getenv("ZSCORE_COOLDOWN_SECONDS", "5")),
         "zscore_sl_enabled": os.getenv("ZSCORE_SL_ENABLED", "true").lower() == "true",
         "zscore_breakeven_enabled": os.getenv("ZSCORE_BREAKEVEN_ENABLED", "true").lower() == "true",
         "zscore_tp2_enabled": os.getenv("ZSCORE_TP2_ENABLED", "true").lower() == "true",
@@ -238,6 +239,26 @@ def default_config():
         "zscore_tp1_close_pct": float(os.getenv("ZSCORE_TP1_CLOSE_PCT", "50")),
         "zscore_breakeven_lock_usd": float(os.getenv("ZSCORE_BREAKEVEN_LOCK_USD", "0.3")),
         "zscore_tp2_usd": float(os.getenv("ZSCORE_TP2_USD", "6")),
+        "blsh_resolution": os.getenv("BLSH_RESOLUTION", "1m"),
+        "blsh_atr_period": int(os.getenv("BLSH_ATR_PERIOD", "9")),
+        "blsh_rsi_period": int(os.getenv("BLSH_RSI_PERIOD", "14")),
+        "blsh_ema_fast": int(os.getenv("BLSH_EMA_FAST", "5")),
+        "blsh_ema_slow": int(os.getenv("BLSH_EMA_SLOW", "35")),
+        "blsh_macd_fast": int(os.getenv("BLSH_MACD_FAST", "12")),
+        "blsh_macd_slow": int(os.getenv("BLSH_MACD_SLOW", "26")),
+        "blsh_macd_signal": int(os.getenv("BLSH_MACD_SIGNAL", "9")),
+        "blsh_mfi_period": int(os.getenv("BLSH_MFI_PERIOD", "14")),
+        "blsh_threshold": float(os.getenv("BLSH_THRESHOLD", "0.1")),
+        "blsh_direction_mode": os.getenv("BLSH_DIRECTION_MODE", "both"),
+        "blsh_cooldown_seconds": float(os.getenv("BLSH_COOLDOWN_SECONDS", "5")),
+        "blsh_sl_enabled": os.getenv("BLSH_SL_ENABLED", "true").lower() == "true",
+        "blsh_sl_usd": float(os.getenv("BLSH_SL_USD", "3")),
+        "blsh_tp1_usd": float(os.getenv("BLSH_TP1_USD", "3")),
+        "blsh_tp1_close_pct": float(os.getenv("BLSH_TP1_CLOSE_PCT", "50")),
+        "blsh_breakeven_enabled": os.getenv("BLSH_BREAKEVEN_ENABLED", "true").lower() == "true",
+        "blsh_breakeven_lock_usd": float(os.getenv("BLSH_BREAKEVEN_LOCK_USD", "0.3")),
+        "blsh_tp2_enabled": os.getenv("BLSH_TP2_ENABLED", "true").lower() == "true",
+        "blsh_tp2_usd": float(os.getenv("BLSH_TP2_USD", "6")),
     }
 
 
@@ -259,7 +280,8 @@ def default_state():
         "rp_osc": None, "rp_mid_price": None, "rp_range_high": None, "rp_range_low": None,
         "rp_breakeven_triggered": False,
         "zscore_value": None, "zscore_trend": None, "zscore_tp1_done": False, "zscore_history": [],
-        "zscore_window_closes": [], "zscore_ema_seed": None, "zscore_live_prev_z": None,
+        "zscore_window_closes": [], "zscore_ema_seed": None, "zscore_live_prev_z": None, "zscore_last_exit_ts": 0.0,
+        "blsh_value": None, "blsh_trend": None, "blsh_tp1_done": False, "blsh_history": [], "blsh_last_exit_ts": 0.0,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -339,7 +361,7 @@ PERSISTED_STATE_KEYS = [
     "position", "avg_entry_price", "total_coin_size", "entry_count", "anchor_price",
     "position_opened_at", "last_entry_price", "stats", "trade_log",
     "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
-    "rp_breakeven_triggered", "obi_breakeven_triggered", "zscore_tp1_done",
+    "rp_breakeven_triggered", "obi_breakeven_triggered", "zscore_tp1_done", "blsh_tp1_done",
 ]
 
 
@@ -755,6 +777,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="position:relative; height:250px;"><canvas id="zscoreChart"></canvas></div>
 </div>
 
+<div id="blsh-chart-section" style="display:none;">
+  <h2 class="section-title">BLSH-Composite-Oszillator</h2>
+  <div style="position:relative; height:250px;"><canvas id="blshChart"></canvas></div>
+</div>
+
 <h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
 <div class="panel-card">
 <form id="config-form">
@@ -768,6 +795,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
       <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, fester TP/SL)</option>
       <option value="zscore_trend">Z-Score-Trend (2 einstellbare Schwellen: Long-Kreuzung von unten, Short-Kreuzung von oben, TP1 Teilverkauf + Break-Even, TP2 final)</option>
+      <option value="blsh_trend">BLSH-Composite (RSI+EMA+MACD+MFI kombiniert, kerzenbasiert, Nulllinien-Exit, TP1 Teilverkauf + Break-Even, TP2 final)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -916,6 +944,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short (Long-Signale werden ignoriert)</option>
     </select>
   </div>
+  <div data-mode="zscore_trend"><label>Cooldown nach Exit (Sek., 0 = aus) - verhindert sofortiges Wiedereinsteigen/Whipsaws</label><input type="number" step="1" id="zscore_cooldown_seconds"></div>
   <div data-mode="zscore_trend"><label>SL vor TP1</label>
     <select class="cfg" id="zscore_sl_enabled">
       <option value="true">An</option>
@@ -939,6 +968,56 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="zscore_trend"><label>TP2-Betrag ($, fest, nur wenn TP2 an)</label><input type="number" step="any" id="zscore_tp2_usd"></div>
+  <div data-mode="blsh_trend"><label>Zeitrahmen</label>
+    <select class="cfg" id="blsh_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="blsh_trend"><label>ATR-Periode</label><input type="number" step="1" id="blsh_atr_period"></div>
+  <div data-mode="blsh_trend"><label>RSI-Periode</label><input type="number" step="1" id="blsh_rsi_period"></div>
+  <div data-mode="blsh_trend"><label>EMA schnell</label><input type="number" step="1" id="blsh_ema_fast"></div>
+  <div data-mode="blsh_trend"><label>EMA langsam</label><input type="number" step="1" id="blsh_ema_slow"></div>
+  <div data-mode="blsh_trend"><label>MACD schnell</label><input type="number" step="1" id="blsh_macd_fast"></div>
+  <div data-mode="blsh_trend"><label>MACD langsam</label><input type="number" step="1" id="blsh_macd_slow"></div>
+  <div data-mode="blsh_trend"><label>MACD-Signal</label><input type="number" step="1" id="blsh_macd_signal"></div>
+  <div data-mode="blsh_trend"><label>MFI-Periode</label><input type="number" step="1" id="blsh_mfi_period"></div>
+  <div data-mode="blsh_trend"><label>Schwelle (Long bei +Wert, Short bei -Wert, Nulllinie schließt falls TP nicht erreicht)</label><input type="number" step="0.1" id="blsh_threshold"></div>
+  <div data-mode="blsh_trend"><label>Richtung</label>
+    <select class="cfg" id="blsh_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long (Short-Signale werden ignoriert)</option>
+      <option value="short_only">Nur Short (Long-Signale werden ignoriert)</option>
+    </select>
+  </div>
+  <div data-mode="blsh_trend"><label>Cooldown nach Exit (Sek., 0 = aus)</label><input type="number" step="1" id="blsh_cooldown_seconds"></div>
+  <div data-mode="blsh_trend"><label>SL vor TP1</label>
+    <select class="cfg" id="blsh_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus - Position läuft bis TP1 ungeschützt</option>
+    </select>
+  </div>
+  <div data-mode="blsh_trend"><label>SL-Betrag vor TP1 ($, fest)</label><input type="number" step="any" id="blsh_sl_usd"></div>
+  <div data-mode="blsh_trend"><label>TP1 ($, fest)</label><input type="number" step="any" id="blsh_tp1_usd"></div>
+  <div data-mode="blsh_trend"><label>TP1 Teilverkauf (%, nur wenn TP2 an - sonst schließt TP1 komplett)</label><input type="number" step="1" id="blsh_tp1_close_pct"></div>
+  <div data-mode="blsh_trend"><label>SL auf Break-Even nach TP1 (nur wenn TP2 an)</label>
+    <select class="cfg" id="blsh_breakeven_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus - nach TP1 kein Stop mehr, läuft bis TP2/Gegensignal</option>
+    </select>
+  </div>
+  <div data-mode="blsh_trend"><label>Abgesicherter Gewinn nach TP1 ($, z.B. 0.3)</label><input type="number" step="any" id="blsh_breakeven_lock_usd"></div>
+  <div data-mode="blsh_trend"><label>TP2</label>
+    <select class="cfg" id="blsh_tp2_enabled">
+      <option value="true">An - TP1 löst Teilverkauf + Break-Even aus, TP2 ist der finale Ausstieg</option>
+      <option value="false">Aus - TP1 wird zum finalen, vollständigen Ausstieg (kein Teilverkauf mehr)</option>
+    </select>
+  </div>
+  <div data-mode="blsh_trend"><label>TP2-Betrag ($, fest, nur wenn TP2 an)</label><input type="number" step="any" id="blsh_tp2_usd"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1027,7 +1106,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<h2 class="section-title">Letzte abgeschlossene Trades</h2>
+<h2 class="section-title">Letzte abgeschlossene Trades <span id="trades-debug" style="font-size:11px; color:var(--text-dim); font-weight:normal;"></span></h2>
 <div class="panel-card">
 <table id="trades-table"><thead><tr><th>Eröffnet</th><th>Geschlossen</th><th>Seite</th><th>Ø-Einstieg</th><th>Exit</th><th>Stufen</th><th>Grund</th><th>PnL $</th></tr></thead><tbody></tbody></table>
 </div>
@@ -1281,6 +1360,7 @@ async function refresh() {
     <div class="card"><div class="label">Range-Profile Kanalbreite (Ø)</div><div class="value">${data.rp_channel_width ?? '-'} (Ø ${data.rp_avg_width ?? '-'})</div></div>
     <div class="card"><div class="label">⚠ Squeeze (Ausbruch könnte bevorstehen)</div><div class="value ${data.rp_squeeze_active?'red':'green'}">${data.rp_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
     <div class="card"><div class="label">Z-Score-Trend (${data.config.entry_mode==='zscore_trend'?'aktiv':'inaktiv'})</div><div class="value ${data.zscore_trend===1?'green':data.zscore_trend===-1?'red':''}">${data.zscore_trend===1?'LONG-Trend':data.zscore_trend===-1?'SHORT-Trend':'-'} (Z ${data.zscore_value ?? '-'})</div></div>
+    <div class="card"><div class="label">BLSH-Composite (${data.config.entry_mode==='blsh_trend'?'aktiv':'inaktiv'})</div><div class="value ${data.blsh_trend===1?'green':data.blsh_trend===-1?'red':''}">${data.blsh_trend===1?'LONG-Trend':data.blsh_trend===-1?'SHORT-Trend':'-'} (V ${data.blsh_value ?? '-'})</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
@@ -1342,6 +1422,7 @@ async function refresh() {
     document.getElementById('zscore_ema_smooth').value = data.config.zscore_ema_smooth;
     document.getElementById('zscore_threshold').value = data.config.zscore_threshold;
     document.getElementById('zscore_direction_mode').value = data.config.zscore_direction_mode;
+    document.getElementById('zscore_cooldown_seconds').value = data.config.zscore_cooldown_seconds;
     document.getElementById('zscore_sl_enabled').value = String(data.config.zscore_sl_enabled);
     document.getElementById('zscore_breakeven_enabled').value = String(data.config.zscore_breakeven_enabled);
     document.getElementById('zscore_tp2_enabled').value = String(data.config.zscore_tp2_enabled);
@@ -1350,6 +1431,26 @@ async function refresh() {
     document.getElementById('zscore_tp1_close_pct').value = data.config.zscore_tp1_close_pct;
     document.getElementById('zscore_breakeven_lock_usd').value = data.config.zscore_breakeven_lock_usd;
     document.getElementById('zscore_tp2_usd').value = data.config.zscore_tp2_usd;
+    document.getElementById('blsh_resolution').value = data.config.blsh_resolution;
+    document.getElementById('blsh_atr_period').value = data.config.blsh_atr_period;
+    document.getElementById('blsh_rsi_period').value = data.config.blsh_rsi_period;
+    document.getElementById('blsh_ema_fast').value = data.config.blsh_ema_fast;
+    document.getElementById('blsh_ema_slow').value = data.config.blsh_ema_slow;
+    document.getElementById('blsh_macd_fast').value = data.config.blsh_macd_fast;
+    document.getElementById('blsh_macd_slow').value = data.config.blsh_macd_slow;
+    document.getElementById('blsh_macd_signal').value = data.config.blsh_macd_signal;
+    document.getElementById('blsh_mfi_period').value = data.config.blsh_mfi_period;
+    document.getElementById('blsh_threshold').value = data.config.blsh_threshold;
+    document.getElementById('blsh_direction_mode').value = data.config.blsh_direction_mode;
+    document.getElementById('blsh_cooldown_seconds').value = data.config.blsh_cooldown_seconds;
+    document.getElementById('blsh_sl_enabled').value = String(data.config.blsh_sl_enabled);
+    document.getElementById('blsh_sl_usd').value = data.config.blsh_sl_usd;
+    document.getElementById('blsh_tp1_usd').value = data.config.blsh_tp1_usd;
+    document.getElementById('blsh_tp1_close_pct').value = data.config.blsh_tp1_close_pct;
+    document.getElementById('blsh_breakeven_enabled').value = String(data.config.blsh_breakeven_enabled);
+    document.getElementById('blsh_breakeven_lock_usd').value = data.config.blsh_breakeven_lock_usd;
+    document.getElementById('blsh_tp2_enabled').value = String(data.config.blsh_tp2_enabled);
+    document.getElementById('blsh_tp2_usd').value = data.config.blsh_tp2_usd;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -1464,6 +1565,40 @@ async function refresh() {
   }
 
   try {
+    const blshSection = document.getElementById('blsh-chart-section');
+    if (data.config.entry_mode === 'blsh_trend' && (data.blsh_history || []).length > 0) {
+      blshSection.style.display = 'block';
+      const bHist = data.blsh_history || [];
+      const bLabels = bHist.map(p => new Date(p.ts).toLocaleTimeString());
+      const bDatasets = [
+        { label:'BLSH-Composite', data: bHist.map(p=>p.v), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
+        { label:'Long-Schwelle (+)', data: Array(bHist.length).fill(data.config.blsh_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+        { label:'Short-Schwelle (-)', data: Array(bHist.length).fill(-data.config.blsh_threshold), borderColor:'#f87171', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+        { label:'Nulllinie (Exit)', data: Array(bHist.length).fill(0), borderColor:'#9ca3af', pointRadius:0, borderWidth:1.5 },
+      ];
+      if (!window.blshChart) {
+        window.blshChart = new Chart(document.getElementById('blshChart'), {
+          type: 'line',
+          data: { labels: bLabels, datasets: bDatasets },
+          options: {
+            responsive:true, maintainAspectRatio:false, animation:false,
+            scales: { x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } },
+            plugins:{legend:{labels:{color:'#e5e7eb'}}}
+          }
+        });
+      } else {
+        window.blshChart.data.labels = bLabels;
+        window.blshChart.data.datasets = bDatasets;
+        window.blshChart.update('none');
+      }
+    } else {
+      blshSection.style.display = 'none';
+    }
+  } catch (e) {
+    console.error('BLSH-Chart-Fehler:', e);
+  }
+
+  try {
     const pocketSection = document.getElementById('pocket-trading-section');
     if (data.config.entry_mode === 'obi_scalp') {
       pocketSection.style.display = 'block';
@@ -1483,6 +1618,7 @@ async function refresh() {
 
   try {
     const trades = (data.trade_log || []).slice(-15).reverse();
+    document.getElementById('trades-debug').innerText = `(roh: data.trade_log = ${JSON.stringify(data.trade_log === undefined ? 'undefined' : data.trade_log === null ? 'null' : `Array(${data.trade_log.length})`)})`;
     const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
     document.querySelector('#trades-table tbody').innerHTML = trades.map(t => `
       <tr><td>${fmtTime(t.opened_at)}</td><td>${fmtTime(t.closed_at)}</td><td>${t.side}</td><td>${t.avg_entry}</td><td>${t.exit}</td><td>${t.entries}</td><td>${t.reason ?? '-'}</td>
@@ -1490,6 +1626,8 @@ async function refresh() {
     `).join('');
   } catch (e) {
     console.error('Trade-Tabelle-Fehler:', e);
+    const dbg = document.getElementById('trades-debug');
+    if (dbg) dbg.innerText = `(Fehler: ${e})`;
   }
 }
 
@@ -1538,6 +1676,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     zscore_ema_smooth: parseInt(document.getElementById('zscore_ema_smooth').value),
     zscore_threshold: parseFloat(document.getElementById('zscore_threshold').value),
     zscore_direction_mode: document.getElementById('zscore_direction_mode').value,
+    zscore_cooldown_seconds: parseFloat(document.getElementById('zscore_cooldown_seconds').value),
     zscore_sl_enabled: document.getElementById('zscore_sl_enabled').value === 'true',
     zscore_breakeven_enabled: document.getElementById('zscore_breakeven_enabled').value === 'true',
     zscore_tp2_enabled: document.getElementById('zscore_tp2_enabled').value === 'true',
@@ -1546,6 +1685,26 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     zscore_tp1_close_pct: parseFloat(document.getElementById('zscore_tp1_close_pct').value),
     zscore_breakeven_lock_usd: parseFloat(document.getElementById('zscore_breakeven_lock_usd').value),
     zscore_tp2_usd: parseFloat(document.getElementById('zscore_tp2_usd').value),
+    blsh_resolution: document.getElementById('blsh_resolution').value,
+    blsh_atr_period: parseInt(document.getElementById('blsh_atr_period').value),
+    blsh_rsi_period: parseInt(document.getElementById('blsh_rsi_period').value),
+    blsh_ema_fast: parseInt(document.getElementById('blsh_ema_fast').value),
+    blsh_ema_slow: parseInt(document.getElementById('blsh_ema_slow').value),
+    blsh_macd_fast: parseInt(document.getElementById('blsh_macd_fast').value),
+    blsh_macd_slow: parseInt(document.getElementById('blsh_macd_slow').value),
+    blsh_macd_signal: parseInt(document.getElementById('blsh_macd_signal').value),
+    blsh_mfi_period: parseInt(document.getElementById('blsh_mfi_period').value),
+    blsh_threshold: parseFloat(document.getElementById('blsh_threshold').value),
+    blsh_direction_mode: document.getElementById('blsh_direction_mode').value,
+    blsh_cooldown_seconds: parseFloat(document.getElementById('blsh_cooldown_seconds').value),
+    blsh_sl_enabled: document.getElementById('blsh_sl_enabled').value === 'true',
+    blsh_sl_usd: parseFloat(document.getElementById('blsh_sl_usd').value),
+    blsh_tp1_usd: parseFloat(document.getElementById('blsh_tp1_usd').value),
+    blsh_tp1_close_pct: parseFloat(document.getElementById('blsh_tp1_close_pct').value),
+    blsh_breakeven_enabled: document.getElementById('blsh_breakeven_enabled').value === 'true',
+    blsh_breakeven_lock_usd: parseFloat(document.getElementById('blsh_breakeven_lock_usd').value),
+    blsh_tp2_enabled: document.getElementById('blsh_tp2_enabled').value === 'true',
+    blsh_tp2_usd: parseFloat(document.getElementById('blsh_tp2_usd').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -1586,7 +1745,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1646,6 +1805,8 @@ async def handle_status(request):
         "rp_squeeze_active": st.get("rp_squeeze_active"),
         "zscore_value": st.get("zscore_value"), "zscore_trend": st.get("zscore_trend"),
         "zscore_history": st.get("zscore_history", [])[-300:],
+        "blsh_value": st.get("blsh_value"), "blsh_trend": st.get("blsh_trend"),
+        "blsh_history": st.get("blsh_history", [])[-300:],
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -1676,9 +1837,14 @@ async def handle_config_update(request):
                 "rp_breakeven_enabled", "rp_breakeven_trigger_usd", "rp_breakeven_lock_usd",
                 "rp_squeeze_lookback", "rp_squeeze_threshold_pct", "rp_require_squeeze",
                 "zscore_resolution", "zscore_lookback_period", "zscore_ema_smooth",
-                "zscore_threshold", "zscore_direction_mode", "zscore_sl_enabled", "zscore_sl_usd",
+                "zscore_threshold", "zscore_direction_mode", "zscore_cooldown_seconds", "zscore_sl_enabled", "zscore_sl_usd",
                 "zscore_tp1_usd", "zscore_tp1_close_pct", "zscore_breakeven_enabled", "zscore_breakeven_lock_usd",
-                "zscore_tp2_enabled", "zscore_tp2_usd"]:
+                "zscore_tp2_enabled", "zscore_tp2_usd",
+                "blsh_resolution", "blsh_atr_period", "blsh_rsi_period", "blsh_ema_fast", "blsh_ema_slow",
+                "blsh_macd_fast", "blsh_macd_slow", "blsh_macd_signal", "blsh_mfi_period", "blsh_threshold",
+                "blsh_direction_mode", "blsh_cooldown_seconds", "blsh_sl_enabled", "blsh_sl_usd",
+                "blsh_tp1_usd", "blsh_tp1_close_pct", "blsh_breakeven_enabled", "blsh_breakeven_lock_usd",
+                "blsh_tp2_enabled", "blsh_tp2_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

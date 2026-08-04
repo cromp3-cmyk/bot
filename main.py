@@ -17,7 +17,7 @@ from bot_core import (
 )
 from strategies import (
     trading_loop, fib_reversal_poll_loop,
-    range_profile_poll_loop, binance_1s_poll_loop, zscore_trend_poll_loop,
+    range_profile_poll_loop, binance_1s_poll_loop, zscore_trend_poll_loop, blsh_trend_poll_loop,
 )
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
@@ -79,6 +79,7 @@ async def main():
         *[range_profile_poll_loop(s) for s in SYMBOLS],
         *[binance_1s_poll_loop(s) for s in SYMBOLS],
         *[zscore_trend_poll_loop(s) for s in SYMBOLS],
+        *[blsh_trend_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),

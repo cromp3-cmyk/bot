@@ -149,6 +149,144 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     return (timestamps, opens, highs, lows, closes), None
 
 
+async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
+    """Wie fetch_candles_binance, liefert zusaetzlich das Handelsvolumen pro Kerze -
+    fuer Strategien wie BLSH-Composite, die Volumen brauchen (z.B. MFI). Bewusst
+    eine eigene Funktion statt die bestehende zu erweitern, um nicht die vielen
+    bestehenden Aufrufer (die ein 5er-Tupel erwarten) zu gefaehrden."""
+    pair = BINANCE_SYMBOL_MAP.get(symbol)
+    if not pair:
+        return None
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    debug_log(f"⚠️ [{symbol}] Binance-Kerzenabfrage (mit Volumen) HTTP {resp.status}")
+                    return None
+                data = await resp.json()
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Binance-Kerzenabfrage (mit Volumen) fehlgeschlagen", {"error": str(e)})
+        return None
+
+    if not data or not isinstance(data, list):
+        return None
+
+    timestamps, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+    for k in data:
+        timestamps.append(int(k[0]))
+        opens.append(float(k[1]))
+        highs.append(float(k[2]))
+        lows.append(float(k[3]))
+        closes.append(float(k[4]))
+        volumes.append(float(k[5]))
+    return timestamps, opens, highs, lows, closes, volumes
+
+
+def resample_candles_vol(data, factor):
+    """Wie resample_candles, aber fuer das 6er-Tupel (ts,o,h,l,c,v) - Volumen wird pro
+    zusammengefasster Kerze aufsummiert."""
+    timestamps, opens, highs, lows, closes, volumes = data
+    n = (len(closes) // factor) * factor
+    if n == 0:
+        return [], [], [], [], [], []
+    out_ts, out_o, out_h, out_l, out_c, out_v = [], [], [], [], [], []
+    for i in range(0, n, factor):
+        out_ts.append(timestamps[i])
+        out_o.append(opens[i:i + factor][0])
+        out_h.append(max(highs[i:i + factor]))
+        out_l.append(min(lows[i:i + factor]))
+        out_c.append(closes[i:i + factor][-1])
+        out_v.append(sum(volumes[i:i + factor]))
+    return out_ts, out_o, out_h, out_l, out_c, out_v
+
+
+async def fetch_candles_binance_multi_vol(symbol, resolution, count_back=150):
+    """Wie fetch_candles_binance_multi, aber mit Volumen (siehe fetch_candles_binance_vol).
+    Unterstuetzt nur "2m" als synthetische Aufloesung (aus 1m) - die Sekunden-Zeitrahmen
+    (10s/15s/30s/45s) brauchen den 1s-Puffer, der kein Volumen mitfuehrt."""
+    if resolution == "2m":
+        data = await fetch_candles_binance_vol(symbol, "1m", count_back=count_back * 2)
+        if data is None:
+            return None
+        return resample_candles_vol(data, 2)
+    return await fetch_candles_binance_vol(symbol, resolution, count_back=count_back)
+
+
+async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_candles):
+    """Wie fetch_historical_candles_binance, aber mit Volumen fuer den BLSH-Backtest.
+    Unterstuetzt nur "2m" als synthetische Aufloesung (aus 1m)."""
+    pair = BINANCE_SYMBOL_MAP.get(symbol)
+    if not pair:
+        return None, "Coin nicht auf Binance verfügbar"
+
+    base_resolution = "1m" if resolution == "2m" else resolution
+    fetch_factor = 2 if resolution == "2m" else 1
+    total_ms = days * 24 * 60 * 60 * 1000
+    end_time = int(time.time() * 1000)
+    start_time = end_time - total_ms
+    hard_candle_cap = max_candles * fetch_factor + 2000
+
+    all_rows = []
+    cursor = end_time
+    requests_made = 0
+    try:
+        async with aiohttp.ClientSession() as session:
+            while cursor > start_time and len(all_rows) < hard_candle_cap:
+                url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
+                retry_count = 0
+                batch = None
+                while retry_count < 5:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status == 429 or resp.status == 418:
+                            retry_after = resp.headers.get("Retry-After")
+                            wait_s = float(retry_after) if retry_after else (1.5 * (retry_count + 1))
+                            await asyncio.sleep(wait_s)
+                            retry_count += 1
+                            continue
+                        if resp.status != 200:
+                            batch = None
+                            break
+                        batch = await resp.json()
+                    break
+                if batch is None:
+                    if retry_count >= 5:
+                        return None, f"Binance-Ratelimit nach {requests_made} Anfragen und 5 Wiederholungsversuchen weiterhin aktiv - bitte kurz warten und erneut versuchen."
+                    break
+                requests_made += 1
+                if not batch:
+                    break
+                all_rows = batch + all_rows
+                cursor = int(batch[0][0]) - 1
+                if len(batch) < 1000:
+                    break
+                await asyncio.sleep(0.25)
+    except Exception as e:
+        return None, f"Abruf fehlgeschlagen nach {requests_made} Anfragen: {e}"
+
+    if not all_rows:
+        return None, "Keine Daten erhalten"
+
+    all_rows = [r for r in all_rows if int(r[0]) >= start_time]
+    timestamps = [int(r[0]) for r in all_rows]
+    opens = [float(r[1]) for r in all_rows]
+    highs = [float(r[2]) for r in all_rows]
+    lows = [float(r[3]) for r in all_rows]
+    closes = [float(r[4]) for r in all_rows]
+    volumes = [float(r[5]) for r in all_rows]
+
+    if resolution == "2m":
+        timestamps, opens, highs, lows, closes, volumes = resample_candles_vol((timestamps, opens, highs, lows, closes, volumes), 2)
+
+    if len(closes) > max_candles:
+        timestamps, opens, highs, lows, closes, volumes = (
+            timestamps[-max_candles:], opens[-max_candles:], highs[-max_candles:],
+            lows[-max_candles:], closes[-max_candles:], volumes[-max_candles:],
+        )
+
+    return (timestamps, opens, highs, lows, closes, volumes), None
+
+
 def resample_candles(data, factor):
     """Fasst je 'factor' aufeinanderfolgende Kerzen zu einer groesseren Kerze zusammen
     (Open der ersten, High/Low ueber alle, Close der letzten, Zeitstempel der ersten).
@@ -545,6 +683,122 @@ def compute_zscore_trend(closes, lookback_period, ema_smooth):
     return _ema_series(z, ema_smooth)
 
 
+def compute_rsi(closes, period):
+    """Standard-RSI mit Wilder-Glaettung (wie Pine's ta.rsi)."""
+    n = len(closes)
+    if n < 2:
+        return [50.0] * n
+    gains = [0.0] * n
+    losses = [0.0] * n
+    for i in range(1, n):
+        diff = closes[i] - closes[i - 1]
+        gains[i] = diff if diff > 0 else 0.0
+        losses[i] = -diff if diff < 0 else 0.0
+
+    def _wilder_rma(values):
+        out = [values[0]] * n
+        for i in range(1, n):
+            if i < period:
+                out[i] = sum(values[:i + 1]) / (i + 1)
+            else:
+                out[i] = (out[i - 1] * (period - 1) + values[i]) / period
+        return out
+
+    avg_gain = _wilder_rma(gains)
+    avg_loss = _wilder_rma(losses)
+    rsi = [50.0] * n
+    for i in range(n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100.0 if avg_gain[i] > 0 else 50.0
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def compute_mfi(highs, lows, closes, volumes, period):
+    """Money Flow Index: RSI-artiger Oszillator auf Basis von volumengewichtetem
+    typischem Preis (hlc3) statt reinem Schlusskurs - misst Geldfluss statt Preis."""
+    n = len(closes)
+    if n < 2:
+        return [50.0] * n
+    typical = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n)]
+    raw_flow = [typical[i] * volumes[i] for i in range(n)]
+    pos_flow = [0.0] * n
+    neg_flow = [0.0] * n
+    for i in range(1, n):
+        if typical[i] > typical[i - 1]:
+            pos_flow[i] = raw_flow[i]
+        elif typical[i] < typical[i - 1]:
+            neg_flow[i] = raw_flow[i]
+
+    def _rolling_sum(values):
+        out = [0.0] * n
+        for i in range(n):
+            start = max(0, i - period + 1)
+            out[i] = sum(values[start:i + 1])
+        return out
+
+    pos_sum = _rolling_sum(pos_flow)
+    neg_sum = _rolling_sum(neg_flow)
+    mfi = [50.0] * n
+    for i in range(n):
+        if neg_sum[i] == 0:
+            mfi[i] = 100.0 if pos_sum[i] > 0 else 50.0
+        else:
+            money_ratio = pos_sum[i] / neg_sum[i]
+            mfi[i] = 100 - (100 / (1 + money_ratio))
+    return mfi
+
+
+def compute_blsh_composite(highs, lows, closes, volumes, atr_period, rsi_period,
+                            ema_fast, ema_slow, macd_fast, macd_slow, macd_signal_period, mfi_period):
+    """Portiert aus dem Indikator 'Buy Low Sell High Composite': kombiniert vier auf
+    -1..+1 normierte Komponenten (EMA-Differenz als Trendrichtung, RSI, MACD-Histogramm,
+    MFI als volumenbasiertes Pendant zum RSI) zu einem einzigen Oszillator. Die
+    Trend-/Momentum-Komponenten (EMA-Diff, MACD-Histogramm) werden relativ zur aktuellen
+    Volatilitaet normiert (2x ATR), RSI/MFI relativ zu ihrer ueblichen 25-75-Spanne.
+    compositeNormalized > 0 = bullisch (gruen im Original), < 0 = baerisch (rot)."""
+    n = len(closes)
+
+    def _normalize(value, lo, hi):
+        rng = hi - lo
+        if rng == 0:
+            rng = 0.0001
+        return -1 + ((value - lo) / rng) * 2
+
+    atr_series = compute_atr(highs, lows, closes, atr_period)
+    price_range = [2 * a for a in atr_series]
+
+    rsi_series = compute_rsi(closes, rsi_period)
+    ema_f = _ema_series(closes, ema_fast)
+    ema_s = _ema_series(closes, ema_slow)
+    ema_diff = [ema_f[i] - ema_s[i] for i in range(n)]
+
+    macd_f = _ema_series(closes, macd_fast)
+    macd_s = _ema_series(closes, macd_slow)
+    macd = [macd_f[i] - macd_s[i] for i in range(n)]
+    # macdSignal ist im Original ein SMA(macd, 9), keine EMA
+    macd_signal = []
+    for i in range(n):
+        start = max(0, i - macd_signal_period + 1)
+        window = macd[start:i + 1]
+        macd_signal.append(sum(window) / len(window))
+    macd_hist = [macd[i] - macd_signal[i] for i in range(n)]
+
+    mfi_series = compute_mfi(highs, lows, closes, volumes, mfi_period)
+
+    composite = [0.0] * n
+    for i in range(n):
+        rsi_norm = _normalize(rsi_series[i], 25, 75)
+        ema_diff_norm = _normalize(ema_diff[i], -price_range[i], price_range[i])
+        macd_hist_norm = _normalize(macd_hist[i], -price_range[i], price_range[i])
+        mfi_norm = _normalize(mfi_series[i], 25, 75)
+        composite_value = ema_diff_norm + rsi_norm + macd_hist_norm + mfi_norm
+        composite[i] = _normalize(composite_value, -4, 4)
+    return composite
+
+
 async def zscore_trend_poll_loop(symbol):
     """Eigene Strategie 'Z-Score-Trend': eine Schwelle X (Long bei +X, Short bei -X,
     siehe compute_zscore_trend fuer die Z-Score-Berechnung). Ausstieg (falls TP noch
@@ -613,6 +867,115 @@ async def zscore_trend_poll_loop(symbol):
                         debug_log(f"⏳ [{symbol}] Z-Score-Trend wartet: zu wenig Kerzen ({len(closed_c)}/{lookback + 2} nötig)")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Z-Score-Trend-Abfrage fehlgeschlagen", {"error": str(e)})
+
+        await asyncio.sleep(5)
+
+
+
+async def blsh_trend_poll_loop(symbol):
+    """Eigene Strategie 'BLSH-Composite' (portiert aus 'Buy Low Sell High Composite'):
+    kombiniert RSI, EMA-Differenz, MACD-Histogramm und MFI zu einem einzigen, auf
+    -1..+1 normierten Oszillator (siehe compute_blsh_composite). Long-Signal: Composite
+    kreuzt +Schwelle von unten. Short-Signal: kreuzt -Schwelle von oben. Ausstieg (falls
+    TP nicht erreicht): Rueckkreuzung der Nulllinie - gleiches Schema wie Z-Score-Trend.
+    Unterschied zu Z-Score-Trend: die Signal-Erkennung ist bewusst KERZENBASIERT (wartet
+    auf Kerzenschluss), nicht tick-live - die Composite kombiniert RSI/MACD/MFI (inkl.
+    Volumen), das liesse sich nicht sinnvoll wie ein einzelner EMA-Schritt pro Tick
+    fortschreiben. TP1 (Teilverkauf + Break-Even)/TP2/SL/Cooldown laufen weiterhin
+    tick-basiert in on_price_update."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    prev_composite = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "blsh_trend":
+                resolution = cfg["blsh_resolution"]
+                atr_period = cfg["blsh_atr_period"]
+                rsi_period = cfg["blsh_rsi_period"]
+                ema_fast = cfg["blsh_ema_fast"]
+                ema_slow = cfg["blsh_ema_slow"]
+                macd_fast = cfg["blsh_macd_fast"]
+                macd_slow = cfg["blsh_macd_slow"]
+                macd_signal_period = cfg["blsh_macd_signal"]
+                mfi_period = cfg["blsh_mfi_period"]
+                threshold = cfg["blsh_threshold"]
+                min_needed = max(ema_slow, macd_slow, atr_period, rsi_period, mfi_period) + 5
+                needed_bars = min(1000, max(min_needed * 3, 60))
+
+                data = await fetch_candles_binance_multi_vol(symbol, resolution, count_back=needed_bars)
+                if data:
+                    timestamps, opens, highs, lows, closes, volumes = data
+                    closed_ts = timestamps[:-1]
+                    closed_h, closed_l, closed_c, closed_v = highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                else:
+                    closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    composite = compute_blsh_composite(closed_h, closed_l, closed_c, closed_v,
+                                                        atr_period, rsi_period, ema_fast, ema_slow,
+                                                        macd_fast, macd_slow, macd_signal_period, mfi_period)
+                    st = b["state"]
+                    curr = composite[-1]
+                    st["blsh_value"] = round(curr, 3)
+                    st["blsh_history"].append({"ts": int(time.time() * 1000), "v": round(curr, 3)})
+                    if len(st["blsh_history"]) > 300:
+                        st["blsh_history"].pop(0)
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] BLSH-Composite aktiv: V={curr:.2f} (Schwelle ±{threshold}), Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_processed_ts != signal_key
+                    if is_new_candle:
+                        last_processed_ts = signal_key
+
+                    long_entry = is_new_candle and prev_composite is not None and prev_composite <= threshold and curr > threshold
+                    short_entry = is_new_candle and prev_composite is not None and prev_composite >= -threshold and curr < -threshold
+                    long_exit = is_new_candle and prev_composite is not None and prev_composite >= 0 and curr < 0
+                    short_exit = is_new_candle and prev_composite is not None and prev_composite <= 0 and curr > 0
+
+                    dir_mode = cfg.get("blsh_direction_mode", "both")
+                    if dir_mode == "long_only":
+                        short_entry = False
+                    elif dir_mode == "short_only":
+                        long_entry = False
+
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    if cfg["bot_active"] and st["position"] is not None:
+                        if (st["position"] == "long" and long_exit) or (st["position"] == "short" and short_exit):
+                            debug_log(f"🚪 [{symbol}] BLSH-Composite Nulllinien-Exit: {st['position'].upper()} @ {price} (V {curr:.2f})")
+                            await execute_exit(symbol, price, "BLSH-ZERO-EXIT")
+                            st["blsh_last_exit_ts"] = time.time()
+
+                    cooldown = cfg.get("blsh_cooldown_seconds", 0)
+                    since_last_exit = time.time() - st.get("blsh_last_exit_ts", 0)
+                    in_cooldown = cooldown > 0 and since_last_exit < cooldown
+
+                    direction = "long" if long_entry else ("short" if short_entry else None)
+                    if direction and cfg["bot_active"] and st["position"] is None and not in_cooldown:
+                        st["blsh_trend"] = 1 if direction == "long" else -1
+                        debug_log(f"📡 [{symbol}] BLSH-Composite Signal: {direction.upper()} @ {price} (V {curr:.2f})")
+                        price_after = st["last_price"] if st["last_price"] is not None else price
+                        await execute_entry(symbol, direction, price_after, is_add_on=False)
+
+                    if is_new_candle:
+                        prev_composite = curr
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] BLSH-Composite wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] BLSH-Composite wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] BLSH-Composite-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
 
@@ -1064,12 +1427,20 @@ async def on_price_update(symbol, price):
                     if (st["position"] == "long" and long_exit) or (st["position"] == "short" and short_exit):
                         debug_log(f"🚪 [{symbol}] Z-Score-Trend Nulllinien-Exit (live): {st['position'].upper()} @ {price} (Z {live_z:.2f})")
                         await execute_exit(symbol, price, "ZSCORE-ZERO-EXIT")
+                        st["zscore_last_exit_ts"] = time.time()
+
+                cooldown = cfg.get("zscore_cooldown_seconds", 0)
+                since_last_exit = time.time() - st.get("zscore_last_exit_ts", 0)
+                in_cooldown = cooldown > 0 and since_last_exit < cooldown
 
                 direction = "long" if long_entry else ("short" if short_entry else None)
                 if direction and cfg["bot_active"] and st["position"] is None:
-                    st["zscore_trend"] = 1 if direction == "long" else -1
-                    debug_log(f"📡 [{symbol}] Z-Score-Trend Signal (live): {direction.upper()} @ {price} (Z {live_z:.2f})")
-                    await execute_entry(symbol, direction, price, is_add_on=False)
+                    if in_cooldown:
+                        pass  # Cooldown nach dem letzten Exit noch aktiv - Signal wird uebersprungen
+                    else:
+                        st["zscore_trend"] = 1 if direction == "long" else -1
+                        debug_log(f"📡 [{symbol}] Z-Score-Trend Signal (live): {direction.upper()} @ {price} (Z {live_z:.2f})")
+                        await execute_entry(symbol, direction, price, is_add_on=False)
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Z-Score-Trend Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
@@ -1082,6 +1453,7 @@ async def on_price_update(symbol, price):
                 # Vor TP1: normaler fester SL (abschaltbar)
                 if cfg.get("zscore_sl_enabled", True) and pnl_usd <= -cfg["zscore_sl_usd"]:
                     await execute_exit(symbol, price, "SL")
+                    st["zscore_last_exit_ts"] = time.time()
                 elif pnl_usd >= cfg["zscore_tp1_usd"]:
                     if cfg.get("zscore_tp2_enabled", True):
                         fraction = cfg["zscore_tp1_close_pct"] / 100
@@ -1092,12 +1464,46 @@ async def on_price_update(symbol, price):
                     else:
                         # TP2 aus: TP1 ist der finale, vollstaendige Ausstieg
                         await execute_exit(symbol, price, "TP1")
+                        st["zscore_last_exit_ts"] = time.time()
             else:
                 # Nach TP1: SL liegt jetzt im Plus (Einstieg + Lock-Betrag, abschaltbar), TP2 ist das finale Ziel (abschaltbar)
                 if cfg.get("zscore_breakeven_enabled", True) and pnl_usd <= cfg["zscore_breakeven_lock_usd"]:
                     await execute_exit(symbol, price, "BREAKEVEN-LOCK")
+                    st["zscore_last_exit_ts"] = time.time()
                 elif cfg.get("zscore_tp2_enabled", True) and pnl_usd >= cfg["zscore_tp2_usd"]:
                     await execute_exit(symbol, price, "TP2")
+                    st["zscore_last_exit_ts"] = time.time()
+        return
+
+    if cfg["entry_mode"] == "blsh_trend":
+        # Nulllinien-Exit/Cooldown-Logik ist bereits kerzenbasiert im Poll-Loop erledigt
+        # (siehe blsh_trend_poll_loop) - hier nur TP1/TP2/SL, tick-basiert wie ueberall.
+        if st["position"] is None:
+            st["blsh_tp1_done"] = False
+        else:
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if not st["blsh_tp1_done"]:
+                if cfg.get("blsh_sl_enabled", True) and pnl_usd <= -cfg["blsh_sl_usd"]:
+                    await execute_exit(symbol, price, "SL")
+                    st["blsh_last_exit_ts"] = time.time()
+                elif pnl_usd >= cfg["blsh_tp1_usd"]:
+                    if cfg.get("blsh_tp2_enabled", True):
+                        fraction = cfg["blsh_tp1_close_pct"] / 100
+                        ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+                        if ok:
+                            st["blsh_tp1_done"] = True
+                            debug_log(f"📡 [{symbol}] BLSH-Composite TP1 erreicht" + (f" - SL auf Einstieg+{cfg['blsh_breakeven_lock_usd']} gesetzt" if cfg.get("blsh_breakeven_enabled", True) else " - kein Break-Even-Stop aktiv, laeuft bis TP2/Gegensignal"))
+                    else:
+                        await execute_exit(symbol, price, "TP1")
+                        st["blsh_last_exit_ts"] = time.time()
+            else:
+                if cfg.get("blsh_breakeven_enabled", True) and pnl_usd <= cfg["blsh_breakeven_lock_usd"]:
+                    await execute_exit(symbol, price, "BREAKEVEN-LOCK")
+                    st["blsh_last_exit_ts"] = time.time()
+                elif cfg.get("blsh_tp2_enabled", True) and pnl_usd >= cfg["blsh_tp2_usd"]:
+                    await execute_exit(symbol, price, "TP2")
+                    st["blsh_last_exit_ts"] = time.time()
         return
 
     if st["position"] is None:
@@ -1190,7 +1596,7 @@ async def trading_loop():
 # Lighter.xyz ist gebuehrenfrei - es werden daher keine Handelsgebuehren simuliert.
 
 BACKTEST_MAX_CANDLES = {
-    "fib_reversal": 100_000, "range_profile": 30_000, "zscore_trend": 100_000,
+    "fib_reversal": 100_000, "range_profile": 30_000, "zscore_trend": 100_000, "blsh_trend": 100_000,
 }
 
 
@@ -1358,12 +1764,14 @@ def backtest_zscore_trend(candles, cfg):
     breakeven_enabled = cfg.get("zscore_breakeven_enabled", True)
     tp2_enabled = cfg.get("zscore_tp2_enabled", True)
     dir_mode = cfg.get("zscore_direction_mode", "both")
+    cooldown_ms = cfg.get("zscore_cooldown_seconds", 0) * 1000
 
     smooth_z = compute_zscore_trend(c, lookback, ema_smooth)
 
     warmup = lookback + 5
     position = None  # {"dir","entry","size","tp1_done","entry_i"}
     trades = []
+    last_exit_ts = -10 ** 15
 
     for i in range(warmup, n):
         price = c[i]
@@ -1375,6 +1783,7 @@ def backtest_zscore_trend(candles, cfg):
                 if sl_enabled and pnl_usd <= -sl_usd:
                     _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL", ts=ts)
                     position = None
+                    last_exit_ts = ts[i]
                 elif pnl_usd >= tp1_usd:
                     if tp2_enabled:
                         close_size = size * tp1_close_pct
@@ -1385,13 +1794,16 @@ def backtest_zscore_trend(candles, cfg):
                         # TP2 aus: TP1 ist der finale, vollstaendige Ausstieg
                         _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP1", ts=ts)
                         position = None
+                        last_exit_ts = ts[i]
             else:
                 if breakeven_enabled and pnl_usd <= breakeven_lock:
                     _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "BREAKEVEN-LOCK", ts=ts)
                     position = None
+                    last_exit_ts = ts[i]
                 elif tp2_enabled and pnl_usd >= tp2_usd:
                     _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP2", ts=ts)
                     position = None
+                    last_exit_ts = ts[i]
 
         prev_z, curr_z = smooth_z[i - 1], smooth_z[i]
         long_entry = prev_z <= threshold and curr_z > threshold
@@ -1409,9 +1821,10 @@ def backtest_zscore_trend(candles, cfg):
             if (position["dir"] == "long" and long_exit) or (position["dir"] == "short" and short_exit):
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ZSCORE-ZERO-EXIT", ts=ts)
                 position = None
+                last_exit_ts = ts[i]
 
         direction = "long" if long_entry else ("short" if short_entry else None)
-        if direction and position is None:
+        if direction and position is None and (ts[i] - last_exit_ts) >= cooldown_ms:
             size = (margin * leverage) / price
             position = {"dir": direction, "entry": price, "size": size, "tp1_done": False, "entry_i": i}
 
@@ -1424,10 +1837,95 @@ def backtest_zscore_trend(candles, cfg):
     return trades
 
 
+def backtest_blsh_trend(candles, cfg):
+    ts, o, h, l, c, v = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    threshold = cfg["blsh_threshold"]
+    sl_usd = cfg["blsh_sl_usd"]
+    tp1_usd = cfg["blsh_tp1_usd"]
+    tp1_close_pct = cfg["blsh_tp1_close_pct"] / 100
+    breakeven_lock = cfg["blsh_breakeven_lock_usd"]
+    tp2_usd = cfg["blsh_tp2_usd"]
+    sl_enabled = cfg.get("blsh_sl_enabled", True)
+    breakeven_enabled = cfg.get("blsh_breakeven_enabled", True)
+    tp2_enabled = cfg.get("blsh_tp2_enabled", True)
+    dir_mode = cfg.get("blsh_direction_mode", "both")
+    cooldown_ms = cfg.get("blsh_cooldown_seconds", 0) * 1000
+
+    composite = compute_blsh_composite(
+        h, l, c, v, cfg["blsh_atr_period"], cfg["blsh_rsi_period"], cfg["blsh_ema_fast"],
+        cfg["blsh_ema_slow"], cfg["blsh_macd_fast"], cfg["blsh_macd_slow"], cfg["blsh_macd_signal"], cfg["blsh_mfi_period"],
+    )
+
+    warmup = max(cfg["blsh_ema_slow"], cfg["blsh_macd_slow"], cfg["blsh_atr_period"], cfg["blsh_rsi_period"], cfg["blsh_mfi_period"]) + 5
+    position = None
+    trades = []
+    last_exit_ts = -10 ** 15
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            if not position["tp1_done"]:
+                if sl_enabled and pnl_usd <= -sl_usd:
+                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL", ts=ts)
+                    position = None
+                    last_exit_ts = ts[i]
+                elif pnl_usd >= tp1_usd:
+                    if tp2_enabled:
+                        close_size = size * tp1_close_pct
+                        _bt_close_trade(trades, direction, entry, price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                        position["size"] -= close_size
+                        position["tp1_done"] = True
+                    else:
+                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP1", ts=ts)
+                        position = None
+                        last_exit_ts = ts[i]
+            else:
+                if breakeven_enabled and pnl_usd <= breakeven_lock:
+                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "BREAKEVEN-LOCK", ts=ts)
+                    position = None
+                    last_exit_ts = ts[i]
+                elif tp2_enabled and pnl_usd >= tp2_usd:
+                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP2", ts=ts)
+                    position = None
+                    last_exit_ts = ts[i]
+
+        prev_v, curr_v = composite[i - 1], composite[i]
+        long_entry = prev_v <= threshold and curr_v > threshold
+        short_entry = prev_v >= -threshold and curr_v < -threshold
+        long_exit = prev_v >= 0 and curr_v < 0
+        short_exit = prev_v <= 0 and curr_v > 0
+        if dir_mode == "long_only":
+            short_entry = False
+        elif dir_mode == "short_only":
+            long_entry = False
+
+        if position is not None:
+            if (position["dir"] == "long" and long_exit) or (position["dir"] == "short" and short_exit):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "BLSH-ZERO-EXIT", ts=ts)
+                position = None
+                last_exit_ts = ts[i]
+
+        direction = "long" if long_entry else ("short" if short_entry else None)
+        if direction and position is None and (ts[i] - last_exit_ts) >= cooldown_ms:
+            size = (margin * leverage) / price
+            position = {"dir": direction, "entry": price, "size": size, "tp1_done": False, "entry_i": i}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
 BACKTEST_FUNCS = {
     "range_profile": backtest_range_profile,
     "fib_reversal": backtest_fib_reversal,
     "zscore_trend": backtest_zscore_trend,
+    "blsh_trend": backtest_blsh_trend,
 }
 
 
@@ -1499,12 +1997,36 @@ def _trim_candles_to_days(candles, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+
+    max_candles = BACKTEST_MAX_CANDLES[entry_mode]
+
+    if entry_mode == "blsh_trend":
+        # Eigener Pfad: braucht Volumen (6er- statt 5er-Tupel), nutzt daher nicht den
+        # gemeinsamen Kerzen-Cache der anderen Strategien.
+        resolution = cfg.get("blsh_resolution", "1m")
+        candles, err = await fetch_historical_candles_binance_vol(symbol, resolution, days, max_candles)
+        if err:
+            return {"error": err}
+        if not candles or len(candles[4]) < 100:
+            return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
+        n_candles = len(candles[4])
+        trades = backtest_blsh_trend(candles, cfg)
+        stats = summarize_backtest_trades(trades)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"])
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"])
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
 
     resolution_key = {"range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
                        "zscore_trend": "zscore_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
-    max_candles = BACKTEST_MAX_CANDLES[entry_mode]
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
         # Obergrenze bewusst strenger, sonst waeren das bei laengeren Zeitraeumen zu viele
