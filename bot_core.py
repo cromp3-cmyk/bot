@@ -878,7 +878,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="obi_scalp"><label>Max. Spread (% vom Mid-Preis)</label><input type="number" step="0.01" id="obi_max_spread_pct"></div>
+  <div data-mode="obi_scalp"><label>Max. Spread (% vom Mid-Preis)</label><input type="number" step="0.0001" id="obi_max_spread_pct"></div>
   <div data-mode="obi_scalp"><label>Volatilitäts-Regime-Filter (verwirft Signale außerhalb Normalband)</label>
     <select class="cfg" id="obi_vol_filter_enabled">
       <option value="false">Aus</option>
@@ -886,8 +886,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>Volatilitäts-Fenster (Sek.)</label><input type="number" step="1" id="obi_vol_window_seconds"></div>
-  <div data-mode="obi_scalp"><label>Min. Volatilität (% Hoch-Tief-Spanne, darunter = zu ruhig)</label><input type="number" step="0.01" id="obi_vol_min_pct"></div>
-  <div data-mode="obi_scalp"><label>Max. Volatilität (% Hoch-Tief-Spanne, darüber = zu wild)</label><input type="number" step="0.01" id="obi_vol_max_pct"></div>
+  <div data-mode="obi_scalp"><label>Min. Volatilität (% Hoch-Tief-Spanne, darunter = zu ruhig)</label><input type="number" step="0.0001" id="obi_vol_min_pct"></div>
+  <div data-mode="obi_scalp"><label>Max. Volatilität (% Hoch-Tief-Spanne, darüber = zu wild)</label><input type="number" step="0.0001" id="obi_vol_max_pct"></div>
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
       <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
