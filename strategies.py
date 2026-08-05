@@ -751,6 +751,21 @@ def compute_mfi(highs, lows, closes, volumes, period):
     return mfi
 
 
+def compute_macd_line_and_signal(closes, fast, slow, signal_period):
+    """Rohe MACD-Linie und Signal-Linie (SMA-basiert, wie im BLSH-Original) - fuer den
+    reinen Crossover-Modus (gruener/roter Punkt: MACD kreuzt seine Signal-Linie),
+    unabhaengig von der Composite-Schwelle."""
+    ema_f = _ema_series(closes, fast)
+    ema_s = _ema_series(closes, slow)
+    macd = [ema_f[i] - ema_s[i] for i in range(len(closes))]
+    macd_signal = []
+    for i in range(len(macd)):
+        start = max(0, i - signal_period + 1)
+        window = macd[start:i + 1]
+        macd_signal.append(sum(window) / len(window))
+    return macd, macd_signal
+
+
 def compute_blsh_composite(highs, lows, closes, volumes, atr_period, rsi_period,
                             ema_fast, ema_slow, macd_fast, macd_slow, macd_signal_period, mfi_period):
     """Portiert aus dem Indikator 'Buy Low Sell High Composite': kombiniert vier auf
@@ -873,25 +888,32 @@ async def zscore_trend_poll_loop(symbol):
 
 
 async def blsh_trend_poll_loop(symbol):
-    """Eigene Strategie 'BLSH-Composite' (portiert aus 'Buy Low Sell High Composite'):
-    kombiniert RSI, EMA-Differenz, MACD-Histogramm und MFI zu einem einzigen, auf
-    -1..+1 normierten Oszillator (siehe compute_blsh_composite). Long-Signal: Composite
-    kreuzt +Schwelle von unten. Short-Signal: kreuzt -Schwelle von oben. Ausstieg (falls
-    TP nicht erreicht): Rueckkreuzung der Nulllinie - gleiches Schema wie Z-Score-Trend.
-    Unterschied zu Z-Score-Trend: die Signal-Erkennung ist bewusst KERZENBASIERT (wartet
-    auf Kerzenschluss), nicht tick-live - die Composite kombiniert RSI/MACD/MFI (inkl.
+    """Eigene Strategie 'BLSH-Composite' (portiert aus 'Buy Low Sell High Composite'),
+    zwei waehlbare Signal-Modi:
+    - "composite" (Standard): kombiniert RSI, EMA-Differenz, MACD-Histogramm und MFI zu
+      einem einzigen, auf -1..+1 normierten Oszillator (siehe compute_blsh_composite).
+      Long bei Kreuzung ueber +Schwelle, Short bei Kreuzung unter -Schwelle, Ausstieg
+      (falls TP nicht erreicht) bei Rueckkreuzung der Nulllinie. TP1/TP2/SL/Cooldown
+      laufen tick-basiert in on_price_update.
+    - "macd_cross": reiner Wechsel-Modus wie im Original-Indikator (gruener/roter Punkt
+      = MACD kreuzt seine eigene Signal-Linie) - kein Threshold, kein TP/SL, immer im
+      Markt: bei jeder Kreuzung wird sofort umgedreht (Position geschlossen + Gegen-
+      position eroeffnet), gleiches Verhalten wie frueher bei Pivot-SuperTrend.
+    Die Signal-Erkennung ist in beiden Modi bewusst KERZENBASIERT (wartet auf
+    Kerzenschluss), nicht tick-live - die Composite kombiniert RSI/MACD/MFI (inkl.
     Volumen), das liesse sich nicht sinnvoll wie ein einzelner EMA-Schritt pro Tick
-    fortschreiben. TP1 (Teilverkauf + Break-Even)/TP2/SL/Cooldown laufen weiterhin
-    tick-basiert in on_price_update."""
+    fortschreiben."""
     b = BOTS[symbol]
     last_processed_ts = None
     prev_composite = None
+    prev_macd_diff = None
     last_heartbeat = 0.0
 
     while True:
         try:
             cfg = b["config"]
             if cfg["entry_mode"] == "blsh_trend":
+                signal_mode = cfg.get("blsh_signal_mode", "composite")
                 resolution = cfg["blsh_resolution"]
                 atr_period = cfg["blsh_atr_period"]
                 rsi_period = cfg["blsh_rsi_period"]
@@ -917,57 +939,90 @@ async def blsh_trend_poll_loop(symbol):
                 due_heartbeat = now - last_heartbeat > 300
 
                 if closed_ts and len(closed_c) > min_needed:
-                    composite = compute_blsh_composite(closed_h, closed_l, closed_c, closed_v,
-                                                        atr_period, rsi_period, ema_fast, ema_slow,
-                                                        macd_fast, macd_slow, macd_signal_period, mfi_period)
                     st = b["state"]
-                    curr = composite[-1]
-                    st["blsh_value"] = round(curr, 3)
-                    st["blsh_history"].append({"ts": int(time.time() * 1000), "v": round(curr, 3)})
-                    if len(st["blsh_history"]) > 300:
-                        st["blsh_history"].pop(0)
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] BLSH-Composite aktiv: V={curr:.2f} (Schwelle ±{threshold}), Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
                     signal_key = closed_ts[-1]
                     is_new_candle = last_processed_ts != signal_key
                     if is_new_candle:
                         last_processed_ts = signal_key
-
-                    long_entry = is_new_candle and prev_composite is not None and prev_composite <= threshold and curr > threshold
-                    short_entry = is_new_candle and prev_composite is not None and prev_composite >= -threshold and curr < -threshold
-                    long_exit = is_new_candle and prev_composite is not None and prev_composite >= 0 and curr < 0
-                    short_exit = is_new_candle and prev_composite is not None and prev_composite <= 0 and curr > 0
-
-                    dir_mode = cfg.get("blsh_direction_mode", "both")
-                    if dir_mode == "long_only":
-                        short_entry = False
-                    elif dir_mode == "short_only":
-                        long_entry = False
-
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
 
-                    if cfg["bot_active"] and st["position"] is not None:
-                        if (st["position"] == "long" and long_exit) or (st["position"] == "short" and short_exit):
-                            debug_log(f"🚪 [{symbol}] BLSH-Composite Nulllinien-Exit: {st['position'].upper()} @ {price} (V {curr:.2f})")
-                            await execute_exit(symbol, price, "BLSH-ZERO-EXIT")
-                            st["blsh_last_exit_ts"] = time.time()
+                    if signal_mode == "macd_cross":
+                        macd, macd_signal = compute_macd_line_and_signal(closed_c, macd_fast, macd_slow, macd_signal_period)
+                        curr_diff = macd[-1] - macd_signal[-1]
+                        st["blsh_value"] = round(curr_diff, 5)
+                        st["blsh_history"].append({"ts": int(time.time() * 1000), "v": round(curr_diff, 5)})
+                        if len(st["blsh_history"]) > 300:
+                            st["blsh_history"].pop(0)
 
-                    cooldown = cfg.get("blsh_cooldown_seconds", 0)
-                    since_last_exit = time.time() - st.get("blsh_last_exit_ts", 0)
-                    in_cooldown = cooldown > 0 and since_last_exit < cooldown
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            debug_log(f"💓 [{symbol}] BLSH-MACD-Cross aktiv: MACD-Signal-Diff={curr_diff:.4f}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
-                    direction = "long" if long_entry else ("short" if short_entry else None)
-                    if direction and cfg["bot_active"] and st["position"] is None and not in_cooldown:
-                        st["blsh_trend"] = 1 if direction == "long" else -1
-                        debug_log(f"📡 [{symbol}] BLSH-Composite Signal: {direction.upper()} @ {price} (V {curr:.2f})")
-                        price_after = st["last_price"] if st["last_price"] is not None else price
-                        await execute_entry(symbol, direction, price_after, is_add_on=False)
+                        bullish_cross = is_new_candle and prev_macd_diff is not None and prev_macd_diff <= 0 and curr_diff > 0
+                        bearish_cross = is_new_candle and prev_macd_diff is not None and prev_macd_diff >= 0 and curr_diff < 0
 
-                    if is_new_candle:
-                        prev_composite = curr
+                        dir_mode = cfg.get("blsh_direction_mode", "both")
+                        allow_entry_long = dir_mode != "short_only"
+                        allow_entry_short = dir_mode != "long_only"
+                        direction = "long" if bullish_cross else ("short" if bearish_cross else None)
+
+                        if direction and cfg["bot_active"]:
+                            if st["position"] is not None and st["position"] != direction:
+                                debug_log(f"🔄 [{symbol}] BLSH-MACD-Cross Wechsel: {direction.upper()} @ {price} (gruener/roter Punkt)")
+                                await execute_exit(symbol, price, "BLSH-MACD-REVERSE")
+                            if st["position"] is None and ((direction == "long" and allow_entry_long) or (direction == "short" and allow_entry_short)):
+                                st["blsh_trend"] = 1 if direction == "long" else -1
+                                debug_log(f"📡 [{symbol}] BLSH-MACD-Cross Signal: {direction.upper()} @ {price}")
+                                price_after = st["last_price"] if st["last_price"] is not None else price
+                                await execute_entry(symbol, direction, price_after, is_add_on=False)
+
+                        if is_new_candle:
+                            prev_macd_diff = curr_diff
+
+                    else:
+                        composite = compute_blsh_composite(closed_h, closed_l, closed_c, closed_v,
+                                                            atr_period, rsi_period, ema_fast, ema_slow,
+                                                            macd_fast, macd_slow, macd_signal_period, mfi_period)
+                        curr = composite[-1]
+                        st["blsh_value"] = round(curr, 3)
+                        st["blsh_history"].append({"ts": int(time.time() * 1000), "v": round(curr, 3)})
+                        if len(st["blsh_history"]) > 300:
+                            st["blsh_history"].pop(0)
+
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            debug_log(f"💓 [{symbol}] BLSH-Composite aktiv: V={curr:.2f} (Schwelle ±{threshold}), Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                        long_entry = is_new_candle and prev_composite is not None and prev_composite <= threshold and curr > threshold
+                        short_entry = is_new_candle and prev_composite is not None and prev_composite >= -threshold and curr < -threshold
+                        long_exit = is_new_candle and prev_composite is not None and prev_composite >= 0 and curr < 0
+                        short_exit = is_new_candle and prev_composite is not None and prev_composite <= 0 and curr > 0
+
+                        dir_mode = cfg.get("blsh_direction_mode", "both")
+                        if dir_mode == "long_only":
+                            short_entry = False
+                        elif dir_mode == "short_only":
+                            long_entry = False
+
+                        if cfg["bot_active"] and st["position"] is not None:
+                            if (st["position"] == "long" and long_exit) or (st["position"] == "short" and short_exit):
+                                debug_log(f"🚪 [{symbol}] BLSH-Composite Nulllinien-Exit: {st['position'].upper()} @ {price} (V {curr:.2f})")
+                                await execute_exit(symbol, price, "BLSH-ZERO-EXIT")
+                                st["blsh_last_exit_ts"] = time.time()
+
+                        cooldown = cfg.get("blsh_cooldown_seconds", 0)
+                        since_last_exit = time.time() - st.get("blsh_last_exit_ts", 0)
+                        in_cooldown = cooldown > 0 and since_last_exit < cooldown
+
+                        direction = "long" if long_entry else ("short" if short_entry else None)
+                        if direction and cfg["bot_active"] and st["position"] is None and not in_cooldown:
+                            st["blsh_trend"] = 1 if direction == "long" else -1
+                            debug_log(f"📡 [{symbol}] BLSH-Composite Signal: {direction.upper()} @ {price} (V {curr:.2f})")
+                            price_after = st["last_price"] if st["last_price"] is not None else price
+                            await execute_entry(symbol, direction, price_after, is_add_on=False)
+
+                        if is_new_candle:
+                            prev_composite = curr
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -1476,6 +1531,10 @@ async def on_price_update(symbol, price):
         return
 
     if cfg["entry_mode"] == "blsh_trend":
+        if cfg.get("blsh_signal_mode", "composite") == "macd_cross":
+            # Reiner Wechsel-Modus: kein TP/SL, Ein-/Ausstieg laeuft komplett
+            # kerzenbasiert im Poll-Loop (siehe blsh_trend_poll_loop)
+            return
         # Nulllinien-Exit/Cooldown-Logik ist bereits kerzenbasiert im Poll-Loop erledigt
         # (siehe blsh_trend_poll_loop) - hier nur TP1/TP2/SL, tick-basiert wie ueberall.
         if st["position"] is None:
@@ -1837,7 +1896,48 @@ def backtest_zscore_trend(candles, cfg):
     return trades
 
 
+def backtest_blsh_macd_cross(candles, cfg):
+    """Backtest fuer den reinen Wechsel-Modus (siehe blsh_trend_poll_loop, "macd_cross"):
+    kein TP/SL, immer im Markt, dreht bei jeder MACD/Signal-Kreuzung sofort um."""
+    ts, o, h, l, c, v = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    dir_mode = cfg.get("blsh_direction_mode", "both")
+    allow_long = dir_mode != "short_only"
+    allow_short = dir_mode != "long_only"
+
+    macd, macd_signal = compute_macd_line_and_signal(c, cfg["blsh_macd_fast"], cfg["blsh_macd_slow"], cfg["blsh_macd_signal"])
+    diff = [macd[i] - macd_signal[i] for i in range(n)]
+
+    warmup = max(cfg["blsh_macd_slow"], cfg["blsh_macd_signal"]) + 5
+    position = None
+    trades = []
+
+    for i in range(warmup, n):
+        price = c[i]
+        prev_d, curr_d = diff[i - 1], diff[i]
+        bullish = prev_d <= 0 and curr_d > 0
+        bearish = prev_d >= 0 and curr_d < 0
+        direction = "long" if bullish else ("short" if bearish else None)
+
+        if direction:
+            if position is not None and position["dir"] != direction:
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "BLSH-MACD-REVERSE", ts=ts)
+                position = None
+            if position is None and ((direction == "long" and allow_long) or (direction == "short" and allow_short)):
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
 def backtest_blsh_trend(candles, cfg):
+    if cfg.get("blsh_signal_mode", "composite") == "macd_cross":
+        return backtest_blsh_macd_cross(candles, cfg)
+
     ts, o, h, l, c, v = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]

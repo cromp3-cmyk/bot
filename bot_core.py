@@ -239,6 +239,7 @@ def default_config():
         "zscore_tp1_close_pct": float(os.getenv("ZSCORE_TP1_CLOSE_PCT", "50")),
         "zscore_breakeven_lock_usd": float(os.getenv("ZSCORE_BREAKEVEN_LOCK_USD", "0.3")),
         "zscore_tp2_usd": float(os.getenv("ZSCORE_TP2_USD", "6")),
+        "blsh_signal_mode": os.getenv("BLSH_SIGNAL_MODE", "composite"),  # "composite" oder "macd_cross"
         "blsh_resolution": os.getenv("BLSH_RESOLUTION", "1m"),
         "blsh_atr_period": int(os.getenv("BLSH_ATR_PERIOD", "9")),
         "blsh_rsi_period": int(os.getenv("BLSH_RSI_PERIOD", "14")),
@@ -968,6 +969,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="zscore_trend"><label>TP2-Betrag ($, fest, nur wenn TP2 an)</label><input type="number" step="any" id="zscore_tp2_usd"></div>
+  <div data-mode="blsh_trend"><label>Signal-Modus</label>
+    <select class="cfg" id="blsh_signal_mode">
+      <option value="composite">Composite (Schwelle + Nulllinien-Exit + TP1/TP2/SL/Cooldown)</option>
+      <option value="macd_cross">Wechsel (grüner/roter Punkt = MACD kreuzt Signal-Linie, kein TP/SL, immer im Markt)</option>
+    </select>
+  </div>
   <div data-mode="blsh_trend"><label>Zeitrahmen</label>
     <select class="cfg" id="blsh_resolution">
       <option value="1m">1 Minute</option>
@@ -994,8 +1001,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short (Long-Signale werden ignoriert)</option>
     </select>
   </div>
-  <div data-mode="blsh_trend"><label>Cooldown nach Exit (Sek., 0 = aus)</label><input type="number" step="1" id="blsh_cooldown_seconds"></div>
-  <div data-mode="blsh_trend"><label>SL vor TP1</label>
+  <div data-mode="blsh_trend"><label>Cooldown nach Exit (Sek., 0 = aus, nur Composite-Modus)</label><input type="number" step="1" id="blsh_cooldown_seconds"></div>
+  <div data-mode="blsh_trend"><label>SL vor TP1 (nur Composite-Modus, im Wechsel-Modus wirkungslos)</label>
     <select class="cfg" id="blsh_sl_enabled">
       <option value="true">An</option>
       <option value="false">Aus - Position läuft bis TP1 ungeschützt</option>
@@ -1431,6 +1438,7 @@ async function refresh() {
     document.getElementById('zscore_tp1_close_pct').value = data.config.zscore_tp1_close_pct;
     document.getElementById('zscore_breakeven_lock_usd').value = data.config.zscore_breakeven_lock_usd;
     document.getElementById('zscore_tp2_usd').value = data.config.zscore_tp2_usd;
+    document.getElementById('blsh_signal_mode').value = data.config.blsh_signal_mode;
     document.getElementById('blsh_resolution').value = data.config.blsh_resolution;
     document.getElementById('blsh_atr_period').value = data.config.blsh_atr_period;
     document.getElementById('blsh_rsi_period').value = data.config.blsh_rsi_period;
@@ -1685,6 +1693,7 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     zscore_tp1_close_pct: parseFloat(document.getElementById('zscore_tp1_close_pct').value),
     zscore_breakeven_lock_usd: parseFloat(document.getElementById('zscore_breakeven_lock_usd').value),
     zscore_tp2_usd: parseFloat(document.getElementById('zscore_tp2_usd').value),
+    blsh_signal_mode: document.getElementById('blsh_signal_mode').value,
     blsh_resolution: document.getElementById('blsh_resolution').value,
     blsh_atr_period: parseInt(document.getElementById('blsh_atr_period').value),
     blsh_rsi_period: parseInt(document.getElementById('blsh_rsi_period').value),
@@ -1745,7 +1754,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1840,7 +1849,7 @@ async def handle_config_update(request):
                 "zscore_threshold", "zscore_direction_mode", "zscore_cooldown_seconds", "zscore_sl_enabled", "zscore_sl_usd",
                 "zscore_tp1_usd", "zscore_tp1_close_pct", "zscore_breakeven_enabled", "zscore_breakeven_lock_usd",
                 "zscore_tp2_enabled", "zscore_tp2_usd",
-                "blsh_resolution", "blsh_atr_period", "blsh_rsi_period", "blsh_ema_fast", "blsh_ema_slow",
+                "blsh_signal_mode", "blsh_resolution", "blsh_atr_period", "blsh_rsi_period", "blsh_ema_fast", "blsh_ema_slow",
                 "blsh_macd_fast", "blsh_macd_slow", "blsh_macd_signal", "blsh_mfi_period", "blsh_threshold",
                 "blsh_direction_mode", "blsh_cooldown_seconds", "blsh_sl_enabled", "blsh_sl_usd",
                 "blsh_tp1_usd", "blsh_tp1_close_pct", "blsh_breakeven_enabled", "blsh_breakeven_lock_usd",
