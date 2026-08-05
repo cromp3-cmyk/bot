@@ -1065,6 +1065,41 @@ def calc_obi(symbol, levels, depth_weighting=False, min_liquidity=0.0):
     return 0.0 if total == 0 else (bid_vol - ask_vol) / total
 
 
+def calc_spread_pct(symbol):
+    """Bid/Ask-Spread der besten Preisstufe in Prozent vom Mid-Preis. Ein ungewoehnlich
+    weiter Spread zeigt ein duennes/chaotisches Buch an - genau dort liefert OBI laut
+    Microstructure-Forschung die unzuverlaessigsten Signale (hoher Spread korreliert mit
+    hoeheren Handelskosten und weniger belastbarem Orderbuch-Signal). Gibt None zurueck,
+    wenn keine Seite des Buchs Daten hat."""
+    book = BOTS[symbol]["state"]["obi_book"]
+    if not book["bids"] or not book["asks"]:
+        return None
+    best_bid = max(float(p) for p in book["bids"].keys())
+    best_ask = min(float(p) for p in book["asks"].keys())
+    mid = (best_bid + best_ask) / 2
+    if mid <= 0:
+        return None
+    return (best_ask - best_bid) / mid * 100
+
+
+def calc_recent_vol_pct(symbol, window_seconds):
+    """Kurzfristige Volatilitaet als Hoch-Tief-Spanne der letzten 'window_seconds' Sekunden
+    Tick-Preise, in Prozent vom Durchschnittspreis im Fenster. Nutzt den bereits mitgefuehrten
+    price_history-Puffer (keine zusaetzliche Datenquelle noetig). Dient als grober
+    Volatilitaets-Regime-Filter: zu ruhig = Seitwaerts-Rauschen ohne Fortsetzung, zu wild =
+    Spike-/Wick-Risiko. Gibt None zurueck, wenn zu wenige Ticks im Fenster liegen."""
+    st = BOTS[symbol]["state"]
+    now_ms = int(time.time() * 1000)
+    cutoff = now_ms - int(window_seconds * 1000)
+    prices = [p["price"] for p in st["price_history"] if p["ts"] >= cutoff]
+    if len(prices) < 3:
+        return None
+    avg = sum(prices) / len(prices)
+    if avg <= 0:
+        return None
+    return (max(prices) - min(prices)) / avg * 100
+
+
 def update_obi_windows(symbol, raw_obi, fast_s, medium_s, slow_s, use_median=False):
     """Ein gemeinsamer Rohwert-Puffer, daraus werden alle drei Zeitfenster berechnet -
     effizienter als drei getrennte Puffer, und alle drei sehen exakt dieselben Rohdaten.
@@ -1165,6 +1200,9 @@ async def handle_obi_order_book_update(symbol, msg):
     st["obi_slow"] = round(slow, 4)
     st["obi_current"] = st["obi_fast"]
 
+    st["obi_spread_pct"] = calc_spread_pct(symbol)
+    st["obi_recent_vol_pct"] = calc_recent_vol_pct(symbol, cfg.get("obi_vol_window_seconds", 30))
+
     st["obi_history"].append({"ts": int(time.time() * 1000), "fast": st["obi_fast"], "medium": st["obi_medium"], "slow": st["obi_slow"]})
     if len(st["obi_history"]) > 300:
         st["obi_history"].pop(0)
@@ -1248,6 +1286,20 @@ async def handle_obi_order_book_update(symbol, msg):
         if direction == "long" and st["last_price"] <= st["obi_trend_ema"]:
             return
         if direction == "short" and st["last_price"] >= st["obi_trend_ema"]:
+            return
+
+    # Optionaler Spread-Filter: verwirft Signale bei ungewoehnlich weitem Bid/Ask-Spread
+    # (duennes/chaotisches Buch, OBI dort am unzuverlaessigsten)
+    if cfg.get("obi_spread_filter_enabled", False):
+        spread = st.get("obi_spread_pct")
+        if spread is None or spread > cfg.get("obi_max_spread_pct", 0.05):
+            return
+
+    # Optionaler Volatilitaets-Regime-Filter: verwirft Signale ausserhalb des Normalbands
+    # (zu ruhig = Rauschen ohne Fortsetzung, zu wild = Spike-/Wick-Risiko)
+    if cfg.get("obi_vol_filter_enabled", False):
+        vol = st.get("obi_recent_vol_pct")
+        if vol is None or vol < cfg.get("obi_vol_min_pct", 0.0) or vol > cfg.get("obi_vol_max_pct", 1.0):
             return
 
     if st["last_price"] is None:
