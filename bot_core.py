@@ -1323,7 +1323,7 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
   statusEl.innerText = `⏳ Lade Kerzen von Binance und simuliere... kann bei langen Zeiträumen 1-2 Minuten dauern.`;
   try {
     const res = await fetch(`/api/backtest?symbol=${btSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days})
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days, config: buildConfigPayload()})
     });
     const data = await res.json();
     if (btSymbol !== currentSymbol) return;  // Coin wurde gewechselt während der Backtest lief
@@ -1748,9 +1748,8 @@ async function refresh() {
   }
 }
 
-document.getElementById('config-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const payload = {
+function buildConfigPayload() {
+  return {
     margin: parseFloat(document.getElementById('margin').value),
     leverage: parseInt(document.getElementById('leverage').value),
     entry_mode: document.getElementById('entry_mode').value,
@@ -1862,6 +1861,11 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     dry_run: document.getElementById('dry_run').value === 'true',
     auto_reverse: document.getElementById('auto_reverse').value === 'true',
   };
+}
+
+document.getElementById('config-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const payload = buildConfigPayload();
   await fetch(`/api/config?symbol=${currentSymbol}`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
   window.formTouched = false;
   showToast(`Gespeichert für ${currentSymbol}!`);
@@ -2020,6 +2024,12 @@ async def handle_backtest(request):
     except (TypeError, ValueError):
         days = 30
     cfg = dict(BOTS[symbol]["config"])  # Kopie - Backtest darf die Live-Config nicht veraendern
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        # Nur bekannte Config-Felder uebernehmen (das Formular schickt ohnehin nur solche) -
+        # so testet der Backtest immer das, was gerade im Formular steht, auch wenn noch
+        # nicht auf "Speichern" geklickt wurde.
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
     entry_mode = cfg["entry_mode"]
     result = await run_backtest(symbol, entry_mode, cfg, days)
     return web.json_response(result)
