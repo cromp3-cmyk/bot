@@ -793,10 +793,17 @@ def compute_trend_meter_dots(closes, cfg):
 async def check_trend_meter_entry(symbol, dot1, dot2, dot3, line, price):
     """Long: alle 3 Punkte UND die Linie gruen -> sofort Long.
     Short: alle 3 Punkte UND die Linie rot -> sofort Short.
-    Sonst (gemischt): kein Einstieg."""
+    Sonst (gemischt): kein Einstieg.
+    Mit 'Invertiert'-Modus (tm_invert_direction) wurden dot1..line schon VOR dem Aufruf
+    umgedreht - hier ist also kein weiterer Invertier-Schritt noetig.
+    Nach einem SL-Exit greift optional eine Cooldown-Sperre (tm_sl_cooldown_seconds), damit
+    der Bot nicht sofort wieder in dieselbe Lage reinlaeuft, aus der der SL ihn gerade
+    rausgeholt hat."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if cfg.get("tm_sl_enabled", False) and time.time() < st.get("tm_sl_cooldown_until", 0.0):
         return
     if dot1 and dot2 and dot3 and line:
         direction = "long"
@@ -805,7 +812,7 @@ async def check_trend_meter_entry(symbol, dot1, dot2, dot3, line, price):
     else:
         return
     marks = "".join("🟢" if v else "🔴" for v in (dot1, dot2, dot3, line))
-    debug_log(f"📡 [{symbol}] Trend-Meter Signal: {direction.upper()} @ {price} (Punkte+Linie {marks})")
+    debug_log(f"📡 [{symbol}] Trend-Meter Signal: {direction.upper()} @ {price} (Punkte+Linie {marks}{' [invertiert]' if cfg.get('tm_invert_direction', False) else ''})")
     await execute_entry(symbol, direction, price, is_add_on=False)
 
 
@@ -887,10 +894,11 @@ async def trend_meter_poll_loop(symbol):
 
                         if is_new_candle:
                             last_processed_ts = signal_key
+                            e1, e2, e3, el = (not dot1, not dot2, not dot3, not line) if cfg.get("tm_invert_direction", False) else (dot1, dot2, dot3, line)
                             if cfg.get("tm_entry_trigger", "candle_close") == "candle_close":
-                                await check_trend_meter_entry(symbol, dot1, dot2, dot3, line, price)
+                                await check_trend_meter_entry(symbol, e1, e2, e3, el, price)
                             if cfg.get("tm_exit_trigger", "candle_close") == "candle_close":
-                                await check_trend_meter_exit(symbol, dot1, dot2, dot3, line, price)
+                                await check_trend_meter_exit(symbol, e1, e2, e3, el, price)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -1769,6 +1777,8 @@ async def on_price_update(symbol, price):
                     dots = compute_trend_meter_dots(live_closes, cfg)
                     if dots:
                         dot1, dot2, dot3, line = dots
+                        if cfg.get("tm_invert_direction", False):
+                            dot1, dot2, dot3, line = not dot1, not dot2, not dot3, not line
                         if entry_trigger == "tick":
                             await check_trend_meter_entry(symbol, dot1, dot2, dot3, line, price)
                         if exit_trigger == "tick":
@@ -1781,6 +1791,7 @@ async def on_price_update(symbol, price):
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
             if cfg.get("tm_sl_enabled", False) and pnl_usd <= -cfg.get("tm_sl_usd", 3):
                 await execute_exit(symbol, price, "SL")
+                st["tm_sl_cooldown_until"] = time.time() + cfg.get("tm_sl_cooldown_seconds", 30)
             elif cfg.get("tm_tp_enabled", False) and pnl_usd >= cfg.get("tm_tp_usd", 3):
                 await execute_exit(symbol, price, "TP")
         return
@@ -1885,6 +1896,8 @@ def backtest_trend_meter(candles, cfg):
     tp_usd = cfg.get("tm_tp_usd", 3)
     sl_enabled = cfg.get("tm_sl_enabled", False)
     sl_usd = cfg.get("tm_sl_usd", 3)
+    sl_cooldown_ms = cfg.get("tm_sl_cooldown_seconds", 30) * 1000
+    invert = cfg.get("tm_invert_direction", False)
 
     macd, macd_signal = compute_macd_line_and_signal(c, cfg["tm_macd_fast"], cfg["tm_macd_slow"], cfg["tm_macd_signal"])
     rsi1 = compute_rsi(c, cfg["tm_rsi1_period"])
@@ -1895,6 +1908,7 @@ def backtest_trend_meter(candles, cfg):
     warmup = max(cfg["tm_macd_slow"], cfg["tm_rsi1_period"], cfg["tm_rsi2_period"], cfg["tm_ma_slow"]) + 2
     position = None  # {"dir","entry","size","entry_i"}
     trades = []
+    sl_cooldown_until_ts = None
 
     for i in range(warmup, n):
         price = c[i]
@@ -1905,6 +1919,8 @@ def backtest_trend_meter(candles, cfg):
             if sl_enabled and pnl_usd <= -sl_usd:
                 _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL", ts=ts)
                 position = None
+                if sl_enabled:
+                    sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
             elif tp_enabled and pnl_usd >= tp_usd:
                 _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
@@ -1913,6 +1929,8 @@ def backtest_trend_meter(candles, cfg):
         dot2 = rsi1[i] > 50
         dot3 = rsi2[i] > 50
         line = ma_fast[i] > ma_slow[i]
+        if invert:
+            dot1, dot2, dot3, line = not dot1, not dot2, not dot3, not line
         all_green = dot1 and dot2 and dot3 and line
         all_red = not dot1 and not dot2 and not dot3 and not line
         any_red = not all_green
@@ -1923,7 +1941,7 @@ def backtest_trend_meter(candles, cfg):
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "TM-SIGNAL-EXIT", ts=ts)
                 position = None
 
-        if position is None:
+        if position is None and not (sl_enabled and sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts):
             direction = "long" if all_green else ("short" if all_red else None)
             if direction:
                 size = (margin * leverage) / price
