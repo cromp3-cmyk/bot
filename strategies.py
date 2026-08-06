@@ -830,8 +830,8 @@ async def trend_meter_poll_loop(symbol):
     """Eigene Strategie 'Trend-Meter' (portiert aus dem TradingView-Indikator 'Trend Meter'
     von Lij_MC): 3 Signal-Punkte (schnelles MACD-Histogramm, RSI13 vs. 50, RSI5 vs. 50) plus
     eine 'obere Linie' (EMA-Crossover) - siehe compute_trend_meter_dots.
-    Kein Stop-Loss (bewusst weggelassen) - nur ein optionaler fester $-Take-Profit (immer
-    tick-basiert geprueft, wie ueberall im Bot). Ein-/Ausstieg sind je EINZELN umschaltbar
+    Kein SL/TP im Kerzenschluss-Poll-Loop noetig - beide (optional, fester $-Betrag) laufen
+    tick-basiert geprueft, wie ueberall im Bot. Ein-/Ausstieg sind je EINZELN umschaltbar
     zwischen kerzenbasiert (nur hier im Poll-Loop bei echtem Kerzenschluss) und tick-basiert
     (reagiert sofort auf jeden Preis-Tick in on_price_update, indem die noch offene letzte
     Kerze live mit dem aktuellen Preis nachgerechnet wird - dafuer werden die Schlusskurse
@@ -1758,7 +1758,7 @@ async def on_price_update(symbol, price):
         # Kerzenbasierter Teil (Ein-/Ausstieg bei echtem Kerzenschluss) laeuft im
         # trend_meter_poll_loop. Hier nur: tick-basierte Live-Auswertung (falls fuer
         # Einstieg und/oder Ausstieg aktiviert) sowie der optionale $-Take-Profit
-        # (immer tick-basiert, wie ueberall im Bot). Bewusst KEIN Stop-Loss.
+        # (immer tick-basiert, wie ueberall im Bot). SL/TP: beide optional, fester $-Betrag.
         entry_trigger = cfg.get("tm_entry_trigger", "candle_close")
         exit_trigger = cfg.get("tm_exit_trigger", "candle_close")
         if entry_trigger == "tick" or exit_trigger == "tick":
@@ -1776,10 +1776,12 @@ async def on_price_update(symbol, price):
             except Exception as e:
                 debug_log(f"⚠️ [{symbol}] Trend-Meter Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
-        if st["position"] is not None and cfg.get("tm_tp_enabled", False):
+        if st["position"] is not None and (cfg.get("tm_tp_enabled", False) or cfg.get("tm_sl_enabled", False)):
             entry = st["avg_entry_price"]
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if pnl_usd >= cfg.get("tm_tp_usd", 3):
+            if cfg.get("tm_sl_enabled", False) and pnl_usd <= -cfg.get("tm_sl_usd", 3):
+                await execute_exit(symbol, price, "SL")
+            elif cfg.get("tm_tp_enabled", False) and pnl_usd >= cfg.get("tm_tp_usd", 3):
                 await execute_exit(symbol, price, "TP")
         return
 
@@ -1875,12 +1877,14 @@ async def trading_loop():
 def backtest_trend_meter(candles, cfg):
     """Backtest laeuft immer wie 'kerzenbasiert' (bei jedem Kerzenschluss ausgewertet) - eine
     echte Tick-Simulation ist mit historischen OHLC-Daten nicht moeglich, das betrifft nur
-    den optionalen Tick-Modus im Live-Betrieb. Kein SL (bewusst nicht vorgesehen)."""
+    den optionalen Tick-Modus im Live-Betrieb. SL/TP optional, beide fester $-Betrag."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     tp_enabled = cfg.get("tm_tp_enabled", False)
     tp_usd = cfg.get("tm_tp_usd", 3)
+    sl_enabled = cfg.get("tm_sl_enabled", False)
+    sl_usd = cfg.get("tm_sl_usd", 3)
 
     macd, macd_signal = compute_macd_line_and_signal(c, cfg["tm_macd_fast"], cfg["tm_macd_slow"], cfg["tm_macd_signal"])
     rsi1 = compute_rsi(c, cfg["tm_rsi1_period"])
@@ -1895,10 +1899,13 @@ def backtest_trend_meter(candles, cfg):
     for i in range(warmup, n):
         price = c[i]
 
-        if position is not None and tp_enabled:
+        if position is not None and (tp_enabled or sl_enabled):
             direction, entry, size = position["dir"], position["entry"], position["size"]
             pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            if pnl_usd >= tp_usd:
+            if sl_enabled and pnl_usd <= -sl_usd:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL", ts=ts)
+                position = None
+            elif tp_enabled and pnl_usd >= tp_usd:
                 _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
 
