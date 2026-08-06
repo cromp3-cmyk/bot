@@ -2473,5 +2473,6 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": cache_used,
         "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
         "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
+        "tm_invert_direction": cfg.get("tm_invert_direction", False) if entry_mode == "trend_meter" else None,
     }
 
