@@ -275,6 +275,20 @@ def default_config():
         "blsh_breakeven_lock_usd": float(os.getenv("BLSH_BREAKEVEN_LOCK_USD", "0.3")),
         "blsh_tp2_enabled": os.getenv("BLSH_TP2_ENABLED", "true").lower() == "true",
         "blsh_tp2_usd": float(os.getenv("BLSH_TP2_USD", "6")),
+        # Trend-Meter (portiert aus dem TradingView-Indikator "Trend Meter" von Lij_MC):
+        # 3 Punkte + obere Linie, alle 4 muessen uebereinstimmen fuer einen Einstieg.
+        "tm_resolution": os.getenv("TM_RESOLUTION", "5m"),
+        "tm_macd_fast": int(os.getenv("TM_MACD_FAST", "8")),
+        "tm_macd_slow": int(os.getenv("TM_MACD_SLOW", "21")),
+        "tm_macd_signal": int(os.getenv("TM_MACD_SIGNAL", "5")),
+        "tm_rsi1_period": int(os.getenv("TM_RSI1_PERIOD", "13")),
+        "tm_rsi2_period": int(os.getenv("TM_RSI2_PERIOD", "5")),
+        "tm_ma_fast": int(os.getenv("TM_MA_FAST", "5")),
+        "tm_ma_slow": int(os.getenv("TM_MA_SLOW", "11")),
+        "tm_entry_trigger": os.getenv("TM_ENTRY_TRIGGER", "candle_close"),  # "candle_close" oder "tick"
+        "tm_exit_trigger": os.getenv("TM_EXIT_TRIGGER", "candle_close"),  # "candle_close" oder "tick"
+        "tm_tp_enabled": os.getenv("TM_TP_ENABLED", "false").lower() == "true",
+        "tm_tp_usd": float(os.getenv("TM_TP_USD", "3")),
     }
 
 
@@ -299,6 +313,7 @@ def default_state():
         "zscore_value": None, "zscore_trend": None, "zscore_tp1_done": False, "zscore_history": [],
         "zscore_window_closes": [], "zscore_ema_seed": None, "zscore_live_prev_z": None, "zscore_last_exit_ts": 0.0,
         "blsh_value": None, "blsh_trend": None, "blsh_tp1_done": False, "blsh_history": [], "blsh_last_exit_ts": 0.0,
+        "tm_closes": [], "tm_dot1": None, "tm_dot2": None, "tm_dot3": None, "tm_line": None,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -813,6 +828,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, fester TP/SL)</option>
       <option value="zscore_trend">Z-Score-Trend (2 einstellbare Schwellen: Long-Kreuzung von unten, Short-Kreuzung von oben, TP1 Teilverkauf + Break-Even, TP2 final)</option>
       <option value="blsh_trend">BLSH-Composite (RSI+EMA+MACD+MFI kombiniert, kerzenbasiert, Nulllinien-Exit, TP1 Teilverkauf + Break-Even, TP2 final)</option>
+      <option value="trend_meter">Trend-Meter (3 Punkte + obere Linie, alle 4 müssen übereinstimmen, kein SL, optionaler $-TP)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1057,6 +1073,46 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="blsh_trend"><label>TP2-Betrag ($, fest, nur wenn TP2 an)</label><input type="number" step="any" id="blsh_tp2_usd"></div>
+  <div data-mode="trend_meter"><label>Zeitrahmen</label>
+    <select class="cfg" id="tm_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="trend_meter"><label>Punkt 1: MACD schnell</label><input type="number" step="1" id="tm_macd_fast"></div>
+  <div data-mode="trend_meter"><label>Punkt 1: MACD langsam</label><input type="number" step="1" id="tm_macd_slow"></div>
+  <div data-mode="trend_meter"><label>Punkt 1: MACD-Signal</label><input type="number" step="1" id="tm_macd_signal"></div>
+  <div data-mode="trend_meter"><label>Punkt 2: RSI-Periode (über/unter 50)</label><input type="number" step="1" id="tm_rsi1_period"></div>
+  <div data-mode="trend_meter"><label>Punkt 3: RSI-Periode (über/unter 50)</label><input type="number" step="1" id="tm_rsi2_period"></div>
+  <div data-mode="trend_meter"><label>Obere Linie: EMA schnell</label><input type="number" step="1" id="tm_ma_fast"></div>
+  <div data-mode="trend_meter"><label>Obere Linie: EMA langsam</label><input type="number" step="1" id="tm_ma_slow"></div>
+  <div data-mode="trend_meter"><label>Einstieg auslösen</label>
+    <select class="cfg" id="tm_entry_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="trend_meter"><label>Ausstieg auslösen</label>
+    <select class="cfg" id="tm_exit_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="trend_meter"><label>Take-Profit (kein Stop-Loss vorgesehen)</label>
+    <select class="cfg" id="tm_tp_enabled">
+      <option value="false">Aus (nur Signal-Exit)</option>
+      <option value="true">An - fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="trend_meter"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" id="tm_tp_usd"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1402,6 +1458,7 @@ async function refresh() {
     <div class="card"><div class="label">⚠ Squeeze (Ausbruch könnte bevorstehen)</div><div class="value ${data.rp_squeeze_active?'red':'green'}">${data.rp_squeeze_active ? 'AKTIV' : 'nein'}</div></div>
     <div class="card"><div class="label">Z-Score-Trend (${data.config.entry_mode==='zscore_trend'?'aktiv':'inaktiv'})</div><div class="value ${data.zscore_trend===1?'green':data.zscore_trend===-1?'red':''}">${data.zscore_trend===1?'LONG-Trend':data.zscore_trend===-1?'SHORT-Trend':'-'} (Z ${data.zscore_value ?? '-'})</div></div>
     <div class="card"><div class="label">BLSH-Composite (${data.config.entry_mode==='blsh_trend'?'aktiv':'inaktiv'})</div><div class="value ${data.blsh_trend===1?'green':data.blsh_trend===-1?'red':''}">${data.blsh_trend===1?'LONG-Trend':data.blsh_trend===-1?'SHORT-Trend':'-'} (V ${data.blsh_value ?? '-'})</div></div>
+    <div class="card"><div class="label">Trend-Meter Punkte+Linie (${data.config.entry_mode==='trend_meter'?'aktiv':'inaktiv'})</div><div class="value">${[data.tm_dot1,data.tm_dot2,data.tm_dot3,data.tm_line].map(v=>v==null?'⚪':(v?'🟢':'🔴')).join(' ')}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
@@ -1499,6 +1556,18 @@ async function refresh() {
     document.getElementById('blsh_breakeven_lock_usd').value = data.config.blsh_breakeven_lock_usd;
     document.getElementById('blsh_tp2_enabled').value = String(data.config.blsh_tp2_enabled);
     document.getElementById('blsh_tp2_usd').value = data.config.blsh_tp2_usd;
+    document.getElementById('tm_resolution').value = data.config.tm_resolution;
+    document.getElementById('tm_macd_fast').value = data.config.tm_macd_fast;
+    document.getElementById('tm_macd_slow').value = data.config.tm_macd_slow;
+    document.getElementById('tm_macd_signal').value = data.config.tm_macd_signal;
+    document.getElementById('tm_rsi1_period').value = data.config.tm_rsi1_period;
+    document.getElementById('tm_rsi2_period').value = data.config.tm_rsi2_period;
+    document.getElementById('tm_ma_fast').value = data.config.tm_ma_fast;
+    document.getElementById('tm_ma_slow').value = data.config.tm_ma_slow;
+    document.getElementById('tm_entry_trigger').value = data.config.tm_entry_trigger;
+    document.getElementById('tm_exit_trigger').value = data.config.tm_exit_trigger;
+    document.getElementById('tm_tp_enabled').value = String(data.config.tm_tp_enabled);
+    document.getElementById('tm_tp_usd').value = data.config.tm_tp_usd;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -1760,6 +1829,18 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
     blsh_breakeven_lock_usd: parseFloat(document.getElementById('blsh_breakeven_lock_usd').value),
     blsh_tp2_enabled: document.getElementById('blsh_tp2_enabled').value === 'true',
     blsh_tp2_usd: parseFloat(document.getElementById('blsh_tp2_usd').value),
+    tm_resolution: document.getElementById('tm_resolution').value,
+    tm_macd_fast: parseInt(document.getElementById('tm_macd_fast').value),
+    tm_macd_slow: parseInt(document.getElementById('tm_macd_slow').value),
+    tm_macd_signal: parseInt(document.getElementById('tm_macd_signal').value),
+    tm_rsi1_period: parseInt(document.getElementById('tm_rsi1_period').value),
+    tm_rsi2_period: parseInt(document.getElementById('tm_rsi2_period').value),
+    tm_ma_fast: parseInt(document.getElementById('tm_ma_fast').value),
+    tm_ma_slow: parseInt(document.getElementById('tm_ma_slow').value),
+    tm_entry_trigger: document.getElementById('tm_entry_trigger').value,
+    tm_exit_trigger: document.getElementById('tm_exit_trigger').value,
+    tm_tp_enabled: document.getElementById('tm_tp_enabled').value === 'true',
+    tm_tp_usd: parseFloat(document.getElementById('tm_tp_usd').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -1800,7 +1881,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1863,6 +1944,8 @@ async def handle_status(request):
         "zscore_history": st.get("zscore_history", [])[-300:],
         "blsh_value": st.get("blsh_value"), "blsh_trend": st.get("blsh_trend"),
         "blsh_history": st.get("blsh_history", [])[-300:],
+        "tm_dot1": st.get("tm_dot1"), "tm_dot2": st.get("tm_dot2"),
+        "tm_dot3": st.get("tm_dot3"), "tm_line": st.get("tm_line"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -1902,7 +1985,10 @@ async def handle_config_update(request):
                 "blsh_macd_fast", "blsh_macd_slow", "blsh_macd_signal", "blsh_mfi_period", "blsh_threshold",
                 "blsh_direction_mode", "blsh_cooldown_seconds", "blsh_sl_enabled", "blsh_sl_usd",
                 "blsh_tp1_usd", "blsh_tp1_close_pct", "blsh_breakeven_enabled", "blsh_breakeven_lock_usd",
-                "blsh_tp2_enabled", "blsh_tp2_usd"]:
+                "blsh_tp2_enabled", "blsh_tp2_usd",
+                "tm_resolution", "tm_macd_fast", "tm_macd_slow", "tm_macd_signal",
+                "tm_rsi1_period", "tm_rsi2_period", "tm_ma_fast", "tm_ma_slow",
+                "tm_entry_trigger", "tm_exit_trigger", "tm_tp_enabled", "tm_tp_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

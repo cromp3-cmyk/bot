@@ -572,24 +572,44 @@ function renderModal(address) {
     </tr>`).join('') || '<tr><td colspan="4" style="color:var(--dim);">Noch keine Fills erfasst</td></tr>';
 }
 
+// Deutsche Kommaschreibweise (z.B. "10,5") in Punkt umwandeln, bevor der Wert an den
+// Server geht - Python's float() kann mit Komma nichts anfangen und wuerde sonst mit
+// einem Fehler abbrechen, der bisher NICHT im Dashboard angezeigt wurde (stilles
+// Scheitern -> Coin-Margin wird nie gespeichert -> faellt auf die Trader-Standard-Margin
+// zurueck, obwohl eine eigene Margin eingestellt wurde).
+function deNum(v) {
+  return typeof v === 'string' ? v.replace(',', '.') : v;
+}
+
+async function postCtJson(url, body) {
+  const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let data = null;
+  try { data = await resp.json(); } catch (e) {}
+  if (!resp.ok || (data && data.error)) {
+    alert('Fehler beim Speichern: ' + (data && data.error ? data.error : `HTTP ${resp.status}`));
+    return false;
+  }
+  return true;
+}
+
 async function saveTraderDefaults() {
   const address = window.currentModalAddress;
-  await fetch('/api/ct/trader_defaults', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+  await postCtJson('/api/ct/trader_defaults', {
     address,
-    copy_margin: document.getElementById('modal-default-margin').value,
-    copy_leverage: document.getElementById('modal-default-leverage').value,
-  })});
+    copy_margin: deNum(document.getElementById('modal-default-margin').value),
+    copy_leverage: deNum(document.getElementById('modal-default-leverage').value),
+  });
   refresh();
 }
 
 async function saveCoinSetting(address, coin) {
-  await fetch('/api/ct/coin_setting', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+  const ok = await postCtJson('/api/ct/coin_setting', {
     address, coin,
-    margin: document.getElementById(`cs-margin-${coin}`).value,
-    leverage: document.getElementById(`cs-lev-${coin}`).value,
+    margin: deNum(document.getElementById(`cs-margin-${coin}`).value),
+    leverage: deNum(document.getElementById(`cs-lev-${coin}`).value),
     enabled: document.getElementById(`cs-enabled-${coin}`).checked,
-  })});
-  refresh();
+  });
+  if (ok) refresh();
 }
 
 async function removeCoinSetting(address, coin) {
@@ -601,16 +621,18 @@ async function addCoinSetting() {
   const address = window.currentModalAddress;
   const coin = document.getElementById('modal-new-coin').value.trim().toUpperCase();
   if (!coin) return;
-  await fetch('/api/ct/coin_setting', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+  const ok = await postCtJson('/api/ct/coin_setting', {
     address, coin,
-    margin: document.getElementById('modal-new-margin').value,
-    leverage: document.getElementById('modal-new-leverage').value,
+    margin: deNum(document.getElementById('modal-new-margin').value),
+    leverage: deNum(document.getElementById('modal-new-leverage').value),
     enabled: true,
-  })});
-  document.getElementById('modal-new-coin').value = '';
-  document.getElementById('modal-new-margin').value = '';
-  document.getElementById('modal-new-leverage').value = '';
-  refresh();
+  });
+  if (ok) {
+    document.getElementById('modal-new-coin').value = '';
+    document.getElementById('modal-new-margin').value = '';
+    document.getElementById('modal-new-leverage').value = '';
+    refresh();
+  }
 }
 
 async function toggleCopy(address, enable) {
@@ -707,10 +729,15 @@ async def handle_ct_set_coin_setting(request):
 
     info = CT_STATE["watched"][addr]
     settings = info.setdefault("coin_settings", {})
+    try:
+        margin_val = float(body["margin"]) if body.get("margin") not in (None, "") else None
+        leverage_val = int(float(body["leverage"])) if body.get("leverage") not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Margin/Hebel müssen Zahlen sein (Komma oder Punkt als Dezimaltrennzeichen)"}, status=400)
     settings[coin] = {
         "enabled": bool(body.get("enabled", True)),
-        "margin": float(body["margin"]) if body.get("margin") not in (None, "") else None,
-        "leverage": int(body["leverage"]) if body.get("leverage") not in (None, "") else None,
+        "margin": margin_val,
+        "leverage": leverage_val,
     }
     debug_log(f"⚙️ [CopyTrading] Coin-Einstellung für {addr} / {coin} gesetzt", settings[coin])
     await save_ct_watched()
@@ -734,10 +761,13 @@ async def handle_ct_set_trader_defaults(request):
     if addr not in CT_STATE["watched"]:
         return web.json_response({"error": "unbekannte Adresse"}, status=400)
     info = CT_STATE["watched"][addr]
-    if body.get("copy_margin") not in (None, ""):
-        info["copy_margin"] = float(body["copy_margin"])
-    if body.get("copy_leverage") not in (None, ""):
-        info["copy_leverage"] = int(body["copy_leverage"])
+    try:
+        if body.get("copy_margin") not in (None, ""):
+            info["copy_margin"] = float(body["copy_margin"])
+        if body.get("copy_leverage") not in (None, ""):
+            info["copy_leverage"] = int(float(body["copy_leverage"]))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Margin/Hebel müssen Zahlen sein (Komma oder Punkt als Dezimaltrennzeichen)"}, status=400)
     await save_ct_watched()
     return web.json_response({"success": True})
 

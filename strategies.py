@@ -766,6 +766,143 @@ def compute_macd_line_and_signal(closes, fast, slow, signal_period):
     return macd, macd_signal
 
 
+def compute_trend_meter_dots(closes, cfg):
+    """Portiert aus dem TradingView-Indikator 'Trend Meter' (Lij_MC), reduziert auf die vom
+    Nutzer gewuenschten 4 Signale (3 Punkte + obere Linie), Standard-Einstellungen des Original-
+    Indikators als Vorgabe:
+    - Punkt 1: schnelles MACD-Histogramm (Standard 8/21/5) > 0 -> gruen
+    - Punkt 2: RSI (Standard-Periode 13) > 50 -> gruen
+    - Punkt 3: RSI (Standard-Periode 5) > 50 -> gruen
+    - Obere Linie: EMA-Crossover (Standard 5 > 11) -> gruen
+    Gibt (dot1, dot2, dot3, line) als bool (True=gruen/False=rot) zurueck, oder None bei zu
+    wenig Kerzen fuer die laengste eingestellte Periode."""
+    n = len(closes)
+    min_needed = max(cfg["tm_macd_slow"], cfg["tm_rsi1_period"], cfg["tm_rsi2_period"], cfg["tm_ma_slow"]) + 2
+    if n < min_needed:
+        return None
+    macd, macd_signal = compute_macd_line_and_signal(closes, cfg["tm_macd_fast"], cfg["tm_macd_slow"], cfg["tm_macd_signal"])
+    dot1 = (macd[-1] - macd_signal[-1]) > 0
+    dot2 = compute_rsi(closes, cfg["tm_rsi1_period"])[-1] > 50
+    dot3 = compute_rsi(closes, cfg["tm_rsi2_period"])[-1] > 50
+    ma_fast = _ema_series(closes, cfg["tm_ma_fast"])[-1]
+    ma_slow = _ema_series(closes, cfg["tm_ma_slow"])[-1]
+    line = ma_fast > ma_slow
+    return dot1, dot2, dot3, line
+
+
+async def check_trend_meter_entry(symbol, dot1, dot2, dot3, line, price):
+    """Long: alle 3 Punkte UND die Linie gruen -> sofort Long.
+    Short: alle 3 Punkte UND die Linie rot -> sofort Short.
+    Sonst (gemischt): kein Einstieg."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if dot1 and dot2 and dot3 and line:
+        direction = "long"
+    elif not dot1 and not dot2 and not dot3 and not line:
+        direction = "short"
+    else:
+        return
+    marks = "".join("🟢" if v else "🔴" for v in (dot1, dot2, dot3, line))
+    debug_log(f"📡 [{symbol}] Trend-Meter Signal: {direction.upper()} @ {price} (Punkte+Linie {marks})")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+
+
+async def check_trend_meter_exit(symbol, dot1, dot2, dot3, line, price):
+    """Exit Long: sobald auch nur einer der 4 (Punkte oder Linie) rot ist.
+    Exit Short: sobald auch nur einer der 4 gruen ist."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    any_red = not (dot1 and dot2 and dot3 and line)
+    any_green = dot1 or dot2 or dot3 or line
+    if st["position"] == "long" and any_red:
+        debug_log(f"🚪 [{symbol}] Trend-Meter Exit: LONG @ {price} (mind. 1 Punkt/Linie rot)")
+        await execute_exit(symbol, price, "TM-SIGNAL-EXIT")
+    elif st["position"] == "short" and any_green:
+        debug_log(f"🚪 [{symbol}] Trend-Meter Exit: SHORT @ {price} (mind. 1 Punkt/Linie grün)")
+        await execute_exit(symbol, price, "TM-SIGNAL-EXIT")
+
+
+async def trend_meter_poll_loop(symbol):
+    """Eigene Strategie 'Trend-Meter' (portiert aus dem TradingView-Indikator 'Trend Meter'
+    von Lij_MC): 3 Signal-Punkte (schnelles MACD-Histogramm, RSI13 vs. 50, RSI5 vs. 50) plus
+    eine 'obere Linie' (EMA-Crossover) - siehe compute_trend_meter_dots.
+    Kein Stop-Loss (bewusst weggelassen) - nur ein optionaler fester $-Take-Profit (immer
+    tick-basiert geprueft, wie ueberall im Bot). Ein-/Ausstieg sind je EINZELN umschaltbar
+    zwischen kerzenbasiert (nur hier im Poll-Loop bei echtem Kerzenschluss) und tick-basiert
+    (reagiert sofort auf jeden Preis-Tick in on_price_update, indem die noch offene letzte
+    Kerze live mit dem aktuellen Preis nachgerechnet wird - dafuer werden die Schlusskurse
+    hier alle 5 Sek. fuer die Live-Auswertung gecacht)."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "trend_meter":
+                resolution = cfg["tm_resolution"]
+                min_needed = max(cfg["tm_macd_slow"], cfg["tm_rsi1_period"], cfg["tm_rsi2_period"], cfg["tm_ma_slow"]) + 2
+                needed_bars = min(1000, max(min_needed * 3, 60))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, _, _, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts = timestamps[:-1]
+                        closed_c = closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_processed_ts != signal_key
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    # Fuer die tick-basierte Live-Auswertung in on_price_update cachen
+                    st["tm_closes"] = closed_c[-(min_needed + 5):]
+
+                    dots = compute_trend_meter_dots(closed_c, cfg)
+                    if dots:
+                        dot1, dot2, dot3, line = dots
+                        st["tm_dot1"], st["tm_dot2"], st["tm_dot3"], st["tm_line"] = dot1, dot2, dot3, line
+
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            marks = "".join("🟢" if v else "🔴" for v in (dot1, dot2, dot3, line))
+                            debug_log(f"💓 [{symbol}] Trend-Meter aktiv: {marks}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                        if is_new_candle:
+                            last_processed_ts = signal_key
+                            if cfg.get("tm_entry_trigger", "candle_close") == "candle_close":
+                                await check_trend_meter_entry(symbol, dot1, dot2, dot3, line, price)
+                            if cfg.get("tm_exit_trigger", "candle_close") == "candle_close":
+                                await check_trend_meter_exit(symbol, dot1, dot2, dot3, line, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Trend-Meter wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Trend-Meter wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Trend-Meter-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
 def compute_blsh_composite(highs, lows, closes, volumes, atr_period, rsi_period,
                             ema_fast, ema_slow, macd_fast, macd_slow, macd_signal_period, mfi_period):
     """Portiert aus dem Indikator 'Buy Low Sell High Composite': kombiniert vier auf
@@ -1617,6 +1754,35 @@ async def on_price_update(symbol, price):
                     st["blsh_last_exit_ts"] = time.time()
         return
 
+    if cfg["entry_mode"] == "trend_meter":
+        # Kerzenbasierter Teil (Ein-/Ausstieg bei echtem Kerzenschluss) laeuft im
+        # trend_meter_poll_loop. Hier nur: tick-basierte Live-Auswertung (falls fuer
+        # Einstieg und/oder Ausstieg aktiviert) sowie der optionale $-Take-Profit
+        # (immer tick-basiert, wie ueberall im Bot). Bewusst KEIN Stop-Loss.
+        entry_trigger = cfg.get("tm_entry_trigger", "candle_close")
+        exit_trigger = cfg.get("tm_exit_trigger", "candle_close")
+        if entry_trigger == "tick" or exit_trigger == "tick":
+            try:
+                cached_closes = st.get("tm_closes")
+                if cached_closes and len(cached_closes) >= 2:
+                    live_closes = cached_closes[:-1] + [price]
+                    dots = compute_trend_meter_dots(live_closes, cfg)
+                    if dots:
+                        dot1, dot2, dot3, line = dots
+                        if entry_trigger == "tick":
+                            await check_trend_meter_entry(symbol, dot1, dot2, dot3, line, price)
+                        if exit_trigger == "tick":
+                            await check_trend_meter_exit(symbol, dot1, dot2, dot3, line, price)
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] Trend-Meter Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        if st["position"] is not None and cfg.get("tm_tp_enabled", False):
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if pnl_usd >= cfg.get("tm_tp_usd", 3):
+                await execute_exit(symbol, price, "TP")
+        return
+
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
@@ -1706,8 +1872,65 @@ async def trading_loop():
 # der Strategie-Qualitaet reicht das aber aus.
 # Lighter.xyz ist gebuehrenfrei - es werden daher keine Handelsgebuehren simuliert.
 
+def backtest_trend_meter(candles, cfg):
+    """Backtest laeuft immer wie 'kerzenbasiert' (bei jedem Kerzenschluss ausgewertet) - eine
+    echte Tick-Simulation ist mit historischen OHLC-Daten nicht moeglich, das betrifft nur
+    den optionalen Tick-Modus im Live-Betrieb. Kein SL (bewusst nicht vorgesehen)."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    tp_enabled = cfg.get("tm_tp_enabled", False)
+    tp_usd = cfg.get("tm_tp_usd", 3)
+
+    macd, macd_signal = compute_macd_line_and_signal(c, cfg["tm_macd_fast"], cfg["tm_macd_slow"], cfg["tm_macd_signal"])
+    rsi1 = compute_rsi(c, cfg["tm_rsi1_period"])
+    rsi2 = compute_rsi(c, cfg["tm_rsi2_period"])
+    ma_fast = _ema_series(c, cfg["tm_ma_fast"])
+    ma_slow = _ema_series(c, cfg["tm_ma_slow"])
+
+    warmup = max(cfg["tm_macd_slow"], cfg["tm_rsi1_period"], cfg["tm_rsi2_period"], cfg["tm_ma_slow"]) + 2
+    position = None  # {"dir","entry","size","entry_i"}
+    trades = []
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None and tp_enabled:
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            if pnl_usd >= tp_usd:
+                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        dot1 = (macd[i] - macd_signal[i]) > 0
+        dot2 = rsi1[i] > 50
+        dot3 = rsi2[i] > 50
+        line = ma_fast[i] > ma_slow[i]
+        all_green = dot1 and dot2 and dot3 and line
+        all_red = not dot1 and not dot2 and not dot3 and not line
+        any_red = not all_green
+        any_green = dot1 or dot2 or dot3 or line
+
+        if position is not None:
+            if (position["dir"] == "long" and any_red) or (position["dir"] == "short" and any_green):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "TM-SIGNAL-EXIT", ts=ts)
+                position = None
+
+        if position is None:
+            direction = "long" if all_green else ("short" if all_red else None)
+            if direction:
+                size = (margin * leverage) / price
+                position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000, "range_profile": 30_000, "zscore_trend": 100_000, "blsh_trend": 100_000,
+    "trend_meter": 100_000,
 }
 
 
@@ -2078,6 +2301,7 @@ BACKTEST_FUNCS = {
     "fib_reversal": backtest_fib_reversal,
     "zscore_trend": backtest_zscore_trend,
     "blsh_trend": backtest_blsh_trend,
+    "trend_meter": backtest_trend_meter,
 }
 
 
@@ -2149,7 +2373,7 @@ def _trim_candles_to_days(candles, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend, trend_meter - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
@@ -2177,7 +2401,7 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         }
 
     resolution_key = {"range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
-                       "zscore_trend": "zscore_resolution"}[entry_mode]
+                       "zscore_trend": "zscore_resolution", "trend_meter": "tm_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
