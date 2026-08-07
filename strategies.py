@@ -567,6 +567,48 @@ def compute_average_force(closes, highs, lows, length, smooth):
     return out
 
 
+def compute_chandelier_exit(highs, lows, closes, atr_period, atr_mult, use_close=True):
+    """Portiert aus 'MG signal [The_lurker]' - nur der Chandelier-Exit-Teil (Trailing-Stop mit
+    Richtungswechsel), der dort tatsaechlich die Buy/Sell-Signale liefert; MagicTrend und
+    Order-Blocks sind rein visuell und wurden bewusst weggelassen.
+    Achtung Vorzeichen-Konvention (ANDERS als compute_supertrend!): direction 1 = bullisch/Long,
+    -1 = baerisch/Short - das ist die Konvention des Original-Skripts.
+    Gibt (direction, long_stop, short_stop) als Listen zurueck. 'length' wird im Original-Skript
+    fuer ATR-Periode UND Hoechst-/Tiefstkurs-Fenster gleichzeitig verwendet - hier atr_period."""
+    n = len(closes)
+    atr = compute_atr(highs, lows, closes, atr_period)
+    atr_ce = [atr_mult * a for a in atr]
+    long_stop = [0.0] * n
+    short_stop = [0.0] * n
+    direction = [1] * n
+    for i in range(n):
+        start = max(0, i - atr_period + 1)
+        if use_close:
+            hh = max(closes[start:i + 1])
+            ll = min(closes[start:i + 1])
+        else:
+            hh = max(highs[start:i + 1])
+            ll = min(lows[start:i + 1])
+        ls_raw = hh - atr_ce[i]
+        ss_raw = ll + atr_ce[i]
+        if i == 0:
+            long_stop[i] = ls_raw
+            short_stop[i] = ss_raw
+            direction[i] = 1
+            continue
+        ls_prev = long_stop[i - 1]
+        ss_prev = short_stop[i - 1]
+        long_stop[i] = max(ls_raw, ls_prev) if closes[i - 1] > ls_prev else ls_raw
+        short_stop[i] = min(ss_raw, ss_prev) if closes[i - 1] < ss_prev else ss_raw
+        if closes[i] > ss_prev:
+            direction[i] = 1
+        elif closes[i] < ls_prev:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i - 1]
+    return direction, long_stop, short_stop
+
+
 def compute_supertrend(highs, lows, closes, atr_period, factor):
     """Standard-SuperTrend-Berechnung (wie Pine's ta.supertrend). Gibt (st_value, direction)
     zurueck - direction[-1] < 0 bedeutet Aufwaertstrend (aktiv), > 0 Abwaertstrend, passend zu
@@ -1186,6 +1228,185 @@ async def stf_poll_loop(symbol):
                         debug_log(f"⏳ [{symbol}] SuperTrend Fusion wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] SuperTrend-Fusion-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+async def check_ce_entry(symbol, buy_signal, sell_signal, price):
+    """Einstieg nur beim Buy/Sell-Flip. Ist der SuperTrend-Fusion-Richtungsfilter aktiv, muss
+    dessen aktuelle Ausrichtung (auf dem HOEHEREN Zeitrahmen ce_stf_resolution) mit dem Signal
+    uebereinstimmen. Stimmt sie noch nicht ueberein, wird das Signal als 'pending' gemerkt statt
+    verworfen - siehe check_ce_pending: sobald SuperTrend umschwenkt UND das Chandelier-Signal
+    zwischenzeitlich nicht wieder gedreht hat, wird die Order alsdann nachtraeglich platziert."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if not (buy_signal or sell_signal):
+        return
+    flip_direction = "long" if buy_signal else "short"
+    if not cfg.get("ce_stf_filter_enabled", False):
+        st["ce_pending_direction"] = None
+        debug_log(f"📡 [{symbol}] Chandelier Signal: {flip_direction.upper()} @ {price}")
+        await execute_entry(symbol, flip_direction, price, is_add_on=False)
+        return
+    bias = st.get("ce_stf_bias")
+    if bias == flip_direction:
+        st["ce_pending_direction"] = None
+        debug_log(f"📡 [{symbol}] Chandelier Signal: {flip_direction.upper()} @ {price} (SuperTrend-Filter bestätigt)")
+        await execute_entry(symbol, flip_direction, price, is_add_on=False)
+    else:
+        st["ce_pending_direction"] = flip_direction
+        debug_log(f"⏸️ [{symbol}] Chandelier Signal {flip_direction.upper()} wartet auf SuperTrend-Bestätigung (aktuell: {bias})")
+
+
+async def check_ce_exit(symbol, buy_signal, sell_signal, price):
+    """Ausstieg immer beim Gegen-Signal - unabhaengig vom SuperTrend-Filter (der filtert nur
+    Einstiege, nie Ausstiege)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if st["position"] == "long" and sell_signal:
+        debug_log(f"🚪 [{symbol}] Chandelier Exit: LONG @ {price} (Sell-Signal)")
+        await execute_exit(symbol, price, "CE-FLIP-EXIT")
+    elif st["position"] == "short" and buy_signal:
+        debug_log(f"🚪 [{symbol}] Chandelier Exit: SHORT @ {price} (Buy-Signal)")
+        await execute_exit(symbol, price, "CE-FLIP-EXIT")
+
+
+async def check_ce_pending(symbol, dir_now, price):
+    """Prueft bei JEDEM Zyklus (nicht nur bei neuer Chandelier-Kerze), ob ein wartendes Signal
+    jetzt durch den SuperTrend-Filter bestaetigt wird. Wird verworfen, sobald die Chandelier-
+    Richtung zwischenzeitlich wieder gedreht hat (das urspruengliche 'buy'/'sell' ist dann nicht
+    mehr aktiv)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    pending = st.get("ce_pending_direction")
+    if not pending or not cfg.get("ce_stf_filter_enabled", False):
+        return
+    still_valid = (pending == "long" and dir_now == 1) or (pending == "short" and dir_now == -1)
+    if not still_valid:
+        st["ce_pending_direction"] = None
+        return
+    bias = st.get("ce_stf_bias")
+    if bias == pending:
+        st["ce_pending_direction"] = None
+        debug_log(f"📡 [{symbol}] Chandelier Pending-Order ausgelöst: {pending.upper()} @ {price} (SuperTrend jetzt bestätigt)")
+        await execute_entry(symbol, pending, price, is_add_on=False)
+
+
+async def ce_poll_loop(symbol):
+    """Chandelier Exit (portiert aus 'MG signal [The_lurker]' - nur der Buy/Sell-Signal-Teil).
+    Optionaler SuperTrend-Fusion-Richtungsfilter auf einem HOEHEREN Zeitrahmen (ce_stf_resolution):
+    SuperTrend bullisch -> nur Longs, baerisch -> nur Shorts. Kommt ein Signal, waehrend
+    SuperTrend noch dagegen steht, wird es als 'pending' gemerkt und nachtraeglich ausgefuehrt,
+    sobald SuperTrend umschwenkt - vorausgesetzt das Chandelier-Signal ist bis dahin noch aktiv
+    (siehe check_ce_pending). Optional fester $-Take-Profit (kein SL vorgesehen). Ein-/Ausstieg
+    je einzeln umschaltbar zwischen kerzenbasiert und tick-basiert."""
+    b = BOTS[symbol]
+    last_ce_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "chandelier_exit":
+                st = b["state"]
+                resolution = cfg["ce_resolution"]
+                atr_period = cfg["ce_atr_period"]
+                min_needed = atr_period + 3
+                needed_bars = min(1000, max(min_needed * 3, 60))
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                stf_filter_enabled = cfg.get("ce_stf_filter_enabled", False)
+                if stf_filter_enabled:
+                    stf_resolution = cfg.get("ce_stf_resolution", "5m")
+                    stf_ema_len = cfg.get("stf_ema_length", 200) if cfg.get("stf_use_ema_filter", False) else 0
+                    stf_min_needed = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], cfg["stf_chop_length"], stf_ema_len) + 3
+                    stf_needed_bars = min(1000, max(stf_min_needed * 3, 60))
+                    if stf_resolution in SUB_MINUTE_RESOLUTIONS:
+                        stf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[stf_resolution], stf_needed_bars)
+                        if stf_local:
+                            stf_ts, _, stf_h, stf_l, stf_c = stf_local
+                        else:
+                            stf_ts = None
+                    else:
+                        stf_data = await fetch_candles_binance_multi(symbol, stf_resolution, count_back=stf_needed_bars)
+                        if stf_data:
+                            s_ts, s_o, s_h, s_l, s_c = stf_data
+                            stf_ts, stf_h, stf_l, stf_c = s_ts[:-1], s_h[:-1], s_l[:-1], s_c[:-1]
+                        else:
+                            stf_ts = None
+                    if stf_ts and len(stf_c) > stf_min_needed:
+                        stf_state = compute_stf_state(stf_h, stf_l, stf_c, cfg)
+                        if stf_state:
+                            st["ce_stf_bias"] = "long" if stf_state["direction"] == -1 else "short"
+                    # Falls (noch) keine STF-Daten da sind, bleibt ce_stf_bias auf dem letzten
+                    # bekannten Wert stehen (oder None ganz am Anfang) - Entries bleiben dann
+                    # so lange 'pending', bis eine Bestaetigung vorliegt.
+                else:
+                    st["ce_stf_bias"] = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_ce_ts != signal_key
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    keep = min_needed + 5
+                    st["ce_highs"] = closed_h[-keep:]
+                    st["ce_lows"] = closed_l[-keep:]
+                    st["ce_closes"] = closed_c[-keep:]
+
+                    direction, long_stop, short_stop = compute_chandelier_exit(
+                        closed_h, closed_l, closed_c, atr_period, cfg["ce_atr_mult"], cfg.get("ce_use_close", True))
+                    dir_now, dir_prev = direction[-1], direction[-2]
+                    st["ce_direction"] = dir_now
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] Chandelier Exit aktiv: dir={'LONG' if dir_now==1 else 'SHORT'}, "
+                                  f"STF-Filter={'an' if stf_filter_enabled else 'aus'}, STF-Bias={st.get('ce_stf_bias')}, "
+                                  f"Pending={st.get('ce_pending_direction')}, Preis={closed_c[-1]}, bot_active={cfg['bot_active']}")
+
+                    if is_new_candle:
+                        last_ce_ts = signal_key
+                        buy_signal = dir_now == 1 and dir_prev == -1
+                        sell_signal = dir_now == -1 and dir_prev == 1
+                        if cfg.get("ce_exit_trigger", "candle_close") == "candle_close":
+                            await check_ce_exit(symbol, buy_signal, sell_signal, price)
+                        if cfg.get("ce_entry_trigger", "candle_close") == "candle_close":
+                            await check_ce_entry(symbol, buy_signal, sell_signal, price)
+
+                    # Pending-Order jeden Zyklus pruefen, nicht nur bei neuer Chandelier-Kerze -
+                    # ein STF-Wechsel soll zeitnah greifen, nicht erst bei der naechsten Kerze.
+                    await check_ce_pending(symbol, dir_now, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Chandelier Exit wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Chandelier Exit wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Chandelier-Exit-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
 
@@ -2108,6 +2329,35 @@ async def on_price_update(symbol, price):
                 await execute_exit(symbol, price, "TP")
         return
 
+    if cfg["entry_mode"] == "chandelier_exit":
+        entry_trigger = cfg.get("ce_entry_trigger", "candle_close")
+        exit_trigger = cfg.get("ce_exit_trigger", "candle_close")
+        if entry_trigger == "tick" or exit_trigger == "tick":
+            try:
+                ch, cl, cc = st.get("ce_highs"), st.get("ce_lows"), st.get("ce_closes")
+                if ch and cl and cc and len(cc) >= 2:
+                    live_h = ch[:-1] + [max(ch[-1], price)]
+                    live_l = cl[:-1] + [min(cl[-1], price)]
+                    live_c = cc[:-1] + [price]
+                    direction, _, _ = compute_chandelier_exit(live_h, live_l, live_c, cfg["ce_atr_period"], cfg["ce_atr_mult"], cfg.get("ce_use_close", True))
+                    dir_now, dir_prev = direction[-1], direction[-2]
+                    buy_signal = dir_now == 1 and dir_prev == -1
+                    sell_signal = dir_now == -1 and dir_prev == 1
+                    if exit_trigger == "tick":
+                        await check_ce_exit(symbol, buy_signal, sell_signal, price)
+                    if entry_trigger == "tick":
+                        await check_ce_entry(symbol, buy_signal, sell_signal, price)
+                    await check_ce_pending(symbol, dir_now, price)
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] Chandelier Exit Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        if st["position"] is not None and cfg.get("ce_tp_enabled", False):
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if pnl_usd >= abs(cfg.get("ce_tp_usd", 3)):
+                await execute_exit(symbol, price, "TP")
+        return
+
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
@@ -2354,9 +2604,112 @@ def backtest_supertrend_fusion(candles, cfg):
     return trades
 
 
+def compute_stf_effective_direction_series(highs, lows, closes, cfg):
+    """Serienversion der reinen SuperTrend-Richtung (inkl. Invertiert-Modus, OHNE die AF-/Chop-/
+    EMA-Filter - fuer den Chandelier-Richtungsfilter zaehlt nur 'ist der hoehere Zeitrahmen
+    gerade bullisch oder baerisch', nicht ob SuperTrend selbst dort einsteigen wuerde).
+    None an Positionen, wo noch nicht genug Kerzen fuer eine verlaessliche ATR-Berechnung da sind."""
+    n = len(closes)
+    st_val, direction = compute_supertrend(highs, lows, closes, cfg["stf_atr_period"], cfg["stf_factor"])
+    invert = cfg.get("stf_invert_direction", False)
+    warmup = cfg["stf_atr_period"] + 3
+    out = [None] * n
+    for i in range(warmup, n):
+        out[i] = -direction[i] if invert else direction[i]
+    return out
+
+
+def backtest_chandelier_exit(candles, cfg, stf_candles=None):
+    """Backtest laeuft immer 'kerzenbasiert'. Der optionale SuperTrend-Richtungsfilter (hoeherer
+    Zeitrahmen) wird ueber die echten Zeitstempel der STF-Kerzen jedem Chandelier-Bar zugeordnet
+    (letzte abgeschlossene STF-Kerze zum jeweiligen Zeitpunkt), genau wie im Live-Betrieb.
+    Pending-Order-Logik: kommt ein Signal gegen den aktuellen STF-Bias, wird es gemerkt und
+    nachtraeglich ausgefuehrt, sobald STF umschwenkt - solange das Chandelier-Signal bis dahin
+    nicht selbst wieder gedreht hat. Kein SL vorgesehen (bewusst weggelassen), nur optionaler
+    fester $-Take-Profit."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    tp_enabled = cfg.get("ce_tp_enabled", False)
+    tp_usd = abs(cfg.get("ce_tp_usd", 3))
+    atr_period = cfg["ce_atr_period"]
+    atr_mult = cfg["ce_atr_mult"]
+    use_close = cfg.get("ce_use_close", True)
+    stf_filter_enabled = cfg.get("ce_stf_filter_enabled", False) and stf_candles is not None
+
+    direction, long_stop, short_stop = compute_chandelier_exit(h, l, c, atr_period, atr_mult, use_close)
+
+    stf_ts_list = None
+    stf_direction_series = None
+    if stf_filter_enabled:
+        stf_ts_list, stf_o, stf_h, stf_l, stf_c = stf_candles
+        stf_direction_series = compute_stf_effective_direction_series(stf_h, stf_l, stf_c, cfg)
+
+    def stf_bias_for_ts(t):
+        if not stf_filter_enabled:
+            return None
+        idx = bisect.bisect_right(stf_ts_list, t) - 1
+        if idx < 0:
+            return None
+        d = stf_direction_series[idx]
+        return None if d is None else ("long" if d == -1 else "short")
+
+    warmup = atr_period + 3
+    position = None
+    pending_direction = None
+    trades = []
+
+    for i in range(warmup, n):
+        price = c[i]
+        dir_now = direction[i]
+        dir_prev = direction[i - 1]
+
+        if position is not None and tp_enabled:
+            pdir, entry, size = position["dir"], position["entry"], position["size"]
+            pnl_usd = (price - entry) * size if pdir == "long" else (entry - price) * size
+            if pnl_usd >= tp_usd:
+                _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        buy_signal = dir_now == 1 and dir_prev == -1
+        sell_signal = dir_now == -1 and dir_prev == 1
+
+        if position is not None:
+            if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "CE-FLIP-EXIT", ts=ts)
+                position = None
+
+        if position is None:
+            bias = stf_bias_for_ts(ts[i]) if stf_filter_enabled else None
+            entered_this_bar = False
+            if buy_signal or sell_signal:
+                flip_dir = "long" if buy_signal else "short"
+                if not stf_filter_enabled or bias == flip_dir:
+                    size = (margin * leverage) / price
+                    position = {"dir": flip_dir, "entry": price, "size": size, "entry_i": i}
+                    pending_direction = None
+                    entered_this_bar = True
+                else:
+                    pending_direction = flip_dir
+
+            if not entered_this_bar and stf_filter_enabled and pending_direction:
+                still_valid = (pending_direction == "long" and dir_now == 1) or (pending_direction == "short" and dir_now == -1)
+                if not still_valid:
+                    pending_direction = None
+                elif bias == pending_direction:
+                    size = (margin * leverage) / price
+                    position = {"dir": pending_direction, "entry": price, "size": size, "entry_i": i}
+                    pending_direction = None
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000, "range_profile": 30_000, "zscore_trend": 100_000, "blsh_trend": 100_000,
-    "trend_meter": 100_000, "supertrend_fusion": 100_000,
+    "trend_meter": 100_000, "supertrend_fusion": 100_000, "chandelier_exit": 100_000,
 }
 
 
@@ -2729,6 +3082,7 @@ BACKTEST_FUNCS = {
     "blsh_trend": backtest_blsh_trend,
     "trend_meter": backtest_trend_meter,
     "supertrend_fusion": backtest_supertrend_fusion,
+    "chandelier_exit": backtest_chandelier_exit,
 }
 
 
@@ -2753,6 +3107,72 @@ def summarize_backtest_trades(trades):
         "avg_loss_usd": round(sum(t["pnl"] for t in losses) / len(losses), 2) if losses else 0,
         "max_drawdown_usd": round(max_dd, 2),
         "avg_bars_held": round(sum(t["bars_held"] for t in trades) / n, 1),
+    }
+
+
+CE_SWEEP_MAX_COMBOS = 400
+CE_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+async def run_ce_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
+                              atr_mult_min, atr_mult_max, atr_mult_step, stf_filter_enabled):
+    """'Monte-Carlo'-Parametersweep fuer Chandelier Exit: testet alle Kombinationen aus
+    ATR-Periode und ATR-Multiplikator im angegebenen Bereich gegeneinander und liefert die
+    besten zurueck. Kerzen werden nur EINMAL geladen (auch fuer den optionalen SuperTrend-
+    Filter), danach laufen alle Kombinationen rein rechnerisch auf denselben Daten - das macht
+    auch mehrere hundert Kombinationen in Sekunden statt Minuten moeglich."""
+    max_candles = BACKTEST_MAX_CANDLES["chandelier_exit"]
+    resolution = cfg.get("ce_resolution", "1m")
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles)
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 100:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    stf_candles = None
+    if stf_filter_enabled:
+        stf_resolution = cfg.get("ce_stf_resolution", "5m")
+        stf_candles, stf_err, _ = await _fetch_cached_backtest_candles(symbol, stf_resolution, days, max_candles)
+        if stf_err or not stf_candles or len(stf_candles[4]) < 100:
+            return {"error": f"Zu wenig historische Kerzen für den SuperTrend-Filter-Zeitrahmen ({stf_resolution}) erhalten."}
+
+    periods = sorted(set(int(round(atr_period_min + i * atr_period_step))
+                          for i in range(int((atr_period_max - atr_period_min) / max(atr_period_step, 1e-9)) + 1)
+                          if atr_period_min + i * atr_period_step <= atr_period_max + 1e-9))
+    mults = sorted(set(round(atr_mult_min + i * atr_mult_step, 4)
+                        for i in range(int((atr_mult_max - atr_mult_min) / max(atr_mult_step, 1e-9)) + 1)
+                        if atr_mult_min + i * atr_mult_step <= atr_mult_max + 1e-9))
+    periods = [p for p in periods if p >= 1]
+    mults = [m for m in mults if m > 0]
+
+    total_combos = len(periods) * len(mults)
+    if total_combos == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
+    if total_combos > CE_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {CE_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    results = []
+    for period in periods:
+        for mult in mults:
+            cfg_copy = dict(cfg)
+            cfg_copy["ce_atr_period"] = period
+            cfg_copy["ce_atr_mult"] = mult
+            cfg_copy["ce_stf_filter_enabled"] = stf_filter_enabled
+            trades = backtest_chandelier_exit(candles, cfg_copy, stf_candles=stf_candles if stf_filter_enabled else None)
+            stats = summarize_backtest_trades(trades)
+            results.append({"ce_atr_period": period, "ce_atr_mult": mult, **stats})
+
+    # Zuverlaessige Ergebnisse (genug Trades) zuerst, darunter nach PnL sortiert - Kombinationen
+    # mit zu wenig Trades sind statistisch kaum aussagekraeftig, sollen aber sichtbar bleiben
+    results.sort(key=lambda r: (r["trades"] >= CE_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
+        "stf_filter_used": stf_filter_enabled, "min_reliable_trades": CE_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": total_combos,
+        "results": results[:30],
     }
 
 
@@ -2798,9 +3218,32 @@ def _trim_candles_to_days(candles, days, max_candles):
     return ts, o, h, l, c
 
 
+async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles):
+    """Gemeinsame Kerzen-Cache-Logik (sonst 1:1 dupliziert) - wird gebraucht, weil Chandelier
+    Exit im Backtest ggf. ZWEI verschiedene Aufloesungen gleichzeitig braucht (eigener
+    Zeitrahmen + hoeherer SuperTrend-Filter-Zeitrahmen)."""
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    cache_key = (symbol, resolution)
+    cached = _backtest_cache_get(cache_key)
+    now = time.time()
+    cache_used = False
+    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
+            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
+            and len(cached["candles"][4]) >= 100):
+        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
+        err = None
+        cache_used = True
+    else:
+        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
+        if candles:
+            _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
+    return candles, err, cache_used
+
+
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend, trend_meter, supertrend_fusion - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend, trend_meter, supertrend_fusion, chandelier_exit - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
@@ -2823,6 +3266,35 @@ async def run_backtest(symbol, entry_mode, cfg, days):
             "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
             "requested_days": days, "actual_days_covered": round(actual_days, 1),
             "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
+
+    if entry_mode == "chandelier_exit":
+        resolution = cfg.get("ce_resolution", "1m")
+        candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles)
+        if err:
+            return {"error": err}
+        if not candles or len(candles[4]) < 100:
+            return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
+
+        stf_candles = None
+        if cfg.get("ce_stf_filter_enabled", False):
+            stf_resolution = cfg.get("ce_stf_resolution", "5m")
+            stf_candles, stf_err, _ = await _fetch_cached_backtest_candles(symbol, stf_resolution, days, max_candles)
+            if stf_err or not stf_candles or len(stf_candles[4]) < 100:
+                return {"error": f"Zu wenig historische Kerzen für den SuperTrend-Filter-Zeitrahmen ({stf_resolution}) erhalten."}
+
+        n_candles = len(candles[4])
+        trades = backtest_chandelier_exit(candles, cfg, stf_candles=stf_candles)
+        stats = summarize_backtest_trades(trades)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"])
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"])
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": cache_used,
             "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
             "trades": trades[-50:],
         }
