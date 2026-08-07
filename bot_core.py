@@ -326,6 +326,7 @@ def default_config():
         "ce_atr_period": int(os.getenv("CE_ATR_PERIOD", "2")),
         "ce_atr_mult": float(os.getenv("CE_ATR_MULT", "1.85")),
         "ce_use_close": os.getenv("CE_USE_CLOSE", "true").lower() == "true",
+        "ce_invert_direction": os.getenv("CE_INVERT_DIRECTION", "false").lower() == "true",
         "ce_entry_trigger": os.getenv("CE_ENTRY_TRIGGER", "candle_close"),
         "ce_exit_trigger": os.getenv("CE_EXIT_TRIGGER", "candle_close"),
         "ce_tp_enabled": os.getenv("CE_TP_ENABLED", "false").lower() == "true",
@@ -1286,6 +1287,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="false">Docht (Hoch/Tief)</option>
     </select>
   </div>
+  <div data-mode="chandelier_exit"><label>Richtung invertieren (Kontra-Modus: Buy-Signal → Short, Sell-Signal → Long)</label>
+    <select class="cfg" id="ce_invert_direction">
+      <option value="false">Aus (normal)</option>
+      <option value="true">An (invertiert)</option>
+    </select>
+  </div>
   <div data-mode="chandelier_exit"><label>Einstieg auslösen</label>
     <select class="cfg" id="ce_entry_trigger">
       <option value="candle_close">Bei Kerzenschluss</option>
@@ -1913,6 +1920,7 @@ async function refresh() {
     document.getElementById('ce_atr_period').value = data.config.ce_atr_period;
     document.getElementById('ce_atr_mult').value = data.config.ce_atr_mult;
     document.getElementById('ce_use_close').value = String(data.config.ce_use_close);
+    document.getElementById('ce_invert_direction').value = String(data.config.ce_invert_direction);
     document.getElementById('ce_entry_trigger').value = data.config.ce_entry_trigger;
     document.getElementById('ce_exit_trigger').value = data.config.ce_exit_trigger;
     document.getElementById('ce_tp_enabled').value = String(data.config.ce_tp_enabled);
@@ -2221,6 +2229,7 @@ function buildConfigPayload() {
     ce_atr_period: parseInt(document.getElementById('ce_atr_period').value),
     ce_atr_mult: parseFloat(document.getElementById('ce_atr_mult').value),
     ce_use_close: document.getElementById('ce_use_close').value === 'true',
+    ce_invert_direction: document.getElementById('ce_invert_direction').value === 'true',
     ce_entry_trigger: document.getElementById('ce_entry_trigger').value,
     ce_exit_trigger: document.getElementById('ce_exit_trigger').value,
     ce_tp_enabled: document.getElementById('ce_tp_enabled').value === 'true',
@@ -2272,7 +2281,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_tp_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2392,7 +2401,7 @@ async def handle_config_update(request):
                 "stf_entry_trigger", "stf_exit_trigger", "stf_invert_direction",
                 "stf_use_ema_filter", "stf_ema_length",
                 "stf_tp_enabled", "stf_tp_usd", "stf_sl_enabled", "stf_sl_usd",
-                "ce_resolution", "ce_atr_period", "ce_atr_mult", "ce_use_close",
+                "ce_resolution", "ce_atr_period", "ce_atr_mult", "ce_use_close", "ce_invert_direction",
                 "ce_entry_trigger", "ce_exit_trigger", "ce_tp_enabled", "ce_tp_usd",
                 "ce_stf_filter_enabled", "ce_stf_resolution"]:
         if key in body:

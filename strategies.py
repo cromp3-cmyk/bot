@@ -1378,7 +1378,9 @@ async def ce_poll_loop(symbol):
 
                     direction, long_stop, short_stop = compute_chandelier_exit(
                         closed_h, closed_l, closed_c, atr_period, cfg["ce_atr_mult"], cfg.get("ce_use_close", True))
-                    dir_now, dir_prev = direction[-1], direction[-2]
+                    invert = cfg.get("ce_invert_direction", False)
+                    dir_now = -direction[-1] if invert else direction[-1]
+                    dir_prev = -direction[-2] if invert else direction[-2]
                     st["ce_direction"] = dir_now
 
                     if due_heartbeat:
@@ -2340,7 +2342,9 @@ async def on_price_update(symbol, price):
                     live_l = cl[:-1] + [min(cl[-1], price)]
                     live_c = cc[:-1] + [price]
                     direction, _, _ = compute_chandelier_exit(live_h, live_l, live_c, cfg["ce_atr_period"], cfg["ce_atr_mult"], cfg.get("ce_use_close", True))
-                    dir_now, dir_prev = direction[-1], direction[-2]
+                    invert = cfg.get("ce_invert_direction", False)
+                    dir_now = -direction[-1] if invert else direction[-1]
+                    dir_prev = -direction[-2] if invert else direction[-2]
                     buy_signal = dir_now == 1 and dir_prev == -1
                     sell_signal = dir_now == -1 and dir_prev == 1
                     if exit_trigger == "tick":
@@ -2658,11 +2662,12 @@ def backtest_chandelier_exit(candles, cfg, stf_candles=None):
     position = None
     pending_direction = None
     trades = []
+    invert = cfg.get("ce_invert_direction", False)
 
     for i in range(warmup, n):
         price = c[i]
-        dir_now = direction[i]
-        dir_prev = direction[i - 1]
+        dir_now = -direction[i] if invert else direction[i]
+        dir_prev = -direction[i - 1] if invert else direction[i - 1]
 
         if position is not None and tp_enabled:
             pdir, entry, size = position["dir"], position["entry"], position["size"]
