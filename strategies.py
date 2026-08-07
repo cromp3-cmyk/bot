@@ -817,11 +817,24 @@ async def check_trend_meter_entry(symbol, dot1, dot2, dot3, line, price):
 
 
 async def check_trend_meter_exit(symbol, dot1, dot2, dot3, line, price):
-    """Exit Long: sobald auch nur einer der 4 (Punkte oder Linie) rot ist.
-    Exit Short: sobald auch nur einer der 4 gruen ist."""
+    """Zwei Exit-Modi (tm_exit_mode):
+    - 'any_signal' (Standard): sobald auch nur einer der 4 (Punkte oder Linie) gegen die
+      Position dreht -> Exit.
+    - 'line_only': die 3 schnellen Punkte werden fuer den Exit komplett ignoriert - die
+      Position laeuft weiter, solange die (traege) Linie noch in dieselbe Richtung zeigt.
+      Erst wenn sich die Linie SELBST dreht, wird geschlossen. Laesst Trades laenger laufen,
+      ohne dass kurzes Punkte-Rauschen den Trade vorzeitig beendet."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if cfg.get("tm_exit_mode", "any_signal") == "line_only":
+        if st["position"] == "long" and not line:
+            debug_log(f"🚪 [{symbol}] Trend-Meter Exit: LONG @ {price} (Linie hat gedreht, Punkte ignoriert)")
+            await execute_exit(symbol, price, "TM-LINE-EXIT")
+        elif st["position"] == "short" and line:
+            debug_log(f"🚪 [{symbol}] Trend-Meter Exit: SHORT @ {price} (Linie hat gedreht, Punkte ignoriert)")
+            await execute_exit(symbol, price, "TM-LINE-EXIT")
         return
     any_red = not (dot1 and dot2 and dot3 and line)
     any_green = dot1 or dot2 or dot3 or line
@@ -1898,6 +1911,7 @@ def backtest_trend_meter(candles, cfg):
     sl_usd = cfg.get("tm_sl_usd", 3)
     sl_cooldown_ms = cfg.get("tm_sl_cooldown_seconds", 30) * 1000
     invert = cfg.get("tm_invert_direction", False)
+    exit_mode = cfg.get("tm_exit_mode", "any_signal")
 
     macd, macd_signal = compute_macd_line_and_signal(c, cfg["tm_macd_fast"], cfg["tm_macd_slow"], cfg["tm_macd_signal"])
     rsi1 = compute_rsi(c, cfg["tm_rsi1_period"])
@@ -1937,8 +1951,14 @@ def backtest_trend_meter(candles, cfg):
         any_green = dot1 or dot2 or dot3 or line
 
         if position is not None:
-            if (position["dir"] == "long" and any_red) or (position["dir"] == "short" and any_green):
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "TM-SIGNAL-EXIT", ts=ts)
+            if exit_mode == "line_only":
+                exit_now = (position["dir"] == "long" and not line) or (position["dir"] == "short" and line)
+                reason = "TM-LINE-EXIT"
+            else:
+                exit_now = (position["dir"] == "long" and any_red) or (position["dir"] == "short" and any_green)
+                reason = "TM-SIGNAL-EXIT"
+            if exit_now:
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
 
         if position is None and not (sl_enabled and sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts):
