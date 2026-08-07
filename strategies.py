@@ -1242,6 +1242,8 @@ async def check_ce_entry(symbol, buy_signal, sell_signal, price):
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or st["position"] is not None or price is None:
         return
+    if cfg.get("ce_sl_enabled", False) and time.time() < st.get("ce_sl_cooldown_until", 0.0):
+        return
     if not (buy_signal or sell_signal):
         return
     flip_direction = "long" if buy_signal else "short"
@@ -1283,6 +1285,8 @@ async def check_ce_pending(symbol, dir_now, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if cfg.get("ce_sl_enabled", False) and time.time() < st.get("ce_sl_cooldown_until", 0.0):
         return
     pending = st.get("ce_pending_direction")
     if not pending or not cfg.get("ce_stf_filter_enabled", False):
@@ -2355,10 +2359,13 @@ async def on_price_update(symbol, price):
             except Exception as e:
                 debug_log(f"⚠️ [{symbol}] Chandelier Exit Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
-        if st["position"] is not None and cfg.get("ce_tp_enabled", False):
+        if st["position"] is not None and (cfg.get("ce_tp_enabled", False) or cfg.get("ce_sl_enabled", False)):
             entry = st["avg_entry_price"]
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if pnl_usd >= abs(cfg.get("ce_tp_usd", 3)):
+            if cfg.get("ce_sl_enabled", False) and pnl_usd <= -abs(cfg.get("ce_sl_usd", 3)):
+                await execute_exit(symbol, price, "SL")
+                st["ce_sl_cooldown_until"] = time.time() + cfg.get("ce_sl_cooldown_seconds", 30)
+            elif cfg.get("ce_tp_enabled", False) and pnl_usd >= abs(cfg.get("ce_tp_usd", 3)):
                 await execute_exit(symbol, price, "TP")
         return
 
@@ -2629,13 +2636,16 @@ def backtest_chandelier_exit(candles, cfg, stf_candles=None):
     (letzte abgeschlossene STF-Kerze zum jeweiligen Zeitpunkt), genau wie im Live-Betrieb.
     Pending-Order-Logik: kommt ein Signal gegen den aktuellen STF-Bias, wird es gemerkt und
     nachtraeglich ausgefuehrt, sobald STF umschwenkt - solange das Chandelier-Signal bis dahin
-    nicht selbst wieder gedreht hat. Kein SL vorgesehen (bewusst weggelassen), nur optionaler
-    fester $-Take-Profit."""
+    nicht selbst wieder gedreht hat. Optional SL (mit Cooldown danach, verhindert sofortiges
+    Wieder-Einsteigen in dieselbe Lage) und optionaler fester $-Take-Profit."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     tp_enabled = cfg.get("ce_tp_enabled", False)
     tp_usd = abs(cfg.get("ce_tp_usd", 3))
+    sl_enabled = cfg.get("ce_sl_enabled", False)
+    sl_usd = abs(cfg.get("ce_sl_usd", 3))
+    sl_cooldown_ms = cfg.get("ce_sl_cooldown_seconds", 30) * 1000
     atr_period = cfg["ce_atr_period"]
     atr_mult = cfg["ce_atr_mult"]
     use_close = cfg.get("ce_use_close", True)
@@ -2663,16 +2673,21 @@ def backtest_chandelier_exit(candles, cfg, stf_candles=None):
     pending_direction = None
     trades = []
     invert = cfg.get("ce_invert_direction", False)
+    sl_cooldown_until_ts = None
 
     for i in range(warmup, n):
         price = c[i]
         dir_now = -direction[i] if invert else direction[i]
         dir_prev = -direction[i - 1] if invert else direction[i - 1]
 
-        if position is not None and tp_enabled:
+        if position is not None and (tp_enabled or sl_enabled):
             pdir, entry, size = position["dir"], position["entry"], position["size"]
             pnl_usd = (price - entry) * size if pdir == "long" else (entry - price) * size
-            if pnl_usd >= tp_usd:
+            if sl_enabled and pnl_usd <= -sl_usd:
+                _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif tp_enabled and pnl_usd >= tp_usd:
                 _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
 
@@ -2684,7 +2699,9 @@ def backtest_chandelier_exit(candles, cfg, stf_candles=None):
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "CE-FLIP-EXIT", ts=ts)
                 position = None
 
-        if position is None:
+        in_sl_cooldown = sl_enabled and sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+
+        if position is None and not in_sl_cooldown:
             bias = stf_bias_for_ts(ts[i]) if stf_filter_enabled else None
             entered_this_bar = False
             if buy_signal or sell_signal:

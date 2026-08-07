@@ -331,6 +331,9 @@ def default_config():
         "ce_exit_trigger": os.getenv("CE_EXIT_TRIGGER", "candle_close"),
         "ce_tp_enabled": os.getenv("CE_TP_ENABLED", "false").lower() == "true",
         "ce_tp_usd": float(os.getenv("CE_TP_USD", "3")),
+        "ce_sl_enabled": os.getenv("CE_SL_ENABLED", "false").lower() == "true",
+        "ce_sl_usd": float(os.getenv("CE_SL_USD", "3")),
+        "ce_sl_cooldown_seconds": float(os.getenv("CE_SL_COOLDOWN_SECONDS", "30")),
         # SuperTrend-Fusion-Richtungsfilter auf hoeherem Zeitrahmen (nutzt dieselben stf_*-Filter-
         # Parameter wie oben, nur mit eigener - typischerweise hoeherer - Aufloesung):
         "ce_stf_filter_enabled": os.getenv("CE_STF_FILTER_ENABLED", "false").lower() == "true",
@@ -364,7 +367,7 @@ def default_state():
         "tm_chop_value": None,
         "stf_highs": [], "stf_lows": [], "stf_closes": [], "stf_direction": None, "stf_chop_value": None,
         "ce_highs": [], "ce_lows": [], "ce_closes": [], "ce_direction": None,
-        "ce_stf_bias": None, "ce_pending_direction": None,
+        "ce_stf_bias": None, "ce_pending_direction": None, "ce_sl_cooldown_until": 0.0,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -1312,6 +1315,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="chandelier_exit"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" id="ce_tp_usd"></div>
+  <div data-mode="chandelier_exit"><label>Stop-Loss</label>
+    <select class="cfg" id="ce_sl_enabled">
+      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
+      <option value="true">An - fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="chandelier_exit"><label>SL-Betrag ($, nur wenn SL an)</label><input type="number" step="any" id="ce_sl_usd"></div>
+  <div data-mode="chandelier_exit"><label>Cooldown nach SL (Sek., verhindert sofortiges Wieder-Einsteigen)</label><input type="number" step="1" id="ce_sl_cooldown_seconds"></div>
   <div data-mode="chandelier_exit"><label>SuperTrend-Richtungsfilter (höherer Zeitrahmen, nutzt die SuperTrend-Fusion-Filtereinstellungen oben)</label>
     <select class="cfg" id="ce_stf_filter_enabled">
       <option value="false">Aus</option>
@@ -1925,6 +1936,9 @@ async function refresh() {
     document.getElementById('ce_exit_trigger').value = data.config.ce_exit_trigger;
     document.getElementById('ce_tp_enabled').value = String(data.config.ce_tp_enabled);
     document.getElementById('ce_tp_usd').value = data.config.ce_tp_usd;
+    document.getElementById('ce_sl_enabled').value = String(data.config.ce_sl_enabled);
+    document.getElementById('ce_sl_usd').value = data.config.ce_sl_usd;
+    document.getElementById('ce_sl_cooldown_seconds').value = data.config.ce_sl_cooldown_seconds;
     document.getElementById('ce_stf_filter_enabled').value = String(data.config.ce_stf_filter_enabled);
     document.getElementById('ce_stf_resolution').value = data.config.ce_stf_resolution;
     document.getElementById('grid_mode').value = data.config.grid_mode;
@@ -2234,6 +2248,9 @@ function buildConfigPayload() {
     ce_exit_trigger: document.getElementById('ce_exit_trigger').value,
     ce_tp_enabled: document.getElementById('ce_tp_enabled').value === 'true',
     ce_tp_usd: parseFloat(document.getElementById('ce_tp_usd').value),
+    ce_sl_enabled: document.getElementById('ce_sl_enabled').value === 'true',
+    ce_sl_usd: parseFloat(document.getElementById('ce_sl_usd').value),
+    ce_sl_cooldown_seconds: parseFloat(document.getElementById('ce_sl_cooldown_seconds').value),
     ce_stf_filter_enabled: document.getElementById('ce_stf_filter_enabled').value === 'true',
     ce_stf_resolution: document.getElementById('ce_stf_resolution').value,
     grid_mode: document.getElementById('grid_mode').value,
@@ -2281,7 +2298,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2403,6 +2420,7 @@ async def handle_config_update(request):
                 "stf_tp_enabled", "stf_tp_usd", "stf_sl_enabled", "stf_sl_usd",
                 "ce_resolution", "ce_atr_period", "ce_atr_mult", "ce_use_close", "ce_invert_direction",
                 "ce_entry_trigger", "ce_exit_trigger", "ce_tp_enabled", "ce_tp_usd",
+                "ce_sl_enabled", "ce_sl_usd", "ce_sl_cooldown_seconds",
                 "ce_stf_filter_enabled", "ce_stf_resolution"]:
         if key in body:
             cfg[key] = body[key]
