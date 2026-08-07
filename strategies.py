@@ -10,6 +10,7 @@ import json
 import time
 import traceback
 import bisect
+import math
 
 from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
@@ -504,6 +505,95 @@ def compute_atr(highs, lows, closes, period):
     return atr
 
 
+def _true_range_series(highs, lows, closes):
+    n = len(closes)
+    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
+    for i in range(1, n):
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+    return tr
+
+
+def compute_choppiness_index(highs, lows, closes, length):
+    """Portiert aus 'SuperTrend Fusion - ATP' (Pine v6): Choppiness Index nach Standardformel -
+    100 * log10(Summe der wahren Handelsspannen der letzten 'length' Kerzen / (Hoechst-Hoch minus
+    Tiefst-Tief im selben Fenster)) / log10(length).
+    Werte nahe 100 = starke Seitwaerts-/Chop-Phase, Werte nahe 0 = klarer, starker Trend.
+    Gibt None zurueck bei zu wenig Daten oder einer Preisspanne von 0 (z.B. komplett flacher Markt)."""
+    n = len(closes)
+    if n < length + 1 or length <= 1:
+        return None
+    tr = _true_range_series(highs, lows, closes)
+    window_tr_sum = sum(tr[-length:])
+    range_hl = max(highs[-length:]) - min(lows[-length:])
+    if range_hl <= 0 or window_tr_sum <= 0:
+        return None
+    return 100 * math.log10(window_tr_sum / range_hl) / math.log10(length)
+
+
+def compute_choppiness_series(highs, lows, closes, length):
+    """Serienversion von compute_choppiness_index fuer den Backtest (vermeidet O(n^2) durch
+    wiederholtes Neuberechnen mit wachsenden Listen)."""
+    n = len(closes)
+    tr = _true_range_series(highs, lows, closes)
+    out = [None] * n
+    for i in range(length - 1, n):
+        start = i - length + 1
+        window_tr_sum = sum(tr[start:i + 1])
+        rng = max(highs[start:i + 1]) - min(lows[start:i + 1])
+        out[i] = None if rng <= 0 or window_tr_sum <= 0 else 100 * math.log10(window_tr_sum / rng) / math.log10(length)
+    return out
+
+
+def compute_average_force(closes, highs, lows, length, smooth):
+    """Portiert aus 'SuperTrend Fusion - ATP': Position des Schlusskurses innerhalb der
+    Hoch-Tief-Spanne der letzten 'length' Kerzen (0 = am Tief, 1 = am Hoch, 0.5 = Mitte),
+    zentriert um 0 (also -0.5..+0.5) und mit SMA('smooth') geglaettet. Positiv = bullisches
+    Momentum, negativ = baerisches Momentum. Urspruenglich von racer8 veroeffentlicht."""
+    n = len(closes)
+    p = max(1, int(length))
+    raw = [0.0] * n
+    for i in range(n):
+        start = max(0, i - p + 1)
+        hh = max(highs[start:i + 1])
+        ll = min(lows[start:i + 1])
+        rng = hh - ll
+        raw[i] = 0.0 if rng == 0 else (closes[i] - ll) / rng - 0.5
+    sm = max(1, int(smooth))
+    out = [0.0] * n
+    for i in range(n):
+        start = max(0, i - sm + 1)
+        window = raw[start:i + 1]
+        out[i] = sum(window) / len(window)
+    return out
+
+
+def compute_supertrend(highs, lows, closes, atr_period, factor):
+    """Standard-SuperTrend-Berechnung (wie Pine's ta.supertrend). Gibt (st_value, direction)
+    zurueck - direction[-1] < 0 bedeutet Aufwaertstrend (aktiv), > 0 Abwaertstrend, passend zu
+    TradingViews eigener Konvention."""
+    n = len(closes)
+    atr = compute_atr(highs, lows, closes, atr_period)
+    hl2 = [(highs[i] + lows[i]) / 2 for i in range(n)]
+    upper = [hl2[i] + factor * atr[i] for i in range(n)]
+    lower = [hl2[i] - factor * atr[i] for i in range(n)]
+    final_upper = [0.0] * n
+    final_lower = [0.0] * n
+    direction = [0] * n
+    st_value = [0.0] * n
+    final_upper[0] = upper[0]
+    final_lower[0] = lower[0]
+    direction[0] = -1
+    st_value[0] = final_lower[0]
+    for i in range(1, n):
+        final_upper[i] = upper[i] if (upper[i] < final_upper[i - 1] or closes[i - 1] > final_upper[i - 1]) else final_upper[i - 1]
+        final_lower[i] = lower[i] if (lower[i] > final_lower[i - 1] or closes[i - 1] < final_lower[i - 1]) else final_lower[i - 1]
+        if direction[i - 1] == -1:
+            direction[i] = -1 if closes[i] > final_lower[i] else 1
+        else:
+            direction[i] = 1 if closes[i] < final_upper[i] else -1
+        st_value[i] = final_lower[i] if direction[i] == -1 else final_upper[i]
+    return st_value, direction
+
 
 def compute_range_profile_snapshot(highs, lows, closes, opens, lookback, bins, ob_os_level):
     """Portiert aus dem Pine-Script 'Range Profile Oscillator': baut ueber die letzten
@@ -846,6 +936,18 @@ async def check_trend_meter_exit(symbol, dot1, dot2, dot3, line, price):
         await execute_exit(symbol, price, "TM-SIGNAL-EXIT")
 
 
+def _tm_resolve_invert(cfg, highs, lows, closes):
+    """Entscheidet, ob die Trend-Meter-Auswertung gerade invertiert werden soll. Ist der
+    Regime-Filter aktiv, entscheidet der Choppiness-Index (>= Schwelle = Seitwaerts -> invertiert,
+    darunter = Trend -> normal) und ueberschreibt den manuellen Schalter. Sonst zaehlt einfach
+    der manuelle 'tm_invert_direction'-Schalter. Gibt (invert: bool, chop_value: float|None) zurueck."""
+    if cfg.get("tm_regime_filter_enabled", False):
+        chop = compute_choppiness_index(highs, lows, closes, cfg.get("tm_regime_chop_length", 14))
+        invert = chop is not None and chop >= cfg.get("tm_regime_chop_threshold", 50)
+        return invert, chop
+    return cfg.get("tm_invert_direction", False), None
+
+
 async def trend_meter_poll_loop(symbol):
     """Eigene Strategie 'Trend-Meter' (portiert aus dem TradingView-Indikator 'Trend Meter'
     von Lij_MC): 3 Signal-Punkte (schnelles MACD-Histogramm, RSI13 vs. 50, RSI5 vs. 50) plus
@@ -855,7 +957,9 @@ async def trend_meter_poll_loop(symbol):
     zwischen kerzenbasiert (nur hier im Poll-Loop bei echtem Kerzenschluss) und tick-basiert
     (reagiert sofort auf jeden Preis-Tick in on_price_update, indem die noch offene letzte
     Kerze live mit dem aktuellen Preis nachgerechnet wird - dafuer werden die Schlusskurse
-    hier alle 5 Sek. fuer die Live-Auswertung gecacht)."""
+    hier alle 5 Sek. fuer die Live-Auswertung gecacht).
+    Optionaler Regime-Filter (siehe _tm_resolve_invert): schaltet automatisch zwischen normal
+    und invertiert um, je nachdem ob der Choppiness-Index gerade Seitwaerts oder Trend anzeigt."""
     b = BOTS[symbol]
     last_processed_ts = None
     last_heartbeat = 0.0
@@ -865,14 +969,15 @@ async def trend_meter_poll_loop(symbol):
             cfg = b["config"]
             if cfg["entry_mode"] == "trend_meter":
                 resolution = cfg["tm_resolution"]
-                min_needed = max(cfg["tm_macd_slow"], cfg["tm_rsi1_period"], cfg["tm_rsi2_period"], cfg["tm_ma_slow"]) + 2
+                min_needed = max(cfg["tm_macd_slow"], cfg["tm_rsi1_period"], cfg["tm_rsi2_period"], cfg["tm_ma_slow"],
+                                  cfg.get("tm_regime_chop_length", 14)) + 2
                 needed_bars = min(1000, max(min_needed * 3, 60))
                 st = b["state"]
 
                 if resolution in SUB_MINUTE_RESOLUTIONS:
                     local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     if local:
-                        closed_ts, _, _, _, closed_c = local
+                        closed_ts, _, closed_h, closed_l, closed_c = local
                     else:
                         closed_ts = None
                 else:
@@ -880,6 +985,8 @@ async def trend_meter_poll_loop(symbol):
                     if data:
                         timestamps, opens, highs, lows, closes = data
                         closed_ts = timestamps[:-1]
+                        closed_h = highs[:-1]
+                        closed_l = lows[:-1]
                         closed_c = closes[:-1]
                     else:
                         closed_ts = None
@@ -893,21 +1000,27 @@ async def trend_meter_poll_loop(symbol):
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
 
                     # Fuer die tick-basierte Live-Auswertung in on_price_update cachen
-                    st["tm_closes"] = closed_c[-(min_needed + 5):]
+                    keep = min_needed + 5
+                    st["tm_closes"] = closed_c[-keep:]
+                    st["tm_highs"] = closed_h[-keep:]
+                    st["tm_lows"] = closed_l[-keep:]
 
                     dots = compute_trend_meter_dots(closed_c, cfg)
                     if dots:
                         dot1, dot2, dot3, line = dots
                         st["tm_dot1"], st["tm_dot2"], st["tm_dot3"], st["tm_line"] = dot1, dot2, dot3, line
+                        invert, chop_value = _tm_resolve_invert(cfg, closed_h, closed_l, closed_c)
+                        st["tm_chop_value"] = chop_value
 
                         if due_heartbeat:
                             last_heartbeat = now
                             marks = "".join("🟢" if v else "🔴" for v in (dot1, dot2, dot3, line))
-                            debug_log(f"💓 [{symbol}] Trend-Meter aktiv: {marks}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                            regime_info = f", Chop={round(chop_value,1) if chop_value is not None else '-'}, invertiert={invert}" if cfg.get("tm_regime_filter_enabled", False) else ""
+                            debug_log(f"💓 [{symbol}] Trend-Meter aktiv: {marks}{regime_info}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
                         if is_new_candle:
                             last_processed_ts = signal_key
-                            e1, e2, e3, el = (not dot1, not dot2, not dot3, not line) if cfg.get("tm_invert_direction", False) else (dot1, dot2, dot3, line)
+                            e1, e2, e3, el = (not dot1, not dot2, not dot3, not line) if invert else (dot1, dot2, dot3, line)
                             if cfg.get("tm_entry_trigger", "candle_close") == "candle_close":
                                 await check_trend_meter_entry(symbol, e1, e2, e3, el, price)
                             if cfg.get("tm_exit_trigger", "candle_close") == "candle_close":
@@ -920,6 +1033,139 @@ async def trend_meter_poll_loop(symbol):
                         debug_log(f"⏳ [{symbol}] Trend-Meter wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Trend-Meter-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+async def check_stf_entry(symbol, direction, prev_direction, bull_ok, bear_ok, price):
+    """Einstieg nur im Moment des Trend-Flips (nicht solange der Trend nur andauert), und nur
+    wenn die aktiven Filter (Average Force, Choppiness) zustimmen."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    flip_to_up = direction == -1 and prev_direction != -1
+    flip_to_down = direction == 1 and prev_direction != 1
+    if flip_to_up and bull_ok:
+        entry_direction = "long"
+    elif flip_to_down and bear_ok:
+        entry_direction = "short"
+    else:
+        return
+    debug_log(f"📡 [{symbol}] SuperTrend Fusion Signal: {entry_direction.upper()} @ {price}")
+    await execute_entry(symbol, entry_direction, price, is_add_on=False)
+
+
+async def check_stf_exit(symbol, direction, price):
+    """Ausstieg immer sobald der SuperTrend selbst dreht - unabhaengig von den Filtern."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if st["position"] == "long" and direction == 1:
+        debug_log(f"🚪 [{symbol}] SuperTrend Fusion Exit: LONG @ {price} (Trend gedreht)")
+        await execute_exit(symbol, price, "ST-FLIP-EXIT")
+    elif st["position"] == "short" and direction == -1:
+        debug_log(f"🚪 [{symbol}] SuperTrend Fusion Exit: SHORT @ {price} (Trend gedreht)")
+        await execute_exit(symbol, price, "ST-FLIP-EXIT")
+
+
+def compute_stf_state(highs, lows, closes, cfg):
+    n = len(closes)
+    min_needed = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], cfg["stf_chop_length"]) + 3
+    if n < min_needed:
+        return None
+    st_val, direction = compute_supertrend(highs, lows, closes, cfg["stf_atr_period"], cfg["stf_factor"])
+    bull_ok, bear_ok = True, True
+    if cfg.get("stf_use_af_filter", True):
+        af = compute_average_force(closes, highs, lows, cfg["stf_af_period"], cfg["stf_af_smooth"])
+        bull_ok = bull_ok and af[-1] > 0
+        bear_ok = bear_ok and af[-1] < 0
+    chop_value = None
+    if cfg.get("stf_use_chop_filter", True):
+        chop_value = compute_choppiness_index(highs, lows, closes, cfg["stf_chop_length"])
+        trending = chop_value is not None and chop_value < cfg.get("stf_chop_threshold", 50)
+        bull_ok = bull_ok and trending
+        bear_ok = bear_ok and trending
+    return {"direction": direction[-1], "prev_direction": direction[-2], "bull_ok": bull_ok, "bear_ok": bear_ok, "chop_value": chop_value}
+
+
+async def stf_poll_loop(symbol):
+    """SuperTrend Fusion (portiert aus 'SuperTrend Fusion - ATP' von AlgoTrade_Pro; der Average-
+    Force-Baustein stammt urspruenglich von racer8): SuperTrend-Basis (ATR-Baender) mit zwei
+    optionalen Filtern - Average-Force-Momentum (muss in Trendrichtung zeigen) und Choppiness-
+    Index (Markt muss gerade als 'trending' gelten, nicht seitwaerts).
+    Einstieg nur im Moment des Trend-Flips, wenn die aktiven Filter zustimmen. Ausstieg immer
+    sobald der SuperTrend selbst dreht, unabhaengig von den Filtern. Optional fester $-SL/TP.
+    Ein-/Ausstieg je einzeln umschaltbar zwischen kerzenbasiert und tick-basiert (live
+    nachgerechnete offene Kerze, wie bei Trend-Meter)."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "supertrend_fusion":
+                resolution = cfg["stf_resolution"]
+                min_needed = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], cfg["stf_chop_length"]) + 3
+                needed_bars = min(1000, max(min_needed * 3, 60))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts = timestamps[:-1]
+                        closed_h = highs[:-1]
+                        closed_l = lows[:-1]
+                        closed_c = closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_processed_ts != signal_key
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    keep = min_needed + 5
+                    st["stf_highs"] = closed_h[-keep:]
+                    st["stf_lows"] = closed_l[-keep:]
+                    st["stf_closes"] = closed_c[-keep:]
+
+                    state = compute_stf_state(closed_h, closed_l, closed_c, cfg)
+                    if state:
+                        st["stf_direction"] = state["direction"]
+                        st["stf_chop_value"] = state["chop_value"]
+
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            trend_label = "AUFWÄRTS" if state["direction"] == -1 else "ABWÄRTS"
+                            debug_log(f"💓 [{symbol}] SuperTrend Fusion aktiv: Trend={trend_label}, Chop={state['chop_value']}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                        if is_new_candle:
+                            last_processed_ts = signal_key
+                            if cfg.get("stf_entry_trigger", "candle_close") == "candle_close":
+                                await check_stf_entry(symbol, state["direction"], state["prev_direction"], state["bull_ok"], state["bear_ok"], price)
+                            if cfg.get("stf_exit_trigger", "candle_close") == "candle_close":
+                                await check_stf_exit(symbol, state["direction"], price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] SuperTrend Fusion wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] SuperTrend Fusion wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] SuperTrend-Fusion-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
 
@@ -1785,12 +2031,17 @@ async def on_price_update(symbol, price):
         if entry_trigger == "tick" or exit_trigger == "tick":
             try:
                 cached_closes = st.get("tm_closes")
+                cached_highs = st.get("tm_highs")
+                cached_lows = st.get("tm_lows")
                 if cached_closes and len(cached_closes) >= 2:
                     live_closes = cached_closes[:-1] + [price]
+                    live_highs = (cached_highs[:-1] + [max(cached_highs[-1], price)]) if cached_highs else live_closes
+                    live_lows = (cached_lows[:-1] + [min(cached_lows[-1], price)]) if cached_lows else live_closes
                     dots = compute_trend_meter_dots(live_closes, cfg)
                     if dots:
                         dot1, dot2, dot3, line = dots
-                        if cfg.get("tm_invert_direction", False):
+                        invert, _ = _tm_resolve_invert(cfg, live_highs, live_lows, live_closes)
+                        if invert:
                             dot1, dot2, dot3, line = not dot1, not dot2, not dot3, not line
                         if entry_trigger == "tick":
                             await check_trend_meter_entry(symbol, dot1, dot2, dot3, line, price)
@@ -1802,10 +2053,38 @@ async def on_price_update(symbol, price):
         if st["position"] is not None and (cfg.get("tm_tp_enabled", False) or cfg.get("tm_sl_enabled", False)):
             entry = st["avg_entry_price"]
             pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
-            if cfg.get("tm_sl_enabled", False) and pnl_usd <= -cfg.get("tm_sl_usd", 3):
+            if cfg.get("tm_sl_enabled", False) and pnl_usd <= -abs(cfg.get("tm_sl_usd", 3)):
                 await execute_exit(symbol, price, "SL")
                 st["tm_sl_cooldown_until"] = time.time() + cfg.get("tm_sl_cooldown_seconds", 30)
-            elif cfg.get("tm_tp_enabled", False) and pnl_usd >= cfg.get("tm_tp_usd", 3):
+            elif cfg.get("tm_tp_enabled", False) and pnl_usd >= abs(cfg.get("tm_tp_usd", 3)):
+                await execute_exit(symbol, price, "TP")
+        return
+
+    if cfg["entry_mode"] == "supertrend_fusion":
+        entry_trigger = cfg.get("stf_entry_trigger", "candle_close")
+        exit_trigger = cfg.get("stf_exit_trigger", "candle_close")
+        if entry_trigger == "tick" or exit_trigger == "tick":
+            try:
+                ch, cl, cc = st.get("stf_highs"), st.get("stf_lows"), st.get("stf_closes")
+                if ch and cl and cc and len(cc) >= 2:
+                    live_h = ch[:-1] + [max(ch[-1], price)]
+                    live_l = cl[:-1] + [min(cl[-1], price)]
+                    live_c = cc[:-1] + [price]
+                    state = compute_stf_state(live_h, live_l, live_c, cfg)
+                    if state:
+                        if entry_trigger == "tick":
+                            await check_stf_entry(symbol, state["direction"], state["prev_direction"], state["bull_ok"], state["bear_ok"], price)
+                        if exit_trigger == "tick":
+                            await check_stf_exit(symbol, state["direction"], price)
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] SuperTrend Fusion Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        if st["position"] is not None and (cfg.get("stf_tp_enabled", False) or cfg.get("stf_sl_enabled", False)):
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if cfg.get("stf_sl_enabled", False) and pnl_usd <= -abs(cfg.get("stf_sl_usd", 3)):
+                await execute_exit(symbol, price, "SL")
+            elif cfg.get("stf_tp_enabled", False) and pnl_usd >= abs(cfg.get("stf_tp_usd", 3)):
                 await execute_exit(symbol, price, "TP")
         return
 
@@ -1906,12 +2185,16 @@ def backtest_trend_meter(candles, cfg):
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     tp_enabled = cfg.get("tm_tp_enabled", False)
-    tp_usd = cfg.get("tm_tp_usd", 3)
+    tp_usd = abs(cfg.get("tm_tp_usd", 3))
     sl_enabled = cfg.get("tm_sl_enabled", False)
-    sl_usd = cfg.get("tm_sl_usd", 3)
+    sl_usd = abs(cfg.get("tm_sl_usd", 3))
     sl_cooldown_ms = cfg.get("tm_sl_cooldown_seconds", 30) * 1000
     invert = cfg.get("tm_invert_direction", False)
     exit_mode = cfg.get("tm_exit_mode", "any_signal")
+    regime_enabled = cfg.get("tm_regime_filter_enabled", False)
+    regime_chop_len = cfg.get("tm_regime_chop_length", 14)
+    regime_chop_threshold = cfg.get("tm_regime_chop_threshold", 50)
+    chop_series = compute_choppiness_series(h, l, c, regime_chop_len) if regime_enabled else None
 
     macd, macd_signal = compute_macd_line_and_signal(c, cfg["tm_macd_fast"], cfg["tm_macd_slow"], cfg["tm_macd_signal"])
     rsi1 = compute_rsi(c, cfg["tm_rsi1_period"])
@@ -1919,7 +2202,7 @@ def backtest_trend_meter(candles, cfg):
     ma_fast = _ema_series(c, cfg["tm_ma_fast"])
     ma_slow = _ema_series(c, cfg["tm_ma_slow"])
 
-    warmup = max(cfg["tm_macd_slow"], cfg["tm_rsi1_period"], cfg["tm_rsi2_period"], cfg["tm_ma_slow"]) + 2
+    warmup = max(cfg["tm_macd_slow"], cfg["tm_rsi1_period"], cfg["tm_rsi2_period"], cfg["tm_ma_slow"], regime_chop_len) + 2
     position = None  # {"dir","entry","size","entry_i"}
     trades = []
     sl_cooldown_until_ts = None
@@ -1943,7 +2226,8 @@ def backtest_trend_meter(candles, cfg):
         dot2 = rsi1[i] > 50
         dot3 = rsi2[i] > 50
         line = ma_fast[i] > ma_slow[i]
-        if invert:
+        invert_i = (chop_series[i] is not None and chop_series[i] >= regime_chop_threshold) if regime_enabled else invert
+        if invert_i:
             dot1, dot2, dot3, line = not dot1, not dot2, not dot3, not line
         all_green = dot1 and dot2 and dot3 and line
         all_red = not dot1 and not dot2 and not dot3 and not line
@@ -1973,9 +2257,73 @@ def backtest_trend_meter(candles, cfg):
     return trades
 
 
+def backtest_supertrend_fusion(candles, cfg):
+    """Backtest laeuft immer 'kerzenbasiert' - eine echte Tick-Simulation ist mit historischen
+    OHLC-Daten nicht moeglich, das betrifft nur den optionalen Tick-Modus im Live-Betrieb."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    tp_enabled = cfg.get("stf_tp_enabled", False)
+    tp_usd = abs(cfg.get("stf_tp_usd", 3))
+    sl_enabled = cfg.get("stf_sl_enabled", False)
+    sl_usd = abs(cfg.get("stf_sl_usd", 3))
+    use_af = cfg.get("stf_use_af_filter", True)
+    use_chop = cfg.get("stf_use_chop_filter", True)
+    chop_len = cfg.get("stf_chop_length", 14)
+    chop_threshold = cfg.get("stf_chop_threshold", 50)
+
+    st_val, direction = compute_supertrend(h, l, c, cfg["stf_atr_period"], cfg["stf_factor"])
+    af = compute_average_force(c, h, l, cfg["stf_af_period"], cfg["stf_af_smooth"]) if use_af else None
+    chop = compute_choppiness_series(h, l, c, chop_len) if use_chop else None
+
+    warmup = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], chop_len) + 3
+    position = None
+    trades = []
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None and (tp_enabled or sl_enabled):
+            pdir, entry, size = position["dir"], position["entry"], position["size"]
+            pnl_usd = (price - entry) * size if pdir == "long" else (entry - price) * size
+            if sl_enabled and pnl_usd <= -sl_usd:
+                _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "SL", ts=ts)
+                position = None
+            elif tp_enabled and pnl_usd >= tp_usd:
+                _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        if position is not None:
+            if (position["dir"] == "long" and direction[i] == 1) or (position["dir"] == "short" and direction[i] == -1):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ST-FLIP-EXIT", ts=ts)
+                position = None
+
+        if position is None:
+            flip_to_up = direction[i] == -1 and direction[i - 1] != -1
+            flip_to_down = direction[i] == 1 and direction[i - 1] != 1
+            bull_ok = True
+            bear_ok = True
+            if af is not None:
+                bull_ok = bull_ok and af[i] > 0
+                bear_ok = bear_ok and af[i] < 0
+            if chop is not None:
+                trending = chop[i] is not None and chop[i] < chop_threshold
+                bull_ok = bull_ok and trending
+                bear_ok = bear_ok and trending
+            entry_direction = "long" if (flip_to_up and bull_ok) else ("short" if (flip_to_down and bear_ok) else None)
+            if entry_direction:
+                size = (margin * leverage) / price
+                position = {"dir": entry_direction, "entry": price, "size": size, "entry_i": i}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000, "range_profile": 30_000, "zscore_trend": 100_000, "blsh_trend": 100_000,
-    "trend_meter": 100_000,
+    "trend_meter": 100_000, "supertrend_fusion": 100_000,
 }
 
 
@@ -2347,6 +2695,7 @@ BACKTEST_FUNCS = {
     "zscore_trend": backtest_zscore_trend,
     "blsh_trend": backtest_blsh_trend,
     "trend_meter": backtest_trend_meter,
+    "supertrend_fusion": backtest_supertrend_fusion,
 }
 
 
@@ -2418,7 +2767,7 @@ def _trim_candles_to_days(candles, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend, trend_meter - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend, trend_meter, supertrend_fusion - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
@@ -2446,7 +2795,8 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         }
 
     resolution_key = {"range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
-                       "zscore_trend": "zscore_resolution", "trend_meter": "tm_resolution"}[entry_mode]
+                       "zscore_trend": "zscore_resolution", "trend_meter": "tm_resolution",
+                       "supertrend_fusion": "stf_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
@@ -2494,5 +2844,6 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
         "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
         "tm_invert_direction": cfg.get("tm_invert_direction", False) if entry_mode == "trend_meter" else None,
+        "tm_regime_filter_enabled": cfg.get("tm_regime_filter_enabled", False) if entry_mode == "trend_meter" else None,
     }
 

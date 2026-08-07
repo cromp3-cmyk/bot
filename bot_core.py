@@ -294,6 +294,29 @@ def default_config():
         "tm_sl_cooldown_seconds": float(os.getenv("TM_SL_COOLDOWN_SECONDS", "30")),
         "tm_invert_direction": os.getenv("TM_INVERT_DIRECTION", "false").lower() == "true",
         "tm_exit_mode": os.getenv("TM_EXIT_MODE", "any_signal"),  # "any_signal" oder "line_only"
+        # Regime-Filter: schaltet automatisch zwischen normal und invertiert um, je nachdem ob
+        # der Choppiness-Index gerade "Seitwaerts" oder "Trend" anzeigt (siehe SuperTrend Fusion
+        # weiter unten). Ueberschreibt tm_invert_direction, solange aktiv.
+        "tm_regime_filter_enabled": os.getenv("TM_REGIME_FILTER_ENABLED", "false").lower() == "true",
+        "tm_regime_chop_length": int(os.getenv("TM_REGIME_CHOP_LENGTH", "14")),
+        "tm_regime_chop_threshold": int(os.getenv("TM_REGIME_CHOP_THRESHOLD", "50")),
+        # SuperTrend Fusion (portiert aus "SuperTrend Fusion - ATP" von AlgoTrade_Pro,
+        # Average-Force-Baustein urspruenglich von racer8):
+        "stf_resolution": os.getenv("STF_RESOLUTION", "5m"),
+        "stf_atr_period": int(os.getenv("STF_ATR_PERIOD", "10")),
+        "stf_factor": float(os.getenv("STF_FACTOR", "3")),
+        "stf_use_af_filter": os.getenv("STF_USE_AF_FILTER", "true").lower() == "true",
+        "stf_af_period": int(os.getenv("STF_AF_PERIOD", "18")),
+        "stf_af_smooth": int(os.getenv("STF_AF_SMOOTH", "6")),
+        "stf_use_chop_filter": os.getenv("STF_USE_CHOP_FILTER", "true").lower() == "true",
+        "stf_chop_length": int(os.getenv("STF_CHOP_LENGTH", "14")),
+        "stf_chop_threshold": int(os.getenv("STF_CHOP_THRESHOLD", "50")),
+        "stf_entry_trigger": os.getenv("STF_ENTRY_TRIGGER", "candle_close"),
+        "stf_exit_trigger": os.getenv("STF_EXIT_TRIGGER", "candle_close"),
+        "stf_tp_enabled": os.getenv("STF_TP_ENABLED", "false").lower() == "true",
+        "stf_tp_usd": float(os.getenv("STF_TP_USD", "3")),
+        "stf_sl_enabled": os.getenv("STF_SL_ENABLED", "false").lower() == "true",
+        "stf_sl_usd": float(os.getenv("STF_SL_USD", "3")),
     }
 
 
@@ -320,6 +343,8 @@ def default_state():
         "blsh_value": None, "blsh_trend": None, "blsh_tp1_done": False, "blsh_history": [], "blsh_last_exit_ts": 0.0,
         "tm_closes": [], "tm_dot1": None, "tm_dot2": None, "tm_dot3": None, "tm_line": None,
         "tm_sl_cooldown_until": 0.0,
+        "tm_chop_value": None,
+        "stf_highs": [], "stf_lows": [], "stf_closes": [], "stf_direction": None, "stf_chop_value": None,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -834,7 +859,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="range_profile">Range-Profile (Point-of-Control-Kanal, Reversion oder Momentum, fester TP/SL)</option>
       <option value="zscore_trend">Z-Score-Trend (2 einstellbare Schwellen: Long-Kreuzung von unten, Short-Kreuzung von oben, TP1 Teilverkauf + Break-Even, TP2 final)</option>
       <option value="blsh_trend">BLSH-Composite (RSI+EMA+MACD+MFI kombiniert, kerzenbasiert, Nulllinien-Exit, TP1 Teilverkauf + Break-Even, TP2 final)</option>
-      <option value="trend_meter">Trend-Meter (3 Punkte + obere Linie, alle 4 müssen übereinstimmen, optional SL+TP+Cooldown, invertierbar)</option>
+      <option value="trend_meter">Trend-Meter (3 Punkte + obere Linie, alle 4 müssen übereinstimmen, optional SL+TP+Cooldown, invertierbar, Regime-Filter)</option>
+      <option value="supertrend_fusion">SuperTrend Fusion (ATR-SuperTrend + Average-Force-Momentum + Choppiness-Filter, optional SL+TP)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1118,14 +1144,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - fester $-Betrag</option>
     </select>
   </div>
-  <div data-mode="trend_meter"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" id="tm_tp_usd"></div>
+  <div data-mode="trend_meter"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" min="0.01" id="tm_tp_usd"></div>
   <div data-mode="trend_meter"><label>Stop-Loss</label>
     <select class="cfg" id="tm_sl_enabled">
       <option value="false">Aus (nur Signal-Exit)</option>
       <option value="true">An - fester $-Betrag</option>
     </select>
   </div>
-  <div data-mode="trend_meter"><label>SL-Betrag ($, nur wenn SL an)</label><input type="number" step="any" id="tm_sl_usd"></div>
+  <div data-mode="trend_meter"><label>SL-Betrag ($, nur wenn SL an - immer positiv, egal was eingegeben wird)</label><input type="number" step="any" min="0.01" id="tm_sl_usd"></div>
   <div data-mode="trend_meter"><label>Cooldown nach SL (Sek., verhindert sofortiges Wieder-Einsteigen)</label><input type="number" step="1" id="tm_sl_cooldown_seconds"></div>
   <div data-mode="trend_meter"><label>Richtung invertieren (Kontra-Modus: Long-Signal → Short, Short-Signal → Long)</label>
     <select class="cfg" id="tm_invert_direction">
@@ -1139,6 +1165,72 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="line_only">Nur wenn die Linie selbst dreht (Punkte ignoriert, Trade läuft länger)</option>
     </select>
   </div>
+  <div data-mode="trend_meter"><label>Regime-Filter (schaltet automatisch normal/invertiert um, überschreibt den Schalter oben)</label>
+    <select class="cfg" id="tm_regime_filter_enabled">
+      <option value="false">Aus (manueller Invertiert-Schalter gilt)</option>
+      <option value="true">An (Choppiness-Index entscheidet automatisch)</option>
+    </select>
+  </div>
+  <div data-mode="trend_meter"><label>Regime: Choppiness-Fenster (Kerzen)</label><input type="number" step="1" id="tm_regime_chop_length"></div>
+  <div data-mode="trend_meter"><label>Regime: Schwelle (≥ = Seitwärts → invertiert, darunter = Trend → normal)</label><input type="number" step="1" min="1" max="100" id="tm_regime_chop_threshold"></div>
+  <div data-mode="supertrend_fusion"><label>Zeitrahmen</label>
+    <select class="cfg" id="stf_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="supertrend_fusion"><label>ATR-Länge</label><input type="number" step="1" id="stf_atr_period"></div>
+  <div data-mode="supertrend_fusion"><label>Faktor (Band-Breite)</label><input type="number" step="0.1" id="stf_factor"></div>
+  <div data-mode="supertrend_fusion"><label>Average-Force-Filter (Momentum muss in Trendrichtung zeigen)</label>
+    <select class="cfg" id="stf_use_af_filter">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="supertrend_fusion"><label>Average-Force: Periode</label><input type="number" step="1" id="stf_af_period"></div>
+  <div data-mode="supertrend_fusion"><label>Average-Force: Glättung</label><input type="number" step="1" id="stf_af_smooth"></div>
+  <div data-mode="supertrend_fusion"><label>Choppiness-Filter (nur bei erkanntem Trend einsteigen)</label>
+    <select class="cfg" id="stf_use_chop_filter">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="supertrend_fusion"><label>Choppiness: Fenster (Kerzen)</label><input type="number" step="1" id="stf_chop_length"></div>
+  <div data-mode="supertrend_fusion"><label>Choppiness: Schwelle (darunter = Trend, erlaubt Einstieg)</label><input type="number" step="1" min="1" max="100" id="stf_chop_threshold"></div>
+  <div data-mode="supertrend_fusion"><label>Einstieg auslösen</label>
+    <select class="cfg" id="stf_entry_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="supertrend_fusion"><label>Ausstieg auslösen</label>
+    <select class="cfg" id="stf_exit_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="supertrend_fusion"><label>Take-Profit</label>
+    <select class="cfg" id="stf_tp_enabled">
+      <option value="false">Aus (nur Trend-Flip-Exit)</option>
+      <option value="true">An - fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="supertrend_fusion"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" min="0.01" id="stf_tp_usd"></div>
+  <div data-mode="supertrend_fusion"><label>Stop-Loss</label>
+    <select class="cfg" id="stf_sl_enabled">
+      <option value="false">Aus (nur Trend-Flip-Exit)</option>
+      <option value="true">An - fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="supertrend_fusion"><label>SL-Betrag ($, nur wenn SL an)</label><input type="number" step="any" min="0.01" id="stf_sl_usd"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1486,6 +1578,8 @@ async function refresh() {
     <div class="card"><div class="label">Z-Score-Trend (${data.config.entry_mode==='zscore_trend'?'aktiv':'inaktiv'})</div><div class="value ${data.zscore_trend===1?'green':data.zscore_trend===-1?'red':''}">${data.zscore_trend===1?'LONG-Trend':data.zscore_trend===-1?'SHORT-Trend':'-'} (Z ${data.zscore_value ?? '-'})</div></div>
     <div class="card"><div class="label">BLSH-Composite (${data.config.entry_mode==='blsh_trend'?'aktiv':'inaktiv'})</div><div class="value ${data.blsh_trend===1?'green':data.blsh_trend===-1?'red':''}">${data.blsh_trend===1?'LONG-Trend':data.blsh_trend===-1?'SHORT-Trend':'-'} (V ${data.blsh_value ?? '-'})</div></div>
     <div class="card"><div class="label">Trend-Meter Punkte+Linie (${data.config.entry_mode==='trend_meter'?'aktiv':'inaktiv'})</div><div class="value">${[data.tm_dot1,data.tm_dot2,data.tm_dot3,data.tm_line].map(v=>v==null?'⚪':(v?'🟢':'🔴')).join(' ')}</div></div>
+    <div class="card"><div class="label">Trend-Meter Regime (Choppiness, Filter ${data.config.tm_regime_filter_enabled?'an':'aus'})</div><div class="value">${data.tm_chop_value!=null?data.tm_chop_value.toFixed(1):'-'} ${data.config.tm_regime_filter_enabled && data.tm_chop_value!=null ? (data.tm_chop_value>=data.config.tm_regime_chop_threshold?'(Seitwärts → invertiert)':'(Trend → normal)') : ''}</div></div>
+    <div class="card"><div class="label">SuperTrend Fusion (${data.config.entry_mode==='supertrend_fusion'?'aktiv':'inaktiv'})</div><div class="value ${data.stf_direction===-1?'green':data.stf_direction===1?'red':''}">${data.stf_direction===-1?'AUFWÄRTS':data.stf_direction===1?'ABWÄRTS':'-'} (Chop ${data.stf_chop_value!=null?data.stf_chop_value.toFixed(1):'-'})</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
@@ -1600,6 +1694,24 @@ async function refresh() {
     document.getElementById('tm_sl_cooldown_seconds').value = data.config.tm_sl_cooldown_seconds;
     document.getElementById('tm_invert_direction').value = String(data.config.tm_invert_direction);
     document.getElementById('tm_exit_mode').value = data.config.tm_exit_mode;
+    document.getElementById('tm_regime_filter_enabled').value = String(data.config.tm_regime_filter_enabled);
+    document.getElementById('tm_regime_chop_length').value = data.config.tm_regime_chop_length;
+    document.getElementById('tm_regime_chop_threshold').value = data.config.tm_regime_chop_threshold;
+    document.getElementById('stf_resolution').value = data.config.stf_resolution;
+    document.getElementById('stf_atr_period').value = data.config.stf_atr_period;
+    document.getElementById('stf_factor').value = data.config.stf_factor;
+    document.getElementById('stf_use_af_filter').value = String(data.config.stf_use_af_filter);
+    document.getElementById('stf_af_period').value = data.config.stf_af_period;
+    document.getElementById('stf_af_smooth').value = data.config.stf_af_smooth;
+    document.getElementById('stf_use_chop_filter').value = String(data.config.stf_use_chop_filter);
+    document.getElementById('stf_chop_length').value = data.config.stf_chop_length;
+    document.getElementById('stf_chop_threshold').value = data.config.stf_chop_threshold;
+    document.getElementById('stf_entry_trigger').value = data.config.stf_entry_trigger;
+    document.getElementById('stf_exit_trigger').value = data.config.stf_exit_trigger;
+    document.getElementById('stf_tp_enabled').value = String(data.config.stf_tp_enabled);
+    document.getElementById('stf_tp_usd').value = data.config.stf_tp_usd;
+    document.getElementById('stf_sl_enabled').value = String(data.config.stf_sl_enabled);
+    document.getElementById('stf_sl_usd').value = data.config.stf_sl_usd;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -1877,6 +1989,24 @@ function buildConfigPayload() {
     tm_sl_cooldown_seconds: parseFloat(document.getElementById('tm_sl_cooldown_seconds').value),
     tm_invert_direction: document.getElementById('tm_invert_direction').value === 'true',
     tm_exit_mode: document.getElementById('tm_exit_mode').value,
+    tm_regime_filter_enabled: document.getElementById('tm_regime_filter_enabled').value === 'true',
+    tm_regime_chop_length: parseInt(document.getElementById('tm_regime_chop_length').value),
+    tm_regime_chop_threshold: parseInt(document.getElementById('tm_regime_chop_threshold').value),
+    stf_resolution: document.getElementById('stf_resolution').value,
+    stf_atr_period: parseInt(document.getElementById('stf_atr_period').value),
+    stf_factor: parseFloat(document.getElementById('stf_factor').value),
+    stf_use_af_filter: document.getElementById('stf_use_af_filter').value === 'true',
+    stf_af_period: parseInt(document.getElementById('stf_af_period').value),
+    stf_af_smooth: parseInt(document.getElementById('stf_af_smooth').value),
+    stf_use_chop_filter: document.getElementById('stf_use_chop_filter').value === 'true',
+    stf_chop_length: parseInt(document.getElementById('stf_chop_length').value),
+    stf_chop_threshold: parseInt(document.getElementById('stf_chop_threshold').value),
+    stf_entry_trigger: document.getElementById('stf_entry_trigger').value,
+    stf_exit_trigger: document.getElementById('stf_exit_trigger').value,
+    stf_tp_enabled: document.getElementById('stf_tp_enabled').value === 'true',
+    stf_tp_usd: parseFloat(document.getElementById('stf_tp_usd').value),
+    stf_sl_enabled: document.getElementById('stf_sl_enabled').value === 'true',
+    stf_sl_usd: parseFloat(document.getElementById('stf_sl_usd').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -1922,7 +2052,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_tp_usd','stf_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -1987,6 +2117,8 @@ async def handle_status(request):
         "blsh_history": st.get("blsh_history", [])[-300:],
         "tm_dot1": st.get("tm_dot1"), "tm_dot2": st.get("tm_dot2"),
         "tm_dot3": st.get("tm_dot3"), "tm_line": st.get("tm_line"),
+        "tm_chop_value": st.get("tm_chop_value"),
+        "stf_direction": st.get("stf_direction"), "stf_chop_value": st.get("stf_chop_value"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -2030,7 +2162,13 @@ async def handle_config_update(request):
                 "tm_resolution", "tm_macd_fast", "tm_macd_slow", "tm_macd_signal",
                 "tm_rsi1_period", "tm_rsi2_period", "tm_ma_fast", "tm_ma_slow",
                 "tm_entry_trigger", "tm_exit_trigger", "tm_tp_enabled", "tm_tp_usd",
-                "tm_sl_enabled", "tm_sl_usd", "tm_sl_cooldown_seconds", "tm_invert_direction", "tm_exit_mode"]:
+                "tm_sl_enabled", "tm_sl_usd", "tm_sl_cooldown_seconds", "tm_invert_direction", "tm_exit_mode",
+                "tm_regime_filter_enabled", "tm_regime_chop_length", "tm_regime_chop_threshold",
+                "stf_resolution", "stf_atr_period", "stf_factor",
+                "stf_use_af_filter", "stf_af_period", "stf_af_smooth",
+                "stf_use_chop_filter", "stf_chop_length", "stf_chop_threshold",
+                "stf_entry_trigger", "stf_exit_trigger",
+                "stf_tp_enabled", "stf_tp_usd", "stf_sl_enabled", "stf_sl_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
