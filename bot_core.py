@@ -313,6 +313,9 @@ def default_config():
         "stf_chop_threshold": int(os.getenv("STF_CHOP_THRESHOLD", "50")),
         "stf_entry_trigger": os.getenv("STF_ENTRY_TRIGGER", "candle_close"),
         "stf_exit_trigger": os.getenv("STF_EXIT_TRIGGER", "candle_close"),
+        "stf_invert_direction": os.getenv("STF_INVERT_DIRECTION", "false").lower() == "true",
+        "stf_use_ema_filter": os.getenv("STF_USE_EMA_FILTER", "false").lower() == "true",
+        "stf_ema_length": int(os.getenv("STF_EMA_LENGTH", "200")),
         "stf_tp_enabled": os.getenv("STF_TP_ENABLED", "false").lower() == "true",
         "stf_tp_usd": float(os.getenv("STF_TP_USD", "3")),
         "stf_sl_enabled": os.getenv("STF_SL_ENABLED", "false").lower() == "true",
@@ -1144,14 +1147,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - fester $-Betrag</option>
     </select>
   </div>
-  <div data-mode="trend_meter"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" min="0.01" id="tm_tp_usd"></div>
+  <div data-mode="trend_meter"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" id="tm_tp_usd"></div>
   <div data-mode="trend_meter"><label>Stop-Loss</label>
     <select class="cfg" id="tm_sl_enabled">
       <option value="false">Aus (nur Signal-Exit)</option>
       <option value="true">An - fester $-Betrag</option>
     </select>
   </div>
-  <div data-mode="trend_meter"><label>SL-Betrag ($, nur wenn SL an - immer positiv, egal was eingegeben wird)</label><input type="number" step="any" min="0.01" id="tm_sl_usd"></div>
+  <div data-mode="trend_meter"><label>SL-Betrag ($, nur wenn SL an - immer positiv, egal was eingegeben wird)</label><input type="number" step="any" id="tm_sl_usd"></div>
   <div data-mode="trend_meter"><label>Cooldown nach SL (Sek., verhindert sofortiges Wieder-Einsteigen)</label><input type="number" step="1" id="tm_sl_cooldown_seconds"></div>
   <div data-mode="trend_meter"><label>Richtung invertieren (Kontra-Modus: Long-Signal → Short, Short-Signal → Long)</label>
     <select class="cfg" id="tm_invert_direction">
@@ -1217,20 +1220,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="tick">Sofort bei jedem Preis-Tick</option>
     </select>
   </div>
+  <div data-mode="supertrend_fusion"><label>Richtung invertieren (Kontra-Modus: SuperTrend-Long → Short, SuperTrend-Short → Long)</label>
+    <select class="cfg" id="stf_invert_direction">
+      <option value="false">Aus (normal)</option>
+      <option value="true">An (invertiert)</option>
+    </select>
+  </div>
+  <div data-mode="supertrend_fusion"><label>EMA-Trendfilter (nur Long über der EMA, nur Short darunter - gilt für die tatsächliche Richtung, auch bei Invertiert)</label>
+    <select class="cfg" id="stf_use_ema_filter">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="supertrend_fusion"><label>EMA-Länge</label><input type="number" step="1" id="stf_ema_length"></div>
   <div data-mode="supertrend_fusion"><label>Take-Profit</label>
     <select class="cfg" id="stf_tp_enabled">
       <option value="false">Aus (nur Trend-Flip-Exit)</option>
       <option value="true">An - fester $-Betrag</option>
     </select>
   </div>
-  <div data-mode="supertrend_fusion"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" min="0.01" id="stf_tp_usd"></div>
+  <div data-mode="supertrend_fusion"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" id="stf_tp_usd"></div>
   <div data-mode="supertrend_fusion"><label>Stop-Loss</label>
     <select class="cfg" id="stf_sl_enabled">
       <option value="false">Aus (nur Trend-Flip-Exit)</option>
       <option value="true">An - fester $-Betrag</option>
     </select>
   </div>
-  <div data-mode="supertrend_fusion"><label>SL-Betrag ($, nur wenn SL an)</label><input type="number" step="any" min="0.01" id="stf_sl_usd"></div>
+  <div data-mode="supertrend_fusion"><label>SL-Betrag ($, nur wenn SL an)</label><input type="number" step="any" id="stf_sl_usd"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1708,6 +1724,9 @@ async function refresh() {
     document.getElementById('stf_chop_threshold').value = data.config.stf_chop_threshold;
     document.getElementById('stf_entry_trigger').value = data.config.stf_entry_trigger;
     document.getElementById('stf_exit_trigger').value = data.config.stf_exit_trigger;
+    document.getElementById('stf_invert_direction').value = String(data.config.stf_invert_direction);
+    document.getElementById('stf_use_ema_filter').value = String(data.config.stf_use_ema_filter);
+    document.getElementById('stf_ema_length').value = data.config.stf_ema_length;
     document.getElementById('stf_tp_enabled').value = String(data.config.stf_tp_enabled);
     document.getElementById('stf_tp_usd').value = data.config.stf_tp_usd;
     document.getElementById('stf_sl_enabled').value = String(data.config.stf_sl_enabled);
@@ -2003,6 +2022,9 @@ function buildConfigPayload() {
     stf_chop_threshold: parseInt(document.getElementById('stf_chop_threshold').value),
     stf_entry_trigger: document.getElementById('stf_entry_trigger').value,
     stf_exit_trigger: document.getElementById('stf_exit_trigger').value,
+    stf_invert_direction: document.getElementById('stf_invert_direction').value === 'true',
+    stf_use_ema_filter: document.getElementById('stf_use_ema_filter').value === 'true',
+    stf_ema_length: parseInt(document.getElementById('stf_ema_length').value),
     stf_tp_enabled: document.getElementById('stf_tp_enabled').value === 'true',
     stf_tp_usd: parseFloat(document.getElementById('stf_tp_usd').value),
     stf_sl_enabled: document.getElementById('stf_sl_enabled').value === 'true',
@@ -2052,7 +2074,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_tp_usd','stf_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2167,7 +2189,8 @@ async def handle_config_update(request):
                 "stf_resolution", "stf_atr_period", "stf_factor",
                 "stf_use_af_filter", "stf_af_period", "stf_af_smooth",
                 "stf_use_chop_filter", "stf_chop_length", "stf_chop_threshold",
-                "stf_entry_trigger", "stf_exit_trigger",
+                "stf_entry_trigger", "stf_exit_trigger", "stf_invert_direction",
+                "stf_use_ema_filter", "stf_ema_length",
                 "stf_tp_enabled", "stf_tp_usd", "stf_sl_enabled", "stf_sl_usd"]:
         if key in body:
             cfg[key] = body[key]

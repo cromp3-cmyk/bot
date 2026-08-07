@@ -1071,8 +1071,14 @@ async def check_stf_exit(symbol, direction, price):
 
 
 def compute_stf_state(highs, lows, closes, cfg):
+    """Gibt bereits die EFFEKTIVEN Werte zurueck (nach Invertiert-Modus und EMA-Filter
+    angewendet) - 'direction'/'prev_direction' sind also schon 'gedreht', wenn stf_invert_direction
+    aktiv ist, und bull_ok/bear_ok beruecksichtigen bereits den optionalen EMA(200)-Trendfilter
+    (nur Long ueber der EMA, nur Short darunter - unabhaengig vom Invertiert-Modus, gilt immer
+    fuer die tatsaechlich einzugehende Richtung)."""
     n = len(closes)
-    min_needed = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], cfg["stf_chop_length"]) + 3
+    ema_len = cfg.get("stf_ema_length", 200) if cfg.get("stf_use_ema_filter", False) else 0
+    min_needed = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], cfg["stf_chop_length"], ema_len) + 3
     if n < min_needed:
         return None
     st_val, direction = compute_supertrend(highs, lows, closes, cfg["stf_atr_period"], cfg["stf_factor"])
@@ -1087,7 +1093,20 @@ def compute_stf_state(highs, lows, closes, cfg):
         trending = chop_value is not None and chop_value < cfg.get("stf_chop_threshold", 50)
         bull_ok = bull_ok and trending
         bear_ok = bear_ok and trending
-    return {"direction": direction[-1], "prev_direction": direction[-2], "bull_ok": bull_ok, "bear_ok": bear_ok, "chop_value": chop_value}
+
+    invert = cfg.get("stf_invert_direction", False)
+    eff_direction = -direction[-1] if invert else direction[-1]
+    eff_prev_direction = -direction[-2] if invert else direction[-2]
+    eff_bull_ok = bear_ok if invert else bull_ok
+    eff_bear_ok = bull_ok if invert else bear_ok
+
+    if cfg.get("stf_use_ema_filter", False):
+        ema = _ema_series(closes, cfg.get("stf_ema_length", 200))
+        above_ema = closes[-1] > ema[-1]
+        eff_bull_ok = eff_bull_ok and above_ema
+        eff_bear_ok = eff_bear_ok and not above_ema
+
+    return {"direction": eff_direction, "prev_direction": eff_prev_direction, "bull_ok": eff_bull_ok, "bear_ok": eff_bear_ok, "chop_value": chop_value}
 
 
 async def stf_poll_loop(symbol):
@@ -1108,7 +1127,8 @@ async def stf_poll_loop(symbol):
             cfg = b["config"]
             if cfg["entry_mode"] == "supertrend_fusion":
                 resolution = cfg["stf_resolution"]
-                min_needed = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], cfg["stf_chop_length"]) + 3
+                ema_len = cfg.get("stf_ema_length", 200) if cfg.get("stf_use_ema_filter", False) else 0
+                min_needed = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], cfg["stf_chop_length"], ema_len) + 3
                 needed_bars = min(1000, max(min_needed * 3, 60))
                 st = b["state"]
 
@@ -2271,12 +2291,16 @@ def backtest_supertrend_fusion(candles, cfg):
     use_chop = cfg.get("stf_use_chop_filter", True)
     chop_len = cfg.get("stf_chop_length", 14)
     chop_threshold = cfg.get("stf_chop_threshold", 50)
+    invert = cfg.get("stf_invert_direction", False)
+    use_ema = cfg.get("stf_use_ema_filter", False)
+    ema_len = cfg.get("stf_ema_length", 200)
 
     st_val, direction = compute_supertrend(h, l, c, cfg["stf_atr_period"], cfg["stf_factor"])
     af = compute_average_force(c, h, l, cfg["stf_af_period"], cfg["stf_af_smooth"]) if use_af else None
     chop = compute_choppiness_series(h, l, c, chop_len) if use_chop else None
+    ema = _ema_series(c, ema_len) if use_ema else None
 
-    warmup = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], chop_len) + 3
+    warmup = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], chop_len, ema_len if use_ema else 0) + 3
     position = None
     trades = []
 
@@ -2293,14 +2317,17 @@ def backtest_supertrend_fusion(candles, cfg):
                 _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
 
+        eff_dir_i = -direction[i] if invert else direction[i]
+        eff_dir_prev = -direction[i - 1] if invert else direction[i - 1]
+
         if position is not None:
-            if (position["dir"] == "long" and direction[i] == 1) or (position["dir"] == "short" and direction[i] == -1):
+            if (position["dir"] == "long" and eff_dir_i == 1) or (position["dir"] == "short" and eff_dir_i == -1):
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ST-FLIP-EXIT", ts=ts)
                 position = None
 
         if position is None:
-            flip_to_up = direction[i] == -1 and direction[i - 1] != -1
-            flip_to_down = direction[i] == 1 and direction[i - 1] != 1
+            flip_to_up = eff_dir_i == -1 and eff_dir_prev != -1
+            flip_to_down = eff_dir_i == 1 and eff_dir_prev != 1
             bull_ok = True
             bear_ok = True
             if af is not None:
@@ -2310,7 +2337,13 @@ def backtest_supertrend_fusion(candles, cfg):
                 trending = chop[i] is not None and chop[i] < chop_threshold
                 bull_ok = bull_ok and trending
                 bear_ok = bear_ok and trending
-            entry_direction = "long" if (flip_to_up and bull_ok) else ("short" if (flip_to_down and bear_ok) else None)
+            eff_bull_ok = bear_ok if invert else bull_ok
+            eff_bear_ok = bull_ok if invert else bear_ok
+            if ema is not None:
+                above_ema = c[i] > ema[i]
+                eff_bull_ok = eff_bull_ok and above_ema
+                eff_bear_ok = eff_bear_ok and not above_ema
+            entry_direction = "long" if (flip_to_up and eff_bull_ok) else ("short" if (flip_to_down and eff_bear_ok) else None)
             if entry_direction:
                 size = (margin * leverage) / price
                 position = {"dir": entry_direction, "entry": price, "size": size, "entry_i": i}
