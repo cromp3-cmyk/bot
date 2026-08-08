@@ -1465,6 +1465,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </tr></thead>
     <tbody></tbody>
   </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="sweep-worst-title">📉 Die 20 schlechtesten Kombinationen (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="ce_atr_period">ATR-Periode ⇅</th>
+      <th class="sortable" data-key="ce_atr_mult">ATR-Multiplikator ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
 </div>
 </div>
 
@@ -1684,13 +1697,18 @@ function resetBacktestUI() {
   window.btTradesData = [];
   document.getElementById('sweep-status').innerText = '';
   document.getElementById('sweep-results-table').style.display = 'none';
+  document.getElementById('sweep-worst-table').style.display = 'none';
+  document.getElementById('sweep-worst-title').style.display = 'none';
   window.sweepResultsData = [];
+  window.sweepWorstData = [];
 }
 
 document.getElementById('btn-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-sweep');
   const statusEl = document.getElementById('sweep-status');
   const tableEl = document.getElementById('sweep-results-table');
+  const worstTableEl = document.getElementById('sweep-worst-table');
+  const worstTitleEl = document.getElementById('sweep-worst-title');
   const sweepSymbol = currentSymbol;
   const payload = {
     days: parseInt(document.getElementById('sweep-days').value) || 30,
@@ -1705,6 +1723,8 @@ document.getElementById('btn-sweep').addEventListener('click', async () => {
   };
   btn.disabled = true;
   tableEl.style.display = 'none';
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
   statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Kombinationen etwas dauern.`;
   try {
     const res = await fetch(`/api/ce_sweep?symbol=${sweepSymbol}`, {
@@ -1719,8 +1739,12 @@ document.getElementById('btn-sweep').addEventListener('click', async () => {
         (data.stf_filter_used ? ' - mit SuperTrend-Filter' : ' - ohne SuperTrend-Filter') +
         ` - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
       window.sweepResultsData = data.results || [];
+      window.sweepWorstData = data.worst_results || [];
       renderSweepResults();
+      renderSweepWorst();
       tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
     }
   } catch (e) {
     if (sweepSymbol !== currentSymbol) return;
@@ -1730,7 +1754,8 @@ document.getElementById('btn-sweep').addEventListener('click', async () => {
 });
 
 window.sweepResultsData = [];
-const renderSweepResults = makeSortableTable('sweep-results-table', () => window.sweepResultsData, (r) => `
+window.sweepWorstData = [];
+const sweepRowHtml = (r) => `
   <tr>
     <td>${r.ce_atr_period}</td>
     <td>${r.ce_atr_mult}</td>
@@ -1739,7 +1764,9 @@ const renderSweepResults = makeSortableTable('sweep-results-table', () => window
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
-  </tr>`);
+  </tr>`;
+const renderSweepResults = makeSortableTable('sweep-results-table', () => window.sweepResultsData, sweepRowHtml);
+const renderSweepWorst = makeSortableTable('sweep-worst-table', () => window.sweepWorstData, sweepRowHtml);
 
 
 

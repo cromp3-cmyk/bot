@@ -3241,7 +3241,10 @@ async def run_ce_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, 
 
     # Zuverlaessige Ergebnisse (genug Trades) zuerst, darunter nach PnL sortiert - Kombinationen
     # mit zu wenig Trades sind statistisch kaum aussagekraeftig, sollen aber sichtbar bleiben
-    results.sort(key=lambda r: (r["trades"] >= CE_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= CE_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    # Schlechteste zuerst nach reinem PnL (unabhaengig von der Trade-Anzahl) - hier soll man
+    # gerade auch sehen, welche Kombinationen durchgehend schlecht abschneiden
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
 
     actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
     return {
@@ -3249,7 +3252,8 @@ async def run_ce_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, 
         "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
         "stf_filter_used": stf_filter_enabled, "min_reliable_trades": CE_SWEEP_MIN_RELIABLE_TRADES,
         "combos_tested": total_combos,
-        "results": results[:30],
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
     }
 
 
