@@ -338,6 +338,36 @@ def default_config():
         # Parameter wie oben, nur mit eigener - typischerweise hoeherer - Aufloesung):
         "ce_stf_filter_enabled": os.getenv("CE_STF_FILTER_ENABLED", "false").lower() == "true",
         "ce_stf_resolution": os.getenv("CE_STF_RESOLUTION", "5m"),
+        # UT-Bot-Trailing-Stop (portiert aus dem "UT Bot"-Baustein des "Wave Cipher SMC Flow
+        # System"):
+        "ut_resolution": os.getenv("UT_RESOLUTION", "5m"),
+        "ut_atr_period": int(os.getenv("UT_ATR_PERIOD", "6")),
+        "ut_key_value": float(os.getenv("UT_KEY_VALUE", "2")),
+        "ut_entry_trigger": os.getenv("UT_ENTRY_TRIGGER", "candle_close"),
+        "ut_exit_trigger": os.getenv("UT_EXIT_TRIGGER", "candle_close"),
+        "ut_invert_direction": os.getenv("UT_INVERT_DIRECTION", "false").lower() == "true",
+        "ut_tp_enabled": os.getenv("UT_TP_ENABLED", "false").lower() == "true",
+        "ut_tp_usd": float(os.getenv("UT_TP_USD", "3")),
+        "ut_sl_enabled": os.getenv("UT_SL_ENABLED", "false").lower() == "true",
+        "ut_sl_usd": float(os.getenv("UT_SL_USD", "3")),
+        "ut_sl_cooldown_seconds": float(os.getenv("UT_SL_COOLDOWN_SECONDS", "30")),
+        # WaveTrend-Cross (portiert aus dem Cipher-B-WaveTrend-Baustein des "Wave Cipher SMC
+        # Flow System"):
+        "wtc_resolution": os.getenv("WTC_RESOLUTION", "5m"),
+        "wtc_channel_length": int(os.getenv("WTC_CHANNEL_LENGTH", "9")),
+        "wtc_average_length": int(os.getenv("WTC_AVERAGE_LENGTH", "12")),
+        "wtc_ma_length": int(os.getenv("WTC_MA_LENGTH", "3")),
+        "wtc_require_obos": os.getenv("WTC_REQUIRE_OBOS", "true").lower() == "true",
+        "wtc_ob_level": int(os.getenv("WTC_OB_LEVEL", "53")),
+        "wtc_os_level": int(os.getenv("WTC_OS_LEVEL", "-53")),
+        "wtc_entry_trigger": os.getenv("WTC_ENTRY_TRIGGER", "candle_close"),
+        "wtc_exit_trigger": os.getenv("WTC_EXIT_TRIGGER", "candle_close"),
+        "wtc_invert_direction": os.getenv("WTC_INVERT_DIRECTION", "false").lower() == "true",
+        "wtc_tp_enabled": os.getenv("WTC_TP_ENABLED", "false").lower() == "true",
+        "wtc_tp_usd": float(os.getenv("WTC_TP_USD", "3")),
+        "wtc_sl_enabled": os.getenv("WTC_SL_ENABLED", "false").lower() == "true",
+        "wtc_sl_usd": float(os.getenv("WTC_SL_USD", "3")),
+        "wtc_sl_cooldown_seconds": float(os.getenv("WTC_SL_COOLDOWN_SECONDS", "30")),
     }
 
 
@@ -368,6 +398,8 @@ def default_state():
         "stf_highs": [], "stf_lows": [], "stf_closes": [], "stf_direction": None, "stf_chop_value": None,
         "ce_highs": [], "ce_lows": [], "ce_closes": [], "ce_direction": None,
         "ce_stf_bias": None, "ce_pending_direction": None, "ce_sl_cooldown_until": 0.0,
+        "ut_highs": [], "ut_lows": [], "ut_closes": [], "ut_stop_value": None, "ut_sl_cooldown_until": 0.0,
+        "wtc_highs": [], "wtc_lows": [], "wtc_closes": [], "wtc_wt1": None, "wtc_wt2": None, "wtc_sl_cooldown_until": 0.0,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -885,6 +917,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="trend_meter">Trend-Meter (3 Punkte + obere Linie, alle 4 müssen übereinstimmen, optional SL+TP+Cooldown, invertierbar, Regime-Filter)</option>
       <option value="supertrend_fusion">SuperTrend Fusion (ATR-SuperTrend + Average-Force-Momentum + Choppiness-Filter, optional SL+TP)</option>
       <option value="chandelier_exit">Chandelier Exit (Trailing-Stop-Flip aus "MG signal", optional TP + SuperTrend-Richtungsfilter im höheren Zeitrahmen)</option>
+      <option value="ut_bot">UT-Bot (ATR-Trailing-Stop, ein gemeinsames Band, optional SL+TP, invertierbar)</option>
+      <option value="wavetrend_cross">WaveTrend-Cross (Cipher-B-WaveTrend-Kreuzung, optional nur überkauft/überverkauft, optional SL+TP, invertierbar)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1338,6 +1372,113 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="4h">4 Stunden</option>
     </select>
   </div>
+  <div data-mode="ut_bot"><label>Zeitrahmen</label>
+    <select class="cfg" id="ut_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot"><label>ATR-Periode</label><input type="number" step="1" id="ut_atr_period"></div>
+  <div data-mode="ut_bot"><label>Key Value (ATR-Multiplikator)</label><input type="number" step="0.1" id="ut_key_value"></div>
+  <div data-mode="ut_bot"><label>Einstieg auslösen</label>
+    <select class="cfg" id="ut_entry_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot"><label>Ausstieg auslösen</label>
+    <select class="cfg" id="ut_exit_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot"><label>Richtung invertieren (Kontra-Modus)</label>
+    <select class="cfg" id="ut_invert_direction">
+      <option value="false">Aus (normal)</option>
+      <option value="true">An (invertiert)</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot"><label>Take-Profit</label>
+    <select class="cfg" id="ut_tp_enabled">
+      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
+      <option value="true">An - fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" id="ut_tp_usd"></div>
+  <div data-mode="ut_bot"><label>Stop-Loss</label>
+    <select class="cfg" id="ut_sl_enabled">
+      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
+      <option value="true">An - fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot"><label>SL-Betrag ($, nur wenn SL an)</label><input type="number" step="any" id="ut_sl_usd"></div>
+  <div data-mode="ut_bot"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ut_sl_cooldown_seconds"></div>
+  <div data-mode="wavetrend_cross"><label>Zeitrahmen</label>
+    <select class="cfg" id="wtc_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten (synthetisch)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Kanal-Länge</label><input type="number" step="1" id="wtc_channel_length"></div>
+  <div data-mode="wavetrend_cross"><label>Durchschnitts-Länge</label><input type="number" step="1" id="wtc_average_length"></div>
+  <div data-mode="wavetrend_cross"><label>Glättungs-Länge (SMA)</label><input type="number" step="1" id="wtc_ma_length"></div>
+  <div data-mode="wavetrend_cross"><label>Nur bei überkauft/überverkauft (sonst jede Kreuzung)</label>
+    <select class="cfg" id="wtc_require_obos">
+      <option value="true">An (selektiver)</option>
+      <option value="false">Aus (jede Kreuzung zählt)</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Überkauft-Level (Sell-Schwelle)</label><input type="number" step="1" id="wtc_ob_level"></div>
+  <div data-mode="wavetrend_cross"><label>Überverkauft-Level (Buy-Schwelle)</label><input type="number" step="1" id="wtc_os_level"></div>
+  <div data-mode="wavetrend_cross"><label>Einstieg auslösen</label>
+    <select class="cfg" id="wtc_entry_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Ausstieg auslösen</label>
+    <select class="cfg" id="wtc_exit_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Richtung invertieren (Kontra-Modus)</label>
+    <select class="cfg" id="wtc_invert_direction">
+      <option value="false">Aus (normal)</option>
+      <option value="true">An (invertiert)</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Take-Profit</label>
+    <select class="cfg" id="wtc_tp_enabled">
+      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
+      <option value="true">An - fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>TP-Betrag ($, nur wenn TP an)</label><input type="number" step="any" id="wtc_tp_usd"></div>
+  <div data-mode="wavetrend_cross"><label>Stop-Loss</label>
+    <select class="cfg" id="wtc_sl_enabled">
+      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
+      <option value="true">An - fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>SL-Betrag ($, nur wenn SL an)</label><input type="number" step="any" id="wtc_sl_usd"></div>
+  <div data-mode="wavetrend_cross"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="wtc_sl_cooldown_seconds"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1819,6 +1960,8 @@ async function refresh() {
     <div class="card"><div class="label">SuperTrend Fusion (${data.config.entry_mode==='supertrend_fusion'?'aktiv':'inaktiv'})</div><div class="value ${data.stf_direction===-1?'green':data.stf_direction===1?'red':''}">${data.stf_direction===-1?'AUFWÄRTS':data.stf_direction===1?'ABWÄRTS':'-'} (Chop ${data.stf_chop_value!=null?data.stf_chop_value.toFixed(1):'-'})</div></div>
     <div class="card"><div class="label">Chandelier Exit (${data.config.entry_mode==='chandelier_exit'?'aktiv':'inaktiv'})</div><div class="value ${data.ce_direction===1?'green':data.ce_direction===-1?'red':''}">${data.ce_direction===1?'LONG-Signal':data.ce_direction===-1?'SHORT-Signal':'-'}</div></div>
     <div class="card"><div class="label">Chandelier SuperTrend-Filter (${data.config.ce_stf_filter_enabled?'an':'aus'})</div><div class="value ${data.ce_stf_bias==='long'?'green':data.ce_stf_bias==='short'?'red':''}">${data.ce_stf_bias ?? '-'} ${data.ce_pending_direction?`⏸️ wartet auf ${data.ce_pending_direction}`:''}</div></div>
+    <div class="card"><div class="label">UT-Bot Stop-Linie (${data.config.entry_mode==='ut_bot'?'aktiv':'inaktiv'})</div><div class="value">${data.ut_stop_value!=null?data.ut_stop_value.toFixed(4):'-'}</div></div>
+    <div class="card"><div class="label">WaveTrend wt1 / wt2 (${data.config.entry_mode==='wavetrend_cross'?'aktiv':'inaktiv'})</div><div class="value">${data.wtc_wt1!=null?data.wtc_wt1.toFixed(2):'-'} / ${data.wtc_wt2!=null?data.wtc_wt2.toFixed(2):'-'}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
@@ -1968,6 +2111,32 @@ async function refresh() {
     document.getElementById('ce_sl_cooldown_seconds').value = data.config.ce_sl_cooldown_seconds;
     document.getElementById('ce_stf_filter_enabled').value = String(data.config.ce_stf_filter_enabled);
     document.getElementById('ce_stf_resolution').value = data.config.ce_stf_resolution;
+    document.getElementById('ut_resolution').value = data.config.ut_resolution;
+    document.getElementById('ut_atr_period').value = data.config.ut_atr_period;
+    document.getElementById('ut_key_value').value = data.config.ut_key_value;
+    document.getElementById('ut_entry_trigger').value = data.config.ut_entry_trigger;
+    document.getElementById('ut_exit_trigger').value = data.config.ut_exit_trigger;
+    document.getElementById('ut_invert_direction').value = String(data.config.ut_invert_direction);
+    document.getElementById('ut_tp_enabled').value = String(data.config.ut_tp_enabled);
+    document.getElementById('ut_tp_usd').value = data.config.ut_tp_usd;
+    document.getElementById('ut_sl_enabled').value = String(data.config.ut_sl_enabled);
+    document.getElementById('ut_sl_usd').value = data.config.ut_sl_usd;
+    document.getElementById('ut_sl_cooldown_seconds').value = data.config.ut_sl_cooldown_seconds;
+    document.getElementById('wtc_resolution').value = data.config.wtc_resolution;
+    document.getElementById('wtc_channel_length').value = data.config.wtc_channel_length;
+    document.getElementById('wtc_average_length').value = data.config.wtc_average_length;
+    document.getElementById('wtc_ma_length').value = data.config.wtc_ma_length;
+    document.getElementById('wtc_require_obos').value = String(data.config.wtc_require_obos);
+    document.getElementById('wtc_ob_level').value = data.config.wtc_ob_level;
+    document.getElementById('wtc_os_level').value = data.config.wtc_os_level;
+    document.getElementById('wtc_entry_trigger').value = data.config.wtc_entry_trigger;
+    document.getElementById('wtc_exit_trigger').value = data.config.wtc_exit_trigger;
+    document.getElementById('wtc_invert_direction').value = String(data.config.wtc_invert_direction);
+    document.getElementById('wtc_tp_enabled').value = String(data.config.wtc_tp_enabled);
+    document.getElementById('wtc_tp_usd').value = data.config.wtc_tp_usd;
+    document.getElementById('wtc_sl_enabled').value = String(data.config.wtc_sl_enabled);
+    document.getElementById('wtc_sl_usd').value = data.config.wtc_sl_usd;
+    document.getElementById('wtc_sl_cooldown_seconds').value = data.config.wtc_sl_cooldown_seconds;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -2280,6 +2449,32 @@ function buildConfigPayload() {
     ce_sl_cooldown_seconds: parseFloat(document.getElementById('ce_sl_cooldown_seconds').value),
     ce_stf_filter_enabled: document.getElementById('ce_stf_filter_enabled').value === 'true',
     ce_stf_resolution: document.getElementById('ce_stf_resolution').value,
+    ut_resolution: document.getElementById('ut_resolution').value,
+    ut_atr_period: parseInt(document.getElementById('ut_atr_period').value),
+    ut_key_value: parseFloat(document.getElementById('ut_key_value').value),
+    ut_entry_trigger: document.getElementById('ut_entry_trigger').value,
+    ut_exit_trigger: document.getElementById('ut_exit_trigger').value,
+    ut_invert_direction: document.getElementById('ut_invert_direction').value === 'true',
+    ut_tp_enabled: document.getElementById('ut_tp_enabled').value === 'true',
+    ut_tp_usd: parseFloat(document.getElementById('ut_tp_usd').value),
+    ut_sl_enabled: document.getElementById('ut_sl_enabled').value === 'true',
+    ut_sl_usd: parseFloat(document.getElementById('ut_sl_usd').value),
+    ut_sl_cooldown_seconds: parseFloat(document.getElementById('ut_sl_cooldown_seconds').value),
+    wtc_resolution: document.getElementById('wtc_resolution').value,
+    wtc_channel_length: parseInt(document.getElementById('wtc_channel_length').value),
+    wtc_average_length: parseInt(document.getElementById('wtc_average_length').value),
+    wtc_ma_length: parseInt(document.getElementById('wtc_ma_length').value),
+    wtc_require_obos: document.getElementById('wtc_require_obos').value === 'true',
+    wtc_ob_level: parseInt(document.getElementById('wtc_ob_level').value),
+    wtc_os_level: parseInt(document.getElementById('wtc_os_level').value),
+    wtc_entry_trigger: document.getElementById('wtc_entry_trigger').value,
+    wtc_exit_trigger: document.getElementById('wtc_exit_trigger').value,
+    wtc_invert_direction: document.getElementById('wtc_invert_direction').value === 'true',
+    wtc_tp_enabled: document.getElementById('wtc_tp_enabled').value === 'true',
+    wtc_tp_usd: parseFloat(document.getElementById('wtc_tp_usd').value),
+    wtc_sl_enabled: document.getElementById('wtc_sl_enabled').value === 'true',
+    wtc_sl_usd: parseFloat(document.getElementById('wtc_sl_usd').value),
+    wtc_sl_cooldown_seconds: parseFloat(document.getElementById('wtc_sl_cooldown_seconds').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -2325,7 +2520,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2394,6 +2589,8 @@ async def handle_status(request):
         "stf_direction": st.get("stf_direction"), "stf_chop_value": st.get("stf_chop_value"),
         "ce_direction": st.get("ce_direction"), "ce_stf_bias": st.get("ce_stf_bias"),
         "ce_pending_direction": st.get("ce_pending_direction"),
+        "ut_stop_value": st.get("ut_stop_value"),
+        "wtc_wt1": st.get("wtc_wt1"), "wtc_wt2": st.get("wtc_wt2"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -2448,7 +2645,12 @@ async def handle_config_update(request):
                 "ce_resolution", "ce_atr_period", "ce_atr_mult", "ce_use_close", "ce_invert_direction",
                 "ce_entry_trigger", "ce_exit_trigger", "ce_tp_enabled", "ce_tp_usd",
                 "ce_sl_enabled", "ce_sl_usd", "ce_sl_cooldown_seconds",
-                "ce_stf_filter_enabled", "ce_stf_resolution"]:
+                "ce_stf_filter_enabled", "ce_stf_resolution",
+                "ut_resolution", "ut_atr_period", "ut_key_value", "ut_entry_trigger", "ut_exit_trigger",
+                "ut_invert_direction", "ut_tp_enabled", "ut_tp_usd", "ut_sl_enabled", "ut_sl_usd", "ut_sl_cooldown_seconds",
+                "wtc_resolution", "wtc_channel_length", "wtc_average_length", "wtc_ma_length",
+                "wtc_require_obos", "wtc_ob_level", "wtc_os_level", "wtc_entry_trigger", "wtc_exit_trigger",
+                "wtc_invert_direction", "wtc_tp_enabled", "wtc_tp_usd", "wtc_sl_enabled", "wtc_sl_usd", "wtc_sl_cooldown_seconds"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

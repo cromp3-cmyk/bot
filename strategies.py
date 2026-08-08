@@ -544,6 +544,67 @@ def compute_choppiness_series(highs, lows, closes, length):
     return out
 
 
+def _sma_series(values, length):
+    n = len(values)
+    out = [0.0] * n
+    for i in range(n):
+        start = max(0, i - length + 1)
+        window = values[start:i + 1]
+        out[i] = sum(window) / len(window)
+    return out
+
+
+def compute_ut_bot(highs, lows, closes, atr_period, key_value):
+    """Portiert aus dem 'UT Bot'-Baustein des 'Wave Cipher SMC Flow System' (urspruenglich ein
+    eigenstaendiges, weit verbreitetes TradingView-Skript): EIN gemeinsamer ATR-Trailing-Stop
+    (nicht zwei getrennte Long-/Short-Baender wie bei Chandelier Exit), der sich nur nachzieht
+    wenn der Kurs bereits mehrere Kerzen auf derselben Seite war. Buy/Sell entsteht, wenn der
+    Kurs die Stop-Linie kreuzt.
+    Gibt (stop, buy, sell) zurueck - stop ist die Trailing-Stop-Linie, buy/sell sind Bool-Listen
+    (True an der Kerze, an der die Kreuzung stattfindet)."""
+    n = len(closes)
+    atr = compute_atr(highs, lows, closes, atr_period)
+    n_loss = [key_value * a for a in atr]
+    stop = [0.0] * n
+    if n == 0:
+        return stop, [], []
+    stop[0] = closes[0] - n_loss[0]
+    for i in range(1, n):
+        prev = stop[i - 1]
+        src, src_prev = closes[i], closes[i - 1]
+        if src > prev and src_prev > prev:
+            stop[i] = max(prev, src - n_loss[i])
+        elif src < prev and src_prev < prev:
+            stop[i] = min(prev, src + n_loss[i])
+        elif src > prev:
+            stop[i] = src - n_loss[i]
+        else:
+            stop[i] = src + n_loss[i]
+    buy = [False] * n
+    sell = [False] * n
+    for i in range(1, n):
+        buy[i] = closes[i - 1] <= stop[i - 1] and closes[i] > stop[i]
+        sell[i] = closes[i - 1] >= stop[i - 1] and closes[i] < stop[i]
+    return stop, buy, sell
+
+
+def compute_wavetrend(highs, lows, closes, chlen, avg_len, ma_len):
+    """Portiert aus dem 'Cipher B'-WaveTrend-Baustein des 'Wave Cipher SMC Flow System'
+    (urspruenglich vom Cipher-B-Skript von falconCoin/LazyBear-Ableitungen). Quelle ist hlc3
+    (Durchschnitt aus Hoch/Tief/Schluss), wie im Original. Gibt (wt1, wt2) zurueck."""
+    n = len(closes)
+    src = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n)]
+    esa = _ema_series(src, chlen)
+    de = _ema_series([abs(src[i] - esa[i]) for i in range(n)], chlen)
+    ci = [0.0] * n
+    for i in range(n):
+        denom = 0.015 * de[i]
+        ci[i] = 0.0 if denom == 0 else (src[i] - esa[i]) / denom
+    wt1 = _ema_series(ci, avg_len)
+    wt2 = _sma_series(wt1, ma_len)
+    return wt1, wt2
+
+
 def compute_average_force(closes, highs, lows, length, smooth):
     """Portiert aus 'SuperTrend Fusion - ATP': Position des Schlusskurses innerhalb der
     Hoch-Tief-Spanne der letzten 'length' Kerzen (0 = am Tief, 1 = am Hoch, 0.5 = Mitte),
@@ -1413,6 +1474,225 @@ async def ce_poll_loop(symbol):
                         debug_log(f"⏳ [{symbol}] Chandelier Exit wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Chandelier-Exit-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+async def check_ut_entry(symbol, buy_signal, sell_signal, price):
+    """Einstieg beim Buy/Sell-Signal des UT-Bot-Trailing-Stops. Mit Invertiert-Modus wurden
+    buy_signal/sell_signal schon VOR dem Aufruf getauscht."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if cfg.get("ut_sl_enabled", False) and time.time() < st.get("ut_sl_cooldown_until", 0.0):
+        return
+    if not (buy_signal or sell_signal):
+        return
+    direction = "long" if buy_signal else "short"
+    debug_log(f"📡 [{symbol}] UT-Bot Signal: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+
+
+async def check_ut_exit(symbol, buy_signal, sell_signal, price):
+    """Ausstieg beim Gegen-Signal - Flip-System wie Chandelier Exit."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if st["position"] == "long" and sell_signal:
+        debug_log(f"🚪 [{symbol}] UT-Bot Exit: LONG @ {price} (Sell-Signal)")
+        await execute_exit(symbol, price, "UT-FLIP-EXIT")
+    elif st["position"] == "short" and buy_signal:
+        debug_log(f"🚪 [{symbol}] UT-Bot Exit: SHORT @ {price} (Buy-Signal)")
+        await execute_exit(symbol, price, "UT-FLIP-EXIT")
+
+
+async def ut_poll_loop(symbol):
+    """UT-Bot-Trailing-Stop (portiert aus dem 'UT Bot'-Baustein des 'Wave Cipher SMC Flow
+    System'): EIN gemeinsamer ATR-Trailing-Stop (ATR-Periode + Key-Value-Multiplikator beide
+    einstellbar). Buy/Sell beim Kreuzen der Stop-Linie, Ausstieg beim Gegen-Signal (Flip-System).
+    Optional SL (mit Cooldown) + TP fest $, Invertiert-Modus, Ein-/Ausstieg je einzeln
+    tick-/kerzenbasiert, alle Zeitrahmen, Backtest-faehig."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "ut_bot":
+                resolution = cfg["ut_resolution"]
+                atr_period = cfg["ut_atr_period"]
+                min_needed = atr_period + 3
+                needed_bars = min(1000, max(min_needed * 3, 60))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_processed_ts != signal_key
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    keep = min_needed + 5
+                    st["ut_highs"] = closed_h[-keep:]
+                    st["ut_lows"] = closed_l[-keep:]
+                    st["ut_closes"] = closed_c[-keep:]
+
+                    stop, buy, sell = compute_ut_bot(closed_h, closed_l, closed_c, atr_period, cfg["ut_key_value"])
+                    st["ut_stop_value"] = stop[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] UT-Bot aktiv: Stop={round(stop[-1],4)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if is_new_candle:
+                        last_processed_ts = signal_key
+                        buy_signal, sell_signal = buy[-1], sell[-1]
+                        if cfg.get("ut_invert_direction", False):
+                            buy_signal, sell_signal = sell_signal, buy_signal
+                        if cfg.get("ut_exit_trigger", "candle_close") == "candle_close":
+                            await check_ut_exit(symbol, buy_signal, sell_signal, price)
+                        if cfg.get("ut_entry_trigger", "candle_close") == "candle_close":
+                            await check_ut_entry(symbol, buy_signal, sell_signal, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] UT-Bot wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] UT-Bot wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] UT-Bot-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+async def check_wtc_entry(symbol, buy_signal, sell_signal, price):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if cfg.get("wtc_sl_enabled", False) and time.time() < st.get("wtc_sl_cooldown_until", 0.0):
+        return
+    if not (buy_signal or sell_signal):
+        return
+    direction = "long" if buy_signal else "short"
+    debug_log(f"📡 [{symbol}] WaveTrend-Cross Signal: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+
+
+async def check_wtc_exit(symbol, buy_signal, sell_signal, price):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if st["position"] == "long" and sell_signal:
+        debug_log(f"🚪 [{symbol}] WaveTrend-Cross Exit: LONG @ {price} (Sell-Signal)")
+        await execute_exit(symbol, price, "WTC-FLIP-EXIT")
+    elif st["position"] == "short" and buy_signal:
+        debug_log(f"🚪 [{symbol}] WaveTrend-Cross Exit: SHORT @ {price} (Buy-Signal)")
+        await execute_exit(symbol, price, "WTC-FLIP-EXIT")
+
+
+def _wtc_signals(wt1, wt2, cfg):
+    """Kreuzung wt1/wt2 an der letzten Kerze, optional nur im ueberkauft/ueberverkauft-Bereich
+    (wie im Original-Skript per 'wtOversold'/'wtOverbought' vorgesehen)."""
+    n = len(wt1)
+    cross_up = wt1[n - 2] <= wt2[n - 2] and wt1[n - 1] > wt2[n - 1]
+    cross_down = wt1[n - 2] >= wt2[n - 2] and wt1[n - 1] < wt2[n - 1]
+    require_obos = cfg.get("wtc_require_obos", True)
+    buy_signal = cross_up and (not require_obos or wt2[n - 1] <= cfg.get("wtc_os_level", -53))
+    sell_signal = cross_down and (not require_obos or wt2[n - 1] >= cfg.get("wtc_ob_level", 53))
+    return buy_signal, sell_signal
+
+
+async def wtc_poll_loop(symbol):
+    """WaveTrend-Cross (portiert aus dem Cipher-B-WaveTrend-Baustein des 'Wave Cipher SMC Flow
+    System'): wt1 kreuzt wt2, optional nur wenn wt2 gerade im ueberkauft/ueberverkauft-Bereich
+    steht (Standard-Level wie im Original: +53/-53). Kanal-/Durchschnitts-/Glaettungslaenge
+    alle einstellbar. Ausstieg beim Gegen-Signal (Flip-System). Optional SL (mit Cooldown) + TP
+    fest $, Invertiert-Modus, Ein-/Ausstieg je einzeln tick-/kerzenbasiert, alle Zeitrahmen,
+    Backtest-faehig."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "wavetrend_cross":
+                resolution = cfg["wtc_resolution"]
+                min_needed = max(cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"]) * 3 + 5
+                needed_bars = min(1000, max(min_needed * 2, 80))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_processed_ts != signal_key
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    keep = min_needed + 5
+                    st["wtc_highs"] = closed_h[-keep:]
+                    st["wtc_lows"] = closed_l[-keep:]
+                    st["wtc_closes"] = closed_c[-keep:]
+
+                    wt1, wt2 = compute_wavetrend(closed_h, closed_l, closed_c, cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"])
+                    st["wtc_wt1"], st["wtc_wt2"] = wt1[-1], wt2[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] WaveTrend-Cross aktiv: wt1={round(wt1[-1],2)} wt2={round(wt2[-1],2)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if is_new_candle:
+                        last_processed_ts = signal_key
+                        buy_signal, sell_signal = _wtc_signals(wt1, wt2, cfg)
+                        if cfg.get("wtc_invert_direction", False):
+                            buy_signal, sell_signal = sell_signal, buy_signal
+                        if cfg.get("wtc_exit_trigger", "candle_close") == "candle_close":
+                            await check_wtc_exit(symbol, buy_signal, sell_signal, price)
+                        if cfg.get("wtc_entry_trigger", "candle_close") == "candle_close":
+                            await check_wtc_entry(symbol, buy_signal, sell_signal, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] WaveTrend-Cross wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] WaveTrend-Cross wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] WaveTrend-Cross-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
 
@@ -2369,6 +2649,68 @@ async def on_price_update(symbol, price):
                 await execute_exit(symbol, price, "TP")
         return
 
+    if cfg["entry_mode"] == "ut_bot":
+        entry_trigger = cfg.get("ut_entry_trigger", "candle_close")
+        exit_trigger = cfg.get("ut_exit_trigger", "candle_close")
+        if entry_trigger == "tick" or exit_trigger == "tick":
+            try:
+                ch, cl, cc = st.get("ut_highs"), st.get("ut_lows"), st.get("ut_closes")
+                if ch and cl and cc and len(cc) >= 2:
+                    live_h = ch[:-1] + [max(ch[-1], price)]
+                    live_l = cl[:-1] + [min(cl[-1], price)]
+                    live_c = cc[:-1] + [price]
+                    stop, buy, sell = compute_ut_bot(live_h, live_l, live_c, cfg["ut_atr_period"], cfg["ut_key_value"])
+                    buy_signal, sell_signal = buy[-1], sell[-1]
+                    if cfg.get("ut_invert_direction", False):
+                        buy_signal, sell_signal = sell_signal, buy_signal
+                    if exit_trigger == "tick":
+                        await check_ut_exit(symbol, buy_signal, sell_signal, price)
+                    if entry_trigger == "tick":
+                        await check_ut_entry(symbol, buy_signal, sell_signal, price)
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] UT-Bot Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        if st["position"] is not None and (cfg.get("ut_tp_enabled", False) or cfg.get("ut_sl_enabled", False)):
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if cfg.get("ut_sl_enabled", False) and pnl_usd <= -abs(cfg.get("ut_sl_usd", 3)):
+                await execute_exit(symbol, price, "SL")
+                st["ut_sl_cooldown_until"] = time.time() + cfg.get("ut_sl_cooldown_seconds", 30)
+            elif cfg.get("ut_tp_enabled", False) and pnl_usd >= abs(cfg.get("ut_tp_usd", 3)):
+                await execute_exit(symbol, price, "TP")
+        return
+
+    if cfg["entry_mode"] == "wavetrend_cross":
+        entry_trigger = cfg.get("wtc_entry_trigger", "candle_close")
+        exit_trigger = cfg.get("wtc_exit_trigger", "candle_close")
+        if entry_trigger == "tick" or exit_trigger == "tick":
+            try:
+                ch, cl, cc = st.get("wtc_highs"), st.get("wtc_lows"), st.get("wtc_closes")
+                if ch and cl and cc and len(cc) >= 2:
+                    live_h = ch[:-1] + [max(ch[-1], price)]
+                    live_l = cl[:-1] + [min(cl[-1], price)]
+                    live_c = cc[:-1] + [price]
+                    wt1, wt2 = compute_wavetrend(live_h, live_l, live_c, cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"])
+                    buy_signal, sell_signal = _wtc_signals(wt1, wt2, cfg)
+                    if cfg.get("wtc_invert_direction", False):
+                        buy_signal, sell_signal = sell_signal, buy_signal
+                    if exit_trigger == "tick":
+                        await check_wtc_exit(symbol, buy_signal, sell_signal, price)
+                    if entry_trigger == "tick":
+                        await check_wtc_entry(symbol, buy_signal, sell_signal, price)
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] WaveTrend-Cross Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        if st["position"] is not None and (cfg.get("wtc_tp_enabled", False) or cfg.get("wtc_sl_enabled", False)):
+            entry = st["avg_entry_price"]
+            pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+            if cfg.get("wtc_sl_enabled", False) and pnl_usd <= -abs(cfg.get("wtc_sl_usd", 3)):
+                await execute_exit(symbol, price, "SL")
+                st["wtc_sl_cooldown_until"] = time.time() + cfg.get("wtc_sl_cooldown_seconds", 30)
+            elif cfg.get("wtc_tp_enabled", False) and pnl_usd >= abs(cfg.get("wtc_tp_usd", 3)):
+                await execute_exit(symbol, price, "TP")
+        return
+
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
@@ -2757,9 +3099,141 @@ def backtest_chandelier_exit(candles, cfg, stf_candles=None):
     return trades
 
 
+def backtest_ut_bot(candles, cfg):
+    """Backtest laeuft immer 'kerzenbasiert'. Intrabar-Pruefung ueber Hoch/Tief fuer SL/TP
+    statt nur Schlusskurs (siehe Chandelier-Exit-Backtest fuer die Begruendung)."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    tp_enabled = cfg.get("ut_tp_enabled", False)
+    tp_usd = abs(cfg.get("ut_tp_usd", 3))
+    sl_enabled = cfg.get("ut_sl_enabled", False)
+    sl_usd = abs(cfg.get("ut_sl_usd", 3))
+    sl_cooldown_ms = cfg.get("ut_sl_cooldown_seconds", 30) * 1000
+    invert = cfg.get("ut_invert_direction", False)
+    atr_period = cfg["ut_atr_period"]
+
+    stop, buy, sell = compute_ut_bot(h, l, c, atr_period, cfg["ut_key_value"])
+    if invert:
+        buy, sell = sell, buy
+
+    warmup = atr_period + 3
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None and (tp_enabled or sl_enabled):
+            pdir, entry, size = position["dir"], position["entry"], position["size"]
+            sl_price = None
+            if sl_enabled:
+                sl_price = (entry - sl_usd / size) if pdir == "long" else (entry + sl_usd / size)
+            tp_price = None
+            if tp_enabled:
+                tp_price = (entry + tp_usd / size) if pdir == "long" else (entry - tp_usd / size)
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, pdir, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, pdir, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        buy_signal, sell_signal = buy[i], sell[i]
+
+        if position is not None:
+            if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "UT-FLIP-EXIT", ts=ts)
+                position = None
+
+        in_sl_cooldown = sl_enabled and sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and (buy_signal or sell_signal):
+            direction = "long" if buy_signal else "short"
+            size = (margin * leverage) / price
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_wavetrend_cross(candles, cfg):
+    """Backtest laeuft immer 'kerzenbasiert'. Intrabar-Pruefung fuer SL/TP wie bei den anderen
+    Strategien."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    tp_enabled = cfg.get("wtc_tp_enabled", False)
+    tp_usd = abs(cfg.get("wtc_tp_usd", 3))
+    sl_enabled = cfg.get("wtc_sl_enabled", False)
+    sl_usd = abs(cfg.get("wtc_sl_usd", 3))
+    sl_cooldown_ms = cfg.get("wtc_sl_cooldown_seconds", 30) * 1000
+    invert = cfg.get("wtc_invert_direction", False)
+    require_obos = cfg.get("wtc_require_obos", True)
+    ob_level = cfg.get("wtc_ob_level", 53)
+    os_level = cfg.get("wtc_os_level", -53)
+
+    wt1, wt2 = compute_wavetrend(h, l, c, cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"])
+
+    warmup = max(cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"]) * 3 + 5
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None and (tp_enabled or sl_enabled):
+            pdir, entry, size = position["dir"], position["entry"], position["size"]
+            sl_price = None
+            if sl_enabled:
+                sl_price = (entry - sl_usd / size) if pdir == "long" else (entry + sl_usd / size)
+            tp_price = None
+            if tp_enabled:
+                tp_price = (entry + tp_usd / size) if pdir == "long" else (entry - tp_usd / size)
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, pdir, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, pdir, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        cross_up = wt1[i - 1] <= wt2[i - 1] and wt1[i] > wt2[i]
+        cross_down = wt1[i - 1] >= wt2[i - 1] and wt1[i] < wt2[i]
+        buy_signal = cross_up and (not require_obos or wt2[i] <= os_level)
+        sell_signal = cross_down and (not require_obos or wt2[i] >= ob_level)
+        if invert:
+            buy_signal, sell_signal = sell_signal, buy_signal
+
+        if position is not None:
+            if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "WTC-FLIP-EXIT", ts=ts)
+                position = None
+
+        in_sl_cooldown = sl_enabled and sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and (buy_signal or sell_signal):
+            direction = "long" if buy_signal else "short"
+            size = (margin * leverage) / price
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000, "range_profile": 30_000, "zscore_trend": 100_000, "blsh_trend": 100_000,
     "trend_meter": 100_000, "supertrend_fusion": 100_000, "chandelier_exit": 100_000,
+    "ut_bot": 100_000, "wavetrend_cross": 100_000,
 }
 
 
@@ -3160,6 +3634,8 @@ BACKTEST_FUNCS = {
     "trend_meter": backtest_trend_meter,
     "supertrend_fusion": backtest_supertrend_fusion,
     "chandelier_exit": backtest_chandelier_exit,
+    "ut_bot": backtest_ut_bot,
+    "wavetrend_cross": backtest_wavetrend_cross,
 }
 
 
@@ -3324,7 +3800,7 @@ async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend, trend_meter, supertrend_fusion, chandelier_exit - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend, trend_meter, supertrend_fusion, chandelier_exit, ut_bot, wavetrend_cross - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
@@ -3382,7 +3858,8 @@ async def run_backtest(symbol, entry_mode, cfg, days):
 
     resolution_key = {"range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
                        "zscore_trend": "zscore_resolution", "trend_meter": "tm_resolution",
-                       "supertrend_fusion": "stf_resolution"}[entry_mode]
+                       "supertrend_fusion": "stf_resolution", "ut_bot": "ut_resolution",
+                       "wavetrend_cross": "wtc_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
