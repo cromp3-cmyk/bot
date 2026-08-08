@@ -2493,14 +2493,22 @@ def backtest_trend_meter(candles, cfg):
 
         if position is not None and (tp_enabled or sl_enabled):
             direction, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            if sl_enabled and pnl_usd <= -sl_usd:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL", ts=ts)
+            # Intrabar-Pruefung ueber Hoch/Tief (nicht nur Schlusskurs) - sonst kann der Kurs bei
+            # laengeren Zeitrahmen weit durch die $-Schwelle durchlaufen, bevor geprueft wird.
+            sl_price = None
+            if sl_enabled:
+                sl_price = (entry - sl_usd / size) if direction == "long" else (entry + sl_usd / size)
+            tp_price = None
+            if tp_enabled:
+                tp_price = (entry + tp_usd / size) if direction == "long" else (entry - tp_usd / size)
+            hit_sl = sl_price is not None and ((direction == "long" and l[i] <= sl_price) or (direction == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((direction == "long" and h[i] >= tp_price) or (direction == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, direction, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
                 position = None
-                if sl_enabled:
-                    sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif tp_enabled and pnl_usd >= tp_usd:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP", ts=ts)
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, direction, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
 
         dot1 = (macd[i] - macd_signal[i]) > 0
@@ -2570,12 +2578,19 @@ def backtest_supertrend_fusion(candles, cfg):
 
         if position is not None and (tp_enabled or sl_enabled):
             pdir, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if pdir == "long" else (entry - price) * size
-            if sl_enabled and pnl_usd <= -sl_usd:
-                _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "SL", ts=ts)
+            sl_price = None
+            if sl_enabled:
+                sl_price = (entry - sl_usd / size) if pdir == "long" else (entry + sl_usd / size)
+            tp_price = None
+            if tp_enabled:
+                tp_price = (entry + tp_usd / size) if pdir == "long" else (entry - tp_usd / size)
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, pdir, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
                 position = None
-            elif tp_enabled and pnl_usd >= tp_usd:
-                _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "TP", ts=ts)
+            elif hit_tp:
+                _bt_close_trade(trades, pdir, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
 
         eff_dir_i = -direction[i] if invert else direction[i]
@@ -2787,19 +2802,28 @@ def backtest_range_profile(candles, cfg):
 
         if position is not None:
             direction, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
-            sl_floor = -cfg["rp_sl_usd"]
-            if breakeven_enabled:
-                if not breakeven_triggered and pnl_usd >= breakeven_trigger:
+            # Intrabar-Pruefung ueber Hoch/Tief statt nur Schlusskurs. Reihenfolge-Annahme fuer
+            # den Break-Even-Mechanismus (bei OHLC-Daten unvermeidbar, da keine Tick-Reihenfolge
+            # bekannt ist): wir pruefen erst, ob der Break-Even-Trigger in dieser Kerze erreicht
+            # wurde, bevor wir den (dann ggf. schon nachgezogenen) SL/Break-Even-Floor gegen
+            # dieselbe Kerze pruefen - das ist die ueblichere, leicht optimistische Annahme.
+            sl_price = entry - cfg["rp_sl_usd"] / size if direction == "long" else entry + cfg["rp_sl_usd"] / size
+            tp_price = entry + cfg["rp_tp_usd"] / size if direction == "long" else entry - cfg["rp_tp_usd"] / size
+            if breakeven_enabled and not breakeven_triggered:
+                trigger_price = entry + breakeven_trigger / size if direction == "long" else entry - breakeven_trigger / size
+                reached_trigger = (direction == "long" and h[i] >= trigger_price) or (direction == "short" and l[i] <= trigger_price)
+                if reached_trigger:
                     breakeven_triggered = True
-                if breakeven_triggered:
-                    sl_floor = breakeven_lock
-            if pnl_usd <= sl_floor:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL" if sl_floor < 0 else "BREAKEVEN-LOCK", ts=ts)
+            floor_is_breakeven = breakeven_enabled and breakeven_triggered
+            floor_price = (entry + breakeven_lock / size if direction == "long" else entry - breakeven_lock / size) if floor_is_breakeven else sl_price
+            hit_floor = (direction == "long" and l[i] <= floor_price) or (direction == "short" and h[i] >= floor_price)
+            hit_tp = (direction == "long" and h[i] >= tp_price) or (direction == "short" and l[i] <= tp_price)
+            if hit_floor:
+                _bt_close_trade(trades, direction, entry, floor_price, size, i, position["entry_i"], "BREAKEVEN-LOCK" if floor_is_breakeven else "SL", ts=ts)
                 position = None
                 breakeven_triggered = False
-            elif pnl_usd >= cfg["rp_tp_usd"]:
-                _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP", ts=ts)
+            elif hit_tp:
+                _bt_close_trade(trades, direction, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
                 breakeven_triggered = False
 
@@ -2852,10 +2876,12 @@ def backtest_fib_reversal(candles, cfg):
                 continue
             fib = build_fib_levels(swing, cfg)
             direction = fib["direction"]
-            reached = price <= fib["entry1_price"] if direction == "long" else price >= fib["entry1_price"]
+            # Intrabar: reicht die Kerze bis zum Entry-Niveau, statt nur der Schlusskurs
+            reached = l[i] <= fib["entry1_price"] if direction == "long" else h[i] >= fib["entry1_price"]
             if reached:
-                size = (margin * leverage) / price
-                position = {"dir": direction, "avg_entry": price, "size": size, "entry1_done": True,
+                entry_price = fib["entry1_price"]
+                size = (margin * leverage) / entry_price
+                position = {"dir": direction, "avg_entry": entry_price, "size": size, "entry1_done": True,
                             "entry2_done": False, "tp1_done": False, "sl_active": fib["sl_price"],
                             "fib": fib, "entry_i": i}
             continue
@@ -2863,34 +2889,35 @@ def backtest_fib_reversal(candles, cfg):
         direction, fib = position["dir"], position["fib"]
 
         if not position["entry2_done"]:
-            reached2 = price <= fib["entry2_price"] if direction == "long" else price >= fib["entry2_price"]
+            reached2 = l[i] <= fib["entry2_price"] if direction == "long" else h[i] >= fib["entry2_price"]
             if reached2:
-                add_size = (margin * leverage) / price
+                entry2_price = fib["entry2_price"]
+                add_size = (margin * leverage) / entry2_price
                 total_size = position["size"] + add_size
-                position["avg_entry"] = (position["avg_entry"] * position["size"] + price * add_size) / total_size
+                position["avg_entry"] = (position["avg_entry"] * position["size"] + entry2_price * add_size) / total_size
                 position["size"] = total_size
                 position["entry2_done"] = True
 
-        sl_hit = price <= position["sl_active"] if direction == "long" else price >= position["sl_active"]
+        sl_hit = l[i] <= position["sl_active"] if direction == "long" else h[i] >= position["sl_active"]
         if sl_hit:
-            _bt_close_trade(trades, direction, position["avg_entry"], price, position["size"], i, position["entry_i"], "SL", ts=ts)
+            _bt_close_trade(trades, direction, position["avg_entry"], position["sl_active"], position["size"], i, position["entry_i"], "SL", ts=ts)
             position = None
             continue
 
         if not position["tp1_done"]:
-            tp1_hit = price >= fib["tp1_price"] if direction == "long" else price <= fib["tp1_price"]
+            tp1_hit = h[i] >= fib["tp1_price"] if direction == "long" else l[i] <= fib["tp1_price"]
             if tp1_hit:
                 fraction = cfg["fib_tp1_close_pct"] / 100
                 close_size = position["size"] * fraction
-                _bt_close_trade(trades, direction, position["avg_entry"], price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                _bt_close_trade(trades, direction, position["avg_entry"], fib["tp1_price"], close_size, i, position["entry_i"], "TP1", ts=ts)
                 position["size"] -= close_size
                 position["tp1_done"] = True
                 position["sl_active"] = position["avg_entry"]
             continue
 
-        tp2_hit = price >= fib["tp2_price"] if direction == "long" else price <= fib["tp2_price"]
+        tp2_hit = h[i] >= fib["tp2_price"] if direction == "long" else l[i] <= fib["tp2_price"]
         if tp2_hit:
-            _bt_close_trade(trades, direction, position["avg_entry"], price, position["size"], i, position["entry_i"], "TP2", ts=ts)
+            _bt_close_trade(trades, direction, position["avg_entry"], fib["tp2_price"], position["size"], i, position["entry_i"], "TP2", ts=ts)
             position = None
 
     return trades
@@ -2926,30 +2953,38 @@ def backtest_zscore_trend(candles, cfg):
 
         if position is not None:
             direction, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
+            # Intrabar-Pruefung ueber Hoch/Tief statt nur Schlusskurs.
             if not position["tp1_done"]:
-                if sl_enabled and pnl_usd <= -sl_usd:
-                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL", ts=ts)
+                sl_price = (entry - sl_usd / size) if direction == "long" else (entry + sl_usd / size)
+                tp1_price = (entry + tp1_usd / size) if direction == "long" else (entry - tp1_usd / size)
+                hit_sl = sl_enabled and ((direction == "long" and l[i] <= sl_price) or (direction == "short" and h[i] >= sl_price))
+                hit_tp1 = (direction == "long" and h[i] >= tp1_price) or (direction == "short" and l[i] <= tp1_price)
+                if hit_sl:
+                    _bt_close_trade(trades, direction, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
                     position = None
                     last_exit_ts = ts[i]
-                elif pnl_usd >= tp1_usd:
+                elif hit_tp1:
                     if tp2_enabled:
                         close_size = size * tp1_close_pct
-                        _bt_close_trade(trades, direction, entry, price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                        _bt_close_trade(trades, direction, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
                         position["size"] -= close_size
                         position["tp1_done"] = True
                     else:
                         # TP2 aus: TP1 ist der finale, vollstaendige Ausstieg
-                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP1", ts=ts)
+                        _bt_close_trade(trades, direction, entry, tp1_price, size, i, position["entry_i"], "TP1", ts=ts)
                         position = None
                         last_exit_ts = ts[i]
             else:
-                if breakeven_enabled and pnl_usd <= breakeven_lock:
-                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "BREAKEVEN-LOCK", ts=ts)
+                breakeven_price = (entry + breakeven_lock / size) if direction == "long" else (entry - breakeven_lock / size)
+                tp2_price = (entry + tp2_usd / size) if direction == "long" else (entry - tp2_usd / size)
+                hit_breakeven = breakeven_enabled and ((direction == "long" and l[i] <= breakeven_price) or (direction == "short" and h[i] >= breakeven_price))
+                hit_tp2 = tp2_enabled and ((direction == "long" and h[i] >= tp2_price) or (direction == "short" and l[i] <= tp2_price))
+                if hit_breakeven:
+                    _bt_close_trade(trades, direction, entry, breakeven_price, size, i, position["entry_i"], "BREAKEVEN-LOCK", ts=ts)
                     position = None
                     last_exit_ts = ts[i]
-                elif tp2_enabled and pnl_usd >= tp2_usd:
-                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP2", ts=ts)
+                elif hit_tp2:
+                    _bt_close_trade(trades, direction, entry, tp2_price, size, i, position["entry_i"], "TP2", ts=ts)
                     position = None
                     last_exit_ts = ts[i]
 
@@ -3057,29 +3092,36 @@ def backtest_blsh_trend(candles, cfg):
 
         if position is not None:
             direction, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if direction == "long" else (entry - price) * size
             if not position["tp1_done"]:
-                if sl_enabled and pnl_usd <= -sl_usd:
-                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "SL", ts=ts)
+                sl_price = (entry - sl_usd / size) if direction == "long" else (entry + sl_usd / size)
+                tp1_price = (entry + tp1_usd / size) if direction == "long" else (entry - tp1_usd / size)
+                hit_sl = sl_enabled and ((direction == "long" and l[i] <= sl_price) or (direction == "short" and h[i] >= sl_price))
+                hit_tp1 = (direction == "long" and h[i] >= tp1_price) or (direction == "short" and l[i] <= tp1_price)
+                if hit_sl:
+                    _bt_close_trade(trades, direction, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
                     position = None
                     last_exit_ts = ts[i]
-                elif pnl_usd >= tp1_usd:
+                elif hit_tp1:
                     if tp2_enabled:
                         close_size = size * tp1_close_pct
-                        _bt_close_trade(trades, direction, entry, price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                        _bt_close_trade(trades, direction, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
                         position["size"] -= close_size
                         position["tp1_done"] = True
                     else:
-                        _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP1", ts=ts)
+                        _bt_close_trade(trades, direction, entry, tp1_price, size, i, position["entry_i"], "TP1", ts=ts)
                         position = None
                         last_exit_ts = ts[i]
             else:
-                if breakeven_enabled and pnl_usd <= breakeven_lock:
-                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "BREAKEVEN-LOCK", ts=ts)
+                breakeven_price = (entry + breakeven_lock / size) if direction == "long" else (entry - breakeven_lock / size)
+                tp2_price = (entry + tp2_usd / size) if direction == "long" else (entry - tp2_usd / size)
+                hit_breakeven = breakeven_enabled and ((direction == "long" and l[i] <= breakeven_price) or (direction == "short" and h[i] >= breakeven_price))
+                hit_tp2 = tp2_enabled and ((direction == "long" and h[i] >= tp2_price) or (direction == "short" and l[i] <= tp2_price))
+                if hit_breakeven:
+                    _bt_close_trade(trades, direction, entry, breakeven_price, size, i, position["entry_i"], "BREAKEVEN-LOCK", ts=ts)
                     position = None
                     last_exit_ts = ts[i]
-                elif tp2_enabled and pnl_usd >= tp2_usd:
-                    _bt_close_trade(trades, direction, entry, price, size, i, position["entry_i"], "TP2", ts=ts)
+                elif hit_tp2:
+                    _bt_close_trade(trades, direction, entry, tp2_price, size, i, position["entry_i"], "TP2", ts=ts)
                     position = None
                     last_exit_ts = ts[i]
 
