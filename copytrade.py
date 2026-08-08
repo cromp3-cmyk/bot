@@ -36,23 +36,29 @@ CT_STATE = {
     "leaderboard_last_fetch": None,
     "leaderboard_error": None,
     "watched": {},
+    "copy_log": [],  # sichtbares Log aller Copy-Versuche (dry_run/success/error/skipped) fuers Dashboard
 }
+CT_COPY_LOG_MAX = 200
 
 
 
 async def execute_copy_trade(symbol, direction, reference_price, margin, leverage):
-    """Kopiert die RICHTUNG eines Trades mit der fuer diesen Trader/Coin eingestellten Margin/Hebel."""
+    """Kopiert die RICHTUNG eines Trades mit der fuer diesen Trader/Coin eingestellten Margin/Hebel.
+    Gibt ein Status-Dict zurueck (fuer das sichtbare Copy-Trade-Log im Dashboard) statt nur zu
+    loggen - vorher gab es keine Stelle, an der man im Dashboard nachvollziehen konnte, was
+    tatsaechlich (simuliert oder echt) kopiert wurde."""
     if symbol not in MARKET_INDICES:
-        debug_log(f"⚠️ [CopyTrading] Coin {symbol} nicht auf Lighter gemappt - übersprungen")
-        return
+        msg = f"Coin {symbol} nicht auf Lighter gemappt"
+        debug_log(f"⚠️ [CopyTrading] {msg} - übersprungen")
+        return {"status": "skipped", "detail": msg}
 
     if CT_CONFIG["dry_run"]:
         debug_log(f"🧪 [CopyTrading] DRY_RUN - würde kopieren: {direction.upper()} {symbol} @ ~{reference_price} (Margin {margin}, Hebel {leverage}x)")
-        return
+        return {"status": "dry_run", "detail": None}
 
     client = get_lighter_client()
     if client is None:
-        return
+        return {"status": "error", "detail": "Kein Lighter-Client verfügbar"}
     try:
         market_index = MARKET_INDICES[symbol]
         precision = get_precision(symbol)
@@ -61,8 +67,9 @@ async def execute_copy_trade(symbol, direction, reference_price, margin, leverag
         coin_amount = position_usdc / reference_price
         base_amount = int(coin_amount * precision)
         if base_amount * (1 / precision) < min_base:
-            debug_log(f"⚠️ [CopyTrading] Order-Größe für {symbol} unter Mindestgröße")
-            return
+            msg = f"Order-Größe für {symbol} unter Mindestgröße"
+            debug_log(f"⚠️ [CopyTrading] {msg}")
+            return {"status": "skipped", "detail": msg}
         is_ask = direction == "short"
         try:
             await client.update_leverage(market_index=market_index, leverage=leverage, margin_mode=0)
@@ -71,8 +78,10 @@ async def execute_copy_trade(symbol, direction, reference_price, margin, leverag
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, reference_price)
         if err:
             debug_log(f"⚠️ [CopyTrading] Order fehlgeschlagen für {symbol}", {"error": str(err)})
+            return {"status": "error", "detail": str(err)}
         else:
             debug_log(f"✅ [CopyTrading] ECHTER Copy-Trade: {direction.upper()} {symbol} @ ~{reference_price}", {"tx_hash": str(tx_hash)})
+            return {"status": "success", "detail": str(tx_hash)}
     finally:
         await client.close()
 
@@ -250,7 +259,14 @@ async def ct_watch_loop():
                                 margin = coin_cfg.get("margin") or info.get("copy_margin", CT_CONFIG["copy_margin"])
                                 leverage = coin_cfg.get("leverage") or info.get("copy_leverage", CT_CONFIG["copy_leverage"])
                                 debug_log(f"🆕 [CopyTrading] Kopiere Fill bei {info['label']} ({address[:8]}...): {direction.upper()} {coin} @ {price}")
-                                await execute_copy_trade(coin, direction, price, margin, leverage)
+                                result = await execute_copy_trade(coin, direction, price, margin, leverage)
+                                CT_STATE["copy_log"].insert(0, {
+                                    "ts": int(time.time() * 1000), "trader_label": info["label"], "address": address,
+                                    "coin": coin, "direction": direction, "price": price, "margin": margin,
+                                    "leverage": leverage, "dry_run": CT_CONFIG["dry_run"],
+                                    "status": result["status"], "detail": result.get("detail"),
+                                })
+                                CT_STATE["copy_log"] = CT_STATE["copy_log"][:CT_COPY_LOG_MAX]
                                 copy_actions += 1
 
                         if new_fills:
@@ -370,6 +386,13 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
 <h2>Beobachtete Trader (anklicken für Details)</h2>
 <table id="copy-table">
   <thead><tr><th>Label</th><th>Adresse</th><th>Offene Positionen</th><th>Konfigurierte Coins</th><th>Copy</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<h2>📋 Copy-Trade-Log <span id="copy-log-mode" style="font-size:13px; font-weight:normal;"></span></h2>
+<div id="copy-log-empty" style="color:var(--dim); font-size:13px; display:none;">Noch keine Copy-Versuche - entweder wurde noch kein neuer Fill bei einem beobachteten Trader erkannt, oder für den Coin ist keine Einstellung hinterlegt (siehe Trader-Details).</div>
+<table id="copy-log-table" style="display:none;">
+  <thead><tr><th>Zeit</th><th>Trader</th><th>Coin</th><th>Richtung</th><th>Preis</th><th>Margin/Hebel</th><th>Status</th></tr></thead>
   <tbody></tbody>
 </table>
 
@@ -512,6 +535,28 @@ async function refresh() {
       </tr>`;
   }).join('');
   document.querySelector('#copy-table tbody').innerHTML = copyRows || '<tr><td colspan="5">Noch keine Trader beobachtet...</td></tr>';
+
+  // Copy-Trade-Log: jeder Versuch, egal ob simuliert (DRY_RUN), erfolgreich oder fehlgeschlagen
+  document.getElementById('copy-log-mode').innerText = data.dry_run ? '(DRY_RUN - hier siehst du, was simuliert würde)' : '(LIVE)';
+  const copyLog = data.copy_log || [];
+  if (copyLog.length === 0) {
+    document.getElementById('copy-log-empty').style.display = '';
+    document.getElementById('copy-log-table').style.display = 'none';
+  } else {
+    document.getElementById('copy-log-empty').style.display = 'none';
+    document.getElementById('copy-log-table').style.display = '';
+    const statusLabel = {dry_run: '🧪 simuliert', success: '✅ erfolgreich', error: '❌ Fehler', skipped: '⏭️ übersprungen'};
+    document.querySelector('#copy-log-table tbody').innerHTML = copyLog.map(e => `
+      <tr>
+        <td>${new Date(e.ts).toLocaleString('de-DE')}</td>
+        <td>${e.trader_label}</td>
+        <td>${e.coin}</td>
+        <td class="${e.direction==='long'?'green':'red'}">${e.direction==='long'?'🟢 Long':'🔴 Short'}</td>
+        <td>${e.price}</td>
+        <td>${e.margin}$ / ${e.leverage}x</td>
+        <td title="${e.detail || ''}">${statusLabel[e.status] || e.status}</td>
+      </tr>`).join('');
+  }
 
   // Falls das Modal gerade offen ist, dessen Inhalt mit aktualisieren
   if (window.currentModalAddress) renderModal(window.currentModalAddress);
@@ -689,6 +734,7 @@ async def handle_ct_status(request):
         "leaderboard_error": CT_STATE["leaderboard_error"],
         "watched": CT_STATE["watched"],
         "trend_meter": compute_trend_meter(),
+        "copy_log": CT_STATE["copy_log"][:100],
     })
 
 
