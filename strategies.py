@@ -3667,6 +3667,58 @@ CE_SWEEP_MAX_COMBOS = 400
 CE_SWEEP_MIN_RELIABLE_TRADES = 5
 
 
+async def run_ut_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
+                              key_value_min, key_value_max, key_value_step):
+    """'Monte-Carlo'-Parametersweep fuer UT-Bot: testet alle Kombinationen aus ATR-Periode und
+    Key-Value-Multiplikator im angegebenen Bereich gegeneinander. Gleiches Prinzip wie beim
+    Chandelier-Sweep, nur ohne SuperTrend-Filter (den gibt's bei UT-Bot nicht)."""
+    max_candles = BACKTEST_MAX_CANDLES["ut_bot"]
+    resolution = cfg.get("ut_resolution", "5m")
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles)
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 100:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    periods = sorted(set(int(round(atr_period_min + i * atr_period_step))
+                          for i in range(int((atr_period_max - atr_period_min) / max(atr_period_step, 1e-9)) + 1)
+                          if atr_period_min + i * atr_period_step <= atr_period_max + 1e-9))
+    key_values = sorted(set(round(key_value_min + i * key_value_step, 4)
+                             for i in range(int((key_value_max - key_value_min) / max(key_value_step, 1e-9)) + 1)
+                             if key_value_min + i * key_value_step <= key_value_max + 1e-9))
+    periods = [p for p in periods if p >= 1]
+    key_values = [k for k in key_values if k > 0]
+
+    total_combos = len(periods) * len(key_values)
+    if total_combos == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
+    if total_combos > CE_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {CE_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    results = []
+    for period in periods:
+        for kv in key_values:
+            cfg_copy = dict(cfg)
+            cfg_copy["ut_atr_period"] = period
+            cfg_copy["ut_key_value"] = kv
+            trades = backtest_ut_bot(candles, cfg_copy)
+            stats = summarize_backtest_trades(trades)
+            results.append({"ut_atr_period": period, "ut_key_value": kv, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= CE_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
+        "min_reliable_trades": CE_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": total_combos,
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
+
+
 async def run_ce_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
                               atr_mult_min, atr_mult_max, atr_mult_step, stf_filter_enabled):
     """'Monte-Carlo'-Parametersweep fuer Chandelier Exit: testet alle Kombinationen aus
