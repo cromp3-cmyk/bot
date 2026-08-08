@@ -2682,13 +2682,26 @@ def backtest_chandelier_exit(candles, cfg, stf_candles=None):
 
         if position is not None and (tp_enabled or sl_enabled):
             pdir, entry, size = position["dir"], position["entry"], position["size"]
-            pnl_usd = (price - entry) * size if pdir == "long" else (entry - price) * size
-            if sl_enabled and pnl_usd <= -sl_usd:
-                _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "SL", ts=ts)
+            # Intrabar-Pruefung ueber Hoch/Tief statt nur Schlusskurs: sonst kann der Kurs
+            # innerhalb einer Kerze (v.a. bei laengeren Zeitrahmen wie 1h) weit durch die
+            # SL-/TP-Schwelle durchlaufen, bevor ueberhaupt geprueft wird - das wuerde live
+            # (tick-basiert) nie passieren. sl_price/tp_price ist der exakte Kurs, bei dem die
+            # $-Schwelle erreicht wird; wird er von Hoch oder Tief der Kerze beruehrt, gilt das
+            # als ausgeloest - realistischer als "erst beim naechsten Kerzenschluss pruefen".
+            sl_price = None
+            if sl_enabled:
+                sl_price = (entry - sl_usd / size) if pdir == "long" else (entry + sl_usd / size)
+            tp_price = None
+            if tp_enabled:
+                tp_price = (entry + tp_usd / size) if pdir == "long" else (entry - tp_usd / size)
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, pdir, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif tp_enabled and pnl_usd >= tp_usd:
-                _bt_close_trade(trades, pdir, entry, price, size, i, position["entry_i"], "TP", ts=ts)
+            elif hit_tp:
+                _bt_close_trade(trades, pdir, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
 
         buy_signal = dir_now == 1 and dir_prev == -1
