@@ -186,19 +186,28 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
 
 def resample_candles_vol(data, factor):
     """Wie resample_candles, aber fuer das 6er-Tupel (ts,o,h,l,c,v) - Volumen wird pro
-    zusammengefasster Kerze aufsummiert."""
+    zusammengefasster Kerze aufsummiert. Ausgerichtet an echten Uhrzeit-Grenzen (siehe
+    resample_candles fuer die Begruendung)."""
     timestamps, opens, highs, lows, closes, volumes = data
-    n = (len(closes) // factor) * factor
+    n = len(closes)
     if n == 0:
         return [], [], [], [], [], []
+    bucket_ms = factor * 60_000
     out_ts, out_o, out_h, out_l, out_c, out_v = [], [], [], [], [], []
-    for i in range(0, n, factor):
-        out_ts.append(timestamps[i])
-        out_o.append(opens[i:i + factor][0])
-        out_h.append(max(highs[i:i + factor]))
-        out_l.append(min(lows[i:i + factor]))
-        out_c.append(closes[i:i + factor][-1])
-        out_v.append(sum(volumes[i:i + factor]))
+    i = 0
+    while i < n:
+        bucket = timestamps[i] // bucket_ms
+        j = i
+        while j < n and timestamps[j] // bucket_ms == bucket:
+            j += 1
+        if j - i == factor:
+            out_ts.append(timestamps[i])
+            out_o.append(opens[i])
+            out_h.append(max(highs[i:j]))
+            out_l.append(min(lows[i:j]))
+            out_c.append(closes[j - 1])
+            out_v.append(sum(volumes[i:j]))
+        i = j
     return out_ts, out_o, out_h, out_l, out_c, out_v
 
 
@@ -289,24 +298,34 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
 
 
 def resample_candles(data, factor):
-    """Fasst je 'factor' aufeinanderfolgende Kerzen zu einer groesseren Kerze zusammen
-    (Open der ersten, High/Low ueber alle, Close der letzten, Zeitstempel der ersten).
-    Noetig fuer Zeitrahmen, die Binance nicht direkt anbietet (z.B. 2m)."""
+    """Fasst 1m-Kerzen zu groesseren Kerzen zusammen (z.B. 2m), AUSGERICHTET AN ECHTEN
+    UHRZEIT-GRENZEN (:00-:02, :02-:04, ...) - genau wie TradingView/Binance das bei nativ
+    unterstuetzten Zeitrahmen machen. Vorher wurde stur ab dem Anfang des geladenen Arrays in
+    Zweierpaaren gruppiert (Zeile 'range(0, n, factor)') - je nachdem, wann der Bot gerade
+    Daten abgerufen hat, verschob sich dadurch die Kerzengrenze und stimmte nicht mehr mit dem
+    TradingView-Chart ueberein (z.B. unsere Kerze 12:01-12:03 statt TradingViews 12:00-12:02) -
+    das erklaerte reale Abweichungen zwischen Chart-Signalen und Backtest-Ergebnissen."""
     timestamps, opens, highs, lows, closes = data
-    n = (len(closes) // factor) * factor
+    n = len(closes)
     if n == 0:
         return [], [], [], [], []
+    bucket_ms = factor * 60_000
     out_ts, out_o, out_h, out_l, out_c = [], [], [], [], []
-    for i in range(0, n, factor):
-        chunk_o = opens[i:i + factor]
-        chunk_h = highs[i:i + factor]
-        chunk_l = lows[i:i + factor]
-        chunk_c = closes[i:i + factor]
-        out_ts.append(timestamps[i])
-        out_o.append(chunk_o[0])
-        out_h.append(max(chunk_h))
-        out_l.append(min(chunk_l))
-        out_c.append(chunk_c[-1])
+    i = 0
+    while i < n:
+        bucket = timestamps[i] // bucket_ms
+        j = i
+        while j < n and timestamps[j] // bucket_ms == bucket:
+            j += 1
+        # Nur vollstaendige Buckets (genau 'factor' Kerzen drin) uebernehmen - ein am Rand
+        # angeschnittener Bucket wuerde eine unvollstaendige, verzerrte Kerze erzeugen.
+        if j - i == factor:
+            out_ts.append(timestamps[i])
+            out_o.append(opens[i])
+            out_h.append(max(highs[i:j]))
+            out_l.append(min(lows[i:j]))
+            out_c.append(closes[j - 1])
+        i = j
     return out_ts, out_o, out_h, out_l, out_c
 
 
