@@ -1694,6 +1694,167 @@ async def check_wtc_dca(symbol, wt1, wt2, price):
     await execute_entry(symbol, direction, price, is_add_on=True)
 
 
+def compute_sg_tp_abs(reference_price, cfg):
+    """Analog zu compute_step_abs beim Grid-Bot, nur mit eigenen sg_-Feldern - so kann
+    Signal-Grid unabhaengig vom normalen Grid konfiguriert werden."""
+    if cfg.get("sg_tp_mode", "pct") == "usd":
+        return cfg.get("sg_tp_step_usd", 5.0)
+    return reference_price * (cfg.get("sg_tp_step_pct", 1.0) / 100)
+
+
+def compute_sg_signal(highs, lows, closes, cfg):
+    """Liefert (buy_entry, sell_entry, buy_dca, sell_dca) fuer die LETZTE Kerze.
+    buy_entry/sell_entry: einmaliges Signal-Ereignis (Kreuzung bzw. Schwellenwert-Durchbruch) -
+    loest den ERSTEN Einstieg aus.
+    buy_dca/sell_dca: anhaltende Bedingung (kann ueber mehrere Kerzen wahr bleiben) - loest
+    Nachkaeufe aus, so oft die Bedingung gilt (mit Cooldown), unabhaengig vom einmaligen
+    Kreuzungs-Ereignis (das strukturell nicht wiederholt feuern kann, siehe WaveTrend-Cross)."""
+    source = cfg.get("sg_signal_source", "wavetrend")
+    if source == "wavetrend":
+        wt1, wt2 = compute_wavetrend(highs, lows, closes, cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"])
+        buy_entry, sell_entry = _wtc_signals(wt1, wt2, cfg)
+        i = len(wt1) - 1
+        buy_dca = _wtc_dca_condition(wt1, wt2, i, "long", cfg)
+        sell_dca = _wtc_dca_condition(wt1, wt2, i, "short", cfg)
+    else:  # "zscore"
+        z = compute_zscore_trend(closes, cfg["zscore_lookback_period"], cfg["zscore_ema_smooth"])
+        threshold = cfg["zscore_threshold"]
+        i = len(z) - 1
+        buy_entry = z[i - 1] <= threshold and z[i] > threshold
+        sell_entry = z[i - 1] >= -threshold and z[i] < -threshold
+        buy_dca = z[i] > threshold
+        sell_dca = z[i] < -threshold
+    if cfg.get("sg_invert_direction", False):
+        buy_entry, sell_entry = sell_entry, buy_entry
+        buy_dca, sell_dca = sell_dca, buy_dca
+    return buy_entry, sell_entry, buy_dca, sell_dca
+
+
+async def check_sg_entry(symbol, buy_entry, sell_entry, price):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if not (buy_entry or sell_entry):
+        return
+    direction = "long" if buy_entry else "short"
+    debug_log(f"📡 [{symbol}] Signal-Grid Einstieg: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+
+
+async def check_sg_dca(symbol, buy_dca, sell_dca, price):
+    """Nachkauf: prueft jeden Zyklus die anhaltende (nicht einmalige) Signal-Bedingung, mit
+    Mindestabstand, bis sg_max_nachkauf Stufen erreicht sind (0 = unbegrenzt, wie beim Grid)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    direction = st["position"]
+    max_nachkauf = cfg.get("sg_max_nachkauf", 0)
+    if max_nachkauf and st["entry_count"] >= max_nachkauf:
+        return
+    cooldown = cfg.get("sg_dca_cooldown_seconds", 60)
+    if time.time() - st.get("sg_last_dca_ts", 0.0) < cooldown:
+        return
+    ok = buy_dca if direction == "long" else sell_dca
+    if not ok:
+        return
+    st["sg_last_dca_ts"] = time.time()
+    debug_log(f"➕ [{symbol}] Signal-Grid Nachkauf #{st['entry_count'] + 1}: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=True)
+
+
+async def check_sg_tp(symbol, price):
+    """Ausstieg wie beim Grid: fester %/$-Abstand vom Ø-Einstieg, KEIN Flip-Exit - eine
+    nachgekaufte Position wird nie durch ein einzelnes Gegen-Signal komplett geschlossen."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    tp_abs = compute_sg_tp_abs(st["avg_entry_price"], cfg)
+    if st["position"] == "long" and price >= st["avg_entry_price"] + tp_abs:
+        await execute_exit(symbol, price, "TP")
+    elif st["position"] == "short" and price <= st["avg_entry_price"] - tp_abs:
+        await execute_exit(symbol, price, "TP")
+
+
+async def sg_poll_loop(symbol):
+    """Signal-Grid: Grid-Mechanik dupliziert (kein Flip-Exit, TP als %/$ vom Ø-Einstieg,
+    Nachkauf bis max. Stufen) - aber Ein-/Nachkauf werden nicht durch Preisabstand ausgeloest,
+    sondern durch ein Indikator-Signal (WaveTrend-Kreuzung oder Z-Score-Schwellenwert-
+    Durchbruch, umschaltbar ueber sg_signal_source). Loest das Problem reiner Flip-Strategien,
+    bei denen ein einzelnes Gegen-Signal sofort die komplette (evtl. mehrfach nachgekaufte)
+    Position schliesst."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "signal_grid":
+                st = b["state"]
+                resolution = cfg["sg_resolution"]
+                source = cfg.get("sg_signal_source", "wavetrend")
+                if source == "wavetrend":
+                    min_needed = max(cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"]) * 3 + 5
+                else:
+                    min_needed = cfg["zscore_lookback_period"] + 5
+                needed_bars = min(1000, max(min_needed * 2, 80))
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_processed_ts != signal_key
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    keep = min_needed + 5
+                    st["sg_highs"] = closed_h[-keep:]
+                    st["sg_lows"] = closed_l[-keep:]
+                    st["sg_closes"] = closed_c[-keep:]
+
+                    buy_entry, sell_entry, buy_dca, sell_dca = compute_sg_signal(closed_h, closed_l, closed_c, cfg)
+                    st["sg_buy_dca"], st["sg_sell_dca"] = buy_dca, sell_dca
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] Signal-Grid aktiv: Quelle={source}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, Stufe={st['entry_count']}, bot_active={cfg['bot_active']}")
+
+                    if is_new_candle:
+                        last_processed_ts = signal_key
+                        if cfg.get("sg_entry_trigger", "candle_close") == "candle_close":
+                            await check_sg_entry(symbol, buy_entry, sell_entry, price)
+
+                    await check_sg_dca(symbol, buy_dca, sell_dca, price)
+                    await check_sg_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Signal-Grid wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Signal-Grid wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Signal-Grid-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
 async def check_wtc_exit(symbol, buy_signal, sell_signal, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -2842,6 +3003,25 @@ async def on_price_update(symbol, price):
                 await execute_exit(symbol, price, "TP")
         return
 
+    if cfg["entry_mode"] == "signal_grid":
+        if cfg.get("sg_entry_trigger", "candle_close") == "tick":
+            try:
+                ch, cl, cc = st.get("sg_highs"), st.get("sg_lows"), st.get("sg_closes")
+                if ch and cl and cc and len(cc) >= 2:
+                    live_h = ch[:-1] + [max(ch[-1], price)]
+                    live_l = cl[:-1] + [min(cl[-1], price)]
+                    live_c = cc[:-1] + [price]
+                    buy_entry, sell_entry, buy_dca, sell_dca = compute_sg_signal(live_h, live_l, live_c, cfg)
+                    st["sg_buy_dca"], st["sg_sell_dca"] = buy_dca, sell_dca
+                    await check_sg_entry(symbol, buy_entry, sell_entry, price)
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] Signal-Grid Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        # Nachkauf und TP laufen immer tick-basiert (wie beim normalen Grid), unabhaengig vom
+        # Einstiegs-Trigger - nutzen die zuletzt vom Poll-Loop (oder oben) berechneten Flags.
+        await check_sg_dca(symbol, st.get("sg_buy_dca", False), st.get("sg_sell_dca", False), price)
+        await check_sg_tp(symbol, price)
+        return
+
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
@@ -3420,10 +3600,92 @@ def backtest_wavetrend_cross(candles, cfg, stf_candles=None):
     return trades
 
 
+def backtest_signal_grid(candles, cfg):
+    """Signal-Grid-Backtest: Grid-Mechanik (TP %/$ vom Ø-Einstieg, kein Flip-Exit, Nachkauf bis
+    max. Stufen mit Cooldown), aber Ein-/Nachkauf werden durch das gewaehlte Indikator-Signal
+    ausgeloest statt durch Preisabstand. Intrabar-Pruefung fuer TP wie bei den anderen
+    Strategien."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    source = cfg.get("sg_signal_source", "wavetrend")
+    max_nachkauf = cfg.get("sg_max_nachkauf", 0)
+    dca_cooldown_ms = cfg.get("sg_dca_cooldown_seconds", 60) * 1000
+    invert = cfg.get("sg_invert_direction", False)
+
+    if source == "wavetrend":
+        wt1, wt2 = compute_wavetrend(h, l, c, cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"])
+        require_obos = cfg.get("wtc_require_obos", True)
+        ob_level = cfg.get("wtc_ob_level", 53)
+        os_level = cfg.get("wtc_os_level", -53)
+        warmup = max(cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"]) * 3 + 5
+
+        def entry_signals(i):
+            cross_up = wt1[i - 1] <= wt2[i - 1] and wt1[i] > wt2[i]
+            cross_down = wt1[i - 1] >= wt2[i - 1] and wt1[i] < wt2[i]
+            return (cross_up and (not require_obos or wt2[i] <= os_level),
+                    cross_down and (not require_obos or wt2[i] >= ob_level))
+
+        def dca_signals(i):
+            return _wtc_dca_condition(wt1, wt2, i, "long", cfg), _wtc_dca_condition(wt1, wt2, i, "short", cfg)
+    else:
+        z = compute_zscore_trend(c, cfg["zscore_lookback_period"], cfg["zscore_ema_smooth"])
+        threshold = cfg["zscore_threshold"]
+        warmup = cfg["zscore_lookback_period"] + 5
+
+        def entry_signals(i):
+            return (z[i - 1] <= threshold and z[i] > threshold, z[i - 1] >= -threshold and z[i] < -threshold)
+
+        def dca_signals(i):
+            return z[i] > threshold, z[i] < -threshold
+
+    position = None  # {"dir","entry","size","entry_i","entry_count","last_dca_ts"}
+    trades = []
+
+    for i in range(warmup, n):
+        price = c[i]
+        buy_entry, sell_entry = entry_signals(i)
+        buy_dca, sell_dca = dca_signals(i)
+        if invert:
+            buy_entry, sell_entry = sell_entry, buy_entry
+            buy_dca, sell_dca = sell_dca, buy_dca
+
+        if position is not None:
+            direction = position["dir"]
+            tp_abs = compute_sg_tp_abs(position["entry"], cfg)
+            if direction == "long" and h[i] >= position["entry"] + tp_abs:
+                _bt_close_trade(trades, direction, position["entry"], position["entry"] + tp_abs, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+            elif direction == "short" and l[i] <= position["entry"] - tp_abs:
+                _bt_close_trade(trades, direction, position["entry"], position["entry"] - tp_abs, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        if position is not None:
+            direction = position["dir"]
+            ok = buy_dca if direction == "long" else sell_dca
+            if ok and (max_nachkauf == 0 or position["entry_count"] < max_nachkauf) and ts[i] - position["last_dca_ts"] >= dca_cooldown_ms:
+                add_size = (margin * leverage) / price
+                total_size = position["size"] + add_size
+                position["entry"] = (position["entry"] * position["size"] + price * add_size) / total_size
+                position["size"] = total_size
+                position["entry_count"] += 1
+                position["last_dca_ts"] = ts[i]
+
+        if position is None and (buy_entry or sell_entry):
+            direction = "long" if buy_entry else "short"
+            size = (margin * leverage) / price
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i, "entry_count": 1, "last_dca_ts": ts[i]}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000, "range_profile": 30_000, "zscore_trend": 100_000, "blsh_trend": 100_000,
     "trend_meter": 100_000, "supertrend_fusion": 100_000, "chandelier_exit": 100_000,
-    "ut_bot": 100_000, "wavetrend_cross": 100_000,
+    "ut_bot": 100_000, "wavetrend_cross": 100_000, "signal_grid": 100_000,
 }
 
 
@@ -3826,6 +4088,7 @@ BACKTEST_FUNCS = {
     "chandelier_exit": backtest_chandelier_exit,
     "ut_bot": backtest_ut_bot,
     "wavetrend_cross": backtest_wavetrend_cross,
+    "signal_grid": backtest_signal_grid,
 }
 
 
@@ -4042,7 +4305,7 @@ async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles):
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend, trend_meter, supertrend_fusion, chandelier_exit, ut_bot, wavetrend_cross - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, zscore_trend, blsh_trend, trend_meter, supertrend_fusion, chandelier_exit, ut_bot, wavetrend_cross, signal_grid - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
@@ -4130,7 +4393,7 @@ async def run_backtest(symbol, entry_mode, cfg, days):
     resolution_key = {"range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
                        "zscore_trend": "zscore_resolution", "trend_meter": "tm_resolution",
                        "supertrend_fusion": "stf_resolution", "ut_bot": "ut_resolution",
-                       "wavetrend_cross": "wtc_resolution"}[entry_mode]
+                       "wavetrend_cross": "wtc_resolution", "signal_grid": "sg_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
