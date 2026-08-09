@@ -368,6 +368,13 @@ def default_config():
         "wtc_sl_enabled": os.getenv("WTC_SL_ENABLED", "false").lower() == "true",
         "wtc_sl_usd": float(os.getenv("WTC_SL_USD", "3")),
         "wtc_sl_cooldown_seconds": float(os.getenv("WTC_SL_COOLDOWN_SECONDS", "30")),
+        # Richtungsmodus, Nachkauf und SuperTrend-Richtungsfilter (analog Chandelier Exit):
+        "wtc_direction_mode": os.getenv("WTC_DIRECTION_MODE", "both"),  # "both"/"long_only"/"short_only"
+        "wtc_dca_enabled": os.getenv("WTC_DCA_ENABLED", "false").lower() == "true",
+        "wtc_dca_max_entries": int(os.getenv("WTC_DCA_MAX_ENTRIES", "10")),
+        "wtc_dca_cooldown_seconds": float(os.getenv("WTC_DCA_COOLDOWN_SECONDS", "60")),
+        "wtc_stf_filter_enabled": os.getenv("WTC_STF_FILTER_ENABLED", "false").lower() == "true",
+        "wtc_stf_resolution": os.getenv("WTC_STF_RESOLUTION", "5m"),
     }
 
 
@@ -400,6 +407,7 @@ def default_state():
         "ce_stf_bias": None, "ce_pending_direction": None, "ce_sl_cooldown_until": 0.0,
         "ut_highs": [], "ut_lows": [], "ut_closes": [], "ut_stop_value": None, "ut_sl_cooldown_until": 0.0,
         "wtc_highs": [], "wtc_lows": [], "wtc_closes": [], "wtc_wt1": None, "wtc_wt2": None, "wtc_sl_cooldown_until": 0.0,
+        "wtc_stf_bias": None, "wtc_pending_direction": None, "wtc_last_dca_ts": 0.0,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -918,7 +926,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="supertrend_fusion">SuperTrend Fusion (ATR-SuperTrend + Average-Force-Momentum + Choppiness-Filter, optional SL+TP)</option>
       <option value="chandelier_exit">Chandelier Exit (Trailing-Stop-Flip aus "MG signal", optional TP + SuperTrend-Richtungsfilter im höheren Zeitrahmen)</option>
       <option value="ut_bot">UT-Bot (ATR-Trailing-Stop, ein gemeinsames Band, optional SL+TP, invertierbar)</option>
-      <option value="wavetrend_cross">WaveTrend-Cross (Cipher-B-WaveTrend-Kreuzung, optional nur überkauft/überverkauft, optional SL+TP, invertierbar)</option>
+      <option value="wavetrend_cross">WaveTrend-Cross (Cipher-B-WaveTrend-Kreuzung, optional nur überkauft/überverkauft, optional SL+TP, invertierbar, Richtungsmodus, Nachkauf, SuperTrend-Richtungsfilter)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1479,6 +1487,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="wavetrend_cross"><label>SL-Betrag ($, nur wenn SL an)</label><input type="number" step="any" id="wtc_sl_usd"></div>
   <div data-mode="wavetrend_cross"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="wtc_sl_cooldown_seconds"></div>
+  <div data-mode="wavetrend_cross"><label>Richtungsmodus</label>
+    <select class="cfg" id="wtc_direction_mode">
+      <option value="both">Beide Richtungen</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Nachkauf (bei anhaltendem Signal in Richtung der offenen Position)</label>
+    <select class="cfg" id="wtc_dca_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Max. Nachkauf-Stufen</label><input type="number" step="1" id="wtc_dca_max_entries"></div>
+  <div data-mode="wavetrend_cross"><label>Mindestabstand zwischen Nachkäufen (Sek.)</label><input type="number" step="1" id="wtc_dca_cooldown_seconds"></div>
+  <div data-mode="wavetrend_cross"><label>SuperTrend-Richtungsfilter (höherer Zeitrahmen, nutzt die SuperTrend-Fusion-Filtereinstellungen)</label>
+    <select class="cfg" id="wtc_stf_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>SuperTrend-Zeitrahmen (sollte höher sein als das Signal oben)</label>
+    <select class="cfg" id="wtc_stf_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -2080,6 +2118,7 @@ async function refresh() {
     <div class="card"><div class="label">Chandelier SuperTrend-Filter (${data.config.ce_stf_filter_enabled?'an':'aus'})</div><div class="value ${data.ce_stf_bias==='long'?'green':data.ce_stf_bias==='short'?'red':''}">${data.ce_stf_bias ?? '-'} ${data.ce_pending_direction?`⏸️ wartet auf ${data.ce_pending_direction}`:''}</div></div>
     <div class="card"><div class="label">UT-Bot Stop-Linie (${data.config.entry_mode==='ut_bot'?'aktiv':'inaktiv'})</div><div class="value">${data.ut_stop_value!=null?data.ut_stop_value.toFixed(4):'-'}</div></div>
     <div class="card"><div class="label">WaveTrend wt1 / wt2 (${data.config.entry_mode==='wavetrend_cross'?'aktiv':'inaktiv'})</div><div class="value">${data.wtc_wt1!=null?data.wtc_wt1.toFixed(2):'-'} / ${data.wtc_wt2!=null?data.wtc_wt2.toFixed(2):'-'}</div></div>
+    <div class="card"><div class="label">WaveTrend SuperTrend-Filter (${data.config.wtc_stf_filter_enabled?'an':'aus'})</div><div class="value ${data.wtc_stf_bias==='long'?'green':data.wtc_stf_bias==='short'?'red':''}">${data.wtc_stf_bias ?? '-'} ${data.wtc_pending_direction?`⏸️ wartet auf ${data.wtc_pending_direction}`:''}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
@@ -2255,6 +2294,12 @@ async function refresh() {
     document.getElementById('wtc_sl_enabled').value = String(data.config.wtc_sl_enabled);
     document.getElementById('wtc_sl_usd').value = data.config.wtc_sl_usd;
     document.getElementById('wtc_sl_cooldown_seconds').value = data.config.wtc_sl_cooldown_seconds;
+    document.getElementById('wtc_direction_mode').value = data.config.wtc_direction_mode;
+    document.getElementById('wtc_dca_enabled').value = String(data.config.wtc_dca_enabled);
+    document.getElementById('wtc_dca_max_entries').value = data.config.wtc_dca_max_entries;
+    document.getElementById('wtc_dca_cooldown_seconds').value = data.config.wtc_dca_cooldown_seconds;
+    document.getElementById('wtc_stf_filter_enabled').value = String(data.config.wtc_stf_filter_enabled);
+    document.getElementById('wtc_stf_resolution').value = data.config.wtc_stf_resolution;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -2422,12 +2467,12 @@ async function refresh() {
 
   try {
     const trades = (data.trade_log || []).slice(-15).reverse();
-    document.getElementById('trades-debug').innerText = `(roh: data.trade_log = ${JSON.stringify(data.trade_log === undefined ? 'undefined' : data.trade_log === null ? 'null' : `Array(${data.trade_log.length})`)})`;
+    document.getElementById('trades-debug').innerText = '';
     const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
     document.querySelector('#trades-table tbody').innerHTML = trades.map(t => `
       <tr><td>${fmtTime(t.opened_at)}</td><td>${fmtTime(t.closed_at)}</td><td>${t.side}</td><td>${t.avg_entry}</td><td>${t.exit}</td><td>${t.entries}</td><td>${t.reason ?? '-'}</td>
       <td class="${t.pnl_usd>=0?'green':'red'}">${t.pnl_usd}</td></tr>
-    `).join('');
+    `).join('') || '<tr><td colspan="8" style="color:var(--text-dim);">Noch keine abgeschlossenen Trades</td></tr>';
   } catch (e) {
     console.error('Trade-Tabelle-Fehler:', e);
     const dbg = document.getElementById('trades-debug');
@@ -2593,6 +2638,12 @@ function buildConfigPayload() {
     wtc_sl_enabled: document.getElementById('wtc_sl_enabled').value === 'true',
     wtc_sl_usd: parseFloat(document.getElementById('wtc_sl_usd').value),
     wtc_sl_cooldown_seconds: parseFloat(document.getElementById('wtc_sl_cooldown_seconds').value),
+    wtc_direction_mode: document.getElementById('wtc_direction_mode').value,
+    wtc_dca_enabled: document.getElementById('wtc_dca_enabled').value === 'true',
+    wtc_dca_max_entries: parseInt(document.getElementById('wtc_dca_max_entries').value),
+    wtc_dca_cooldown_seconds: parseFloat(document.getElementById('wtc_dca_cooldown_seconds').value),
+    wtc_stf_filter_enabled: document.getElementById('wtc_stf_filter_enabled').value === 'true',
+    wtc_stf_resolution: document.getElementById('wtc_stf_resolution').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -2638,7 +2689,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_resolution','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','zscore_direction_mode','zscore_cooldown_seconds','zscore_sl_enabled','zscore_sl_usd','zscore_tp1_usd','zscore_tp1_close_pct','zscore_breakeven_enabled','zscore_breakeven_lock_usd','zscore_tp2_enabled','zscore_tp2_usd','blsh_signal_mode','blsh_resolution','blsh_atr_period','blsh_rsi_period','blsh_ema_fast','blsh_ema_slow','blsh_macd_fast','blsh_macd_slow','blsh_macd_signal','blsh_mfi_period','blsh_threshold','blsh_direction_mode','blsh_cooldown_seconds','blsh_sl_enabled','blsh_sl_usd','blsh_tp1_usd','blsh_tp1_close_pct','blsh_breakeven_enabled','blsh_breakeven_lock_usd','blsh_tp2_enabled','blsh_tp2_usd','tm_resolution','tm_macd_fast','tm_macd_slow','tm_macd_signal','tm_rsi1_period','tm_rsi2_period','tm_ma_fast','tm_ma_slow','tm_entry_trigger','tm_exit_trigger','tm_tp_enabled','tm_tp_usd','tm_sl_enabled','tm_sl_usd','tm_sl_cooldown_seconds','tm_invert_direction','tm_exit_mode','tm_regime_filter_enabled','tm_regime_chop_length','tm_regime_chop_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','wtc_direction_mode','wtc_dca_enabled','wtc_dca_max_entries','wtc_dca_cooldown_seconds','wtc_stf_filter_enabled','wtc_stf_resolution','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2709,6 +2760,7 @@ async def handle_status(request):
         "ce_pending_direction": st.get("ce_pending_direction"),
         "ut_stop_value": st.get("ut_stop_value"),
         "wtc_wt1": st.get("wtc_wt1"), "wtc_wt2": st.get("wtc_wt2"),
+        "wtc_stf_bias": st.get("wtc_stf_bias"), "wtc_pending_direction": st.get("wtc_pending_direction"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -2768,7 +2820,9 @@ async def handle_config_update(request):
                 "ut_invert_direction", "ut_tp_enabled", "ut_tp_usd", "ut_sl_enabled", "ut_sl_usd", "ut_sl_cooldown_seconds",
                 "wtc_resolution", "wtc_channel_length", "wtc_average_length", "wtc_ma_length",
                 "wtc_require_obos", "wtc_ob_level", "wtc_os_level", "wtc_entry_trigger", "wtc_exit_trigger",
-                "wtc_invert_direction", "wtc_tp_enabled", "wtc_tp_usd", "wtc_sl_enabled", "wtc_sl_usd", "wtc_sl_cooldown_seconds"]:
+                "wtc_invert_direction", "wtc_tp_enabled", "wtc_tp_usd", "wtc_sl_enabled", "wtc_sl_usd", "wtc_sl_cooldown_seconds",
+                "wtc_direction_mode", "wtc_dca_enabled", "wtc_dca_max_entries", "wtc_dca_cooldown_seconds",
+                "wtc_stf_filter_enabled", "wtc_stf_resolution"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

@@ -1584,17 +1584,114 @@ async def ut_poll_loop(symbol):
 
 
 async def check_wtc_entry(symbol, buy_signal, sell_signal, price):
+    """Einstieg beim Buy/Sell-Signal. Erweiterungen:
+    - Richtungsmodus (wtc_direction_mode): 'long_only'/'short_only' blendet die jeweils andere
+      Einstiegsrichtung aus (Exit bei Gegen-Signal bleibt trotzdem aktiv, dreht aber nicht um).
+    - Optionaler SuperTrend-Fusion-Richtungsfilter auf hoeherem Zeitrahmen (wie bei Chandelier
+      Exit): stimmt die Richtung nicht mit dem SuperTrend-Bias ueberein, wird das Signal als
+      'pending' gemerkt statt verworfen - siehe check_wtc_pending.
+    Der Nachkauf (DCA) laeuft NICHT hierueber, sondern ueber check_wtc_dca - Kreuzungs-Signale
+    sind einmalige Ereignisse und koennen strukturell nicht ein zweites Mal in dieselbe Richtung
+    feuern, waehrend die Position noch offen ist (dafuer muesste erst das Gegen-Signal kommen,
+    das die Position ohnehin schliessen wuerde)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is not None or price is None:
+    if not cfg["bot_active"] or price is None or st["position"] is not None:
         return
     if cfg.get("wtc_sl_enabled", False) and time.time() < st.get("wtc_sl_cooldown_until", 0.0):
         return
     if not (buy_signal or sell_signal):
         return
+
     direction = "long" if buy_signal else "short"
-    debug_log(f"📡 [{symbol}] WaveTrend-Cross Signal: {direction.upper()} @ {price}")
-    await execute_entry(symbol, direction, price, is_add_on=False)
+    dir_mode = cfg.get("wtc_direction_mode", "both")
+    if dir_mode == "long_only" and direction == "short":
+        return
+    if dir_mode == "short_only" and direction == "long":
+        return
+
+    stf_filter_enabled = cfg.get("wtc_stf_filter_enabled", False)
+
+    if not stf_filter_enabled:
+        st["wtc_pending_direction"] = None
+        debug_log(f"📡 [{symbol}] WaveTrend-Cross Signal: {direction.upper()} @ {price}")
+        await execute_entry(symbol, direction, price, is_add_on=False)
+        return
+
+    bias = st.get("wtc_stf_bias")
+    if bias == direction:
+        st["wtc_pending_direction"] = None
+        debug_log(f"📡 [{symbol}] WaveTrend-Cross Signal: {direction.upper()} @ {price} (SuperTrend-Filter bestätigt)")
+        await execute_entry(symbol, direction, price, is_add_on=False)
+    else:
+        st["wtc_pending_direction"] = direction
+        debug_log(f"⏸️ [{symbol}] WaveTrend-Cross Signal {direction.upper()} wartet auf SuperTrend-Bestätigung (aktuell: {bias})")
+
+
+async def check_wtc_pending(symbol, buy_signal, sell_signal, price):
+    """Prueft jeden Zyklus, ob ein wartendes Signal jetzt durch den SuperTrend-Filter bestaetigt
+    wird - analog zu check_ce_pending bei Chandelier Exit. 'buy_signal'/'sell_signal' hier sind
+    die AKTUELLEN Werte an dieser Kerze/diesem Tick (nicht die des urspruenglichen Signals) -
+    wird verworfen, sobald das WaveTrend-Signal zwischenzeitlich in die Gegenrichtung gedreht hat."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    pending = st.get("wtc_pending_direction")
+    if not pending or not cfg.get("wtc_stf_filter_enabled", False):
+        return
+    if sell_signal and pending == "long":
+        st["wtc_pending_direction"] = None
+        return
+    if buy_signal and pending == "short":
+        st["wtc_pending_direction"] = None
+        return
+    bias = st.get("wtc_stf_bias")
+    if bias == pending:
+        st["wtc_pending_direction"] = None
+        debug_log(f"📡 [{symbol}] WaveTrend-Cross Pending-Order ausgelöst: {pending.upper()} @ {price} (SuperTrend jetzt bestätigt)")
+        await execute_entry(symbol, pending, price, is_add_on=False)
+
+
+def _wtc_dca_condition(wt1, wt2, i, direction, cfg):
+    """Level-basierte Nachkauf-Bedingung (anders als das einmalige Kreuzungs-Signal): 'noch
+    long-guenstig' heisst wt2 weiterhin im ueberverkauft-Bereich (bzw. wt1 noch ueber wt2, wenn
+    die OB/OS-Pflicht aus ist) - das kann ueber mehrere Kerzen hinweg stabil wahr bleiben, im
+    Gegensatz zur Kreuzung selbst, die nur einmalig feuert."""
+    require_obos = cfg.get("wtc_require_obos", True)
+    if direction == "long":
+        if require_obos:
+            return wt2[i] <= cfg.get("wtc_os_level", -53)
+        return wt1[i] > wt2[i]
+    else:
+        if require_obos:
+            return wt2[i] >= cfg.get("wtc_ob_level", 53)
+        return wt1[i] < wt2[i]
+
+
+async def check_wtc_dca(symbol, wt1, wt2, price):
+    """Nachkauf: prueft JEDEN Zyklus (nicht nur bei neuer Kerze), ob die Nachkauf-Bedingung
+    weiterhin erfuellt ist, und kauft mit Mindestabstand (wtc_dca_cooldown_seconds) nach, bis
+    wtc_dca_max_entries Stufen erreicht sind."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if not cfg.get("wtc_dca_enabled", False):
+        return
+    direction = st["position"]
+    if st["entry_count"] >= cfg.get("wtc_dca_max_entries", 10):
+        return
+    cooldown = cfg.get("wtc_dca_cooldown_seconds", 60)
+    if time.time() - st.get("wtc_last_dca_ts", 0.0) < cooldown:
+        return
+    if not wt1 or not _wtc_dca_condition(wt1, wt2, len(wt1) - 1, direction, cfg):
+        return
+    if cfg.get("wtc_stf_filter_enabled", False) and st.get("wtc_stf_bias") != direction:
+        return
+    st["wtc_last_dca_ts"] = time.time()
+    debug_log(f"➕ [{symbol}] WaveTrend-Cross Nachkauf #{st['entry_count'] + 1}: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=True)
 
 
 async def check_wtc_exit(symbol, buy_signal, sell_signal, price):
@@ -1659,6 +1756,32 @@ async def wtc_poll_loop(symbol):
                 now = time.time()
                 due_heartbeat = now - last_heartbeat > 300
 
+                stf_filter_enabled = cfg.get("wtc_stf_filter_enabled", False)
+                if stf_filter_enabled:
+                    stf_resolution = cfg.get("wtc_stf_resolution", "5m")
+                    stf_ema_len = cfg.get("stf_ema_length", 200) if cfg.get("stf_use_ema_filter", False) else 0
+                    stf_min_needed = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], cfg["stf_chop_length"], stf_ema_len) + 3
+                    stf_needed_bars = min(1000, max(stf_min_needed * 3, 60))
+                    if stf_resolution in SUB_MINUTE_RESOLUTIONS:
+                        stf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[stf_resolution], stf_needed_bars)
+                        if stf_local:
+                            stf_ts, _, stf_h, stf_l, stf_c = stf_local
+                        else:
+                            stf_ts = None
+                    else:
+                        stf_data = await fetch_candles_binance_multi(symbol, stf_resolution, count_back=stf_needed_bars)
+                        if stf_data:
+                            s_ts, s_o, s_h, s_l, s_c = stf_data
+                            stf_ts, stf_h, stf_l, stf_c = s_ts[:-1], s_h[:-1], s_l[:-1], s_c[:-1]
+                        else:
+                            stf_ts = None
+                    if stf_ts and len(stf_c) > stf_min_needed:
+                        stf_state = compute_stf_state(stf_h, stf_l, stf_c, cfg)
+                        if stf_state:
+                            st["wtc_stf_bias"] = "long" if stf_state["direction"] == -1 else "short"
+                else:
+                    st["wtc_stf_bias"] = None
+
                 if closed_ts and len(closed_c) > min_needed:
                     signal_key = closed_ts[-1]
                     is_new_candle = last_processed_ts != signal_key
@@ -1674,17 +1797,23 @@ async def wtc_poll_loop(symbol):
 
                     if due_heartbeat:
                         last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] WaveTrend-Cross aktiv: wt1={round(wt1[-1],2)} wt2={round(wt2[-1],2)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                        debug_log(f"💓 [{symbol}] WaveTrend-Cross aktiv: wt1={round(wt1[-1],2)} wt2={round(wt2[-1],2)}, STF-Filter={'an' if stf_filter_enabled else 'aus'}, STF-Bias={st.get('wtc_stf_bias')}, Pending={st.get('wtc_pending_direction')}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    buy_signal, sell_signal = _wtc_signals(wt1, wt2, cfg)
+                    if cfg.get("wtc_invert_direction", False):
+                        buy_signal, sell_signal = sell_signal, buy_signal
 
                     if is_new_candle:
                         last_processed_ts = signal_key
-                        buy_signal, sell_signal = _wtc_signals(wt1, wt2, cfg)
-                        if cfg.get("wtc_invert_direction", False):
-                            buy_signal, sell_signal = sell_signal, buy_signal
                         if cfg.get("wtc_exit_trigger", "candle_close") == "candle_close":
                             await check_wtc_exit(symbol, buy_signal, sell_signal, price)
                         if cfg.get("wtc_entry_trigger", "candle_close") == "candle_close":
                             await check_wtc_entry(symbol, buy_signal, sell_signal, price)
+
+                    # Pending-Order jeden Zyklus pruefen, nicht nur bei neuer Kerze
+                    await check_wtc_pending(symbol, buy_signal, sell_signal, price)
+                    # Nachkauf jeden Zyklus pruefen (level-basiert, nicht an das Kreuzungs-Signal gebunden)
+                    await check_wtc_dca(symbol, wt1, wt2, price)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -2698,6 +2827,8 @@ async def on_price_update(symbol, price):
                         await check_wtc_exit(symbol, buy_signal, sell_signal, price)
                     if entry_trigger == "tick":
                         await check_wtc_entry(symbol, buy_signal, sell_signal, price)
+                    await check_wtc_pending(symbol, buy_signal, sell_signal, price)
+                    await check_wtc_dca(symbol, wt1, wt2, price)
             except Exception as e:
                 debug_log(f"⚠️ [{symbol}] WaveTrend-Cross Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
@@ -3162,9 +3293,11 @@ def backtest_ut_bot(candles, cfg):
     return trades
 
 
-def backtest_wavetrend_cross(candles, cfg):
+def backtest_wavetrend_cross(candles, cfg, stf_candles=None):
     """Backtest laeuft immer 'kerzenbasiert'. Intrabar-Pruefung fuer SL/TP wie bei den anderen
-    Strategien."""
+    Strategien. Unterstuetzt Richtungsmodus (long_only/short_only), Nachkauf (DCA) und den
+    optionalen SuperTrend-Fusion-Richtungsfilter auf hoeherem Zeitrahmen inkl. Pending-Order-
+    Logik (wie bei Chandelier Exit)."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
@@ -3177,11 +3310,32 @@ def backtest_wavetrend_cross(candles, cfg):
     require_obos = cfg.get("wtc_require_obos", True)
     ob_level = cfg.get("wtc_ob_level", 53)
     os_level = cfg.get("wtc_os_level", -53)
+    dir_mode = cfg.get("wtc_direction_mode", "both")
+    dca_enabled = cfg.get("wtc_dca_enabled", False)
+    dca_max = cfg.get("wtc_dca_max_entries", 10)
+    dca_cooldown_ms = cfg.get("wtc_dca_cooldown_seconds", 60) * 1000
+    stf_filter_enabled = cfg.get("wtc_stf_filter_enabled", False) and stf_candles is not None
 
     wt1, wt2 = compute_wavetrend(h, l, c, cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"])
 
+    stf_ts_list = None
+    stf_direction_series = None
+    if stf_filter_enabled:
+        stf_ts_list, stf_o, stf_h, stf_l, stf_c = stf_candles
+        stf_direction_series = compute_stf_effective_direction_series(stf_h, stf_l, stf_c, cfg)
+
+    def stf_bias_for_ts(t):
+        if not stf_filter_enabled:
+            return None
+        idx = bisect.bisect_right(stf_ts_list, t) - 1
+        if idx < 0:
+            return None
+        d = stf_direction_series[idx]
+        return None if d is None else ("long" if d == -1 else "short")
+
     warmup = max(cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"]) * 3 + 5
-    position = None
+    position = None  # {"dir","entry","size","entry_i","entry_count"}
+    pending_direction = None
     trades = []
     sl_cooldown_until_ts = None
 
@@ -3219,10 +3373,46 @@ def backtest_wavetrend_cross(candles, cfg):
                 position = None
 
         in_sl_cooldown = sl_enabled and sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-        if position is None and not in_sl_cooldown and (buy_signal or sell_signal):
-            direction = "long" if buy_signal else "short"
-            size = (margin * leverage) / price
-            position = {"dir": direction, "entry": price, "size": size, "entry_i": i}
+
+        # Nachkauf: level-basiert, jede Kerze geprueft, nicht an das einmalige Kreuzungs-Signal
+        # gebunden (das koennte in derselben Richtung strukturell nicht wiederholt feuern).
+        if position is not None and dca_enabled and position["entry_count"] < dca_max:
+            direction = position["dir"]
+            last_dca = position.get("last_dca_ts", ts[position["entry_i"]])
+            if ts[i] - last_dca >= dca_cooldown_ms and _wtc_dca_condition(wt1, wt2, i, direction, cfg):
+                bias = stf_bias_for_ts(ts[i]) if stf_filter_enabled else None
+                if not stf_filter_enabled or bias == direction:
+                    add_size = (margin * leverage) / price
+                    total_size = position["size"] + add_size
+                    position["entry"] = (position["entry"] * position["size"] + price * add_size) / total_size
+                    position["size"] = total_size
+                    position["entry_count"] += 1
+                    position["last_dca_ts"] = ts[i]
+
+        if buy_signal or sell_signal:
+            signal_dir = "long" if buy_signal else "short"
+            allowed = not ((dir_mode == "long_only" and signal_dir == "short") or (dir_mode == "short_only" and signal_dir == "long"))
+
+            if allowed and position is None and not in_sl_cooldown:
+                bias = stf_bias_for_ts(ts[i]) if stf_filter_enabled else None
+                if not stf_filter_enabled or bias == signal_dir:
+                    size = (margin * leverage) / price
+                    position = {"dir": signal_dir, "entry": price, "size": size, "entry_i": i, "entry_count": 1, "last_dca_ts": ts[i]}
+                    pending_direction = None
+                else:
+                    pending_direction = signal_dir
+
+        if position is None and stf_filter_enabled and pending_direction:
+            if sell_signal and pending_direction == "long":
+                pending_direction = None
+            elif buy_signal and pending_direction == "short":
+                pending_direction = None
+            else:
+                bias = stf_bias_for_ts(ts[i])
+                if bias == pending_direction:
+                    size = (margin * leverage) / price
+                    position = {"dir": pending_direction, "entry": price, "size": size, "entry_i": i, "entry_count": 1, "last_dca_ts": ts[i]}
+                    pending_direction = None
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
@@ -3896,6 +4086,35 @@ async def run_backtest(symbol, entry_mode, cfg, days):
 
         n_candles = len(candles[4])
         trades = backtest_chandelier_exit(candles, cfg, stf_candles=stf_candles)
+        stats = summarize_backtest_trades(trades)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"])
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"])
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": cache_used,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
+
+    if entry_mode == "wavetrend_cross":
+        resolution = cfg.get("wtc_resolution", "5m")
+        candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles)
+        if err:
+            return {"error": err}
+        if not candles or len(candles[4]) < 100:
+            return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
+
+        stf_candles = None
+        if cfg.get("wtc_stf_filter_enabled", False):
+            stf_resolution = cfg.get("wtc_stf_resolution", "5m")
+            stf_candles, stf_err, _ = await _fetch_cached_backtest_candles(symbol, stf_resolution, days, max_candles)
+            if stf_err or not stf_candles or len(stf_candles[4]) < 100:
+                return {"error": f"Zu wenig historische Kerzen für den SuperTrend-Filter-Zeitrahmen ({stf_resolution}) erhalten."}
+
+        n_candles = len(candles[4])
+        trades = backtest_wavetrend_cross(candles, cfg, stf_candles=stf_candles)
         stats = summarize_backtest_trades(trades)
         stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"])
         stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"])
