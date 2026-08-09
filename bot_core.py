@@ -998,18 +998,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - Einstieg nur wenn direkt vorher ein Squeeze aktiv war</option>
     </select>
   </div>
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-    </select>
-  </div>
   <div data-mode="signal_grid"><label>Z-Score-Preset (aus dem Original-Indikator, setzt Lookback-Periode + Schwelle - nur bei Signal-Quelle Z-Score)</label>
+    <select id="zscore_preset" onchange="if(this.value){const [lb,th]=this.value.split(':'); document.getElementById('zscore_lookback_period').value=lb; document.getElementById('zscore_threshold').value=th; window.formTouched=true;} this.value='';">
       <option value="">- auswählen -</option>
       <option value="10:1.0">Scalping (Lookback 10, Schwelle 1.0) - 1-15min Charts, sehr reaktionsschnell</option>
       <option value="20:1.5">Default (Lookback 20, Schwelle 1.5) - universell einsetzbar</option>
@@ -1020,90 +1010,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="signal_grid"><label>Z-Score: Lookback-Periode (nur bei Signal-Quelle Z-Score)</label><input type="number" step="1" id="zscore_lookback_period"></div>
   <div data-mode="signal_grid"><label>Z-Score: EMA-Glättung (nur bei Signal-Quelle Z-Score)</label><input type="number" step="1" id="zscore_ema_smooth"></div>
   <div data-mode="signal_grid"><label>Z-Score: Schwelle (nur bei Signal-Quelle Z-Score)</label><input type="number" step="0.1" id="zscore_threshold"></div>
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long (Short-Signale werden ignoriert)</option>
-      <option value="short_only">Nur Short (Long-Signale werden ignoriert)</option>
-    </select>
-  </div>
-      <option value="true">An</option>
-      <option value="false">Aus - Position läuft bis TP1 ungeschützt</option>
-    </select>
-  </div>
-      <option value="true">An</option>
-      <option value="false">Aus - nach TP1 kein Stop mehr, läuft bis TP2/Gegensignal</option>
-    </select>
-  </div>
-      <option value="true">An - TP1 löst Teilverkauf + Break-Even aus, TP2 ist der finale Ausstieg</option>
-      <option value="false">Aus - TP1 wird zum finalen, vollständigen Ausstieg (kein Teilverkauf mehr)</option>
-    </select>
-  </div>
-      <option value="composite">Composite (Schwelle + Nulllinien-Exit + TP1/TP2/SL/Cooldown)</option>
-      <option value="macd_cross">Wechsel (grüner/roter Punkt = MACD kreuzt Signal-Linie, kein TP/SL, immer im Markt)</option>
-    </select>
-  </div>
-      <option value="1m">1 Minute</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-    </select>
-  </div>
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long (Short-Signale werden ignoriert)</option>
-      <option value="short_only">Nur Short (Long-Signale werden ignoriert)</option>
-    </select>
-  </div>
-      <option value="true">An</option>
-      <option value="false">Aus - Position läuft bis TP1 ungeschützt</option>
-    </select>
-  </div>
-      <option value="true">An</option>
-      <option value="false">Aus - nach TP1 kein Stop mehr, läuft bis TP2/Gegensignal</option>
-    </select>
-  </div>
-      <option value="true">An - TP1 löst Teilverkauf + Break-Even aus, TP2 ist der finale Ausstieg</option>
-      <option value="false">Aus - TP1 wird zum finalen, vollständigen Ausstieg (kein Teilverkauf mehr)</option>
-    </select>
-  </div>
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-    </select>
-  </div>
-      <option value="candle_close">Bei Kerzenschluss</option>
-      <option value="tick">Sofort bei jedem Preis-Tick</option>
-    </select>
-  </div>
-      <option value="candle_close">Bei Kerzenschluss</option>
-      <option value="tick">Sofort bei jedem Preis-Tick</option>
-    </select>
-  </div>
-      <option value="false">Aus (nur Signal-Exit)</option>
-      <option value="true">An - fester $-Betrag</option>
-    </select>
-  </div>
-      <option value="false">Aus (nur Signal-Exit)</option>
-      <option value="true">An - fester $-Betrag</option>
-    </select>
-  </div>
-      <option value="false">Aus (normal)</option>
-      <option value="true">An (invertiert)</option>
-    </select>
-  </div>
-      <option value="any_signal">Sofort bei erstem Signal (1 Punkt oder Linie reicht)</option>
-      <option value="line_only">Nur wenn die Linie selbst dreht (Punkte ignoriert, Trade läuft länger)</option>
-    </select>
-  </div>
-      <option value="false">Aus (manueller Invertiert-Schalter gilt)</option>
-      <option value="true">An (Choppiness-Index entscheidet automatisch)</option>
-    </select>
-  </div>
   <div data-mode="supertrend_fusion"><label>Zeitrahmen</label>
     <select class="cfg" id="stf_resolution">
       <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
