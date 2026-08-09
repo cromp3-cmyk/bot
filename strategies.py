@@ -1758,11 +1758,21 @@ async def check_sg_signal(symbol, buy_entry, sell_entry, price):
 
 
 async def check_sg_tp(symbol, price):
-    """Ausstieg wie beim Grid: fester %/$-Abstand vom Ø-Einstieg, KEIN Flip-Exit - eine
-    nachgekaufte Position wird nie durch ein einzelnes Gegen-Signal komplett geschlossen."""
+    """Ausstieg: kein Flip-Exit, nur TP. Zwei Modi:
+    - '%': Preis-Abstand vom Ø-Einstieg (wie beim normalen Grid).
+    - '$': ECHTER Gewinn in Dollar auf die gesamte (ggf. mehrfach nachgekaufte) Position -
+      konsistent mit allen anderen Strategien im Bot (Trend-Meter, Chandelier etc.), NICHT ein
+      reiner Kursabstand wie beim alten Grid (der bei einem teuren Coin wie BTC nur Cent-Betraege
+      bedeuten wuerde)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if cfg.get("sg_tp_mode", "pct") == "usd":
+        entry = st["avg_entry_price"]
+        pnl_usd = (price - entry) * st["total_coin_size"] if st["position"] == "long" else (entry - price) * st["total_coin_size"]
+        if pnl_usd >= abs(cfg.get("sg_tp_step_usd", 5.0)):
+            await execute_exit(symbol, price, "TP")
         return
     tp_abs = compute_sg_tp_abs(st["avg_entry_price"], cfg)
     if st["position"] == "long" and price >= st["avg_entry_price"] + tp_abs:
@@ -3633,13 +3643,16 @@ def backtest_signal_grid(candles, cfg):
             buy_entry, sell_entry = sell_entry, buy_entry
 
         if position is not None:
-            direction = position["dir"]
-            tp_abs = compute_sg_tp_abs(position["entry"], cfg)
-            if direction == "long" and h[i] >= position["entry"] + tp_abs:
-                _bt_close_trade(trades, direction, position["entry"], position["entry"] + tp_abs, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-            elif direction == "short" and l[i] <= position["entry"] - tp_abs:
-                _bt_close_trade(trades, direction, position["entry"], position["entry"] - tp_abs, position["size"], i, position["entry_i"], "TP", ts=ts)
+            direction, entry, size = position["dir"], position["entry"], position["size"]
+            if cfg.get("sg_tp_mode", "pct") == "usd":
+                tp_usd = abs(cfg.get("sg_tp_step_usd", 5.0))
+                tp_price = entry + tp_usd / size if direction == "long" else entry - tp_usd / size
+            else:
+                tp_abs = compute_sg_tp_abs(entry, cfg)
+                tp_price = entry + tp_abs if direction == "long" else entry - tp_abs
+            hit_tp = (direction == "long" and h[i] >= tp_price) or (direction == "short" and l[i] <= tp_price)
+            if hit_tp:
+                _bt_close_trade(trades, direction, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
                 position = None
 
         if position is not None and (buy_entry or sell_entry):
