@@ -1517,6 +1517,56 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="supertrend_fusion" style="display:none;">
+<h2 class="section-title">🎲 SuperTrend-Fusion-Parameter-Sweep (ATR-Periode × Faktor)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet alle Kombinationen aus ATR-Periode und Faktor (Band-Breite) im angegebenen Bereich gegeneinander
+    (auf denselben, nur einmal geladenen Kerzen) und zeigt die besten zuerst. Average-Force-/Choppiness-Filter
+    bleiben dabei so eingestellt, wie sie aktuell im Formular stehen. Ergebnisse mit weniger als
+    5 Trades sind statistisch kaum aussagekräftig und werden nach unten sortiert, aber nicht versteckt.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="stf-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>ATR-Periode von</label><input type="number" step="1" id="stf-sweep-period-min" value="1" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" id="stf-sweep-period-max" value="10" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" id="stf-sweep-period-step" value="1" style="width:70px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Faktor von</label><input type="number" step="0.1" id="stf-sweep-factor-min" value="1.0" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" id="stf-sweep-factor-max" value="5.0" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.1" id="stf-sweep-factor-step" value="0.5" style="width:70px;"></div>
+    <button id="btn-stf-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="stf-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <table id="stf-sweep-results-table" style="display:none; margin-top:12px;">
+    <thead><tr>
+      <th class="sortable" data-key="stf_atr_period">ATR-Periode ⇅</th>
+      <th class="sortable" data-key="stf_factor">Faktor ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="stf-sweep-worst-title">📉 Die 20 schlechtesten Kombinationen (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="stf-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="stf_atr_period">ATR-Periode ⇅</th>
+      <th class="sortable" data-key="stf_factor">Faktor ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <h2 class="section-title">Letzte abgeschlossene Trades <span id="trades-debug" style="font-size:11px; color:var(--text-dim); font-weight:normal;"></span></h2>
 <div class="panel-card">
 <table id="trades-table"><thead><tr><th>Eröffnet</th><th>Geschlossen</th><th>Seite</th><th>Ø-Einstieg</th><th>Exit</th><th>Stufen</th><th>Grund</th><th>PnL $</th></tr></thead><tbody></tbody></table>
@@ -1742,6 +1792,12 @@ function resetBacktestUI() {
   document.getElementById('ut-sweep-worst-title').style.display = 'none';
   window.utSweepResultsData = [];
   window.utSweepWorstData = [];
+  document.getElementById('stf-sweep-status').innerText = '';
+  document.getElementById('stf-sweep-results-table').style.display = 'none';
+  document.getElementById('stf-sweep-worst-table').style.display = 'none';
+  document.getElementById('stf-sweep-worst-title').style.display = 'none';
+  window.stfSweepResultsData = [];
+  window.stfSweepWorstData = [];
 }
 
 document.getElementById('btn-sweep').addEventListener('click', async () => {
@@ -1870,6 +1926,69 @@ const utSweepRowHtml = (r) => `
   </tr>`;
 const renderUtSweepResults = makeSortableTable('ut-sweep-results-table', () => window.utSweepResultsData, utSweepRowHtml);
 const renderUtSweepWorst = makeSortableTable('ut-sweep-worst-table', () => window.utSweepWorstData, utSweepRowHtml);
+
+document.getElementById('btn-stf-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-stf-sweep');
+  const statusEl = document.getElementById('stf-sweep-status');
+  const tableEl = document.getElementById('stf-sweep-results-table');
+  const worstTableEl = document.getElementById('stf-sweep-worst-table');
+  const worstTitleEl = document.getElementById('stf-sweep-worst-title');
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('stf-sweep-days').value) || 30,
+    atr_period_min: parseInt(document.getElementById('stf-sweep-period-min').value),
+    atr_period_max: parseInt(document.getElementById('stf-sweep-period-max').value),
+    atr_period_step: parseInt(document.getElementById('stf-sweep-period-step').value),
+    factor_min: parseFloat(document.getElementById('stf-sweep-factor-min').value),
+    factor_max: parseFloat(document.getElementById('stf-sweep-factor-max').value),
+    factor_step: parseFloat(document.getElementById('stf-sweep-factor-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  tableEl.style.display = 'none';
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Kombinationen etwas dauern.`;
+  try {
+    const res = await fetch(`/api/stf_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
+      window.stfSweepResultsData = data.results || [];
+      window.stfSweepWorstData = data.worst_results || [];
+      renderStfSweepResults();
+      renderStfSweepWorst();
+      tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.stfSweepResultsData = [];
+window.stfSweepWorstData = [];
+const stfSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.stf_atr_period}</td>
+    <td>${r.stf_factor}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderStfSweepResults = makeSortableTable('stf-sweep-results-table', () => window.stfSweepResultsData, stfSweepRowHtml);
+const renderStfSweepWorst = makeSortableTable('stf-sweep-worst-table', () => window.stfSweepWorstData, stfSweepRowHtml);
+
 
 
 
@@ -2552,6 +2671,36 @@ async def handle_ut_sweep(request):
 
     result = await run_ut_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
                                        key_value_min, key_value_max, key_value_step)
+    return web.json_response(result)
+
+
+async def handle_stf_sweep(request):
+    """'Monte-Carlo'-Parametersweep fuer SuperTrend Fusion: testet einen Bereich von
+    ATR-Periode und Faktor gegeneinander und gibt die besten/schlechtesten Kombinationen
+    zurueck."""
+    from strategies import run_stf_param_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        atr_period_min = max(1, int(body.get("atr_period_min", 1)))
+        atr_period_max = max(atr_period_min, int(body.get("atr_period_max", 10)))
+        atr_period_step = max(1, int(body.get("atr_period_step", 1)))
+        factor_min = max(0.01, float(body.get("factor_min", 1.0)))
+        factor_max = max(factor_min, float(body.get("factor_max", 5.0)))
+        factor_step = max(0.01, float(body.get("factor_step", 0.5)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_stf_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
+                                        factor_min, factor_max, factor_step)
     return web.json_response(result)
 
 

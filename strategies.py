@@ -3074,6 +3074,59 @@ CE_SWEEP_MAX_COMBOS = 400
 CE_SWEEP_MIN_RELIABLE_TRADES = 5
 
 
+async def run_stf_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
+                               factor_min, factor_max, factor_step):
+    """'Monte-Carlo'-Parametersweep fuer SuperTrend Fusion: testet alle Kombinationen aus
+    ATR-Periode und Faktor (Band-Breite) im angegebenen Bereich gegeneinander. Gleiches Prinzip
+    wie beim Chandelier-/UT-Bot-Sweep - die Average-Force-/Choppiness-Filter bleiben dabei so
+    eingestellt, wie sie aktuell im Formular stehen."""
+    max_candles = BACKTEST_MAX_CANDLES["supertrend_fusion"]
+    resolution = cfg.get("stf_resolution", "5m")
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles)
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 100:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    periods = sorted(set(int(round(atr_period_min + i * atr_period_step))
+                          for i in range(int((atr_period_max - atr_period_min) / max(atr_period_step, 1e-9)) + 1)
+                          if atr_period_min + i * atr_period_step <= atr_period_max + 1e-9))
+    factors = sorted(set(round(factor_min + i * factor_step, 4)
+                          for i in range(int((factor_max - factor_min) / max(factor_step, 1e-9)) + 1)
+                          if factor_min + i * factor_step <= factor_max + 1e-9))
+    periods = [p for p in periods if p >= 1]
+    factors = [f for f in factors if f > 0]
+
+    total_combos = len(periods) * len(factors)
+    if total_combos == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
+    if total_combos > CE_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {CE_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    results = []
+    for period in periods:
+        for factor in factors:
+            cfg_copy = dict(cfg)
+            cfg_copy["stf_atr_period"] = period
+            cfg_copy["stf_factor"] = factor
+            trades = backtest_supertrend_fusion(candles, cfg_copy)
+            stats = summarize_backtest_trades(trades)
+            results.append({"stf_atr_period": period, "stf_factor": factor, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= CE_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
+        "min_reliable_trades": CE_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": total_combos,
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
+
+
 async def run_ut_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
                               key_value_min, key_value_max, key_value_step):
     """'Monte-Carlo'-Parametersweep fuer UT-Bot: testet alle Kombinationen aus ATR-Periode und
