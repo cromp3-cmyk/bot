@@ -384,7 +384,7 @@ def default_config():
         "sg_tp_step_pct": float(os.getenv("SG_TP_STEP_PCT", "1.0")),
         "sg_tp_step_usd": float(os.getenv("SG_TP_STEP_USD", "5")),
         "sg_max_nachkauf": int(os.getenv("SG_MAX_NACHKAUF", "0")),  # 0 = unbegrenzt, wie beim Grid
-        "sg_dca_cooldown_seconds": float(os.getenv("SG_DCA_COOLDOWN_SECONDS", "60")),
+        "sg_dca_cooldown_seconds": float(os.getenv("SG_DCA_COOLDOWN_SECONDS", "10")),
         "sg_invert_direction": os.getenv("SG_INVERT_DIRECTION", "false").lower() == "true",
     }
 
@@ -419,7 +419,7 @@ def default_state():
         "ut_highs": [], "ut_lows": [], "ut_closes": [], "ut_stop_value": None, "ut_sl_cooldown_until": 0.0,
         "wtc_highs": [], "wtc_lows": [], "wtc_closes": [], "wtc_wt1": None, "wtc_wt2": None, "wtc_sl_cooldown_until": 0.0,
         "wtc_stf_bias": None, "wtc_pending_direction": None, "wtc_last_dca_ts": 0.0,
-        "sg_highs": [], "sg_lows": [], "sg_closes": [], "sg_buy_dca": False, "sg_sell_dca": False, "sg_last_dca_ts": 0.0,
+        "sg_highs": [], "sg_lows": [], "sg_closes": [], "sg_last_dca_ts": 0.0,
         "rp_width_history": [], "rp_channel_width": None, "rp_avg_width": None,
         "rp_squeeze_active": False, "rp_squeeze_was_active": False,
         "binance_1s_buffer": [],
@@ -939,7 +939,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="chandelier_exit">Chandelier Exit (Trailing-Stop-Flip aus "MG signal", optional TP + SuperTrend-Richtungsfilter im höheren Zeitrahmen)</option>
       <option value="ut_bot">UT-Bot (ATR-Trailing-Stop, ein gemeinsames Band, optional SL+TP, invertierbar)</option>
       <option value="wavetrend_cross">WaveTrend-Cross (Cipher-B-WaveTrend-Kreuzung, optional nur überkauft/überverkauft, optional SL+TP, invertierbar, Richtungsmodus, Nachkauf, SuperTrend-Richtungsfilter)</option>
-      <option value="signal_grid">Signal-Grid (Grid-Mechanik: kein Flip-Exit, TP %/$ vom Ø-Einstieg, Nachkauf bis Stufen-Limit - ausgelöst durch WaveTrend- oder Z-Score-Signal statt Preisabstand)</option>
+      <option value="signal_grid">Signal-Grid (Grid-Mechanik: kein Flip-Exit, TP %/$ vom Ø-Einstieg, Nachkauf bei jedem neuen WaveTrend-/Z-Score-Signal in dieselbe Richtung, bis Stufen-Limit)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1571,7 +1571,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="signal_grid"><label>TP-Abstand (%)</label><input type="number" step="0.1" id="sg_tp_step_pct"></div>
   <div data-mode="signal_grid"><label>TP-Abstand ($)</label><input type="number" step="any" id="sg_tp_step_usd"></div>
   <div data-mode="signal_grid"><label>Max. Nachkauf-Stufen (0 = unbegrenzt)</label><input type="number" step="1" id="sg_max_nachkauf"></div>
-  <div data-mode="signal_grid"><label>Mindestabstand zwischen Nachkäufen (Sek.)</label><input type="number" step="1" id="sg_dca_cooldown_seconds"></div>
+  <div data-mode="signal_grid"><label>Mindestabstand zwischen Nachkäufen (Sek., Sicherheitsnetz - Nachkauf braucht ohnehin ein echtes neues Signal)</label><input type="number" step="1" id="sg_dca_cooldown_seconds"></div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
