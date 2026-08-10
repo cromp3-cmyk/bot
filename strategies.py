@@ -1381,40 +1381,78 @@ async def ut_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+def _ht_reset_state(st):
+    """Setzt alle SL-/TP-Preise und Teilverkauf-Flags zurueck (bei jedem vollstaendigen
+    Ausstieg noetig, egal ob durch SL, TP3 oder Flip-Exit)."""
+    st["ht_sl_price"] = None
+    st["ht_tp1_price"] = None
+    st["ht_tp2_price"] = None
+    st["ht_tp3_price"] = None
+    st["ht_tp1_done"] = False
+    st["ht_tp2_done"] = False
+
+
 async def check_ht_sl_tp(symbol, price):
-    """Prueft die bei Einstieg fest hinterlegten SL-/TP-Preise (siehe check_ht_entry) gegen den
-    aktuellen Preis - anders als bei Chandelier/UT-Bot sind das keine festen $-Betraege, sondern
-    ATR2-basierte Preisabstaende (Channel-Deviation fuer SL, Base-Risk fuer TP), die bei jedem
-    Einstieg neu aus dem dann aktuellen ATR2 berechnet werden."""
+    """Prueft SL sowie die drei Teilgewinn-Stufen TP1/TP2/TP3 aus dem Original-Skript (dort nur
+    Statistik-Tracking, hier als echte Teilverkaeufe umgesetzt - siehe Skript-Tooltip 'Base Risk':
+    'Sets SL distance from HalfTrend line, and TP1 distance from entry. TP2 is 2x, TP3 is 3x.'):
+    TP1 -> Teilverkauf (ht_tp1_close_pct % der Position) + SL springt auf Ø-Einstieg (Break-Even),
+    TP2 -> weiterer Teilverkauf (ht_tp2_close_pct % der VERBLEIBENDEN Position),
+    TP3 -> Rest vollstaendig schliessen. SL wird zuerst geprueft (hat Vorrang vor TP-Treffern im
+    selben Tick)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if st["position"] is None or price is None:
         return
-    sl_price = st.get("ht_sl_price")
-    tp_price = st.get("ht_tp_price")
-    if sl_price is None and tp_price is None:
-        return
     pos = st["position"]
-    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
-    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
-    if hit_sl:
-        debug_log(f"🚪 [{symbol}] HalfTrend SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
-        st["ht_sl_cooldown_until"] = time.time() + cfg.get("ht_sl_cooldown_seconds", 30)
-        st["ht_sl_price"] = None
-        st["ht_tp_price"] = None
-    elif hit_tp:
-        debug_log(f"🚪 [{symbol}] HalfTrend TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-        await execute_exit(symbol, price, "TP")
-        st["ht_sl_price"] = None
-        st["ht_tp_price"] = None
+
+    sl_price = st.get("ht_sl_price")
+    if sl_price is not None:
+        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+        if hit_sl:
+            reason = "BREAKEVEN" if st.get("ht_tp1_done") else "SL"
+            debug_log(f"🚪 [{symbol}] HalfTrend {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+            await execute_exit(symbol, price, reason)
+            st["ht_sl_cooldown_until"] = time.time() + cfg.get("ht_sl_cooldown_seconds", 30)
+            _ht_reset_state(st)
+            return
+
+    if not cfg.get("ht_tp_enabled", True):
+        return
+
+    if not st.get("ht_tp1_done") and st.get("ht_tp1_price") is not None:
+        tp1_price = st["ht_tp1_price"]
+        if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
+            fraction = cfg.get("ht_tp1_close_pct", 33) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+            if ok:
+                st["ht_tp1_done"] = True
+                st["ht_sl_price"] = st["avg_entry_price"]  # Break-Even
+                debug_log(f"📡 [{symbol}] HalfTrend TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'],4)}) gesetzt")
+        return
+
+    if not st.get("ht_tp2_done") and st.get("ht_tp2_price") is not None:
+        tp2_price = st["ht_tp2_price"]
+        if (pos == "long" and price >= tp2_price) or (pos == "short" and price <= tp2_price):
+            fraction = cfg.get("ht_tp2_close_pct", 50) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP2")
+            if ok:
+                st["ht_tp2_done"] = True
+        return
+
+    tp3_price = st.get("ht_tp3_price")
+    if tp3_price is not None:
+        if (pos == "long" and price >= tp3_price) or (pos == "short" and price <= tp3_price):
+            debug_log(f"🚪 [{symbol}] HalfTrend TP3 (Rest): {pos.upper()} @ {price}")
+            await execute_exit(symbol, price, "TP3")
+            _ht_reset_state(st)
 
 
 async def check_ht_entry(symbol, buy_signal, sell_signal, price, atr2_now):
-    """Einstieg beim HalfTrend-Flip-Signal. Setzt bei erfolgreichem Einstieg direkt die
-    SL-/TP-Preise fest (ATR2 zum Einstiegszeitpunkt * Channel-Deviation bzw. Base-Risk-
-    Multiplikator) - diese bleiben bis zum Ausstieg unveraendert (kein Nachziehen), analog zum
-    Original-Skript, das SL/TP1-3 ebenfalls einmalig beim Signal festlegt."""
+    """Einstieg beim HalfTrend-Flip-Signal. Setzt bei erfolgreichem Einstieg SL sowie alle drei
+    TP-Stufen fest (ATR2 zum Einstiegszeitpunkt * Channel-Deviation bzw. Base-Risk-Multiplikator,
+    TP2 = 2x, TP3 = 3x Base-Risk-Abstand) - bleiben bis zum jeweiligen Treffer unveraendert
+    (kein Nachziehen), analog zum Original-Skript."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or st["position"] is not None or price is None:
@@ -1428,21 +1466,25 @@ async def check_ht_entry(symbol, buy_signal, sell_signal, price, atr2_now):
     await execute_entry(symbol, direction, price, is_add_on=False)
     if st["position"] is None:
         return  # Einstieg (z.B. dry_run-Fehler) hat nicht geklappt
+    _ht_reset_state(st)
     if cfg.get("ht_sl_enabled", True) and atr2_now is not None:
         dist_sl = atr2_now * cfg.get("ht_channel_deviation", 2.0)
         st["ht_sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
-    else:
-        st["ht_sl_price"] = None
     if cfg.get("ht_tp_enabled", True) and atr2_now is not None:
-        dist_tp = atr2_now * cfg.get("ht_base_risk_mult", 3.0)
-        st["ht_tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
-    else:
-        st["ht_tp_price"] = None
+        dist = atr2_now * cfg.get("ht_base_risk_mult", 3.0)
+        if direction == "long":
+            st["ht_tp1_price"] = price + dist
+            st["ht_tp2_price"] = price + dist * 2
+            st["ht_tp3_price"] = price + dist * 3
+        else:
+            st["ht_tp1_price"] = price - dist
+            st["ht_tp2_price"] = price - dist * 2
+            st["ht_tp3_price"] = price - dist * 3
 
 
 async def check_ht_exit(symbol, buy_signal, sell_signal, price):
-    """Ausstieg immer beim Gegen-Signal - Flip-System wie Chandelier/UT-Bot, unabhaengig von
-    SL/TP (die laufen separat ueber check_ht_sl_tp)."""
+    """Ausstieg immer beim Gegen-Signal - Flip-System wie Chandelier/UT-Bot, unabhaengig davon,
+    welche TP-Stufe gerade aktiv ist (schliesst dann den kompletten Rest der Position)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or st["position"] is None or price is None:
@@ -1450,13 +1492,11 @@ async def check_ht_exit(symbol, buy_signal, sell_signal, price):
     if st["position"] == "long" and sell_signal:
         debug_log(f"🚪 [{symbol}] HalfTrend Exit: LONG @ {price} (Sell-Signal)")
         await execute_exit(symbol, price, "HT-FLIP-EXIT")
-        st["ht_sl_price"] = None
-        st["ht_tp_price"] = None
+        _ht_reset_state(st)
     elif st["position"] == "short" and buy_signal:
         debug_log(f"🚪 [{symbol}] HalfTrend Exit: SHORT @ {price} (Buy-Signal)")
         await execute_exit(symbol, price, "HT-FLIP-EXIT")
-        st["ht_sl_price"] = None
-        st["ht_tp_price"] = None
+        _ht_reset_state(st)
 
 
 async def ht_poll_loop(symbol):
@@ -2935,7 +2975,9 @@ def _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup):
     """Kern-Simulation fuer HalfTrend, getrennt von der Trend-/ATR2-Berechnung (compute_halftrend)
     damit der Parameter-Sweep trend/atr2 nur EINMAL pro Amplitude berechnen muss und Channel-
     Deviation/Base-Risk-Kombinationen rein rechnerisch (schnell) durchtestet - wie beim Chandelier-
-    Exit-Sweep, der Kerzen auch nur einmal laedt."""
+    Exit-Sweep, der Kerzen auch nur einmal laedt. Bildet die drei TP-Stufen des Original-Skripts
+    als echte Teilverkaeufe nach (dort nur Statistik-Tracking): TP1 -> Teilverkauf + SL auf
+    Break-Even, TP2 -> weiterer Teilverkauf, TP3 -> Rest schliessen. Analog zu backtest_fib_reversal."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
@@ -2943,10 +2985,12 @@ def _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup):
     base_risk_mult = cfg["ht_base_risk_mult"]
     tp_enabled = cfg.get("ht_tp_enabled", True)
     sl_enabled = cfg.get("ht_sl_enabled", True)
+    tp1_frac = cfg.get("ht_tp1_close_pct", 33) / 100
+    tp2_frac = cfg.get("ht_tp2_close_pct", 50) / 100
     sl_cooldown_ms = cfg.get("ht_sl_cooldown_seconds", 30) * 1000
     invert = cfg.get("ht_invert_direction", False)
 
-    position = None
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp1_price","tp2_price","tp3_price","tp1_done","tp2_done"}
     trades = []
     sl_cooldown_until_ts = None
 
@@ -2954,17 +2998,34 @@ def _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup):
         price = c[i]
 
         if position is not None:
-            pdir, entry, size = position["dir"], position["entry"], position["size"]
-            sl_price, tp_price = position.get("sl_price"), position.get("tp_price")
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position.get("sl_price")
             hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
             if hit_sl:
-                _bt_close_trade(trades, pdir, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
+                reason = "BREAKEVEN" if position["tp1_done"] else "SL"
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, pdir, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
-                position = None
+            elif tp_enabled and not position["tp1_done"] and position.get("tp1_price") is not None:
+                tp1_price = position["tp1_price"]
+                if (pdir == "long" and h[i] >= tp1_price) or (pdir == "short" and l[i] <= tp1_price):
+                    close_size = position["size"] * tp1_frac
+                    _bt_close_trade(trades, pdir, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                    position["size"] -= close_size
+                    position["tp1_done"] = True
+                    position["sl_price"] = entry  # Break-Even
+            elif tp_enabled and position["tp1_done"] and not position["tp2_done"] and position.get("tp2_price") is not None:
+                tp2_price = position["tp2_price"]
+                if (pdir == "long" and h[i] >= tp2_price) or (pdir == "short" and l[i] <= tp2_price):
+                    close_size = position["size"] * tp2_frac
+                    _bt_close_trade(trades, pdir, entry, tp2_price, close_size, i, position["entry_i"], "TP2", ts=ts)
+                    position["size"] -= close_size
+                    position["tp2_done"] = True
+            elif tp_enabled and position["tp1_done"] and position["tp2_done"] and position.get("tp3_price") is not None:
+                tp3_price = position["tp3_price"]
+                if (pdir == "long" and h[i] >= tp3_price) or (pdir == "short" and l[i] <= tp3_price):
+                    _bt_close_trade(trades, pdir, entry, tp3_price, position["size"], i, position["entry_i"], "TP3", ts=ts)
+                    position = None
 
         buy_signal = trend[i] == 0 and trend[i - 1] == 1
         sell_signal = trend[i] == 1 and trend[i - 1] == 0
@@ -2981,10 +3042,17 @@ def _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup):
             direction = "long" if buy_signal else "short"
             size = (margin * leverage) / price
             dist_sl = atr2[i] * channel_deviation if sl_enabled else None
-            dist_tp = atr2[i] * base_risk_mult if tp_enabled else None
             sl_price = (price - dist_sl if direction == "long" else price + dist_sl) if dist_sl is not None else None
-            tp_price = (price + dist_tp if direction == "long" else price - dist_tp) if dist_tp is not None else None
-            position = {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+            tp1_price = tp2_price = tp3_price = None
+            if tp_enabled:
+                dist = atr2[i] * base_risk_mult
+                if direction == "long":
+                    tp1_price, tp2_price, tp3_price = price + dist, price + dist * 2, price + dist * 3
+                else:
+                    tp1_price, tp2_price, tp3_price = price - dist, price - dist * 2, price - dist * 3
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
+                        "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price, "tp3_price": tp3_price,
+                        "tp1_done": False, "tp2_done": False}
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
@@ -2993,8 +3061,8 @@ def _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup):
 
 
 def backtest_halftrend(candles, cfg):
-    """Backtest laeuft immer 'kerzenbasiert'. Intrabar-Pruefung fuer SL/TP wie bei den anderen
-    Strategien - hier sind SL/TP-Abstaende aber ATR2-basiert (Channel-Deviation bzw. Base-Risk-
+    """Backtest laeuft immer 'kerzenbasiert'. Intrabar-Pruefung fuer SL/TP1/TP2/TP3 wie bei den
+    anderen Strategien - hier sind die Abstaende ATR2-basiert (Channel-Deviation bzw. Base-Risk-
     Multiplikator), nicht fest in $, und werden bei jedem Einstieg neu aus dem dann aktuellen
     ATR2 berechnet (siehe _simulate_halftrend_trades)."""
     h, l, c = candles[2], candles[3], candles[4]

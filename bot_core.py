@@ -311,6 +311,8 @@ def default_config():
         "ht_exit_trigger": os.getenv("HT_EXIT_TRIGGER", "candle_close"),
         "ht_invert_direction": os.getenv("HT_INVERT_DIRECTION", "false").lower() == "true",
         "ht_tp_enabled": os.getenv("HT_TP_ENABLED", "true").lower() == "true",
+        "ht_tp1_close_pct": float(os.getenv("HT_TP1_CLOSE_PCT", "33")),
+        "ht_tp2_close_pct": float(os.getenv("HT_TP2_CLOSE_PCT", "50")),
         "ht_sl_enabled": os.getenv("HT_SL_ENABLED", "true").lower() == "true",
         "ht_sl_cooldown_seconds": float(os.getenv("HT_SL_COOLDOWN_SECONDS", "30")),
         # WaveTrend-Cross (portiert aus dem Cipher-B-WaveTrend-Baustein des "Wave Cipher SMC
@@ -456,7 +458,7 @@ PERSISTED_STATE_KEYS = [
     "position_opened_at", "last_entry_price", "stats", "trade_log",
     "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
     "rp_breakeven_triggered", "obi_breakeven_triggered",
-    "ht_sl_price", "ht_tp_price",
+    "ht_sl_price", "ht_tp1_price", "ht_tp2_price", "ht_tp3_price", "ht_tp1_done", "ht_tp2_done",
 ]
 
 
@@ -1248,13 +1250,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An (invertiert)</option>
     </select>
   </div>
-  <div data-mode="halftrend"><label>Take-Profit (ATR2 × Base Risk)</label>
+  <div data-mode="halftrend"><label>Take-Profit-Stufen (TP1/TP2/TP3, ATR2 × Base Risk 1x/2x/3x)</label>
     <select class="cfg" id="ht_tp_enabled">
       <option value="false">Aus (nur Gegen-Signal-Exit)</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="halftrend"><label>Stop-Loss (ATR2 × Channel Deviation)</label>
+  <div data-mode="halftrend"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" id="ht_tp1_close_pct"></div>
+  <div data-mode="halftrend"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" id="ht_tp2_close_pct"></div>
+  <div data-mode="halftrend"><label>Stop-Loss (ATR2 × Channel Deviation, springt nach TP1 auf Break-Even)</label>
     <select class="cfg" id="ht_sl_enabled">
       <option value="false">Aus (nur Gegen-Signal-Exit)</option>
       <option value="true">An</option>
@@ -2234,7 +2238,8 @@ async function refresh() {
     <div class="card"><div class="label">Chandelier SuperTrend-Filter (${data.config.ce_stf_filter_enabled?'an':'aus'})</div><div class="value ${data.ce_stf_bias==='long'?'green':data.ce_stf_bias==='short'?'red':''}">${data.ce_stf_bias ?? '-'} ${data.ce_pending_direction?`⏸️ wartet auf ${data.ce_pending_direction}`:''}</div></div>
     <div class="card"><div class="label">UT-Bot Stop-Linie (${data.config.entry_mode==='ut_bot'?'aktiv':'inaktiv'})</div><div class="value">${data.ut_stop_value!=null?data.ut_stop_value.toFixed(4):'-'}</div></div>
     <div class="card"><div class="label">HalfTrend (${data.config.entry_mode==='halftrend'?'aktiv':'inaktiv'})</div><div class="value ${data.ht_direction===1?'green':data.ht_direction===-1?'red':''}">${data.ht_direction===1?'LONG-Signal':data.ht_direction===-1?'SHORT-Signal':'-'}</div></div>
-    <div class="card"><div class="label">HalfTrend SL / TP</div><div class="value">${data.ht_sl_price!=null?data.ht_sl_price.toFixed(4):'-'} / ${data.ht_tp_price!=null?data.ht_tp_price.toFixed(4):'-'}</div></div>
+    <div class="card"><div class="label">HalfTrend SL</div><div class="value">${data.ht_sl_price!=null?data.ht_sl_price.toFixed(4):'-'}${data.ht_tp1_done?' (Break-Even)':''}</div></div>
+    <div class="card"><div class="label">HalfTrend TP1 / TP2 / TP3</div><div class="value">${data.ht_tp1_price!=null?data.ht_tp1_price.toFixed(4):'-'}${data.ht_tp1_done?'✓':''} / ${data.ht_tp2_price!=null?data.ht_tp2_price.toFixed(4):'-'}${data.ht_tp2_done?'✓':''} / ${data.ht_tp3_price!=null?data.ht_tp3_price.toFixed(4):'-'}</div></div>
     <div class="card"><div class="label">WaveTrend wt1 / wt2 (${data.config.entry_mode==='wavetrend_cross'?'aktiv':'inaktiv'})</div><div class="value">${data.wtc_wt1!=null?data.wtc_wt1.toFixed(2):'-'} / ${data.wtc_wt2!=null?data.wtc_wt2.toFixed(2):'-'}</div></div>
     <div class="card"><div class="label">WaveTrend SuperTrend-Filter (${data.config.wtc_stf_filter_enabled?'an':'aus'})</div><div class="value ${data.wtc_stf_bias==='long'?'green':data.wtc_stf_bias==='short'?'red':''}">${data.wtc_stf_bias ?? '-'} ${data.wtc_pending_direction?`⏸️ wartet auf ${data.wtc_pending_direction}`:''}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
@@ -2353,6 +2358,8 @@ async function refresh() {
     document.getElementById('ht_exit_trigger').value = data.config.ht_exit_trigger;
     document.getElementById('ht_invert_direction').value = String(data.config.ht_invert_direction);
     document.getElementById('ht_tp_enabled').value = String(data.config.ht_tp_enabled);
+    document.getElementById('ht_tp1_close_pct').value = data.config.ht_tp1_close_pct;
+    document.getElementById('ht_tp2_close_pct').value = data.config.ht_tp2_close_pct;
     document.getElementById('ht_sl_enabled').value = String(data.config.ht_sl_enabled);
     document.getElementById('ht_sl_cooldown_seconds').value = data.config.ht_sl_cooldown_seconds;
     document.getElementById('wtc_resolution').value = data.config.wtc_resolution;
@@ -2596,6 +2603,8 @@ function buildConfigPayload() {
     ht_exit_trigger: document.getElementById('ht_exit_trigger').value,
     ht_invert_direction: document.getElementById('ht_invert_direction').value === 'true',
     ht_tp_enabled: document.getElementById('ht_tp_enabled').value === 'true',
+    ht_tp1_close_pct: parseFloat(document.getElementById('ht_tp1_close_pct').value),
+    ht_tp2_close_pct: parseFloat(document.getElementById('ht_tp2_close_pct').value),
     ht_sl_enabled: document.getElementById('ht_sl_enabled').value === 'true',
     ht_sl_cooldown_seconds: parseFloat(document.getElementById('ht_sl_cooldown_seconds').value),
     wtc_resolution: document.getElementById('wtc_resolution').value,
@@ -2673,7 +2682,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_sl_cooldown_seconds','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','wtc_direction_mode','wtc_dca_enabled','wtc_dca_max_entries','wtc_dca_cooldown_seconds','wtc_stf_filter_enabled','wtc_stf_resolution','sg_tp_step_pct','sg_tp_step_usd','sg_max_nachkauf','sg_dca_cooldown_seconds','sg_invert_direction','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','wtc_direction_mode','wtc_dca_enabled','wtc_dca_max_entries','wtc_dca_cooldown_seconds','wtc_stf_filter_enabled','wtc_stf_resolution','sg_tp_step_pct','sg_tp_step_usd','sg_max_nachkauf','sg_dca_cooldown_seconds','sg_invert_direction','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2736,7 +2745,9 @@ async def handle_status(request):
         "ce_direction": st.get("ce_direction"), "ce_stf_bias": st.get("ce_stf_bias"),
         "ce_pending_direction": st.get("ce_pending_direction"),
         "ut_stop_value": st.get("ut_stop_value"),
-        "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"), "ht_tp_price": st.get("ht_tp_price"),
+        "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"),
+        "ht_tp1_price": st.get("ht_tp1_price"), "ht_tp2_price": st.get("ht_tp2_price"), "ht_tp3_price": st.get("ht_tp3_price"),
+        "ht_tp1_done": st.get("ht_tp1_done"), "ht_tp2_done": st.get("ht_tp2_done"),
         "wtc_wt1": st.get("wtc_wt1"), "wtc_wt2": st.get("wtc_wt2"),
         "wtc_stf_bias": st.get("wtc_stf_bias"), "wtc_pending_direction": st.get("wtc_pending_direction"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
@@ -2784,7 +2795,7 @@ async def handle_config_update(request):
                 "ut_invert_direction", "ut_tp_enabled", "ut_tp_usd", "ut_sl_enabled", "ut_sl_usd", "ut_sl_cooldown_seconds",
                 "ht_resolution", "ht_amplitude", "ht_channel_deviation", "ht_base_risk_mult",
                 "ht_entry_trigger", "ht_exit_trigger", "ht_invert_direction",
-                "ht_tp_enabled", "ht_sl_enabled", "ht_sl_cooldown_seconds",
+                "ht_tp_enabled", "ht_tp1_close_pct", "ht_tp2_close_pct", "ht_sl_enabled", "ht_sl_cooldown_seconds",
                 "wtc_resolution", "wtc_channel_length", "wtc_average_length", "wtc_ma_length",
                 "wtc_require_obos", "wtc_ob_level", "wtc_os_level", "wtc_entry_trigger", "wtc_exit_trigger",
                 "wtc_invert_direction", "wtc_tp_enabled", "wtc_tp_usd", "wtc_sl_enabled", "wtc_sl_usd", "wtc_sl_cooldown_seconds",
