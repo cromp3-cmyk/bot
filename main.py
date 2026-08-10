@@ -13,12 +13,14 @@ from bot_core import (
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reset,
     handle_manual_trade, handle_backtest, handle_ce_sweep, handle_ut_sweep, handle_stf_sweep,
+    handle_ht_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
     trading_loop, fib_reversal_poll_loop,
     range_profile_poll_loop, binance_1s_poll_loop,
     stf_poll_loop, ce_poll_loop, ut_poll_loop, wtc_poll_loop, sg_poll_loop,
+    ht_poll_loop,
 )
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
@@ -41,6 +43,7 @@ async def start_web_server():
     app.router.add_post("/api/ce_sweep", handle_ce_sweep)
     app.router.add_post("/api/ut_sweep", handle_ut_sweep)
     app.router.add_post("/api/stf_sweep", handle_stf_sweep)
+    app.router.add_post("/api/ht_sweep", handle_ht_sweep)
     app.router.add_post("/api/reset", handle_reset)
     app.router.add_get("/copytrading", handle_ct_index)
     app.router.add_get("/api/ct/status", handle_ct_status)
@@ -87,6 +90,7 @@ async def main():
         *[ut_poll_loop(s) for s in SYMBOLS],
         *[wtc_poll_loop(s) for s in SYMBOLS],
         *[sg_poll_loop(s) for s in SYMBOLS],
+        *[ht_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),

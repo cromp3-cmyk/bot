@@ -298,6 +298,21 @@ def default_config():
         "ut_sl_enabled": os.getenv("UT_SL_ENABLED", "false").lower() == "true",
         "ut_sl_usd": float(os.getenv("UT_SL_USD", "3")),
         "ut_sl_cooldown_seconds": float(os.getenv("UT_SL_COOLDOWN_SECONDS", "30")),
+        # HalfTrend (portiert aus "HalfTrend Long/Short Signal Engine [BigBeluga]", Basis:
+        # everget's HalfTrend-Indikator): ATR-Periode ist im Original fest auf 100. Channel-
+        # Deviation und Base-Risk-Multiplikator sind hier (anders als im rein optischen Original)
+        # echte SL-/TP-Abstands-Multiplikatoren (in ATR2-Vielfachen), damit beide Parameter
+        # tatsaechlich das Backtest-/Sweep-Ergebnis beeinflussen:
+        "ht_resolution": os.getenv("HT_RESOLUTION", "5m"),
+        "ht_amplitude": int(os.getenv("HT_AMPLITUDE", "20")),
+        "ht_channel_deviation": float(os.getenv("HT_CHANNEL_DEVIATION", "2.0")),
+        "ht_base_risk_mult": float(os.getenv("HT_BASE_RISK_MULT", "3.0")),
+        "ht_entry_trigger": os.getenv("HT_ENTRY_TRIGGER", "candle_close"),
+        "ht_exit_trigger": os.getenv("HT_EXIT_TRIGGER", "candle_close"),
+        "ht_invert_direction": os.getenv("HT_INVERT_DIRECTION", "false").lower() == "true",
+        "ht_tp_enabled": os.getenv("HT_TP_ENABLED", "true").lower() == "true",
+        "ht_sl_enabled": os.getenv("HT_SL_ENABLED", "true").lower() == "true",
+        "ht_sl_cooldown_seconds": float(os.getenv("HT_SL_COOLDOWN_SECONDS", "30")),
         # WaveTrend-Cross (portiert aus dem Cipher-B-WaveTrend-Baustein des "Wave Cipher SMC
         # Flow System"):
         "wtc_resolution": os.getenv("WTC_RESOLUTION", "5m"),
@@ -441,6 +456,7 @@ PERSISTED_STATE_KEYS = [
     "position_opened_at", "last_entry_price", "stats", "trade_log",
     "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
     "rp_breakeven_triggered", "obi_breakeven_triggered",
+    "ht_sl_price", "ht_tp_price",
 ]
 
 
@@ -866,6 +882,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="supertrend_fusion">SuperTrend Fusion (ATR-SuperTrend + Average-Force-Momentum + Choppiness-Filter, optional SL+TP)</option>
       <option value="chandelier_exit">Chandelier Exit (Trailing-Stop-Flip aus "MG signal", optional TP + SuperTrend-Richtungsfilter im höheren Zeitrahmen)</option>
       <option value="ut_bot">UT-Bot (ATR-Trailing-Stop, ein gemeinsames Band, optional SL+TP, invertierbar)</option>
+      <option value="halftrend">HalfTrend (Swing-Hoch/-Tief-Trendwechsel, optional ATR2-basiertes SL+TP, invertierbar)</option>
       <option value="wavetrend_cross">WaveTrend-Cross (Cipher-B-WaveTrend-Kreuzung, optional nur überkauft/überverkauft, optional SL+TP, invertierbar, Richtungsmodus, Nachkauf, SuperTrend-Richtungsfilter)</option>
       <option value="signal_grid">Signal-Grid (Grid-Mechanik: kein Flip-Exit, TP %/$ vom Ø-Einstieg, Nachkauf bei jedem neuen WaveTrend-/Z-Score-Signal in dieselbe Richtung, bis Stufen-Limit)</option>
     </select>
@@ -1197,6 +1214,53 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="ut_bot"><label>SL-Betrag ($, nur wenn SL an)</label><input type="number" step="any" id="ut_sl_usd"></div>
   <div data-mode="ut_bot"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ut_sl_cooldown_seconds"></div>
+  <div data-mode="halftrend"><label>Zeitrahmen</label>
+    <select class="cfg" id="ht_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="halftrend"><label>Amplitude (Swing-Lookback)</label><input type="number" step="1" id="ht_amplitude"></div>
+  <div data-mode="halftrend"><label>Channel Deviation (SL-Abstand in ATR2-Vielfachen)</label><input type="number" step="0.1" id="ht_channel_deviation"></div>
+  <div data-mode="halftrend"><label>Base Risk (TP-Abstand in ATR2-Vielfachen)</label><input type="number" step="0.1" id="ht_base_risk_mult"></div>
+  <div data-mode="halftrend"><label>Einstieg auslösen</label>
+    <select class="cfg" id="ht_entry_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="halftrend"><label>Ausstieg auslösen</label>
+    <select class="cfg" id="ht_exit_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="halftrend"><label>Richtung invertieren (Kontra-Modus)</label>
+    <select class="cfg" id="ht_invert_direction">
+      <option value="false">Aus (normal)</option>
+      <option value="true">An (invertiert)</option>
+    </select>
+  </div>
+  <div data-mode="halftrend"><label>Take-Profit (ATR2 × Base Risk)</label>
+    <select class="cfg" id="ht_tp_enabled">
+      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="halftrend"><label>Stop-Loss (ATR2 × Channel Deviation)</label>
+    <select class="cfg" id="ht_sl_enabled">
+      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="halftrend"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ht_sl_cooldown_seconds"></div>
   <div data-mode="wavetrend_cross"><label>Zeitrahmen</label>
     <select class="cfg" id="wtc_resolution">
       <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -1517,6 +1581,64 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="halftrend" style="display:none;">
+<h2 class="section-title">🎲 HalfTrend-Parameter-Sweep (Amplitude × Channel Deviation × Base Risk)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet alle Kombinationen aus Amplitude (Swing-Lookback), Channel Deviation (SL-Abstand) und
+    Base Risk (TP-Abstand) im angegebenen Bereich gegeneinander (Kerzen werden nur einmal geladen,
+    Trend/ATR2 nur einmal pro Amplitude neu berechnet) und zeigt die besten zuerst. Ergebnisse mit
+    weniger als 5 Trades sind statistisch kaum aussagekräftig und werden nach unten sortiert, aber
+    nicht versteckt.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="ht-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Amplitude von</label><input type="number" step="1" id="ht-sweep-amp-min" value="10" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" id="ht-sweep-amp-max" value="40" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" id="ht-sweep-amp-step" value="2" style="width:70px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Channel Dev von</label><input type="number" step="0.1" id="ht-sweep-cd-min" value="1.0" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" id="ht-sweep-cd-max" value="4.0" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.1" id="ht-sweep-cd-step" value="0.5" style="width:70px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Base Risk von</label><input type="number" step="0.1" id="ht-sweep-br-min" value="1.0" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" id="ht-sweep-br-max" value="5.0" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.5" id="ht-sweep-br-step" value="0.5" style="width:70px;"></div>
+    <button id="btn-ht-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="ht-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <table id="ht-sweep-results-table" style="display:none; margin-top:12px;">
+    <thead><tr>
+      <th class="sortable" data-key="ht_amplitude">Amplitude ⇅</th>
+      <th class="sortable" data-key="ht_channel_deviation">Channel Dev ⇅</th>
+      <th class="sortable" data-key="ht_base_risk_mult">Base Risk ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ht-sweep-worst-title">📉 Die 20 schlechtesten Kombinationen (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="ht-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="ht_amplitude">Amplitude ⇅</th>
+      <th class="sortable" data-key="ht_channel_deviation">Channel Dev ⇅</th>
+      <th class="sortable" data-key="ht_base_risk_mult">Base Risk ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="supertrend_fusion" style="display:none;">
 <h2 class="section-title">🎲 SuperTrend-Fusion-Parameter-Sweep (ATR-Periode × Faktor)</h2>
 <div class="panel-card">
@@ -1792,6 +1914,12 @@ function resetBacktestUI() {
   document.getElementById('ut-sweep-worst-title').style.display = 'none';
   window.utSweepResultsData = [];
   window.utSweepWorstData = [];
+  document.getElementById('ht-sweep-status').innerText = '';
+  document.getElementById('ht-sweep-results-table').style.display = 'none';
+  document.getElementById('ht-sweep-worst-table').style.display = 'none';
+  document.getElementById('ht-sweep-worst-title').style.display = 'none';
+  window.htSweepResultsData = [];
+  window.htSweepWorstData = [];
   document.getElementById('stf-sweep-status').innerText = '';
   document.getElementById('stf-sweep-results-table').style.display = 'none';
   document.getElementById('stf-sweep-worst-table').style.display = 'none';
@@ -1927,6 +2055,72 @@ const utSweepRowHtml = (r) => `
 const renderUtSweepResults = makeSortableTable('ut-sweep-results-table', () => window.utSweepResultsData, utSweepRowHtml);
 const renderUtSweepWorst = makeSortableTable('ut-sweep-worst-table', () => window.utSweepWorstData, utSweepRowHtml);
 
+document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-ht-sweep');
+  const statusEl = document.getElementById('ht-sweep-status');
+  const tableEl = document.getElementById('ht-sweep-results-table');
+  const worstTableEl = document.getElementById('ht-sweep-worst-table');
+  const worstTitleEl = document.getElementById('ht-sweep-worst-title');
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('ht-sweep-days').value) || 30,
+    amplitude_min: parseInt(document.getElementById('ht-sweep-amp-min').value),
+    amplitude_max: parseInt(document.getElementById('ht-sweep-amp-max').value),
+    amplitude_step: parseInt(document.getElementById('ht-sweep-amp-step').value),
+    channel_dev_min: parseFloat(document.getElementById('ht-sweep-cd-min').value),
+    channel_dev_max: parseFloat(document.getElementById('ht-sweep-cd-max').value),
+    channel_dev_step: parseFloat(document.getElementById('ht-sweep-cd-step').value),
+    base_risk_min: parseFloat(document.getElementById('ht-sweep-br-min').value),
+    base_risk_max: parseFloat(document.getElementById('ht-sweep-br-max').value),
+    base_risk_step: parseFloat(document.getElementById('ht-sweep-br-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  tableEl.style.display = 'none';
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Kombinationen etwas dauern.`;
+  try {
+    const res = await fetch(`/api/ht_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
+      window.htSweepResultsData = data.results || [];
+      window.htSweepWorstData = data.worst_results || [];
+      renderHtSweepResults();
+      renderHtSweepWorst();
+      tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.htSweepResultsData = [];
+window.htSweepWorstData = [];
+const htSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.ht_amplitude}</td>
+    <td>${r.ht_channel_deviation}</td>
+    <td>${r.ht_base_risk_mult}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderHtSweepResults = makeSortableTable('ht-sweep-results-table', () => window.htSweepResultsData, htSweepRowHtml);
+const renderHtSweepWorst = makeSortableTable('ht-sweep-worst-table', () => window.htSweepWorstData, htSweepRowHtml);
+
 document.getElementById('btn-stf-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-stf-sweep');
   const statusEl = document.getElementById('stf-sweep-status');
@@ -2039,6 +2233,8 @@ async function refresh() {
     <div class="card"><div class="label">Chandelier Exit (${data.config.entry_mode==='chandelier_exit'?'aktiv':'inaktiv'})</div><div class="value ${data.ce_direction===1?'green':data.ce_direction===-1?'red':''}">${data.ce_direction===1?'LONG-Signal':data.ce_direction===-1?'SHORT-Signal':'-'}</div></div>
     <div class="card"><div class="label">Chandelier SuperTrend-Filter (${data.config.ce_stf_filter_enabled?'an':'aus'})</div><div class="value ${data.ce_stf_bias==='long'?'green':data.ce_stf_bias==='short'?'red':''}">${data.ce_stf_bias ?? '-'} ${data.ce_pending_direction?`⏸️ wartet auf ${data.ce_pending_direction}`:''}</div></div>
     <div class="card"><div class="label">UT-Bot Stop-Linie (${data.config.entry_mode==='ut_bot'?'aktiv':'inaktiv'})</div><div class="value">${data.ut_stop_value!=null?data.ut_stop_value.toFixed(4):'-'}</div></div>
+    <div class="card"><div class="label">HalfTrend (${data.config.entry_mode==='halftrend'?'aktiv':'inaktiv'})</div><div class="value ${data.ht_direction===1?'green':data.ht_direction===-1?'red':''}">${data.ht_direction===1?'LONG-Signal':data.ht_direction===-1?'SHORT-Signal':'-'}</div></div>
+    <div class="card"><div class="label">HalfTrend SL / TP</div><div class="value">${data.ht_sl_price!=null?data.ht_sl_price.toFixed(4):'-'} / ${data.ht_tp_price!=null?data.ht_tp_price.toFixed(4):'-'}</div></div>
     <div class="card"><div class="label">WaveTrend wt1 / wt2 (${data.config.entry_mode==='wavetrend_cross'?'aktiv':'inaktiv'})</div><div class="value">${data.wtc_wt1!=null?data.wtc_wt1.toFixed(2):'-'} / ${data.wtc_wt2!=null?data.wtc_wt2.toFixed(2):'-'}</div></div>
     <div class="card"><div class="label">WaveTrend SuperTrend-Filter (${data.config.wtc_stf_filter_enabled?'an':'aus'})</div><div class="value ${data.wtc_stf_bias==='long'?'green':data.wtc_stf_bias==='short'?'red':''}">${data.wtc_stf_bias ?? '-'} ${data.wtc_pending_direction?`⏸️ wartet auf ${data.wtc_pending_direction}`:''}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
@@ -2149,6 +2345,16 @@ async function refresh() {
     document.getElementById('ut_sl_enabled').value = String(data.config.ut_sl_enabled);
     document.getElementById('ut_sl_usd').value = data.config.ut_sl_usd;
     document.getElementById('ut_sl_cooldown_seconds').value = data.config.ut_sl_cooldown_seconds;
+    document.getElementById('ht_resolution').value = data.config.ht_resolution;
+    document.getElementById('ht_amplitude').value = data.config.ht_amplitude;
+    document.getElementById('ht_channel_deviation').value = data.config.ht_channel_deviation;
+    document.getElementById('ht_base_risk_mult').value = data.config.ht_base_risk_mult;
+    document.getElementById('ht_entry_trigger').value = data.config.ht_entry_trigger;
+    document.getElementById('ht_exit_trigger').value = data.config.ht_exit_trigger;
+    document.getElementById('ht_invert_direction').value = String(data.config.ht_invert_direction);
+    document.getElementById('ht_tp_enabled').value = String(data.config.ht_tp_enabled);
+    document.getElementById('ht_sl_enabled').value = String(data.config.ht_sl_enabled);
+    document.getElementById('ht_sl_cooldown_seconds').value = data.config.ht_sl_cooldown_seconds;
     document.getElementById('wtc_resolution').value = data.config.wtc_resolution;
     document.getElementById('wtc_channel_length').value = data.config.wtc_channel_length;
     document.getElementById('wtc_average_length').value = data.config.wtc_average_length;
@@ -2382,6 +2588,16 @@ function buildConfigPayload() {
     ut_sl_enabled: document.getElementById('ut_sl_enabled').value === 'true',
     ut_sl_usd: parseFloat(document.getElementById('ut_sl_usd').value),
     ut_sl_cooldown_seconds: parseFloat(document.getElementById('ut_sl_cooldown_seconds').value),
+    ht_resolution: document.getElementById('ht_resolution').value,
+    ht_amplitude: parseInt(document.getElementById('ht_amplitude').value),
+    ht_channel_deviation: parseFloat(document.getElementById('ht_channel_deviation').value),
+    ht_base_risk_mult: parseFloat(document.getElementById('ht_base_risk_mult').value),
+    ht_entry_trigger: document.getElementById('ht_entry_trigger').value,
+    ht_exit_trigger: document.getElementById('ht_exit_trigger').value,
+    ht_invert_direction: document.getElementById('ht_invert_direction').value === 'true',
+    ht_tp_enabled: document.getElementById('ht_tp_enabled').value === 'true',
+    ht_sl_enabled: document.getElementById('ht_sl_enabled').value === 'true',
+    ht_sl_cooldown_seconds: parseFloat(document.getElementById('ht_sl_cooldown_seconds').value),
     wtc_resolution: document.getElementById('wtc_resolution').value,
     wtc_channel_length: parseInt(document.getElementById('wtc_channel_length').value),
     wtc_average_length: parseInt(document.getElementById('wtc_average_length').value),
@@ -2457,7 +2673,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','wtc_direction_mode','wtc_dca_enabled','wtc_dca_max_entries','wtc_dca_cooldown_seconds','wtc_stf_filter_enabled','wtc_stf_resolution','sg_tp_step_pct','sg_tp_step_usd','sg_max_nachkauf','sg_dca_cooldown_seconds','sg_invert_direction','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_sl_cooldown_seconds','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','wtc_direction_mode','wtc_dca_enabled','wtc_dca_max_entries','wtc_dca_cooldown_seconds','wtc_stf_filter_enabled','wtc_stf_resolution','sg_tp_step_pct','sg_tp_step_usd','sg_max_nachkauf','sg_dca_cooldown_seconds','sg_invert_direction','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2520,6 +2736,7 @@ async def handle_status(request):
         "ce_direction": st.get("ce_direction"), "ce_stf_bias": st.get("ce_stf_bias"),
         "ce_pending_direction": st.get("ce_pending_direction"),
         "ut_stop_value": st.get("ut_stop_value"),
+        "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"), "ht_tp_price": st.get("ht_tp_price"),
         "wtc_wt1": st.get("wtc_wt1"), "wtc_wt2": st.get("wtc_wt2"),
         "wtc_stf_bias": st.get("wtc_stf_bias"), "wtc_pending_direction": st.get("wtc_pending_direction"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
@@ -2565,6 +2782,9 @@ async def handle_config_update(request):
                 "ce_stf_filter_enabled", "ce_stf_resolution",
                 "ut_resolution", "ut_atr_period", "ut_key_value", "ut_entry_trigger", "ut_exit_trigger",
                 "ut_invert_direction", "ut_tp_enabled", "ut_tp_usd", "ut_sl_enabled", "ut_sl_usd", "ut_sl_cooldown_seconds",
+                "ht_resolution", "ht_amplitude", "ht_channel_deviation", "ht_base_risk_mult",
+                "ht_entry_trigger", "ht_exit_trigger", "ht_invert_direction",
+                "ht_tp_enabled", "ht_sl_enabled", "ht_sl_cooldown_seconds",
                 "wtc_resolution", "wtc_channel_length", "wtc_average_length", "wtc_ma_length",
                 "wtc_require_obos", "wtc_ob_level", "wtc_os_level", "wtc_entry_trigger", "wtc_exit_trigger",
                 "wtc_invert_direction", "wtc_tp_enabled", "wtc_tp_usd", "wtc_sl_enabled", "wtc_sl_usd", "wtc_sl_cooldown_seconds",
@@ -2671,6 +2891,40 @@ async def handle_ut_sweep(request):
 
     result = await run_ut_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
                                        key_value_min, key_value_max, key_value_step)
+    return web.json_response(result)
+
+
+async def handle_ht_sweep(request):
+    """'Monte-Carlo'-Parametersweep fuer HalfTrend: testet einen Bereich von Amplitude,
+    Channel Deviation (SL-Abstand) und Base Risk (TP-Abstand) gegeneinander und gibt die
+    besten/schlechtesten Kombinationen zurueck."""
+    from strategies import run_ht_param_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        amplitude_min = max(2, int(body.get("amplitude_min", 10)))
+        amplitude_max = max(amplitude_min, int(body.get("amplitude_max", 40)))
+        amplitude_step = max(1, int(body.get("amplitude_step", 2)))
+        channel_dev_min = max(0.01, float(body.get("channel_dev_min", 1.0)))
+        channel_dev_max = max(channel_dev_min, float(body.get("channel_dev_max", 4.0)))
+        channel_dev_step = max(0.01, float(body.get("channel_dev_step", 0.5)))
+        base_risk_min = max(0.01, float(body.get("base_risk_min", 1.0)))
+        base_risk_max = max(base_risk_min, float(body.get("base_risk_max", 5.0)))
+        base_risk_step = max(0.01, float(body.get("base_risk_step", 0.5)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_ht_param_sweep(symbol, cfg, days, amplitude_min, amplitude_max, amplitude_step,
+                                       channel_dev_min, channel_dev_max, channel_dev_step,
+                                       base_risk_min, base_risk_max, base_risk_step)
     return web.json_response(result)
 
 

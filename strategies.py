@@ -605,6 +605,78 @@ def compute_supertrend(highs, lows, closes, atr_period, factor):
     return st_value, direction
 
 
+def compute_halftrend(highs, lows, closes, amplitude, channel_deviation):
+    """Portiert aus 'HalfTrend Long/Short Signal Engine [BigBeluga]' (Basis-Trendlogik von
+    everget's originalem HalfTrend-Indikator) - nur der Teil, der tatsaechlich Long/Short
+    bestimmt (Swing-Hoch/-Tief-Vergleich gegen gleitende Durchschnitte). Die Risk-Management-
+    und Dashboard-Teile des Original-Skripts sind rein visuell und wurden weggelassen.
+    ATR-Periode ist im Original FEST auf 100 (ta.atr(100)/2 als 'atr2') - nur amplitude
+    (Swing-Lookback-Fenster) ist ein echter Signal-Parameter. channel_deviation beeinflusst im
+    Original NUR die geplotteten Kanal-Baender, nicht das Signal selbst - in diesem Bot wird es
+    stattdessen als SL-Abstand (in ATR2-Vielfachen) verwendet (siehe backtest_halftrend/
+    check_ht_entry), damit der Parameter hier tatsaechlich etwas bewirkt.
+    Gibt (ht_line, trend, atr2) zurueck - trend 0 = bullisch (Long), 1 = baerisch (Short), wie
+    im Original-Skript. atr2 wird fuer die SL-/TP-Abstandsberechnung (Base Risk) mitgeliefert."""
+    n = len(closes)
+    if n == 0:
+        return [], [], []
+    atr = compute_atr(highs, lows, closes, 100)
+    atr2 = [a / 2.0 for a in atr]
+    highma = _sma_series(highs, amplitude)
+    lowma = _sma_series(lows, amplitude)
+
+    trend = 0
+    next_trend = 0
+    max_low_price = lows[0]
+    min_high_price = highs[0]
+    up = 0.0
+    down = 0.0
+    prev_trend_final = None
+
+    ht_line = [0.0] * n
+    trend_out = [0] * n
+
+    for i in range(n):
+        start = max(0, i - amplitude + 1)
+        high_price = max(highs[start:i + 1])
+        low_price = min(lows[start:i + 1])
+        prev_low = lows[i - 1] if i > 0 else lows[i]
+        prev_high = highs[i - 1] if i > 0 else highs[i]
+
+        if next_trend == 1:
+            max_low_price = max(low_price, max_low_price)
+            if highma[i] < max_low_price and closes[i] < prev_low:
+                trend = 1
+                next_trend = 0
+                min_high_price = high_price
+        else:
+            min_high_price = min(high_price, min_high_price)
+            if lowma[i] > min_high_price and closes[i] > prev_high:
+                trend = 0
+                next_trend = 1
+                max_low_price = low_price
+
+        up_before, down_before = up, down
+
+        if trend == 0:
+            if i > 0 and prev_trend_final is not None and prev_trend_final != 0:
+                up = down_before
+            else:
+                up = max_low_price if i == 0 else max(max_low_price, up_before)
+            ht_line[i] = up
+        else:
+            if i > 0 and prev_trend_final is not None and prev_trend_final != 1:
+                down = up_before
+            else:
+                down = min_high_price if i == 0 else min(min_high_price, down_before)
+            ht_line[i] = down
+
+        trend_out[i] = trend
+        prev_trend_final = trend
+
+    return ht_line, trend_out, atr2
+
+
 def compute_range_profile_snapshot(highs, lows, closes, opens, lookback, bins, ob_os_level):
     """Portiert aus dem Pine-Script 'Range Profile Oscillator': baut ueber die letzten
     'lookback' Kerzen ein Bullen-/Baeren-gewichtetes Histogramm (Volumen-Profil-Prinzip,
@@ -1305,6 +1377,167 @@ async def ut_poll_loop(symbol):
                         debug_log(f"⏳ [{symbol}] UT-Bot wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] UT-Bot-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+async def check_ht_sl_tp(symbol, price):
+    """Prueft die bei Einstieg fest hinterlegten SL-/TP-Preise (siehe check_ht_entry) gegen den
+    aktuellen Preis - anders als bei Chandelier/UT-Bot sind das keine festen $-Betraege, sondern
+    ATR2-basierte Preisabstaende (Channel-Deviation fuer SL, Base-Risk fuer TP), die bei jedem
+    Einstieg neu aus dem dann aktuellen ATR2 berechnet werden."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    sl_price = st.get("ht_sl_price")
+    tp_price = st.get("ht_tp_price")
+    if sl_price is None and tp_price is None:
+        return
+    pos = st["position"]
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
+    if hit_sl:
+        debug_log(f"🚪 [{symbol}] HalfTrend SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, "SL")
+        st["ht_sl_cooldown_until"] = time.time() + cfg.get("ht_sl_cooldown_seconds", 30)
+        st["ht_sl_price"] = None
+        st["ht_tp_price"] = None
+    elif hit_tp:
+        debug_log(f"🚪 [{symbol}] HalfTrend TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP")
+        st["ht_sl_price"] = None
+        st["ht_tp_price"] = None
+
+
+async def check_ht_entry(symbol, buy_signal, sell_signal, price, atr2_now):
+    """Einstieg beim HalfTrend-Flip-Signal. Setzt bei erfolgreichem Einstieg direkt die
+    SL-/TP-Preise fest (ATR2 zum Einstiegszeitpunkt * Channel-Deviation bzw. Base-Risk-
+    Multiplikator) - diese bleiben bis zum Ausstieg unveraendert (kein Nachziehen), analog zum
+    Original-Skript, das SL/TP1-3 ebenfalls einmalig beim Signal festlegt."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if time.time() < st.get("ht_sl_cooldown_until", 0.0):
+        return
+    if not (buy_signal or sell_signal):
+        return
+    direction = "long" if buy_signal else "short"
+    debug_log(f"📡 [{symbol}] HalfTrend Signal: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+    if st["position"] is None:
+        return  # Einstieg (z.B. dry_run-Fehler) hat nicht geklappt
+    if cfg.get("ht_sl_enabled", True) and atr2_now is not None:
+        dist_sl = atr2_now * cfg.get("ht_channel_deviation", 2.0)
+        st["ht_sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
+    else:
+        st["ht_sl_price"] = None
+    if cfg.get("ht_tp_enabled", True) and atr2_now is not None:
+        dist_tp = atr2_now * cfg.get("ht_base_risk_mult", 3.0)
+        st["ht_tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
+    else:
+        st["ht_tp_price"] = None
+
+
+async def check_ht_exit(symbol, buy_signal, sell_signal, price):
+    """Ausstieg immer beim Gegen-Signal - Flip-System wie Chandelier/UT-Bot, unabhaengig von
+    SL/TP (die laufen separat ueber check_ht_sl_tp)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if st["position"] == "long" and sell_signal:
+        debug_log(f"🚪 [{symbol}] HalfTrend Exit: LONG @ {price} (Sell-Signal)")
+        await execute_exit(symbol, price, "HT-FLIP-EXIT")
+        st["ht_sl_price"] = None
+        st["ht_tp_price"] = None
+    elif st["position"] == "short" and buy_signal:
+        debug_log(f"🚪 [{symbol}] HalfTrend Exit: SHORT @ {price} (Buy-Signal)")
+        await execute_exit(symbol, price, "HT-FLIP-EXIT")
+        st["ht_sl_price"] = None
+        st["ht_tp_price"] = None
+
+
+async def ht_poll_loop(symbol):
+    """HalfTrend (portiert aus 'HalfTrend Long/Short Signal Engine [BigBeluga]', Basis: everget's
+    HalfTrend). Swing-Hoch/-Tief-Vergleich gegen SMA(amplitude) bestimmt den Trend, Flip = Signal.
+    ATR-Periode ist im Original fest auf 100. SL (Channel-Deviation * ATR2) und TP (Base-Risk-
+    Multiplikator * ATR2) sind optional und werden einmalig bei Einstieg berechnet, Ausstieg
+    sonst immer beim Gegen-Signal (Flip-System wie Chandelier/UT-Bot). Ein-/Ausstieg je einzeln
+    tick-/kerzenbasiert, alle Zeitrahmen, Backtest-faehig."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "halftrend":
+                resolution = cfg["ht_resolution"]
+                amplitude = cfg["ht_amplitude"]
+                min_needed = max(100, amplitude) + 5
+                needed_bars = min(1000, max(min_needed * 2, 200))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_processed_ts != signal_key
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    keep = min_needed + 5
+                    st["ht_highs"] = closed_h[-keep:]
+                    st["ht_lows"] = closed_l[-keep:]
+                    st["ht_closes"] = closed_c[-keep:]
+
+                    ht_line, trend, atr2 = compute_halftrend(closed_h, closed_l, closed_c, amplitude, cfg["ht_channel_deviation"])
+                    invert = cfg.get("ht_invert_direction", False)
+                    dir_now = trend[-1]
+                    st["ht_direction"] = (1 if dir_now == 0 else -1) * (-1 if invert else 1)
+                    st["ht_atr2_last"] = atr2[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] HalfTrend aktiv: Trend={'AUFWÄRTS' if dir_now==0 else 'ABWÄRTS'}, "
+                                  f"ATR2={round(atr2[-1],4)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if is_new_candle:
+                        last_processed_ts = signal_key
+                        buy_signal = trend[-1] == 0 and trend[-2] == 1
+                        sell_signal = trend[-1] == 1 and trend[-2] == 0
+                        if invert:
+                            buy_signal, sell_signal = sell_signal, buy_signal
+                        if cfg.get("ht_exit_trigger", "candle_close") == "candle_close":
+                            await check_ht_exit(symbol, buy_signal, sell_signal, price)
+                        if cfg.get("ht_entry_trigger", "candle_close") == "candle_close":
+                            await check_ht_entry(symbol, buy_signal, sell_signal, price, atr2[-1])
+
+                    await check_ht_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] HalfTrend wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] HalfTrend wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] HalfTrend-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
 
@@ -2261,6 +2494,31 @@ async def on_price_update(symbol, price):
                 await execute_exit(symbol, price, "TP")
         return
 
+    if cfg["entry_mode"] == "halftrend":
+        entry_trigger = cfg.get("ht_entry_trigger", "candle_close")
+        exit_trigger = cfg.get("ht_exit_trigger", "candle_close")
+        if entry_trigger == "tick" or exit_trigger == "tick":
+            try:
+                ch, cl, cc = st.get("ht_highs"), st.get("ht_lows"), st.get("ht_closes")
+                if ch and cl and cc and len(cc) >= 2:
+                    live_h = ch[:-1] + [max(ch[-1], price)]
+                    live_l = cl[:-1] + [min(cl[-1], price)]
+                    live_c = cc[:-1] + [price]
+                    _, trend, atr2 = compute_halftrend(live_h, live_l, live_c, cfg["ht_amplitude"], cfg["ht_channel_deviation"])
+                    buy_signal = trend[-1] == 0 and trend[-2] == 1
+                    sell_signal = trend[-1] == 1 and trend[-2] == 0
+                    if cfg.get("ht_invert_direction", False):
+                        buy_signal, sell_signal = sell_signal, buy_signal
+                    if exit_trigger == "tick":
+                        await check_ht_exit(symbol, buy_signal, sell_signal, price)
+                    if entry_trigger == "tick":
+                        await check_ht_entry(symbol, buy_signal, sell_signal, price, atr2[-1])
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] HalfTrend Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await check_ht_sl_tp(symbol, price)
+        return
+
     if cfg["entry_mode"] == "wavetrend_cross":
         entry_trigger = cfg.get("wtc_entry_trigger", "candle_close")
         exit_trigger = cfg.get("wtc_exit_trigger", "candle_close")
@@ -2673,6 +2931,79 @@ def backtest_ut_bot(candles, cfg):
     return trades
 
 
+def _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup):
+    """Kern-Simulation fuer HalfTrend, getrennt von der Trend-/ATR2-Berechnung (compute_halftrend)
+    damit der Parameter-Sweep trend/atr2 nur EINMAL pro Amplitude berechnen muss und Channel-
+    Deviation/Base-Risk-Kombinationen rein rechnerisch (schnell) durchtestet - wie beim Chandelier-
+    Exit-Sweep, der Kerzen auch nur einmal laedt."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    channel_deviation = cfg["ht_channel_deviation"]
+    base_risk_mult = cfg["ht_base_risk_mult"]
+    tp_enabled = cfg.get("ht_tp_enabled", True)
+    sl_enabled = cfg.get("ht_sl_enabled", True)
+    sl_cooldown_ms = cfg.get("ht_sl_cooldown_seconds", 30) * 1000
+    invert = cfg.get("ht_invert_direction", False)
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            pdir, entry, size = position["dir"], position["entry"], position["size"]
+            sl_price, tp_price = position.get("sl_price"), position.get("tp_price")
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, pdir, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, pdir, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        buy_signal = trend[i] == 0 and trend[i - 1] == 1
+        sell_signal = trend[i] == 1 and trend[i - 1] == 0
+        if invert:
+            buy_signal, sell_signal = sell_signal, buy_signal
+
+        if position is not None:
+            if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "HT-FLIP-EXIT", ts=ts)
+                position = None
+
+        in_sl_cooldown = sl_enabled and sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and (buy_signal or sell_signal):
+            direction = "long" if buy_signal else "short"
+            size = (margin * leverage) / price
+            dist_sl = atr2[i] * channel_deviation if sl_enabled else None
+            dist_tp = atr2[i] * base_risk_mult if tp_enabled else None
+            sl_price = (price - dist_sl if direction == "long" else price + dist_sl) if dist_sl is not None else None
+            tp_price = (price + dist_tp if direction == "long" else price - dist_tp) if dist_tp is not None else None
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_halftrend(candles, cfg):
+    """Backtest laeuft immer 'kerzenbasiert'. Intrabar-Pruefung fuer SL/TP wie bei den anderen
+    Strategien - hier sind SL/TP-Abstaende aber ATR2-basiert (Channel-Deviation bzw. Base-Risk-
+    Multiplikator), nicht fest in $, und werden bei jedem Einstieg neu aus dem dann aktuellen
+    ATR2 berechnet (siehe _simulate_halftrend_trades)."""
+    h, l, c = candles[2], candles[3], candles[4]
+    amplitude = cfg["ht_amplitude"]
+    _, trend, atr2 = compute_halftrend(h, l, c, amplitude, cfg["ht_channel_deviation"])
+    warmup = max(100, amplitude) + 5
+    return _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup)
+
+
 def backtest_wavetrend_cross(candles, cfg, stf_candles=None):
     """Backtest laeuft immer 'kerzenbasiert'. Intrabar-Pruefung fuer SL/TP wie bei den anderen
     Strategien. Unterstuetzt Richtungsmodus (long_only/short_only), Nachkauf (DCA) und den
@@ -2883,6 +3214,7 @@ BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000, "range_profile": 30_000,
     "supertrend_fusion": 100_000, "chandelier_exit": 100_000,
     "ut_bot": 100_000, "wavetrend_cross": 100_000, "signal_grid": 100_000,
+    "halftrend": 100_000,
 }
 
 
@@ -3245,6 +3577,75 @@ async def run_ce_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, 
     }
 
 
+HT_SWEEP_MAX_COMBOS = 500
+HT_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+async def run_ht_param_sweep(symbol, cfg, days, amplitude_min, amplitude_max, amplitude_step,
+                              channel_dev_min, channel_dev_max, channel_dev_step,
+                              base_risk_min, base_risk_max, base_risk_step):
+    """'Monte-Carlo'-Parametersweep fuer HalfTrend: testet alle Kombinationen aus Amplitude,
+    Channel-Deviation (SL-Abstand) und Base-Risk-Multiplikator (TP-Abstand) im angegebenen
+    Bereich gegeneinander. Amplitude bestimmt den eigentlichen Trend/Signal-Verlauf (aufwendig
+    zu berechnen), Channel-Deviation/Base-Risk wirken sich NUR auf die SL-/TP-Preise aus (billig
+    zu berechnen) - deshalb wird trend/atr2 nur EINMAL pro Amplitude neu berechnet und fuer alle
+    Channel-Deviation x Base-Risk-Kombinationen wiederverwendet, aehnlich dem Chandelier-Sweep."""
+    max_candles = BACKTEST_MAX_CANDLES["halftrend"]
+    resolution = cfg.get("ht_resolution", "5m")
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles)
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 150:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    amplitudes = sorted(set(int(round(amplitude_min + i * amplitude_step))
+                             for i in range(int((amplitude_max - amplitude_min) / max(amplitude_step, 1e-9)) + 1)
+                             if amplitude_min + i * amplitude_step <= amplitude_max + 1e-9))
+    channel_devs = sorted(set(round(channel_dev_min + i * channel_dev_step, 4)
+                               for i in range(int((channel_dev_max - channel_dev_min) / max(channel_dev_step, 1e-9)) + 1)
+                               if channel_dev_min + i * channel_dev_step <= channel_dev_max + 1e-9))
+    base_risks = sorted(set(round(base_risk_min + i * base_risk_step, 4)
+                             for i in range(int((base_risk_max - base_risk_min) / max(base_risk_step, 1e-9)) + 1)
+                             if base_risk_min + i * base_risk_step <= base_risk_max + 1e-9))
+    amplitudes = [a for a in amplitudes if a >= 2]
+    channel_devs = [d for d in channel_devs if d > 0]
+    base_risks = [r for r in base_risks if r > 0]
+
+    total_combos = len(amplitudes) * len(channel_devs) * len(base_risks)
+    if total_combos == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
+    if total_combos > HT_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {HT_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    h, l, c = candles[2], candles[3], candles[4]
+    results = []
+    for amp in amplitudes:
+        _, trend, atr2 = compute_halftrend(h, l, c, amp, 1.0)  # channel_deviation wirkt nicht auf trend/atr2
+        warmup = max(100, amp) + 5
+        for cd in channel_devs:
+            for br in base_risks:
+                cfg_copy = dict(cfg)
+                cfg_copy["ht_amplitude"] = amp
+                cfg_copy["ht_channel_deviation"] = cd
+                cfg_copy["ht_base_risk_mult"] = br
+                trades = _simulate_halftrend_trades(candles, cfg_copy, trend, atr2, warmup)
+                stats = summarize_backtest_trades(trades)
+                results.append({"ht_amplitude": amp, "ht_channel_deviation": cd, "ht_base_risk_mult": br, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= HT_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
+        "min_reliable_trades": HT_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": total_combos,
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
+
+
 from collections import OrderedDict
 
 _backtest_candle_cache = OrderedDict()  # key: (symbol, resolution) -> {"fetched_at": float, "days": int, "candles": (...)}
@@ -3318,12 +3719,13 @@ BACKTEST_FUNCS = {
     "ut_bot": backtest_ut_bot,
     "wavetrend_cross": backtest_wavetrend_cross,
     "signal_grid": backtest_signal_grid,
+    "halftrend": backtest_halftrend,
 }
 
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, supertrend_fusion, chandelier_exit, ut_bot, wavetrend_cross, signal_grid - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur range_profile, fib_reversal, supertrend_fusion, chandelier_exit, ut_bot, wavetrend_cross, signal_grid, halftrend - Grid/OBI-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
@@ -3387,7 +3789,8 @@ async def run_backtest(symbol, entry_mode, cfg, days):
 
     resolution_key = {"range_profile": "rp_resolution", "fib_reversal": "fib_resolution",
                        "supertrend_fusion": "stf_resolution", "ut_bot": "ut_resolution",
-                       "wavetrend_cross": "wtc_resolution", "signal_grid": "sg_resolution"}[entry_mode]
+                       "wavetrend_cross": "wtc_resolution", "signal_grid": "sg_resolution",
+                       "halftrend": "ht_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
