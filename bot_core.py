@@ -393,6 +393,7 @@ def default_state():
         "oms_cvd_buffer": [], "oms_cvd_ratio": None,
         "oms_funding_rate": None, "oms_last_signal_direction": None, "oms_last_trade_time": 0.0,
         "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None,
+        "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
         "oms_dca_count": 0, "oms_last_entry_price": None,
         "oms_price_history": [], "oms_markers": [],
@@ -866,20 +867,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div id="oms-trend-meter-detail" style="display:none; margin-bottom:12px; font-size:13px; color:var(--text-dim); text-align:center;"></div>
 <div id="oms-gauge-wrap" style="display:none; margin-bottom:12px;"></div>
 <div id="oms-checklist-wrap" style="display:none; margin-bottom:12px;"></div>
-<div id="oms-chart-wrap" style="display:none; margin-bottom:20px;"></div>
-
-<div style="margin-bottom:20px;">
-  <button id="btn-start" class="start">▶️ Start</button>
-  <button id="btn-stop" class="stop">⏸️ Stop</button>
-  <button id="btn-close" class="danger">✖️ Position jetzt schließen</button>
-  <button id="btn-reset" class="neutral">🔄 Reset (Statistik)</button>
-</div>
-
-<h2 class="section-title">Übersicht</h2>
-<div class="grid" id="status-grid"></div>
-
-<h2 class="section-title">Kursverlauf</h2>
-<div style="position:relative; height:400px;"><canvas id="priceChart"></canvas></div>
+<div id="oms-chart-wrap" style="display:none; margin-bottom:12px;"></div>
 
 <div id="pocket-trading-section" style="display:none;">
   <h2 class="section-title">⚡ Pocket-Trading (manuell, läuft parallel zur Automatik)</h2>
@@ -900,10 +888,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<div id="obi-chart-section" style="display:none;">
+<div id="obi-chart-section" style="display:none; margin-bottom:12px;">
   <h2 class="section-title">OBI-Verlauf (schnell / mittel / langsam)</h2>
-  <div style="position:relative; height:250px;"><canvas id="obiChart"></canvas></div>
+  <div style="position:relative; height:200px;"><canvas id="obiChart"></canvas></div>
 </div>
+
+<div id="generic-chart-wrap">
+  <h2 class="section-title">Kursverlauf</h2>
+  <div style="position:relative; height:400px;"><canvas id="priceChart"></canvas></div>
+</div>
+
+<details id="zone-settings" open style="margin-top:8px;">
+<summary style="cursor:pointer; font-size:18px; font-weight:700; padding:10px 0; color:var(--text);">⚙️ Steuerung &amp; Einstellungen (aufklappen/einklappen)</summary>
+
+<div style="margin-bottom:20px;">
+  <button id="btn-start" class="start">▶️ Start</button>
+  <button id="btn-stop" class="stop">⏸️ Stop</button>
+  <button id="btn-close" class="danger">✖️ Position jetzt schließen</button>
+  <button id="btn-reset" class="neutral">🔄 Reset (Statistik)</button>
+</div>
+
+<h2 class="section-title">Übersicht</h2>
+<div class="grid" id="status-grid"></div>
 
 <h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
 <div class="panel-card">
@@ -1500,6 +1506,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div style="font-size:12px; color:var(--text-dim); margin-top:8px;" id="abs-distances"></div>
 </div>
 
+<div id="backtest-zone">
 <h2 class="section-title">📊 Backtest (mit den oben gespeicherten Einstellungen)</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
@@ -1771,6 +1778,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+</div>
+
+</details>
+
 <h2 class="section-title">Letzte abgeschlossene Trades <span id="trades-debug" style="font-size:11px; color:var(--text-dim); font-weight:normal;"></span></h2>
 <div class="panel-card">
 <table id="trades-table"><thead><tr><th>Eröffnet</th><th>Geschlossen</th><th>Seite</th><th>Ø-Einstieg</th><th>Exit</th><th>Stufen</th><th>Grund</th><th>PnL $</th></tr></thead><tbody></tbody></table>
@@ -1830,6 +1841,12 @@ function updateModeFields() {
   document.querySelectorAll('[data-mode-section]').forEach(el => {
     el.style.display = (el.dataset.modeSection === mode) ? '' : 'none';
   });
+  // OBI-Momentum-Scalp hat keinen Kerzen-Backtest (braucht Orderbuch/Trade-Tape/Funding, die es
+  // historisch nicht gibt) und der grosse generische Kursverlauf-Chart ist redundant zum
+  // kompakten Mini-Chart oben - beides ausblenden, damit die Seite aufgeraeumt bleibt
+  const isOms = mode === 'oms_scalp';
+  document.getElementById('backtest-zone').style.display = isOms ? 'none' : '';
+  document.getElementById('generic-chart-wrap').style.display = isOms ? 'none' : '';
 }
 document.getElementById('entry_mode').addEventListener('change', () => {
   window.formTouched = true;
@@ -2316,40 +2333,64 @@ function renderOmsChecklist(data) {
   </div>`;
 }
 
-function renderOmsChart(history, markers) {
+function renderOmsChart(history, markers, pos) {
   if (!history || history.length < 2) {
-    return '<div class="panel-card" style="padding:14px; color:var(--text-dim); font-size:13px;">Preisverlauf sammelt noch Daten...</div>';
+    return '<div class="panel-card" style="padding:10px; color:var(--text-dim); font-size:12px;">Preisverlauf sammelt noch Daten...</div>';
   }
   const prices = history.map(h => h[1]);
   const times = history.map(h => h[0]);
-  const minP = Math.min(...prices), maxP = Math.max(...prices);
+  let minP = Math.min(...prices), maxP = Math.max(...prices);
   const minT = times[0], maxT = times[times.length - 1];
-  const w = 800, h = 160, pad = 12;
+
+  // SL-/TP1-/Trailing-Linien mit einrechnen, damit sie nicht aus dem sichtbaren Bereich fallen
+  let slPrice = null, tp1Price = null, trailPrice = null;
+  if (pos && pos.position && pos.size) {
+    const slDist = pos.sl_usd / pos.size, tp1Dist = pos.tp1_usd / pos.size;
+    slPrice = pos.position === 'long' ? pos.avg_entry_price - slDist : pos.avg_entry_price + slDist;
+    if (!pos.tp1_done) tp1Price = pos.position === 'long' ? pos.avg_entry_price + tp1Dist : pos.avg_entry_price - tp1Dist;
+    else if (pos.trail_price != null) trailPrice = pos.trail_price;
+    [slPrice, tp1Price, trailPrice].forEach(v => { if (v != null) { minP = Math.min(minP, v); maxP = Math.max(maxP, v); } });
+  }
+
+  const w = 800, h = 130, pad = 10;
   const pRange = (maxP - minP) || (maxP * 0.001) || 1;
   const tRange = (maxT - minT) || 1;
   const xOf = t => pad + (t - minT) / tRange * (w - 2 * pad);
   const yOf = p => h - pad - (p - minP) / pRange * (h - 2 * pad);
   const points = history.map(([t, p]) => `${xOf(t).toFixed(1)},${yOf(p).toFixed(1)}`).join(' ');
+
+  let levelLines = '';
+  if (slPrice != null) levelLines += `<line x1="${pad}" y1="${yOf(slPrice).toFixed(1)}" x2="${w-pad}" y2="${yOf(slPrice).toFixed(1)}" stroke="#f0526b" stroke-width="1" stroke-dasharray="4,3"/><text x="${w-pad}" y="${(yOf(slPrice)-3).toFixed(1)}" fill="#f0526b" font-size="9" text-anchor="end">SL</text>`;
+  if (tp1Price != null) levelLines += `<line x1="${pad}" y1="${yOf(tp1Price).toFixed(1)}" x2="${w-pad}" y2="${yOf(tp1Price).toFixed(1)}" stroke="#22c55e" stroke-width="1" stroke-dasharray="4,3"/><text x="${w-pad}" y="${(yOf(tp1Price)-3).toFixed(1)}" fill="#22c55e" font-size="9" text-anchor="end">TP1</text>`;
+  if (trailPrice != null) levelLines += `<line x1="${pad}" y1="${yOf(trailPrice).toFixed(1)}" x2="${w-pad}" y2="${yOf(trailPrice).toFixed(1)}" stroke="#3b82f6" stroke-width="1" stroke-dasharray="4,3"/><text x="${w-pad}" y="${(yOf(trailPrice)-3).toFixed(1)}" fill="#3b82f6" font-size="9" text-anchor="end">Trail</text>`;
+
   const styles = {
-    entry_long: { shape: 'triUp', color: '#22c55e' },
-    entry_short: { shape: 'triDown', color: '#f0526b' },
-    dca_long: { shape: 'circle', color: '#86efac', r: 3 },
-    dca_short: { shape: 'circle', color: '#fca5a5', r: 3 },
-    exit_sl: { shape: 'x', color: '#f0526b' },
-    exit_tp1: { shape: 'circle', color: '#22c55e', r: 4 },
-    exit_trail: { shape: 'circle', color: '#3b82f6', r: 4 },
+    entry_long: { shape: 'triUp', color: '#22c55e', label: 'LONG' },
+    entry_short: { shape: 'triDown', color: '#f0526b', label: 'SHORT' },
+    dca_long: { shape: 'circle', color: '#86efac', r: 3, label: '+' },
+    dca_short: { shape: 'circle', color: '#fca5a5', r: 3, label: '+' },
+    exit_sl: { shape: 'x', color: '#f0526b', label: 'SL' },
+    exit_tp1: { shape: 'circle', color: '#22c55e', r: 4, label: 'TP1' },
+    exit_trail: { shape: 'circle', color: '#3b82f6', r: 4, label: 'Exit' },
   };
   const markerSvgs = (markers || []).filter(m => m.ts >= minT && m.ts <= maxT).map(m => {
     const x = xOf(m.ts), y = yOf(m.price);
-    const st = styles[m.kind] || { shape: 'circle', color: '#888', r: 3 };
-    if (st.shape === 'triUp') return `<polygon points="${x},${y-6} ${x-5},${y+4} ${x+5},${y+4}" fill="${st.color}"/>`;
-    if (st.shape === 'triDown') return `<polygon points="${x},${y+6} ${x-5},${y-4} ${x+5},${y-4}" fill="${st.color}"/>`;
-    if (st.shape === 'x') return `<line x1="${x-4}" y1="${y-4}" x2="${x+4}" y2="${y+4}" stroke="${st.color}" stroke-width="2"/><line x1="${x-4}" y1="${y+4}" x2="${x+4}" y2="${y-4}" stroke="${st.color}" stroke-width="2"/>`;
-    return `<circle cx="${x}" cy="${y}" r="${st.r||3}" fill="${st.color}"/>`;
+    const st = styles[m.kind] || { shape: 'circle', color: '#888', r: 3, label: '' };
+    let shape = '';
+    if (st.shape === 'triUp') shape = `<polygon points="${x},${y-6} ${x-5},${y+4} ${x+5},${y+4}" fill="${st.color}"/>`;
+    else if (st.shape === 'triDown') shape = `<polygon points="${x},${y+6} ${x-5},${y-4} ${x+5},${y-4}" fill="${st.color}"/>`;
+    else if (st.shape === 'x') shape = `<line x1="${x-4}" y1="${y-4}" x2="${x+4}" y2="${y+4}" stroke="${st.color}" stroke-width="2"/><line x1="${x-4}" y1="${y+4}" x2="${x+4}" y2="${y-4}" stroke="${st.color}" stroke-width="2"/>`;
+    else shape = `<circle cx="${x}" cy="${y}" r="${st.r||3}" fill="${st.color}"/>`;
+    // Textlabel nur bei Ein-/Ausstieg (nicht bei Nachkauf-Kreisen), damit es nicht zu voll wird
+    const label = (st.shape === 'triUp' || st.shape === 'triDown')
+      ? `<text x="${x}" y="${st.shape==='triUp' ? y-9 : y+15}" fill="${st.color}" font-size="9" font-weight="700" text-anchor="middle">${st.label}</text>` : '';
+    return shape + label;
   }).join('');
-  return `<div class="panel-card" style="padding:10px;">
-    <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">Preisverlauf (letzte 15 Min): 🔺 Long-Einstieg · 🔻 Short-Einstieg · ⭕ Nachkauf · ✖️ SL · 🟢 TP1 · 🔵 Trailing-Exit</div>
-    <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:160px; display:block;">
+
+  return `<div class="panel-card" style="padding:8px 10px;">
+    <div style="font-size:11px; color:var(--text-dim); margin-bottom:4px;">Preisverlauf (15 Min) · 🔺LONG · 🔻SHORT · ⭕Nachkauf · ✖️SL · 🟢TP1 · 🔵Trail-Exit</div>
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:130px; display:block;">
+      ${levelLines}
       <polyline points="${points}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
       ${markerSvgs}
     </svg>
@@ -2411,7 +2452,11 @@ async function refresh() {
 
     gaugeWrap.innerHTML = renderOmsGauge(data.oms_obi_fast, data.oms_obi_medium, data.oms_obi_slow, data.config.oms_obi_threshold);
     checklistWrap.innerHTML = renderOmsChecklist(data);
-    chartWrap.innerHTML = renderOmsChart(data.oms_price_history, data.oms_markers);
+    chartWrap.innerHTML = renderOmsChart(data.oms_price_history, data.oms_markers, {
+      position: data.position, avg_entry_price: data.avg_entry_price, size: data.total_coin_size,
+      sl_usd: data.config.oms_sl_usd, tp1_usd: data.config.oms_tp1_usd,
+      tp1_done: data.oms_tp1_done, trail_price: data.oms_trail_price,
+    });
   } else {
     trendMeterEl.style.display = 'none';
     trendMeterDetailEl.style.display = 'none';
@@ -2668,16 +2713,19 @@ async function refresh() {
 
   try {
     const obiSection = document.getElementById('obi-chart-section');
-    if (data.config.entry_mode === 'obi_scalp' && (data.obi_history || []).length > 0) {
+    const isObiLike = data.config.entry_mode === 'obi_scalp' || data.config.entry_mode === 'oms_scalp';
+    const rawHist = data.config.entry_mode === 'oms_scalp' ? (data.oms_obi_history || []) : (data.obi_history || []);
+    const threshold = data.config.entry_mode === 'oms_scalp' ? data.config.oms_obi_threshold : data.config.obi_threshold;
+    if (isObiLike && rawHist.length > 0) {
       obiSection.style.display = 'block';
-      const obiHist = data.obi_history || [];
+      const obiHist = rawHist;
       const obiLabels = obiHist.map(p => new Date(p.ts).toLocaleTimeString());
       const obiDatasets = [
         { label:'Schnell', data: obiHist.map(p=>p.fast), borderColor:'#f87171', pointRadius:0, borderWidth:2 },
         { label:'Mittel', data: obiHist.map(p=>p.medium), borderColor:'#fbbf24', pointRadius:0, borderWidth:2 },
         { label:'Langsam', data: obiHist.map(p=>p.slow), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
-        { label:'Schwelle +', data: Array(obiHist.length).fill(data.config.obi_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
-        { label:'Schwelle -', data: Array(obiHist.length).fill(-data.config.obi_threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+        { label:'Schwelle +', data: Array(obiHist.length).fill(threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+        { label:'Schwelle -', data: Array(obiHist.length).fill(-threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
         { label:'Null', data: Array(obiHist.length).fill(0), borderColor:'#4b5563', pointRadius:0, borderWidth:1 },
       ];
       if (!obiChart) {
@@ -2704,7 +2752,7 @@ async function refresh() {
 
   try {
     const pocketSection = document.getElementById('pocket-trading-section');
-    if (data.config.entry_mode === 'obi_scalp') {
+    if (data.config.entry_mode === 'obi_scalp' || data.config.entry_mode === 'oms_scalp') {
       pocketSection.style.display = 'block';
       document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
       document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
@@ -2978,6 +3026,7 @@ async def handle_status(request):
     payload = {
         "symbol": symbol, "last_price": st["last_price"], "anchor_price": st["anchor_price"],
         "position": st["position"], "avg_entry_price": round(st["avg_entry_price"], 2) if st["avg_entry_price"] else None,
+        "total_coin_size": st["total_coin_size"],
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),
         "unrealized_pnl_usd": calc_unrealized_pnl(symbol),
         "grid_levels": calc_grid_levels(symbol),
@@ -2992,6 +3041,7 @@ async def handle_status(request):
         "oms_dca_count": st.get("oms_dca_count"),
         "oms_price_history": [[round(ts, 1), price] for ts, price in st.get("oms_price_history", [])[-200:]],
         "oms_markers": st.get("oms_markers", [])[-30:],
+        "oms_obi_history": st.get("oms_obi_history", [])[-300:],
         "obi_history": st.get("obi_history", [])[-300:],
         "obi_spread_pct": st.get("obi_spread_pct"), "obi_recent_vol_pct": st.get("obi_recent_vol_pct"),
         "fib": st.get("fib"),

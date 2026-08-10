@@ -2417,6 +2417,9 @@ async def handle_oms_signal_check(symbol):
     st["oms_signal"] = direction
     if st["last_price"] is not None:
         _oms_record_price(st, st["last_price"])
+    st["oms_obi_history"].append({"ts": int(now * 1000), "fast": fast, "medium": medium, "slow": slow})
+    if len(st["oms_obi_history"]) > 300:
+        st["oms_obi_history"].pop(0)
 
     if direction is None or st["last_price"] is None:
         return
