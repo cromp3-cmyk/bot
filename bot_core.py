@@ -771,6 +771,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"><title>Grid-Bot Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack.min.css" rel="stylesheet"/>
+<script src="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack-all.js"></script>
 <style>
   :root {
     --bg: #060a18;
@@ -823,6 +825,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .badge.active { background:rgba(34,197,94,0.15); color:#86efac; border:1px solid rgba(34,197,94,0.35); }
   .badge.paused { background:rgba(251,191,36,0.15); color:#fde68a; border:1px solid rgba(251,191,36,0.35); }
   .panel-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 20px; padding: 22px; margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
+  .grid-stack-item-content { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+  .widget-drag-handle { cursor: move; padding: 8px 12px; font-size: 12px; font-weight: 700; color: var(--text-dim); background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--panel-border); user-select: none; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .widget-drag-handle::before { content: "⠿"; opacity: 0.5; }
+  .widget-body { padding: 10px; overflow: auto; flex: 1; min-height: 0; }
+  .widget-body .panel-card { margin-bottom: 0; border: none; padding: 0; box-shadow: none; border-radius: 0; background: transparent; }
+  #btn-reset-layout { background: rgba(124,138,168,0.15); color: var(--text-dim); border: 1px solid var(--panel-border); border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer; float: right; }
   form { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap:14px; align-items:end; }
   label { display:block; font-size:11px; color: var(--text-dim); text-transform:uppercase; letter-spacing:0.03em; margin-bottom:6px; }
   input, select.cfg {
@@ -863,35 +871,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="coin-overview" id="coin-overview"></div>
 
-<div id="oms-trend-meter" style="display:none; margin-bottom:12px; padding:20px; border-radius:14px; text-align:center; font-weight:800; font-size:28px; letter-spacing:0.03em; transition:background 0.3s;"></div>
-<div id="oms-trend-meter-detail" style="display:none; margin-bottom:12px; font-size:13px; color:var(--text-dim); text-align:center;"></div>
-<div id="oms-gauge-wrap" style="display:none; margin-bottom:12px;"></div>
-<div id="oms-checklist-wrap" style="display:none; margin-bottom:12px;"></div>
-<div id="oms-chart-wrap" style="display:none; margin-bottom:12px;"></div>
-
-<div id="pocket-trading-section" style="display:none;">
-  <h2 class="section-title">⚡ Pocket-Trading (manuell, läuft parallel zur Automatik)</h2>
-  <div class="panel-card">
-    <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:16px;">
-      <div><div class="label">Margin (nächster Klick)</div><div class="value" id="pocket-margin">-</div></div>
-      <div><div class="label">Position</div><div class="value" id="pocket-position">-</div></div>
-      <div><div class="label">Ø-Einstieg</div><div class="value" id="pocket-entry">-</div></div>
-      <div><div class="label">Unrealisiert $</div><div class="value" id="pocket-pnl">-</div></div>
-    </div>
-    <div style="display:flex; gap:12px; margin-bottom:18px;">
-      <button id="btn-manual-buy" style="flex:1; padding:24px 10px; font-size:20px; font-weight:700; background:#16a34a; color:white; border:none; border-radius:14px; cursor:pointer;">⬆️ BUY</button>
-      <button id="btn-manual-sell" style="flex:1; padding:24px 10px; font-size:20px; font-weight:700; background:#dc2626; color:white; border:none; border-radius:14px; cursor:pointer;">⬇️ SELL</button>
-      <button id="btn-manual-tp" style="flex:1; padding:24px 10px; font-size:20px; font-weight:700; background:#2563eb; color:white; border:none; border-radius:14px; cursor:pointer;">✅ TP</button>
-    </div>
-    <div class="label" style="margin-bottom:6px;">Letzte 10 Kerzen (aus dem Live-Preis-Tick zusammengesetzt)</div>
-    <div id="mini-candles" style="display:flex; gap:4px; align-items:center; height:70px;"></div>
-  </div>
+<div id="oms-grid-header" style="display:none; margin-bottom:8px;">
+  <button id="btn-reset-layout" type="button">↺ Layout zurücksetzen</button>
+  <div style="font-size:11px; color:var(--text-dim); padding-top:8px;">Ziehe an der Titelleiste eines Kachel, um sie zu verschieben - an der unteren rechten Ecke ziehen, um die Größe zu ändern.</div>
 </div>
-
-<div id="obi-chart-section" style="display:none; margin-bottom:12px;">
-  <h2 class="section-title">OBI-Verlauf (schnell / mittel / langsam)</h2>
-  <div style="position:relative; height:200px;"><canvas id="obiChart"></canvas></div>
-</div>
+<div class="grid-stack" id="oms-grid" style="margin-bottom:12px;"></div>
 
 <div id="generic-chart-wrap">
   <h2 class="section-title">Kursverlauf</h2>
@@ -1791,6 +1775,75 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 let priceChart;
 let obiChart;
+
+// ===== Verschieb-/größenveränderbares Widget-Dashboard (wie bei Lighter) =====
+// Jede Kachel behält ihre bestehende ID (oms-trend-meter, oms-gauge-wrap, ...) im Inneren -
+// die ganze bisherige Render-Logik funktioniert dadurch unveraendert weiter, nur die AUSSENHUELLE
+// ist jetzt per GridStack frei verschieb-/groessenveraenderbar. Layout wird pro Browser
+// gespeichert (localStorage), nicht auf dem Server - jeder Nutzer kann sein eigenes Layout haben.
+const OMS_WIDGET_DEFS = [
+  { id: "gsi-signal", title: "📡 Signal", x: 0, y: 0, w: 4, h: 3,
+    body: '<div id="oms-trend-meter" style="padding:16px; border-radius:10px; text-align:center; font-weight:800; font-size:20px;"></div><div id="oms-trend-meter-detail" style="margin-top:8px; font-size:11px; color:var(--text-dim); text-align:center;"></div>' },
+  { id: "gsi-gauge", title: "📶 OBI-Gauge", x: 4, y: 0, w: 4, h: 3, body: '<div id="oms-gauge-wrap"></div>' },
+  { id: "gsi-cvd-gauge", title: "💹 CVD-Gauge", x: 8, y: 0, w: 4, h: 3, body: '<div id="oms-cvd-gauge-wrap"></div>' },
+  { id: "gsi-checklist", title: "✅ Warum feuert's?", x: 0, y: 3, w: 4, h: 3, body: '<div id="oms-checklist-wrap"></div>' },
+  { id: "gsi-pocket", title: "⚡ Pocket-Trading", x: 4, y: 3, w: 4, h: 5, body: `
+    <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; font-size:11px;">
+      <div><div class="label">Margin</div><div class="value" id="pocket-margin" style="font-size:14px;">-</div></div>
+      <div><div class="label">Position</div><div class="value" id="pocket-position" style="font-size:14px;">-</div></div>
+      <div><div class="label">Ø-Einstieg</div><div class="value" id="pocket-entry" style="font-size:14px;">-</div></div>
+      <div><div class="label">Unrealisiert $</div><div class="value" id="pocket-pnl" style="font-size:14px;">-</div></div>
+    </div>
+    <div style="display:flex; gap:8px; margin-bottom:12px;">
+      <button id="btn-manual-buy" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#16a34a; color:white; border:none; border-radius:10px; cursor:pointer;">⬆️ BUY</button>
+      <button id="btn-manual-sell" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#dc2626; color:white; border:none; border-radius:10px; cursor:pointer;">⬇️ SELL</button>
+      <button id="btn-manual-tp" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#2563eb; color:white; border:none; border-radius:10px; cursor:pointer;">✅ TP</button>
+    </div>
+    <div class="label" style="margin-bottom:4px; font-size:10px;">Letzte 10 Kerzen</div>
+    <div id="mini-candles" style="display:flex; gap:3px; align-items:center; height:60px;"></div>` },
+  { id: "gsi-chart", title: "📈 Preisverlauf", x: 8, y: 3, w: 4, h: 5, body: '<div id="oms-chart-wrap"></div>' },
+  { id: "gsi-obi", title: "〰️ OBI-Verlauf", x: 0, y: 8, w: 12, h: 4, body: '<div style="position:relative; height:100%; min-height:180px;"><canvas id="obiChart"></canvas></div>' },
+];
+
+let omsGrid;
+function initOmsGrid() {
+  const container = document.getElementById('oms-grid');
+  container.innerHTML = OMS_WIDGET_DEFS.map(w => `
+    <div class="grid-stack-item" gs-id="${w.id}" gs-x="${w.x}" gs-y="${w.y}" gs-w="${w.w}" gs-h="${w.h}" id="${w.id}">
+      <div class="grid-stack-item-content">
+        <div class="widget-drag-handle">${w.title}</div>
+        <div class="widget-body">${w.body}</div>
+      </div>
+    </div>`).join('');
+
+  omsGrid = GridStack.init({ cellHeight: 46, margin: 6, float: true, handle: '.widget-drag-handle', animate: true }, container);
+
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('oms_dashboard_layout') || 'null'); } catch (e) {}
+  if (saved && Array.isArray(saved) && saved.length) {
+    omsGrid.load(saved);
+  }
+
+  omsGrid.on('change', () => {
+    try { localStorage.setItem('oms_dashboard_layout', JSON.stringify(omsGrid.save(false))); } catch (e) {}
+  });
+
+  document.getElementById('btn-reset-layout').addEventListener('click', () => {
+    try { localStorage.removeItem('oms_dashboard_layout'); } catch (e) {}
+    omsGrid.load(OMS_WIDGET_DEFS.map(w => ({ id: w.id, x: w.x, y: w.y, w: w.w, h: w.h })));
+  });
+
+  // Manuelle Buy/Sell/TP-Buttons neu verdrahten, da sie jetzt per innerHTML neu erzeugt wurden
+  document.getElementById('btn-manual-buy').addEventListener('click', () => manualTrade('long'));
+  document.getElementById('btn-manual-sell').addEventListener('click', () => manualTrade('short'));
+  document.getElementById('btn-manual-tp').addEventListener('click', async () => {
+    const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.error) alert(data.error);
+    refresh();
+  });
+}
+initOmsGrid();
 let currentSymbol = null;
 let allSymbols = [];
 
@@ -1893,14 +1946,8 @@ async function manualTrade(direction) {
   if (data.error) alert(data.error);
   refresh();
 }
-document.getElementById('btn-manual-buy').addEventListener('click', () => manualTrade('long'));
-document.getElementById('btn-manual-sell').addEventListener('click', () => manualTrade('short'));
-document.getElementById('btn-manual-tp').addEventListener('click', async () => {
-  const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method:'POST' });
-  const data = await res.json();
-  if (data.error) alert(data.error);
-  refresh();
-});
+// btn-manual-buy/sell/tp werden jetzt in initOmsGrid() verdrahtet, da diese Buttons dort
+// dynamisch per innerHTML erzeugt werden (Teil der verschiebbaren Pocket-Trading-Kachel)
 
 document.getElementById('btn-backtest').addEventListener('click', async () => {
   const days = parseInt(document.getElementById('backtest-days').value) || 30;
@@ -2314,6 +2361,33 @@ function renderOmsGauge(fast, medium, slow, threshold) {
   </div>`;
 }
 
+function _omsGaugeStageLabel(v, t) {
+  if (v == null) return 'Keine Daten';
+  if (v >= t) return 'STARK LONG';
+  if (v >= t / 2) return 'Vor-Long';
+  if (v > -t / 2) return 'Neutral';
+  if (v > -t) return 'Vor-Short';
+  return 'STARK SHORT';
+}
+
+function renderOmsCvdGauge(cvdRatio, minRatio) {
+  const t = minRatio ?? 0.15;
+  const clamp = v => Math.max(-1, Math.min(1, v ?? 0));
+  const pctOf = v => (clamp(v) + 1) / 2 * 100;
+  const zoneStop1 = ((1 - t) / 2 * 100).toFixed(0);
+  const zoneStop2 = (50 + t / 2 * 50).toFixed(0);
+  return `<div class="panel-card" style="padding:14px;">
+    <div style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Cumulative Volume Delta (CVD) — Stufe: <b style="color:var(--text);">${_omsGaugeStageLabel(cvdRatio, t)}</b></div>
+    <div style="position:relative; height:28px; border-radius:6px; background:linear-gradient(90deg, #f0526b 0%, #7c3f47 ${zoneStop1}%, #3a3f52 48%, #3a3f52 52%, #2f6b45 ${zoneStop2}%, #22c55e 100%);">
+      <div style="position:absolute; top:-4px; left:${pctOf(cvdRatio)}%; width:2px; height:36px; background:#fff; transform:translateX(-1px);" title="aktuelles CVD-Verhältnis"></div>
+    </div>
+    <div style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-dim); margin-top:4px;">
+      <span>Stark Short</span><span>Neutral</span><span>Stark Long</span>
+    </div>
+    <div style="font-size:11px; color:var(--text-dim); margin-top:6px;">Zeigt, wer gerade aktiv (aggressiv) kauft/verkauft - anders als OBI, das nur zeigt, wer im Orderbuch bereitsteht. Muss "Vor-Long"/"Stark Long" (bzw. Short) erreichen, um ein OBI-Signal zu bestätigen.</div>
+  </div>`;
+}
+
 function renderOmsChecklist(data) {
   const row = (label, status, detail) => {
     const icon = status === true ? '✅' : status === false ? '❌' : '➖';
@@ -2425,13 +2499,23 @@ async function refresh() {
   const checklistWrap = document.getElementById('oms-checklist-wrap');
   const chartWrap = document.getElementById('oms-chart-wrap');
 
-  if (data.config.entry_mode === 'oms_scalp') {
-    trendMeterEl.style.display = '';
-    trendMeterDetailEl.style.display = '';
-    gaugeWrap.style.display = '';
-    checklistWrap.style.display = '';
-    chartWrap.style.display = '';
+  const showGridWidget = (gsiId, show) => {
+    const el = document.getElementById(gsiId);
+    if (el) el.style.display = show ? '' : 'none';
+  };
+  const isOms = data.config.entry_mode === 'oms_scalp';
+  const isObiLikeMode = isOms || data.config.entry_mode === 'obi_scalp';
+  document.getElementById('oms-grid').style.display = isObiLikeMode ? '' : 'none';
+  document.getElementById('oms-grid-header').style.display = isObiLikeMode ? '' : 'none';
+  showGridWidget('gsi-signal', isOms);
+  showGridWidget('gsi-gauge', isOms);
+  showGridWidget('gsi-cvd-gauge', isOms);
+  showGridWidget('gsi-checklist', isOms);
+  showGridWidget('gsi-chart', isOms);
+  showGridWidget('gsi-pocket', isObiLikeMode);
+  showGridWidget('gsi-obi', isObiLikeMode);
 
+  if (isOms) {
     const sig = data.oms_signal;
     if (sig === 'long') {
       trendMeterEl.style.background = 'rgba(34,197,94,0.18)';
@@ -2451,18 +2535,13 @@ async function refresh() {
       `CVD: ${data.oms_cvd_ratio ?? '-'}  |  Funding: ${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'}`;
 
     gaugeWrap.innerHTML = renderOmsGauge(data.oms_obi_fast, data.oms_obi_medium, data.oms_obi_slow, data.config.oms_obi_threshold);
+    document.getElementById('oms-cvd-gauge-wrap').innerHTML = renderOmsCvdGauge(data.oms_cvd_ratio, data.config.oms_cvd_min_ratio);
     checklistWrap.innerHTML = renderOmsChecklist(data);
     chartWrap.innerHTML = renderOmsChart(data.oms_price_history, data.oms_markers, {
       position: data.position, avg_entry_price: data.avg_entry_price, size: data.total_coin_size,
       sl_usd: data.config.oms_sl_usd, tp1_usd: data.config.oms_tp1_usd,
       tp1_done: data.oms_tp1_done, trail_price: data.oms_trail_price,
     });
-  } else {
-    trendMeterEl.style.display = 'none';
-    trendMeterDetailEl.style.display = 'none';
-    gaugeWrap.style.display = 'none';
-    checklistWrap.style.display = 'none';
-    chartWrap.style.display = 'none';
   }
 
   const gl = data.grid_levels || {};
@@ -2712,12 +2791,10 @@ async function refresh() {
   }
 
   try {
-    const obiSection = document.getElementById('obi-chart-section');
     const isObiLike = data.config.entry_mode === 'obi_scalp' || data.config.entry_mode === 'oms_scalp';
     const rawHist = data.config.entry_mode === 'oms_scalp' ? (data.oms_obi_history || []) : (data.obi_history || []);
     const threshold = data.config.entry_mode === 'oms_scalp' ? data.config.oms_obi_threshold : data.config.obi_threshold;
     if (isObiLike && rawHist.length > 0) {
-      obiSection.style.display = 'block';
       const obiHist = rawHist;
       const obiLabels = obiHist.map(p => new Date(p.ts).toLocaleTimeString());
       const obiDatasets = [
@@ -2728,32 +2805,31 @@ async function refresh() {
         { label:'Schwelle -', data: Array(obiHist.length).fill(-threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
         { label:'Null', data: Array(obiHist.length).fill(0), borderColor:'#4b5563', pointRadius:0, borderWidth:1 },
       ];
-      if (!obiChart) {
-        obiChart = new Chart(document.getElementById('obiChart'), {
-          type: 'line',
-          data: { labels: obiLabels, datasets: obiDatasets },
-          options: {
-            responsive:true, maintainAspectRatio:false, animation:false,
-            scales: { x:{ display:false }, y:{ min:-1, max:1, ticks:{color:'#9ca3af'} } },
-            plugins:{legend:{labels:{color:'#e5e7eb'}}}
-          }
-        });
-      } else {
-        obiChart.data.labels = obiLabels;
-        obiChart.data.datasets = obiDatasets;
-        obiChart.update('none');
+      const obiCanvas = document.getElementById('obiChart');
+      if (obiCanvas) {
+        if (!obiChart) {
+          obiChart = new Chart(obiCanvas, {
+            type: 'line',
+            data: { labels: obiLabels, datasets: obiDatasets },
+            options: {
+              responsive:true, maintainAspectRatio:false, animation:false,
+              scales: { x:{ display:false }, y:{ min:-1, max:1, ticks:{color:'#9ca3af'} } },
+              plugins:{legend:{labels:{color:'#e5e7eb', boxWidth:10, font:{size:10}}}}
+            }
+          });
+        } else {
+          obiChart.data.labels = obiLabels;
+          obiChart.data.datasets = obiDatasets;
+          obiChart.update('none');
+        }
       }
-    } else {
-      obiSection.style.display = 'none';
     }
   } catch (e) {
     console.error('OBI-Chart-Fehler:', e);
   }
 
   try {
-    const pocketSection = document.getElementById('pocket-trading-section');
     if (data.config.entry_mode === 'obi_scalp' || data.config.entry_mode === 'oms_scalp') {
-      pocketSection.style.display = 'block';
       document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
       document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
       document.getElementById('pocket-entry').innerText = data.avg_entry_price ?? '-';
@@ -2761,8 +2837,6 @@ async function refresh() {
       pnlEl.innerText = data.unrealized_pnl_usd ?? '-';
       pnlEl.className = (data.unrealized_pnl_usd ?? 0) >= 0 ? 'value green' : 'value red';
       renderMiniCandles(hist);
-    } else {
-      pocketSection.style.display = 'none';
     }
   } catch (e) {
     console.error('Pocket-Trading-Fehler:', e);
