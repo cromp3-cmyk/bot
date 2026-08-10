@@ -2319,6 +2319,24 @@ def _oms_reset_position_state(st):
     st["oms_last_signal_direction"] = None  # sofort wieder offen fuer ein neues Signal in jede Richtung
 
 
+def _oms_record_price(st, price):
+    """Rollender Preisverlauf fuers Mini-Chart im Dashboard - nach Zeit statt Anzahl begrenzt
+    (letzte 15 Minuten), damit die Chart-Breite unabhaengig von der Tick-Frequenz des Coins ist."""
+    now = time.time()
+    hist = st["oms_price_history"]
+    hist.append((now, price))
+    cutoff = now - 900
+    if len(hist) > 20 and hist[0][0] < cutoff:
+        st["oms_price_history"] = [h for h in hist if h[0] >= cutoff]
+
+
+def _oms_record_marker(st, price, kind):
+    """kind: entry_long, entry_short, dca_long, dca_short, exit_sl, exit_tp1, exit_trail"""
+    st["oms_markers"].append({"ts": time.time(), "price": price, "kind": kind})
+    if len(st["oms_markers"]) > 60:
+        st["oms_markers"] = st["oms_markers"][-60:]
+
+
 async def handle_oms_signal_check(symbol):
     """Wird bei jedem Orderbuch-Update aufgerufen (Buch selbst ist schon von
     handle_obi_order_book_update aktualisiert). Berechnet OBI ueber drei eigene
@@ -2362,31 +2380,43 @@ async def handle_oms_signal_check(symbol):
         return None
 
     fast_dir, medium_dir, slow_dir = side_of(fast), side_of(medium), side_of(slow)
-    direction = fast_dir if (fast_dir is not None and fast_dir == medium_dir == slow_dir) else None
+    obi_direction = fast_dir if (fast_dir is not None and fast_dir == medium_dir == slow_dir) else None
+    direction = obi_direction
+    # Fuer die Bedingungs-Checkliste im Dashboard: jede Stufe einzeln festhalten, nicht nur
+    # das Endergebnis - so sieht man WARUM ein Signal (nicht) durchkommt
+    st["oms_obi_direction"] = obi_direction
 
     # CVD-Bestaetigung: die tatsaechliche Trade-Richtung muss zum Orderbuch-Signal passen,
     # sonst koennte es eine Spoofing-Wand sein (sichtbare Wall, aber niemand handelt dagegen)
-    if direction is not None and cfg.get("oms_cvd_confirm_enabled", True):
+    cvd_enabled = cfg.get("oms_cvd_confirm_enabled", True)
+    cvd_ok = None
+    if obi_direction is not None and cvd_enabled:
         cvd_ratio = st.get("oms_cvd_ratio") or 0.0
         min_ratio = cfg.get("oms_cvd_min_ratio", 0.15)
-        if direction == "long" and cvd_ratio < min_ratio:
+        cvd_ok = not ((obi_direction == "long" and cvd_ratio < min_ratio) or
+                      (obi_direction == "short" and cvd_ratio > -min_ratio))
+        if not cvd_ok:
             direction = None
-        elif direction == "short" and cvd_ratio > -min_ratio:
-            direction = None
+    st["oms_cvd_ok"] = cvd_ok
 
     # Funding-Filter: nicht in eine bereits ueberfuellte Richtung nachlegen (Squeeze-Risiko)
-    if direction is not None and cfg.get("oms_funding_filter_enabled", True):
+    funding_enabled = cfg.get("oms_funding_filter_enabled", True)
+    funding_ok = None
+    if direction is not None and funding_enabled:
         funding = st.get("oms_funding_rate")
         max_abs = cfg.get("oms_funding_max_abs", 0.0005)
         if funding is not None:
-            if direction == "long" and funding > max_abs:
+            funding_ok = not ((direction == "long" and funding > max_abs) or
+                               (direction == "short" and funding < -max_abs))
+            if not funding_ok:
                 direction = None
-            elif direction == "short" and funding < -max_abs:
-                direction = None
+    st["oms_funding_ok"] = funding_ok
 
     # Trend-Meter: IMMER aktualisieren, unabhaengig von bot_active/Cooldown/Position - das ist
     # die Live-Anzeige "JETZT LONG"/"JETZT SHORT" zum manuellen Nachhandeln
     st["oms_signal"] = direction
+    if st["last_price"] is not None:
+        _oms_record_price(st, st["last_price"])
 
     if direction is None or st["last_price"] is None:
         return
@@ -2406,6 +2436,7 @@ async def handle_oms_signal_check(symbol):
         if st["position"] is not None:
             _oms_reset_position_state(st)
             st["oms_last_entry_price"] = st["last_price"]
+            _oms_record_marker(st, st["last_price"], "entry_long" if direction == "long" else "entry_short")
 
     elif (cfg.get("oms_dca_enabled", True) and direction == st["position"]
           and st["oms_dca_count"] < cfg.get("oms_dca_max_entries", 2) and not st["oms_tp1_done"]):
@@ -2424,6 +2455,7 @@ async def handle_oms_signal_check(symbol):
             if ok:
                 st["oms_dca_count"] += 1
                 st["oms_last_entry_price"] = st["last_price"]
+                _oms_record_marker(st, st["last_price"], "dca_long" if direction == "long" else "dca_short")
 
 
 async def check_oms_exit_management(symbol, price):
@@ -2434,7 +2466,10 @@ async def check_oms_exit_management(symbol, price):
         return
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
-    if cfg["entry_mode"] != "oms_scalp" or st["position"] is None or price is None:
+    if cfg["entry_mode"] != "oms_scalp" or price is None:
+        return
+    _oms_record_price(st, price)
+    if st["position"] is None:
         return
 
     pos = st["position"]
@@ -2447,6 +2482,7 @@ async def check_oms_exit_management(symbol, price):
     if not st["oms_tp1_done"]:
         if pnl_usd <= -cfg["oms_sl_usd"]:
             await execute_exit(symbol, price, "SL")
+            _oms_record_marker(st, price, "exit_sl")
             _oms_reset_position_state(st)
             return
         if pnl_usd >= cfg["oms_tp1_usd"]:
@@ -2455,6 +2491,7 @@ async def check_oms_exit_management(symbol, price):
             if ok:
                 st["oms_tp1_done"] = True
                 st["oms_trail_price"] = price  # Trailing-Referenz startet ab hier
+                _oms_record_marker(st, price, "exit_tp1")
         return
 
     # Nach TP1: Rest eng nachziehen
@@ -2464,12 +2501,14 @@ async def check_oms_exit_management(symbol, price):
             st["oms_trail_price"] = price
         if price <= (st["oms_trail_price"] or price) - trail_dist:
             await execute_exit(symbol, price, "TRAIL")
+            _oms_record_marker(st, price, "exit_trail")
             _oms_reset_position_state(st)
     else:
         if price < (st["oms_trail_price"] or price):
             st["oms_trail_price"] = price
         if price >= (st["oms_trail_price"] or price) + trail_dist:
             await execute_exit(symbol, price, "TRAIL")
+            _oms_record_marker(st, price, "exit_trail")
             _oms_reset_position_state(st)
 
 

@@ -392,8 +392,10 @@ def default_state():
         "oms_obi_buffer": [], "oms_obi_fast": None, "oms_obi_medium": None, "oms_obi_slow": None,
         "oms_cvd_buffer": [], "oms_cvd_ratio": None,
         "oms_funding_rate": None, "oms_last_signal_direction": None, "oms_last_trade_time": 0.0,
-        "oms_signal": None, "oms_tp1_done": False, "oms_trail_price": None,
+        "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None,
+        "oms_tp1_done": False, "oms_trail_price": None,
         "oms_dca_count": 0, "oms_last_entry_price": None,
+        "oms_price_history": [], "oms_markers": [],
         "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
         "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "rp_osc": None, "rp_mid_price": None, "rp_range_high": None, "rp_range_low": None,
@@ -860,8 +862,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="coin-overview" id="coin-overview"></div>
 
-<div id="oms-trend-meter" style="display:none; margin-bottom:20px; padding:20px; border-radius:14px; text-align:center; font-weight:800; font-size:28px; letter-spacing:0.03em; transition:background 0.3s;"></div>
-<div id="oms-trend-meter-detail" style="display:none; margin-bottom:20px; font-size:13px; color:var(--text-dim); text-align:center;"></div>
+<div id="oms-trend-meter" style="display:none; margin-bottom:12px; padding:20px; border-radius:14px; text-align:center; font-weight:800; font-size:28px; letter-spacing:0.03em; transition:background 0.3s;"></div>
+<div id="oms-trend-meter-detail" style="display:none; margin-bottom:12px; font-size:13px; color:var(--text-dim); text-align:center;"></div>
+<div id="oms-gauge-wrap" style="display:none; margin-bottom:12px;"></div>
+<div id="oms-checklist-wrap" style="display:none; margin-bottom:12px;"></div>
+<div id="oms-chart-wrap" style="display:none; margin-bottom:20px;"></div>
 
 <div style="margin-bottom:20px;">
   <button id="btn-start" class="start">▶️ Start</button>
@@ -2264,6 +2269,93 @@ const renderStfSweepWorst = makeSortableTable('stf-sweep-worst-table', () => win
 
 
 
+function renderOmsGauge(fast, medium, slow, threshold) {
+  const t = threshold ?? 0.35;
+  const clamp = v => Math.max(-1, Math.min(1, v ?? 0));
+  const pctOf = v => (clamp(v) + 1) / 2 * 100;
+  const stageLabel = v => {
+    if (v == null) return 'Keine Daten';
+    if (v >= t) return 'STARK LONG';
+    if (v >= t / 2) return 'Vor-Long';
+    if (v > -t / 2) return 'Neutral';
+    if (v > -t) return 'Vor-Short';
+    return 'STARK SHORT';
+  };
+  const zoneStop1 = ((1 - t) / 2 * 100).toFixed(0);
+  const zoneStop2 = (50 + t / 2 * 50).toFixed(0);
+  return `<div class="panel-card" style="padding:14px;">
+    <div style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Orderbuch-Ungleichgewicht (OBI) — Stufe: <b style="color:var(--text);">${stageLabel(fast)}</b></div>
+    <div style="position:relative; height:28px; border-radius:6px; background:linear-gradient(90deg, #f0526b 0%, #7c3f47 ${zoneStop1}%, #3a3f52 48%, #3a3f52 52%, #2f6b45 ${zoneStop2}%, #22c55e 100%);">
+      <div style="position:absolute; top:-4px; left:${pctOf(fast)}%; width:2px; height:36px; background:#fff; transform:translateX(-1px);" title="schnelles Fenster"></div>
+      <div style="position:absolute; top:11px; left:${pctOf(medium)}%; width:6px; height:6px; border-radius:50%; background:#fff; opacity:0.6; transform:translateX(-3px);" title="mittleres Fenster"></div>
+      <div style="position:absolute; top:11px; left:${pctOf(slow)}%; width:6px; height:6px; border-radius:50%; background:#fff; opacity:0.35; transform:translateX(-3px);" title="langsames Fenster"></div>
+    </div>
+    <div style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-dim); margin-top:4px;">
+      <span>Stark Short</span><span>Neutral</span><span>Stark Long</span>
+    </div>
+    <div style="font-size:11px; color:var(--text-dim); margin-top:6px;">Weiße Linie = schnelles Fenster (jetzt) · Punkte = mittel/langsam (blasser = älteres Fenster) - alle drei müssen in dieselbe Zone zeigen, damit ein Signal entsteht.</div>
+  </div>`;
+}
+
+function renderOmsChecklist(data) {
+  const row = (label, status, detail) => {
+    const icon = status === true ? '✅' : status === false ? '❌' : '➖';
+    return `<div style="display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid var(--panel-border);">
+      <span>${icon} ${label}</span><span style="color:var(--text-dim); font-size:12px;">${detail}</span>
+    </div>`;
+  };
+  const obiOk = data.oms_obi_direction != null;
+  const obiDetail = `schnell ${data.oms_obi_fast ?? '-'} / mittel ${data.oms_obi_medium ?? '-'} / langsam ${data.oms_obi_slow ?? '-'}`;
+  const cvdDetail = data.config.oms_cvd_confirm_enabled ? `CVD ${data.oms_cvd_ratio ?? '-'} (min. ${data.config.oms_cvd_min_ratio})` : 'deaktiviert';
+  const fundingDetail = data.config.oms_funding_filter_enabled ? `${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'} (Grenze ${(data.config.oms_funding_max_abs*100).toFixed(3)}%)` : 'deaktiviert';
+  return `<div class="panel-card" style="padding:14px;">
+    <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">Warum feuert (nicht)?</div>
+    ${row('OBI-Übereinstimmung (3 Fenster gleiche Richtung)', obiOk, obiDetail)}
+    ${row('CVD-Bestätigung', data.oms_cvd_ok, cvdDetail)}
+    ${row('Funding-Filter bestanden', data.oms_funding_ok, fundingDetail)}
+  </div>`;
+}
+
+function renderOmsChart(history, markers) {
+  if (!history || history.length < 2) {
+    return '<div class="panel-card" style="padding:14px; color:var(--text-dim); font-size:13px;">Preisverlauf sammelt noch Daten...</div>';
+  }
+  const prices = history.map(h => h[1]);
+  const times = history.map(h => h[0]);
+  const minP = Math.min(...prices), maxP = Math.max(...prices);
+  const minT = times[0], maxT = times[times.length - 1];
+  const w = 800, h = 160, pad = 12;
+  const pRange = (maxP - minP) || (maxP * 0.001) || 1;
+  const tRange = (maxT - minT) || 1;
+  const xOf = t => pad + (t - minT) / tRange * (w - 2 * pad);
+  const yOf = p => h - pad - (p - minP) / pRange * (h - 2 * pad);
+  const points = history.map(([t, p]) => `${xOf(t).toFixed(1)},${yOf(p).toFixed(1)}`).join(' ');
+  const styles = {
+    entry_long: { shape: 'triUp', color: '#22c55e' },
+    entry_short: { shape: 'triDown', color: '#f0526b' },
+    dca_long: { shape: 'circle', color: '#86efac', r: 3 },
+    dca_short: { shape: 'circle', color: '#fca5a5', r: 3 },
+    exit_sl: { shape: 'x', color: '#f0526b' },
+    exit_tp1: { shape: 'circle', color: '#22c55e', r: 4 },
+    exit_trail: { shape: 'circle', color: '#3b82f6', r: 4 },
+  };
+  const markerSvgs = (markers || []).filter(m => m.ts >= minT && m.ts <= maxT).map(m => {
+    const x = xOf(m.ts), y = yOf(m.price);
+    const st = styles[m.kind] || { shape: 'circle', color: '#888', r: 3 };
+    if (st.shape === 'triUp') return `<polygon points="${x},${y-6} ${x-5},${y+4} ${x+5},${y+4}" fill="${st.color}"/>`;
+    if (st.shape === 'triDown') return `<polygon points="${x},${y+6} ${x-5},${y-4} ${x+5},${y-4}" fill="${st.color}"/>`;
+    if (st.shape === 'x') return `<line x1="${x-4}" y1="${y-4}" x2="${x+4}" y2="${y+4}" stroke="${st.color}" stroke-width="2"/><line x1="${x-4}" y1="${y+4}" x2="${x+4}" y2="${y-4}" stroke="${st.color}" stroke-width="2"/>`;
+    return `<circle cx="${x}" cy="${y}" r="${st.r||3}" fill="${st.color}"/>`;
+  }).join('');
+  return `<div class="panel-card" style="padding:10px;">
+    <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">Preisverlauf (letzte 15 Min): 🔺 Long-Einstieg · 🔻 Short-Einstieg · ⭕ Nachkauf · ✖️ SL · 🟢 TP1 · 🔵 Trailing-Exit</div>
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:160px; display:block;">
+      <polyline points="${points}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+      ${markerSvgs}
+    </svg>
+  </div>`;
+}
+
 async function refresh() {
   if (!currentSymbol) return;
   const res = await fetch(`/api/status?symbol=${currentSymbol}`);
@@ -2288,9 +2380,17 @@ async function refresh() {
   // Signal-Richtung - auch nutzbar wenn der Bot pausiert ist, zum manuellen Nachhandeln
   const trendMeterEl = document.getElementById('oms-trend-meter');
   const trendMeterDetailEl = document.getElementById('oms-trend-meter-detail');
+  const gaugeWrap = document.getElementById('oms-gauge-wrap');
+  const checklistWrap = document.getElementById('oms-checklist-wrap');
+  const chartWrap = document.getElementById('oms-chart-wrap');
+
   if (data.config.entry_mode === 'oms_scalp') {
     trendMeterEl.style.display = '';
     trendMeterDetailEl.style.display = '';
+    gaugeWrap.style.display = '';
+    checklistWrap.style.display = '';
+    chartWrap.style.display = '';
+
     const sig = data.oms_signal;
     if (sig === 'long') {
       trendMeterEl.style.background = 'rgba(34,197,94,0.18)';
@@ -2308,9 +2408,16 @@ async function refresh() {
     trendMeterDetailEl.innerText =
       `OBI schnell/mittel/langsam: ${data.oms_obi_fast ?? '-'} / ${data.oms_obi_medium ?? '-'} / ${data.oms_obi_slow ?? '-'}  |  ` +
       `CVD: ${data.oms_cvd_ratio ?? '-'}  |  Funding: ${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'}`;
+
+    gaugeWrap.innerHTML = renderOmsGauge(data.oms_obi_fast, data.oms_obi_medium, data.oms_obi_slow, data.config.oms_obi_threshold);
+    checklistWrap.innerHTML = renderOmsChecklist(data);
+    chartWrap.innerHTML = renderOmsChart(data.oms_price_history, data.oms_markers);
   } else {
     trendMeterEl.style.display = 'none';
     trendMeterDetailEl.style.display = 'none';
+    gaugeWrap.style.display = 'none';
+    checklistWrap.style.display = 'none';
+    chartWrap.style.display = 'none';
   }
 
   const gl = data.grid_levels || {};
@@ -2878,9 +2985,13 @@ async def handle_status(request):
         "obi_medium": st.get("obi_medium"), "obi_slow": st.get("obi_slow"),
         "oms_signal": st.get("oms_signal"), "oms_obi_fast": st.get("oms_obi_fast"),
         "oms_obi_medium": st.get("oms_obi_medium"), "oms_obi_slow": st.get("oms_obi_slow"),
+        "oms_obi_direction": st.get("oms_obi_direction"), "oms_cvd_ok": st.get("oms_cvd_ok"),
+        "oms_funding_ok": st.get("oms_funding_ok"),
         "oms_cvd_ratio": st.get("oms_cvd_ratio"), "oms_funding_rate": st.get("oms_funding_rate"),
         "oms_tp1_done": st.get("oms_tp1_done"), "oms_trail_price": st.get("oms_trail_price"),
         "oms_dca_count": st.get("oms_dca_count"),
+        "oms_price_history": [[round(ts, 1), price] for ts, price in st.get("oms_price_history", [])[-200:]],
+        "oms_markers": st.get("oms_markers", [])[-30:],
         "obi_history": st.get("obi_history", [])[-300:],
         "obi_spread_pct": st.get("obi_spread_pct"), "obi_recent_vol_pct": st.get("obi_recent_vol_pct"),
         "fib": st.get("fib"),
