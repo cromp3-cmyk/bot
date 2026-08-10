@@ -2127,8 +2127,6 @@ def check_obi_reversal(st, fast, long_threshold, short_threshold, min_bounce):
 async def handle_obi_order_book_update(symbol, msg):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
-    if cfg["entry_mode"] != "obi_scalp":
-        return
 
     ob = msg.get("order_book", {})
     book = st["obi_book"]
@@ -2140,6 +2138,12 @@ async def handle_obi_order_book_update(symbol, msg):
                 book[side_key].pop(price, None)
             else:
                 book[side_key][price] = size
+
+    if cfg["entry_mode"] == "oms_scalp":
+        await handle_oms_signal_check(symbol)
+        return
+    if cfg["entry_mode"] != "obi_scalp":
+        return
 
     raw_obi = calc_obi(symbol, cfg["obi_levels"],
                         depth_weighting=cfg.get("obi_depth_weighting_enabled", False),
@@ -2265,6 +2269,210 @@ async def handle_obi_order_book_update(symbol, msg):
     await execute_entry(symbol, direction, st["last_price"], is_add_on=False)
 
 
+# ========== OBI-MOMENTUM-SCALP (oms_) - eigenstaendige neue Strategie ==========
+# Einstieg: OBI ueber drei Zeitfenster (muessen uebereinstimmen, wie OBI-Scalp) UND CVD
+# (echte Trade-Tape-Richtung aus dem Trade-Kanal - is_maker_ask gibt an, ob der Taker
+# gekauft oder verkauft hat) bestaetigt dieselbe Richtung. Optionaler Funding-Filter
+# verhindert Nachlegen in eine bereits ueberfuellte Richtung. Exit: TP1 (Teilverkauf) +
+# enger Trailing-Stop auf den Rest, SL von Anfang an ein fester $-Betrag auf die GESAMTE
+# Position (bewusst NICHT die Liquidation als Stop). Nachkauf: max. N Stufen, fallende
+# Groesse, nur wenn das Signal nach spuerbarem Pullback erneut bestaetigt - kein blindes
+# Preis-Grid. st["oms_signal"] wird IMMER aktualisiert (auch bei bot_active=False oder
+# Cooldown) - das ist das Trend-Meter zum manuellen Nachhandeln im Dashboard.
+
+def update_oms_cvd(symbol, trades):
+    """CVD (Cumulative Volume Delta) aus dem echten Lighter-Trade-Tape: is_maker_ask=True
+    heisst, die Ask-Seite war die ruhende (Maker-)Order - der Taker hat also AGGRESSIV
+    GEKAUFT (Delta +size). is_maker_ask=False heisst umgekehrt, der Taker hat aggressiv
+    VERKAUFT (Delta -size). Als Verhaeltnis (net/vol, -1..1) gespeichert statt absoluter
+    Groesse - bleibt so vergleichbar mit OBI und unabhaengig vom Volumen-Niveau des Coins."""
+    if symbol not in BOTS or not trades:
+        return
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    now = time.time()
+    buf = st["oms_cvd_buffer"]
+    for t in trades:
+        try:
+            size = float(t.get("size", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if size <= 0:
+            continue
+        is_maker_ask = bool(t.get("is_maker_ask", False))
+        delta = size if is_maker_ask else -size
+        buf.append((delta, size, now))
+    window = cfg.get("oms_cvd_window_seconds", 10)
+    cutoff = now - window
+    buf = [d for d in buf if d[2] >= cutoff]
+    st["oms_cvd_buffer"] = buf
+    net = sum(d for d, v, ts in buf)
+    vol = sum(v for d, v, ts in buf)
+    st["oms_cvd_ratio"] = round(0.0 if vol == 0 else net / vol, 4)
+
+
+def _oms_reset_position_state(st):
+    st["oms_tp1_done"] = False
+    st["oms_trail_price"] = None
+    st["oms_dca_count"] = 0
+    st["oms_last_entry_price"] = None
+    st["oms_last_signal_direction"] = None  # sofort wieder offen fuer ein neues Signal in jede Richtung
+
+
+async def handle_oms_signal_check(symbol):
+    """Wird bei jedem Orderbuch-Update aufgerufen (Buch selbst ist schon von
+    handle_obi_order_book_update aktualisiert). Berechnet OBI ueber drei eigene
+    Zeitfenster, bestaetigt per CVD, filtert per Funding-Rate, aktualisiert das
+    Live-Signal fuers Trend-Meter IMMER - und loest bei aktivem Bot Einstieg/Nachkauf aus."""
+    if symbol not in BOTS:
+        return
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if cfg["entry_mode"] != "oms_scalp":
+        return
+
+    raw_obi = calc_obi(symbol, cfg["oms_levels"])
+    now = time.time()
+    buf = st["oms_obi_buffer"]
+    buf.append((raw_obi, now))
+    max_window = max(cfg["oms_window_fast_seconds"], cfg["oms_window_medium_seconds"], cfg["oms_window_slow_seconds"])
+    cutoff = now - max_window
+    buf = [d for d in buf if d[1] >= cutoff]
+    st["oms_obi_buffer"] = buf
+
+    def avg_over(seconds):
+        wc = now - seconds
+        vals = [v for v, ts in buf if ts >= wc]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    fast = avg_over(cfg["oms_window_fast_seconds"])
+    medium = avg_over(cfg["oms_window_medium_seconds"])
+    slow = avg_over(cfg["oms_window_slow_seconds"])
+    st["oms_obi_fast"] = round(fast, 4)
+    st["oms_obi_medium"] = round(medium, 4)
+    st["oms_obi_slow"] = round(slow, 4)
+
+    threshold = cfg["oms_obi_threshold"]
+
+    def side_of(v):
+        if v >= threshold:
+            return "long"
+        if v <= -threshold:
+            return "short"
+        return None
+
+    fast_dir, medium_dir, slow_dir = side_of(fast), side_of(medium), side_of(slow)
+    direction = fast_dir if (fast_dir is not None and fast_dir == medium_dir == slow_dir) else None
+
+    # CVD-Bestaetigung: die tatsaechliche Trade-Richtung muss zum Orderbuch-Signal passen,
+    # sonst koennte es eine Spoofing-Wand sein (sichtbare Wall, aber niemand handelt dagegen)
+    if direction is not None and cfg.get("oms_cvd_confirm_enabled", True):
+        cvd_ratio = st.get("oms_cvd_ratio") or 0.0
+        min_ratio = cfg.get("oms_cvd_min_ratio", 0.15)
+        if direction == "long" and cvd_ratio < min_ratio:
+            direction = None
+        elif direction == "short" and cvd_ratio > -min_ratio:
+            direction = None
+
+    # Funding-Filter: nicht in eine bereits ueberfuellte Richtung nachlegen (Squeeze-Risiko)
+    if direction is not None and cfg.get("oms_funding_filter_enabled", True):
+        funding = st.get("oms_funding_rate")
+        max_abs = cfg.get("oms_funding_max_abs", 0.0005)
+        if funding is not None:
+            if direction == "long" and funding > max_abs:
+                direction = None
+            elif direction == "short" and funding < -max_abs:
+                direction = None
+
+    # Trend-Meter: IMMER aktualisieren, unabhaengig von bot_active/Cooldown/Position - das ist
+    # die Live-Anzeige "JETZT LONG"/"JETZT SHORT" zum manuellen Nachhandeln
+    st["oms_signal"] = direction
+
+    if direction is None or st["last_price"] is None:
+        return
+    if not cfg["bot_active"]:
+        return
+    if now - st["oms_last_trade_time"] < cfg["oms_cooldown_seconds"]:
+        return
+
+    if st["position"] is None:
+        if direction == st["oms_last_signal_direction"]:
+            return  # dasselbe Signal wie beim letzten Mal - nicht wiederholt in dieselbe Richtung feuern
+        st["oms_last_signal_direction"] = direction
+        st["oms_last_trade_time"] = now
+        debug_log(f"📡 [{symbol}] OBI-Momentum-Scalp Signal: {direction.upper()} @ {st['last_price']} "
+                  f"(OBI {round(fast,3)}/{round(medium,3)}/{round(slow,3)}, CVD {st.get('oms_cvd_ratio')})")
+        await execute_entry(symbol, direction, st["last_price"], is_add_on=False)
+        if st["position"] is not None:
+            _oms_reset_position_state(st)
+            st["oms_last_entry_price"] = st["last_price"]
+
+    elif (cfg.get("oms_dca_enabled", True) and direction == st["position"]
+          and st["oms_dca_count"] < cfg.get("oms_dca_max_entries", 2) and not st["oms_tp1_done"]):
+        # Nachkauf nur wenn Signal erneut bestaetigt UND der Preis seit dem letzten Einstieg
+        # spuerbar gegen die Position gelaufen ist - kein reines "Signal wieder da" (sonst
+        # Dauerfeuer), kein Nachkauf mehr nachdem TP1 schon getroffen wurde (Rest wird getrailt)
+        last_entry = st["oms_last_entry_price"] or st["avg_entry_price"]
+        moved_against = (last_entry - st["last_price"]) if st["position"] == "long" else (st["last_price"] - last_entry)
+        moved_against_usd = moved_against * st["total_coin_size"]
+        if moved_against_usd >= cfg.get("oms_dca_min_pullback_usd", 1.0):
+            st["oms_last_trade_time"] = now
+            fraction = cfg.get("oms_dca_size_fraction", 0.6) ** (st["oms_dca_count"] + 1)
+            debug_log(f"📡 [{symbol}] OBI-Momentum-Scalp Nachkauf {st['oms_dca_count']+1}: "
+                      f"{direction.upper()} @ {st['last_price']} (Signal erneut bestätigt, Größe ×{round(fraction,2)})")
+            ok = await execute_entry(symbol, direction, st["last_price"], is_add_on=True, size_multiplier=fraction)
+            if ok:
+                st["oms_dca_count"] += 1
+                st["oms_last_entry_price"] = st["last_price"]
+
+
+async def check_oms_exit_management(symbol, price):
+    """Wird bei jedem Preis-Tick aufgerufen. SL zuerst (fester $-Betrag auf die GESAMTE
+    Position, NICHT die Liquidation), dann TP1 (Teilverkauf - danach startet Trailing fuer
+    den Rest; kein separater Break-Even-SL noetig, der TP1-Gewinn ist schon real realisiert)."""
+    if symbol not in BOTS:
+        return
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if cfg["entry_mode"] != "oms_scalp" or st["position"] is None or price is None:
+        return
+
+    pos = st["position"]
+    entry = st["avg_entry_price"]
+    size = st["total_coin_size"]
+    if not size:
+        return
+    pnl_usd = (price - entry) * size if pos == "long" else (entry - price) * size
+
+    if not st["oms_tp1_done"]:
+        if pnl_usd <= -cfg["oms_sl_usd"]:
+            await execute_exit(symbol, price, "SL")
+            _oms_reset_position_state(st)
+            return
+        if pnl_usd >= cfg["oms_tp1_usd"]:
+            fraction = cfg["oms_tp1_close_pct"] / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+            if ok:
+                st["oms_tp1_done"] = True
+                st["oms_trail_price"] = price  # Trailing-Referenz startet ab hier
+        return
+
+    # Nach TP1: Rest eng nachziehen
+    trail_dist = cfg["oms_trail_distance_usd"] / size if size else 0
+    if pos == "long":
+        if price > (st["oms_trail_price"] or price):
+            st["oms_trail_price"] = price
+        if price <= (st["oms_trail_price"] or price) - trail_dist:
+            await execute_exit(symbol, price, "TRAIL")
+            _oms_reset_position_state(st)
+    else:
+        if price < (st["oms_trail_price"] or price):
+            st["oms_trail_price"] = price
+        if price >= (st["oms_trail_price"] or price) + trail_dist:
+            await execute_exit(symbol, price, "TRAIL")
+            _oms_reset_position_state(st)
+
+
 def update_obi_trend_ema(symbol, price, ema_length):
     st = BOTS[symbol]["state"]
     if st["obi_trend_ema"] is None:
@@ -2359,6 +2567,10 @@ async def on_price_update(symbol, price):
                     await execute_exit(symbol, price, "TP")
                 elif pnl_pct <= sl_floor:
                     await execute_exit(symbol, price, "SL" if sl_floor < 0 else "BREAKEVEN-LOCK")
+        return
+
+    if cfg["entry_mode"] == "oms_scalp":
+        await check_oms_exit_management(symbol, price)
         return
 
     if cfg["entry_mode"] == "fib_reversal":
@@ -2652,6 +2864,7 @@ async def trading_loop():
                 for s in SYMBOLS:
                     await ws.send(json.dumps({"type": "subscribe", "channel": f"trade/{MARKET_INDICES[s]}"}))
                     await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{MARKET_INDICES[s]}"}))
+                    await ws.send(json.dumps({"type": "subscribe", "channel": f"market_stats/{MARKET_INDICES[s]}"}))
                 debug_log(f"✅ Verbunden für {', '.join(SYMBOLS)}")
 
                 async for raw in ws:
@@ -2665,6 +2878,7 @@ async def trading_loop():
 
                     if channel.startswith("trade") and symbol:
                         trades = msg.get("trades", [])
+                        update_oms_cvd(symbol, trades)
                         if trades:
                             price = float(trades[-1]["price"])
                             try:
@@ -2673,6 +2887,14 @@ async def trading_loop():
                                 debug_log(f"⚠️ [{symbol}] on_price_update fehlgeschlagen (Verbindung bleibt bestehen)", {"error": str(e), "traceback": traceback.format_exc()})
                     elif channel.startswith("order_book") and symbol:
                         await handle_obi_order_book_update(symbol, msg)
+                    elif channel.startswith("market_stats") and symbol:
+                        stats = msg.get("market_stats", {})
+                        rate = stats.get("current_funding_rate")
+                        if rate is not None:
+                            try:
+                                BOTS[symbol]["state"]["oms_funding_rate"] = float(rate)
+                            except (TypeError, ValueError):
+                                pass
 
                     now = time.time()
                     if now - last_status_log >= 20:
