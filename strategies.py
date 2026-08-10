@@ -38,7 +38,8 @@ async def fetch_candles_binance(symbol, resolution, count_back=150):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
-                    debug_log(f"⚠️ [{symbol}] Binance-Kerzenabfrage HTTP {resp.status}")
+                    body = await resp.text()
+                    debug_log(f"⚠️ [{symbol}] Binance-Kerzenabfrage HTTP {resp.status}", {"body": body[:300]})
                     return None
                 data = await resp.json()
     except Exception as e:
@@ -272,21 +273,23 @@ async def binance_1s_poll_loop(symbol):
 
     while True:
         try:
-            data = await fetch_candles_binance(symbol, "1s", count_back=1000)
-            if data:
-                timestamps, opens, highs, lows, closes = data
-                buffer = st.get("binance_1s_buffer", [])
-                # Nur neue Kerzen anhaengen statt jedes Mal den kompletten Puffer zu
-                # deduplizieren+sortieren (war bei vielen Coins gleichzeitig ein spuerbarer
-                # Speicher-/CPU-Fresser). Binance liefert die Kerzen bereits aufsteigend
-                # sortiert, daher reicht ein einfacher Vergleich mit dem letzten Timestamp.
-                last_ts = buffer[-1]["ts"] if buffer else -1
-                for i in range(len(timestamps)):
-                    if timestamps[i] > last_ts:
-                        buffer.append({"ts": timestamps[i], "o": opens[i], "h": highs[i], "l": lows[i], "c": closes[i]})
-                if len(buffer) > 10000:  # ~2.75 Stunden 1s-Historie (reduziert wegen Speicherlimit)
-                    buffer = buffer[-10000:]
-                st["binance_1s_buffer"] = buffer
+            cfg = b["config"]
+            if cfg["bot_active"]:
+                data = await fetch_candles_binance(symbol, "1s", count_back=1000)
+                if data:
+                    timestamps, opens, highs, lows, closes = data
+                    buffer = st.get("binance_1s_buffer", [])
+                    # Nur neue Kerzen anhaengen statt jedes Mal den kompletten Puffer zu
+                    # deduplizieren+sortieren (war bei vielen Coins gleichzeitig ein spuerbarer
+                    # Speicher-/CPU-Fresser). Binance liefert die Kerzen bereits aufsteigend
+                    # sortiert, daher reicht ein einfacher Vergleich mit dem letzten Timestamp.
+                    last_ts = buffer[-1]["ts"] if buffer else -1
+                    for i in range(len(timestamps)):
+                        if timestamps[i] > last_ts:
+                            buffer.append({"ts": timestamps[i], "o": opens[i], "h": highs[i], "l": lows[i], "c": closes[i]})
+                    if len(buffer) > 10000:  # ~2.75 Stunden 1s-Historie (reduziert wegen Speicherlimit)
+                        buffer = buffer[-10000:]
+                    st["binance_1s_buffer"] = buffer
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Binance-1s-Puffer-Abfrage fehlgeschlagen", {"error": str(e)})
         await asyncio.sleep(5)
@@ -366,7 +369,7 @@ async def fib_reversal_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "fib_reversal":
+            if cfg["entry_mode"] == "fib_reversal" and cfg["bot_active"]:
                 st = b["state"]
                 if not st["fib_entry1_done"]:
                     needed_bars = cfg["fib_lookback_candles"] + 5
@@ -754,7 +757,7 @@ async def range_profile_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "range_profile":
+            if cfg["entry_mode"] == "range_profile" and cfg["bot_active"]:
                 lookback = cfg["rp_lookback"]
                 needed_bars = min(1000, lookback + 60)
                 resolution = cfg["rp_resolution"]
@@ -1026,7 +1029,7 @@ async def stf_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "supertrend_fusion":
+            if cfg["entry_mode"] == "supertrend_fusion" and cfg["bot_active"]:
                 resolution = cfg["stf_resolution"]
                 ema_len = cfg.get("stf_ema_length", 200) if cfg.get("stf_use_ema_filter", False) else 0
                 min_needed = max(cfg["stf_atr_period"], cfg["stf_af_period"] + cfg["stf_af_smooth"], cfg["stf_chop_length"], ema_len) + 3
@@ -1176,7 +1179,7 @@ async def ce_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "chandelier_exit":
+            if cfg["entry_mode"] == "chandelier_exit" and cfg["bot_active"]:
                 st = b["state"]
                 resolution = cfg["ce_resolution"]
                 atr_period = cfg["ce_atr_period"]
@@ -1319,7 +1322,7 @@ async def ut_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "ut_bot":
+            if cfg["entry_mode"] == "ut_bot" and cfg["bot_active"]:
                 resolution = cfg["ut_resolution"]
                 atr_period = cfg["ut_atr_period"]
                 min_needed = atr_period + 3
@@ -1513,7 +1516,7 @@ async def ht_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "halftrend":
+            if cfg["entry_mode"] == "halftrend" and cfg["bot_active"]:
                 resolution = cfg["ht_resolution"]
                 amplitude = cfg["ht_amplitude"]
                 min_needed = max(100, amplitude) + 5
@@ -1794,7 +1797,7 @@ async def sg_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "signal_grid":
+            if cfg["entry_mode"] == "signal_grid" and cfg["bot_active"]:
                 st = b["state"]
                 resolution = cfg["sg_resolution"]
                 source = cfg.get("sg_signal_source", "wavetrend")
@@ -1894,7 +1897,7 @@ async def wtc_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "wavetrend_cross":
+            if cfg["entry_mode"] == "wavetrend_cross" and cfg["bot_active"]:
                 resolution = cfg["wtc_resolution"]
                 min_needed = max(cfg["wtc_channel_length"], cfg["wtc_average_length"], cfg["wtc_ma_length"]) * 3 + 5
                 needed_bars = min(1000, max(min_needed * 2, 80))

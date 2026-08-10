@@ -192,12 +192,20 @@ async def ct_leaderboard_refresh_loop():
                 for i, row in enumerate(CT_STATE["leaderboard"]):
                     addr = row["address"]
                     if addr not in CT_STATE["watched"]:
+                        # monitor_enabled bewusst False: neue Leaderboard-Trader werden nur GELISTET
+                        # (Adresse+PnL sichtbar), aber NICHT per userState/userFills abgefragt, bis
+                        # der Nutzer sie explizit per "Beobachten"-Schalter dazu freigibt. Verhindert,
+                        # dass alle leaderboard_top_n Trader dauerhaft im 15s-Takt abgefragt werden.
                         CT_STATE["watched"][addr] = {
-                            "label": f"#{i+1} (Leaderboard)", "copy_enabled": False, "coin_settings": {},
-                            "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
+                            "label": f"#{i+1} (Leaderboard)", "copy_enabled": False, "monitor_enabled": False,
+                            "coin_settings": {}, "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
                             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "leaderboard",
-                            "position_meta": {},
+                            "position_meta": {}, "leaderboard_pnl": row.get("pnl"),
+                            "behavior_stats": {"neu": 0, "nachkauf": 0, "reverse": 0},
                         }
+                    else:
+                        # PnL bei jedem Refresh nachziehen, auch fuer schon bekannte Trader
+                        CT_STATE["watched"][addr]["leaderboard_pnl"] = row.get("pnl")
             await asyncio.sleep(CT_CONFIG["leaderboard_refresh_minutes"] * 60)
 
 
@@ -205,15 +213,22 @@ async def ct_watch_loop():
     for addr in CT_MANUAL_ADDRESSES:
         if addr not in CT_STATE["watched"]:
             CT_STATE["watched"][addr] = {
-                "label": "Manuell hinzugefügt", "copy_enabled": False, "coin_settings": {},
-                "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
+                "label": "Manuell hinzugefügt", "copy_enabled": False, "monitor_enabled": False,
+                "coin_settings": {}, "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
                 "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
-                "position_meta": {},
+                "position_meta": {}, "leaderboard_pnl": None,
+                "behavior_stats": {"neu": 0, "nachkauf": 0, "reverse": 0},
             }
 
     async with aiohttp.ClientSession() as session:
         while True:
             for address, info in list(CT_STATE["watched"].items()):
+                # Nur Trader abfragen, die der Nutzer aktiv beobachtet ODER kopiert - alle
+                # anderen bleiben im Leaderboard sichtbar (Adresse+PnL), aber ohne staendige
+                # userState/userFills-Anfragen an Hyperliquid.
+                if not (info.get("monitor_enabled") or info.get("copy_enabled")):
+                    continue
+
                 user_state = await fetch_user_state(session, address)
                 info["positions"] = extract_ct_positions(user_state)
 
@@ -234,6 +249,7 @@ async def ct_watch_loop():
                     else:
                         new_fills = [f for f in fills_sorted if f.get("time", 0) > info["last_fill_time"]]
                         copy_actions = 0
+                        stats = info.setdefault("behavior_stats", {"neu": 0, "nachkauf": 0, "reverse": 0})
 
                         for f in new_fills:
                             info["last_fill_time"] = f["time"]
@@ -246,11 +262,14 @@ async def ct_watch_loop():
                             now_iso = datetime.now().isoformat()
                             if prev_meta is None:
                                 meta[coin] = {"opened_at": now_iso, "direction": direction, "entries": 1, "last_action": "Neu"}
+                                stats["neu"] += 1
                             elif prev_meta["direction"] == direction:
                                 prev_meta["entries"] += 1
                                 prev_meta["last_action"] = "Nachkauf"
+                                stats["nachkauf"] += 1
                             else:
                                 meta[coin] = {"opened_at": now_iso, "direction": direction, "entries": 1, "last_action": "Reverse"}
+                                stats["reverse"] += 1
 
                             # Nur kopieren, wenn Copy an ist UND dieser Coin explizit fuer diesen
                             # Trader freigeschaltet wurde (keine Coin-Einstellung = wird NICHT kopiert)
@@ -290,8 +309,10 @@ async def save_ct_watched():
         trimmed = {
             addr: {
                 "label": info.get("label"), "copy_enabled": info.get("copy_enabled", False),
+                "monitor_enabled": info.get("monitor_enabled", False),
                 "coin_settings": info.get("coin_settings", {}), "copy_margin": info.get("copy_margin"),
                 "copy_leverage": info.get("copy_leverage"), "source": info.get("source"),
+                "behavior_stats": info.get("behavior_stats", {"neu": 0, "nachkauf": 0, "reverse": 0}),
             }
             for addr, info in CT_STATE["watched"].items()
         }
@@ -311,9 +332,11 @@ async def load_ct_watched():
             for addr, cfg in saved.items():
                 CT_STATE["watched"][addr] = {
                     "label": cfg.get("label", "Wiederhergestellt"), "copy_enabled": cfg.get("copy_enabled", False),
+                    "monitor_enabled": cfg.get("monitor_enabled", False),
                     "coin_settings": cfg.get("coin_settings", {}), "copy_margin": cfg.get("copy_margin", CT_CONFIG["copy_margin"]),
                     "copy_leverage": cfg.get("copy_leverage", CT_CONFIG["copy_leverage"]), "source": cfg.get("source", "manual"),
                     "last_fill_time": None, "positions": [], "recent_fills": [], "position_meta": {},
+                    "leaderboard_pnl": None, "behavior_stats": cfg.get("behavior_stats", {"neu": 0, "nachkauf": 0, "reverse": 0}),
                 }
             debug_log(f"✅ {len(saved)} Copy-Trading-Trader aus Redis wiederhergestellt")
     except Exception as e:
@@ -343,6 +366,8 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
   button { padding:7px 14px; background:linear-gradient(135deg,var(--accent),#2563eb); color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:700; font-size:12px; }
   button.copy-on { background:linear-gradient(135deg,#22c55e,#15803d); }
   button.copy-off { background:linear-gradient(135deg,#475569,#334155); }
+  button.monitor-on { background:linear-gradient(135deg,#3b82f6,#1d4ed8); }
+  button.monitor-off { background:linear-gradient(135deg,#475569,#334155); }
   .warn { background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.35); color:#fca5b1; padding:10px 14px; border-radius:10px; font-size:13px; margin-top:10px; }
   .addr { font-family:monospace; font-size:12px; color:var(--dim); }
   .fill-buy { color:var(--green); } .fill-sell { color:var(--red); }
@@ -384,8 +409,9 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
 </table>
 
 <h2>Beobachtete Trader (anklicken für Details)</h2>
+<div style="color:var(--dim); font-size:12px; margin-top:6px;">Nur Trader mit "Beobachten AN" oder "Copy AN" werden laufend abgefragt (userState/userFills) - alle anderen stehen nur mit ihrer Leaderboard-PnL in der Liste, ohne staendige Anfragen an Hyperliquid.</div>
 <table id="copy-table">
-  <thead><tr><th>Label</th><th>Adresse</th><th>Offene Positionen</th><th>Konfigurierte Coins</th><th>Copy</th></tr></thead>
+  <thead><tr><th>Label</th><th>Adresse</th><th>Leaderboard-PnL</th><th>Offene Positionen</th><th>Verhalten (Neu/Nachkauf/Reverse)</th><th>Konfigurierte Coins</th><th>Beobachten</th><th>Copy</th></tr></thead>
   <tbody></tbody>
 </table>
 
@@ -525,16 +551,27 @@ async function refresh() {
   const copyRows = Object.entries(data.watched).map(([addr, info]) => {
     const posSummary = (info.positions || []).map(p => `${p.side==='long'?'🟢':'🔴'} ${p.coin}`).join(', ') || '-';
     const coinCount = Object.keys(info.coin_settings || {}).length;
+    const pnl = info.leaderboard_pnl;
+    const pnlHtml = (pnl === null || pnl === undefined || pnl === '') ? '-' :
+      `<span class="${parseFloat(pnl) >= 0 ? 'green' : 'red'}">${parseFloat(pnl).toLocaleString('de-DE', {maximumFractionDigits:0})}$</span>`;
+    const stats = info.behavior_stats || {neu:0, nachkauf:0, reverse:0};
+    const statsTotal = stats.neu + stats.nachkauf + stats.reverse;
+    const nachkaufQuote = statsTotal > 0 ? Math.round(stats.nachkauf / statsTotal * 100) : null;
+    const statsHtml = statsTotal === 0 ? '<span style="color:var(--dim);">noch keine Daten</span>' :
+      `${stats.neu} Neu / ${stats.nachkauf} Nachkauf / ${stats.reverse} Reverse${nachkaufQuote !== null ? ` <span style="color:var(--dim);">(${nachkaufQuote}% Nachkauf-Quote)</span>` : ''}`;
     return `
       <tr>
         <td style="cursor:pointer; color:var(--accent);" onclick="openModal('${addr}')">${info.label} 🔍</td>
         <td class="addr">${addr.slice(0,10)}...${addr.slice(-6)}</td>
+        <td>${pnlHtml}</td>
         <td>${posSummary}</td>
+        <td style="font-size:12px;">${statsHtml}</td>
         <td>${coinCount} Coin${coinCount===1?'':'s'} konfiguriert</td>
+        <td><button class="${info.monitor_enabled?'monitor-on':'monitor-off'}" onclick="toggleMonitor('${addr}', ${!info.monitor_enabled})">${info.monitor_enabled?'Beobachten AN':'Beobachten AUS'}</button></td>
         <td><button class="${info.copy_enabled?'copy-on':'copy-off'}" onclick="toggleCopy('${addr}', ${!info.copy_enabled})">${info.copy_enabled?'Copy AN':'Copy AUS'}</button></td>
       </tr>`;
   }).join('');
-  document.querySelector('#copy-table tbody').innerHTML = copyRows || '<tr><td colspan="5">Noch keine Trader beobachtet...</td></tr>';
+  document.querySelector('#copy-table tbody').innerHTML = copyRows || '<tr><td colspan="8">Noch keine Trader beobachtet...</td></tr>';
 
   // Copy-Trade-Log: jeder Versuch, egal ob simuliert (DRY_RUN), erfolgreich oder fehlgeschlagen
   document.getElementById('copy-log-mode').innerText = data.dry_run ? '(DRY_RUN - hier siehst du, was simuliert würde)' : '(LIVE)';
@@ -685,6 +722,11 @@ async function toggleCopy(address, enable) {
   refresh();
 }
 
+async function toggleMonitor(address, enable) {
+  await fetch('/api/ct/monitor', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, enable}) });
+  refresh();
+}
+
 document.getElementById('btn-add-address').addEventListener('click', async () => {
   const addr = document.getElementById('new-address').value.trim();
   if (!addr) return;
@@ -745,10 +787,11 @@ async def handle_ct_watch(request):
         return web.json_response({"error": "keine Adresse"}, status=400)
     if addr not in CT_STATE["watched"]:
         CT_STATE["watched"][addr] = {
-            "label": "Manuell hinzugefügt", "copy_enabled": False, "coin_settings": {},
-            "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
+            "label": "Manuell hinzugefügt", "copy_enabled": False, "monitor_enabled": True,
+            "coin_settings": {}, "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
-            "position_meta": {},
+            "position_meta": {}, "leaderboard_pnl": None,
+            "behavior_stats": {"neu": 0, "nachkauf": 0, "reverse": 0},
         }
         await save_ct_watched()
     return web.json_response({"success": True})
@@ -761,6 +804,19 @@ async def handle_ct_copy_toggle(request):
     if addr in CT_STATE["watched"]:
         CT_STATE["watched"][addr]["copy_enabled"] = enable
         debug_log(f"{'✅' if enable else '⏸️'} [CopyTrading] Copy für {addr} {'aktiviert' if enable else 'deaktiviert'}")
+        await save_ct_watched()
+    return web.json_response({"success": True})
+
+
+async def handle_ct_monitor_toggle(request):
+    """Schaltet NUR die Beobachtung an/aus (userState/userFills-Abfragen), unabhaengig vom
+    Copy-Schalter - damit man einen Trader analysieren kann, ohne ihm gleich zu folgen."""
+    body = await request.json()
+    addr = body.get("address")
+    enable = bool(body.get("enable"))
+    if addr in CT_STATE["watched"]:
+        CT_STATE["watched"][addr]["monitor_enabled"] = enable
+        debug_log(f"{'👁️' if enable else '🚫'} [CopyTrading] Beobachtung für {addr} {'aktiviert' if enable else 'deaktiviert'}")
         await save_ct_watched()
     return web.json_response({"success": True})
 
