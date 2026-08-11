@@ -1883,11 +1883,21 @@ function initOmsGrid() {
 
   omsGrid = GridStack.init({ cellHeight: 46, margin: 6, float: true, handle: '.widget-drag-handle', animate: true }, container);
 
+  // Gespeichertes Layout mit den AKTUELL bekannten Widgets zusammenfuehren: Kacheln, die der
+  // Nutzer schon verschoben/skaliert hat, behalten seine Position; neu hinzugekommene Kacheln
+  // (die im gespeicherten Layout noch gar nicht existierten) fallen auf ihre Default-Position
+  // zurueck, statt komplett zu verschwinden - das war der Bug, der OI-/Liq-Gauge unsichtbar
+  // gemacht hat, als sie zu einem bereits gespeicherten Layout hinzukamen.
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem('oms_dashboard_layout') || 'null'); } catch (e) {}
-  if (saved && Array.isArray(saved) && saved.length) {
-    omsGrid.load(saved);
+  const savedById = {};
+  if (saved && Array.isArray(saved)) {
+    saved.forEach(item => { if (item && item.id) savedById[item.id] = item; });
   }
+  const merged = OMS_WIDGET_DEFS.map(w => savedById[w.id]
+    ? { id: w.id, x: savedById[w.id].x, y: savedById[w.id].y, w: savedById[w.id].w, h: savedById[w.id].h }
+    : { id: w.id, x: w.x, y: w.y, w: w.w, h: w.h });
+  omsGrid.load(merged);
 
   omsGrid.on('change', () => {
     try { localStorage.setItem('oms_dashboard_layout', JSON.stringify(omsGrid.save(false))); } catch (e) {}
@@ -2937,6 +2947,9 @@ async function refresh() {
               plugins:{legend:{labels:{color:'#e5e7eb', boxWidth:10, font:{size:10}}}}
             }
           });
+          // Falls die Kachel beim ersten Erstellen noch unsichtbar war (display:none),
+          // rechnet Chart.js sonst dauerhaft mit Groesse 0 - erzwingt Neuberechnung
+          requestAnimationFrame(() => obiChart && obiChart.resize());
         } else {
           obiChart.data.labels = obiLabels;
           obiChart.data.datasets = obiDatasets;
