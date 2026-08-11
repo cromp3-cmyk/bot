@@ -1878,31 +1878,35 @@ async def scalp_board_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["bot_active"]:
-                st = b["state"]
-                board = {}
-                for label, seconds in SCALP_BOARD_TIMEFRAMES:
-                    if seconds == 60:
-                        data = await fetch_candles_binance_multi(symbol, "1m", count_back=120)
-                        candles = (data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
-                    else:
-                        local = get_seconds_candles(st, seconds, 120)
-                        candles = (local[2], local[3], local[4]) if local else None
+            st = b["state"]
+            board = {}
+            for label, seconds in SCALP_BOARD_TIMEFRAMES:
+                if seconds == 60:
+                    data = await fetch_candles_binance_multi(symbol, "1m", count_back=120)
+                    candles = (data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
+                else:
+                    # 30s/45s brauchen den echten 1s-Puffer (binance_1s_poll_loop), der aus
+                    # Kostengruenden weiterhin nur bei aktivem Bot gefuellt wird - liefert also
+                    # erst Daten, sobald der Bot fuer den Coin mal aktiv war/ist. Die 60s-Spalte
+                    # oben ist ein direkter, einzelner REST-Call und funktioniert unabhaengig
+                    # davon sofort, auch bei pausiertem Bot.
+                    local = get_seconds_candles(st, seconds, 120)
+                    candles = (local[2], local[3], local[4]) if local else None
 
-                    if candles and len(candles[2]) > 20:
-                        h, l, c = candles
-                        rsi_series = compute_rsi(c, 8)
-                        k, d = compute_stochastic(h, l, c, 5, 3, 3)
-                        macd, macd_sig = compute_macd_line_and_signal(c, 5, 13, 3)
-                        board[label] = {
-                            "rsi": round(rsi_series[-1], 1),
-                            "stoch_k": round(k[-1], 1), "stoch_d": round(d[-1], 1),
-                            "macd_hist": round(macd[-1] - macd_sig[-1], 5),
-                            "cvd": _cvd_ratio_over(st, seconds),
-                        }
-                    else:
-                        board[label] = None
-                st["scalp_board"] = board
+                if candles and len(candles[2]) > 20:
+                    h, l, c = candles
+                    rsi_series = compute_rsi(c, 8)
+                    k, d = compute_stochastic(h, l, c, 5, 3, 3)
+                    macd, macd_sig = compute_macd_line_and_signal(c, 5, 13, 3)
+                    board[label] = {
+                        "rsi": round(rsi_series[-1], 1),
+                        "stoch_k": round(k[-1], 1), "stoch_d": round(d[-1], 1),
+                        "macd_hist": round(macd[-1] - macd_sig[-1], 5),
+                        "cvd": _cvd_ratio_over(st, seconds),
+                    }
+                else:
+                    board[label] = None
+            st["scalp_board"] = board
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Scalp-Board-Berechnung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         await asyncio.sleep(5)
@@ -1912,33 +1916,34 @@ async def quad_stoch_poll_loop(symbol):
     """Reiner Anzeige-Verlauf (wie OBI-Verlauf) fuer 4 Stochastics unterschiedlicher Laenge
     (9/3, 14/3, 40/4, 60/10 - wie im 'Quad Stochastic Divergence'-Indikator, nur die Linien
     selbst, ohne die Pivot-/Divergenz-Erkennung). Zeitrahmen ueber quad_stoch_resolution frei
-    waehlbar (30s/1m/5m), unabhaengig vom entry_mode - reiner Beobachtungs-Chart."""
+    waehlbar (30s/1m/5m), unabhaengig vom entry_mode UND vom bot_active-Status - reiner
+    Beobachtungs-Chart, soll auch bei pausiertem Bot funktionieren (nur die 30s-Aufloesung
+    braucht weiterhin den bot_active-gated 1s-Puffer, 1m/5m laufen per REST immer)."""
     b = BOTS[symbol]
     while True:
         try:
             cfg = b["config"]
-            if cfg["bot_active"]:
-                st = b["state"]
-                resolution = cfg.get("quad_stoch_resolution", "1m")
-                needed_bars = 150
-                if resolution == "30s":
-                    local = get_seconds_candles(st, 30, needed_bars)
-                    candles = (local[2], local[3], local[4]) if local else None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
-                    candles = (data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
+            st = b["state"]
+            resolution = cfg.get("quad_stoch_resolution", "1m")
+            needed_bars = 150
+            if resolution == "30s":
+                local = get_seconds_candles(st, 30, needed_bars)
+                candles = (local[2], local[3], local[4]) if local else None
+            else:
+                data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                candles = (data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
 
-                if candles and len(candles[2]) > 60:
-                    h, l, c = candles
-                    s1, _ = compute_stochastic(h, l, c, 9, 3, 1)
-                    s2, _ = compute_stochastic(h, l, c, 14, 3, 1)
-                    s3, _ = compute_stochastic(h, l, c, 40, 4, 1)
-                    s4, _ = compute_stochastic(h, l, c, 60, 10, 1)
-                    hist = st["quad_stoch_history"]
-                    hist.append({"ts": int(time.time() * 1000), "s1": round(s1[-1], 1), "s2": round(s2[-1], 1),
-                                 "s3": round(s3[-1], 1), "s4": round(s4[-1], 1)})
-                    if len(hist) > 300:
-                        st["quad_stoch_history"] = hist[-300:]
+            if candles and len(candles[2]) > 60:
+                h, l, c = candles
+                s1, _ = compute_stochastic(h, l, c, 9, 3, 1)
+                s2, _ = compute_stochastic(h, l, c, 14, 3, 1)
+                s3, _ = compute_stochastic(h, l, c, 40, 4, 1)
+                s4, _ = compute_stochastic(h, l, c, 60, 10, 1)
+                hist = st["quad_stoch_history"]
+                hist.append({"ts": int(time.time() * 1000), "s1": round(s1[-1], 1), "s2": round(s2[-1], 1),
+                             "s3": round(s3[-1], 1), "s4": round(s4[-1], 1)})
+                if len(hist) > 300:
+                    st["quad_stoch_history"] = hist[-300:]
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Quad-Stochastic-Berechnung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         await asyncio.sleep(5)

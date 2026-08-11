@@ -2519,7 +2519,7 @@ function renderOmsLiqGauge(liqRatio, minRatio, liqCount) {
 function renderScalpBoard(board) {
   const tfs = [['30s','30s'], ['45s','45s'], ['60s','60s']];
   if (!board || tfs.every(([k]) => !board[k])) {
-    return '<div style="padding:14px; color:var(--text-dim); font-size:13px;">Sammelt noch Daten... (braucht den Bot im aktiven Zustand für den Coin, damit die 30s/45s/60s-Kerzen gefüllt werden)</div>';
+    return '<div style="padding:14px; color:var(--text-dim); font-size:13px;">Sammelt noch Daten... (60 Sek. sollte binnen weniger Sekunden erscheinen, egal ob der Bot aktiv ist - 30/45 Sek. brauchen zusätzlich den Bot einmal im aktiven Zustand, damit der Sekunden-Kerzen-Puffer gefüllt wird)</div>';
   }
   const rsiCell = v => {
     if (v == null) return '<td>-</td>';
