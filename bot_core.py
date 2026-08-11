@@ -242,6 +242,10 @@ def default_config():
         "oms_dca_size_fraction": float(os.getenv("OMS_DCA_SIZE_FRACTION", "0.6")),
         "oms_dca_min_pullback_usd": float(os.getenv("OMS_DCA_MIN_PULLBACK_USD", "1.0")),
         "oms_reverse_on_signal": os.getenv("OMS_REVERSE_ON_SIGNAL", "false").lower() == "true",
+        "oms_rsi_filter_enabled": os.getenv("OMS_RSI_FILTER_ENABLED", "false").lower() == "true",
+        "oms_rsi_resolution": os.getenv("OMS_RSI_RESOLUTION", "1m"),
+        "oms_rsi_period": int(os.getenv("OMS_RSI_PERIOD", "14")),
+        "oms_rsi_midline": float(os.getenv("OMS_RSI_MIDLINE", "50")),
         "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
         "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
         "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
@@ -393,7 +397,7 @@ def default_state():
         "oms_obi_buffer": [], "oms_obi_fast": None, "oms_obi_medium": None, "oms_obi_slow": None,
         "oms_cvd_buffer": [], "oms_cvd_ratio": None,
         "oms_funding_rate": None, "oms_last_signal_direction": None, "oms_last_trade_time": 0.0,
-        "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None,
+        "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None, "oms_rsi_ok": None, "oms_rsi": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
         "oms_dca_count": 0, "oms_last_entry_price": None,
@@ -1036,6 +1040,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An (bestätigtes Gegen-Signal dreht sofort um)</option>
     </select>
   </div>
+  <div data-mode="oms_scalp"><label>RSI-Regime-Filter (RSI &lt; Mittellinie → nur Short, RSI &gt; Mittellinie → nur Long)</label>
+    <select class="cfg" id="oms_rsi_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="oms_scalp"><label>RSI Zeitrahmen</label>
+    <select class="cfg" id="oms_rsi_resolution">
+      <option value="10s">10 Sekunden</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="45s">45 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+    </select>
+  </div>
+  <div data-mode="oms_scalp"><label>RSI Periode</label><input type="number" step="1" id="oms_rsi_period"></div>
+  <div data-mode="oms_scalp"><label>RSI Mittellinie</label><input type="number" step="1" id="oms_rsi_midline"></div>
 
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
@@ -2406,11 +2429,13 @@ function renderOmsChecklist(data) {
   const obiDetail = `schnell ${data.oms_obi_fast ?? '-'} / mittel ${data.oms_obi_medium ?? '-'} / langsam ${data.oms_obi_slow ?? '-'}`;
   const cvdDetail = data.config.oms_cvd_confirm_enabled ? `CVD ${data.oms_cvd_ratio ?? '-'} (min. ${data.config.oms_cvd_min_ratio})` : 'deaktiviert';
   const fundingDetail = data.config.oms_funding_filter_enabled ? `${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'} (Grenze ${(data.config.oms_funding_max_abs*100).toFixed(3)}%)` : 'deaktiviert';
+  const rsiDetail = data.config.oms_rsi_filter_enabled ? `RSI ${data.oms_rsi ?? '-'} (Mittellinie ${data.config.oms_rsi_midline})` : 'deaktiviert';
   return `<div class="panel-card" style="padding:14px;">
     <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">Warum feuert (nicht)?</div>
     ${row('OBI-Übereinstimmung (3 Fenster gleiche Richtung)', obiOk, obiDetail)}
     ${row('CVD-Bestätigung', data.oms_cvd_ok, cvdDetail)}
     ${row('Funding-Filter bestanden', data.oms_funding_ok, fundingDetail)}
+    ${row('RSI-Regime-Filter bestanden', data.oms_rsi_ok, rsiDetail)}
   </div>`;
 }
 
@@ -2540,7 +2565,8 @@ async function refresh() {
     }
     trendMeterDetailEl.innerText =
       `OBI schnell/mittel/langsam: ${data.oms_obi_fast ?? '-'} / ${data.oms_obi_medium ?? '-'} / ${data.oms_obi_slow ?? '-'}  |  ` +
-      `CVD: ${data.oms_cvd_ratio ?? '-'}  |  Funding: ${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'}`;
+      `CVD: ${data.oms_cvd_ratio ?? '-'}  |  Funding: ${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'}` +
+      (data.config.oms_rsi_filter_enabled ? `  |  RSI: ${data.oms_rsi ?? '-'}` : '');
 
     gaugeWrap.innerHTML = renderOmsGauge(data.oms_obi_fast, data.oms_obi_medium, data.oms_obi_slow, data.config.oms_obi_threshold);
     document.getElementById('oms-cvd-gauge-wrap').innerHTML = renderOmsCvdGauge(data.oms_cvd_ratio, data.config.oms_cvd_min_ratio);
@@ -2647,6 +2673,10 @@ async function refresh() {
     document.getElementById('oms_dca_size_fraction').value = data.config.oms_dca_size_fraction;
     document.getElementById('oms_dca_min_pullback_usd').value = data.config.oms_dca_min_pullback_usd;
     document.getElementById('oms_reverse_on_signal').value = String(data.config.oms_reverse_on_signal);
+    document.getElementById('oms_rsi_filter_enabled').value = String(data.config.oms_rsi_filter_enabled);
+    document.getElementById('oms_rsi_resolution').value = data.config.oms_rsi_resolution;
+    document.getElementById('oms_rsi_period').value = data.config.oms_rsi_period;
+    document.getElementById('oms_rsi_midline').value = data.config.oms_rsi_midline;
     document.getElementById('fib_resolution').value = data.config.fib_resolution;
     document.getElementById('fib_lookback_candles').value = data.config.fib_lookback_candles;
     document.getElementById('fib_entry1_level').value = data.config.fib_entry1_level;
@@ -2922,6 +2952,10 @@ function buildConfigPayload() {
     oms_dca_size_fraction: parseFloat(document.getElementById('oms_dca_size_fraction').value),
     oms_dca_min_pullback_usd: parseFloat(document.getElementById('oms_dca_min_pullback_usd').value),
     oms_reverse_on_signal: document.getElementById('oms_reverse_on_signal').value === 'true',
+    oms_rsi_filter_enabled: document.getElementById('oms_rsi_filter_enabled').value === 'true',
+    oms_rsi_resolution: document.getElementById('oms_rsi_resolution').value,
+    oms_rsi_period: parseInt(document.getElementById('oms_rsi_period').value),
+    oms_rsi_midline: parseFloat(document.getElementById('oms_rsi_midline').value),
     fib_resolution: document.getElementById('fib_resolution').value,
     fib_lookback_candles: parseInt(document.getElementById('fib_lookback_candles').value),
     fib_entry1_level: parseFloat(document.getElementById('fib_entry1_level').value),
@@ -3064,7 +3098,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','wtc_direction_mode','wtc_dca_enabled','wtc_dca_max_entries','wtc_dca_cooldown_seconds','wtc_stf_filter_enabled','wtc_stf_resolution','sg_tp_step_pct','sg_tp_step_usd','sg_max_nachkauf','sg_dca_cooldown_seconds','sg_invert_direction','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','oms_rsi_period','oms_rsi_midline','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','wtc_direction_mode','wtc_dca_enabled','wtc_dca_max_entries','wtc_dca_cooldown_seconds','wtc_stf_filter_enabled','wtc_stf_resolution','sg_tp_step_pct','sg_tp_step_usd','sg_max_nachkauf','sg_dca_cooldown_seconds','sg_invert_direction','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -3119,7 +3153,7 @@ async def handle_status(request):
         "oms_signal": st.get("oms_signal"), "oms_obi_fast": st.get("oms_obi_fast"),
         "oms_obi_medium": st.get("oms_obi_medium"), "oms_obi_slow": st.get("oms_obi_slow"),
         "oms_obi_direction": st.get("oms_obi_direction"), "oms_cvd_ok": st.get("oms_cvd_ok"),
-        "oms_funding_ok": st.get("oms_funding_ok"),
+        "oms_funding_ok": st.get("oms_funding_ok"), "oms_rsi_ok": st.get("oms_rsi_ok"), "oms_rsi": st.get("oms_rsi"),
         "oms_cvd_ratio": st.get("oms_cvd_ratio"), "oms_funding_rate": st.get("oms_funding_rate"),
         "oms_tp1_done": st.get("oms_tp1_done"), "oms_trail_price": st.get("oms_trail_price"),
         "oms_dca_count": st.get("oms_dca_count"),
@@ -3175,6 +3209,7 @@ async def handle_config_update(request):
                 "oms_tp1_usd", "oms_tp1_close_pct", "oms_sl_usd", "oms_trail_distance_usd",
                 "oms_dca_enabled", "oms_dca_max_entries", "oms_dca_size_fraction", "oms_dca_min_pullback_usd",
                 "oms_reverse_on_signal",
+                "oms_rsi_filter_enabled", "oms_rsi_resolution", "oms_rsi_period", "oms_rsi_midline",
                 "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
                 "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds",
                 "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_tp_usd", "rp_sl_usd",

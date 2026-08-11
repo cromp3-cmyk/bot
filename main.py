@@ -20,7 +20,7 @@ from strategies import (
     trading_loop, fib_reversal_poll_loop,
     range_profile_poll_loop, binance_1s_poll_loop,
     stf_poll_loop, ce_poll_loop, ut_poll_loop, wtc_poll_loop, sg_poll_loop,
-    ht_poll_loop,
+    ht_poll_loop, oms_rsi_poll_loop,
 )
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
@@ -93,6 +93,7 @@ async def main():
         *[wtc_poll_loop(s) for s in SYMBOLS],
         *[sg_poll_loop(s) for s in SYMBOLS],
         *[ht_poll_loop(s) for s in SYMBOLS],
+        *[oms_rsi_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),

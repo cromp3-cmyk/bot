@@ -1783,6 +1783,37 @@ async def check_sg_tp(symbol, price):
         await execute_exit(symbol, price, "TP")
 
 
+async def oms_rsi_poll_loop(symbol):
+    """Separater, traeger laufender Poll-Loop nur fuer den optionalen RSI-Regime-Filter von
+    OBI-Momentum-Scalp (RSI < Mittellinie -> nur Short erlaubt, RSI > Mittellinie -> nur Long
+    erlaubt). Laeuft unabhaengig vom tick-schnellen OBI/CVD-Signal, da RSI auf Kerzen (nicht auf
+    einzelnen Trades) beruht - ein 5-Sekunden-Takt waere unnoetig oft fuer einen 1-Minuten-RSI.
+    Wird nur abgefragt, wenn der Filter tatsaechlich aktiviert ist (kein unnoetiger API-Traffic)."""
+    b = BOTS[symbol]
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "oms_scalp" and cfg["bot_active"] and cfg.get("oms_rsi_filter_enabled", False):
+                resolution = cfg.get("oms_rsi_resolution", "1m")
+                period = cfg.get("oms_rsi_period", 14)
+                needed_bars = min(500, max(period * 3, 60))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    closed_c = local[4] if local else None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    closed_c = data[4][:-1] if data else None
+
+                if closed_c and len(closed_c) > period:
+                    rsi_series = compute_rsi(closed_c, period)
+                    st["oms_rsi"] = round(rsi_series[-1], 2)
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] OMS-RSI-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        await asyncio.sleep(10)
+
+
 async def sg_poll_loop(symbol):
     """Signal-Grid: Grid-Mechanik dupliziert (kein Flip-Exit, TP als %/$ vom Ø-Einstieg,
     Nachkauf bis max. Stufen) - aber Ein-/Nachkauf werden nicht durch Preisabstand ausgeloest,
@@ -2411,6 +2442,21 @@ async def handle_oms_signal_check(symbol):
             if not funding_ok:
                 direction = None
     st["oms_funding_ok"] = funding_ok
+
+    # RSI-Regime-Filter: RSI unter Mittellinie -> nur Short erlaubt, RSI ueber Mittellinie ->
+    # nur Long erlaubt (Wilder-RSI auf Kerzen, separat per oms_rsi_poll_loop aktualisiert, da
+    # das ein traegerer Regime-Filter ist, kein tick-schnelles Signal wie OBI/CVD)
+    rsi_enabled = cfg.get("oms_rsi_filter_enabled", False)
+    rsi_ok = None
+    if direction is not None and rsi_enabled:
+        rsi_val = st.get("oms_rsi")
+        midline = cfg.get("oms_rsi_midline", 50)
+        if rsi_val is not None:
+            rsi_ok = not ((direction == "long" and rsi_val < midline) or
+                          (direction == "short" and rsi_val > midline))
+            if not rsi_ok:
+                direction = None
+    st["oms_rsi_ok"] = rsi_ok
 
     # Trend-Meter: IMMER aktualisieren, unabhaengig von bot_active/Cooldown/Position - das ist
     # die Live-Anzeige "JETZT LONG"/"JETZT SHORT" zum manuellen Nachhandeln
