@@ -2460,6 +2460,26 @@ async def handle_oms_signal_check(symbol):
                 st["oms_last_entry_price"] = st["last_price"]
                 _oms_record_marker(st, st["last_price"], "dca_long" if direction == "long" else "dca_short")
 
+    elif cfg.get("oms_reverse_on_signal", False) and direction != st["position"]:
+        # Optional: Gegen-Signal dreht die Position sofort um, statt auf SL/TP1/Trail zu warten.
+        # "direction" hat zu diesem Zeitpunkt bereits alle Filter durchlaufen (OBI 3-Fenster +
+        # CVD + Funding) - ist also kein rohes Einzelsignal, sondern derselbe bestaetigte Signal-
+        # Typ, der auch fuer einen Neueinstieg gelten wuerde. Standardmaessig AUS, da haeufiges
+        # Drehen in Seitwaertsmaerkten teuer werden kann (Spread/Slippage bei jedem Dreh).
+        old_direction = st["position"]
+        debug_log(f"🔄 [{symbol}] OBI-Momentum-Scalp Reverse: {old_direction.upper()} -> {direction.upper()} @ {st['last_price']} "
+                  f"(OBI {round(fast,3)}/{round(medium,3)}/{round(slow,3)}, CVD {st.get('oms_cvd_ratio')})")
+        await execute_exit(symbol, st["last_price"], "REVERSE")
+        _oms_record_marker(st, st["last_price"], "exit_reverse")
+        _oms_reset_position_state(st)
+        st["oms_last_trade_time"] = now
+        st["oms_last_signal_direction"] = direction
+        await execute_entry(symbol, direction, st["last_price"], is_add_on=False)
+        if st["position"] is not None:
+            _oms_reset_position_state(st)
+            st["oms_last_entry_price"] = st["last_price"]
+            _oms_record_marker(st, st["last_price"], "entry_long" if direction == "long" else "entry_short")
+
 
 async def check_oms_exit_management(symbol, price):
     """Wird bei jedem Preis-Tick aufgerufen. SL zuerst (fester $-Betrag auf die GESAMTE

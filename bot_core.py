@@ -241,6 +241,7 @@ def default_config():
         "oms_dca_max_entries": int(os.getenv("OMS_DCA_MAX_ENTRIES", "2")),
         "oms_dca_size_fraction": float(os.getenv("OMS_DCA_SIZE_FRACTION", "0.6")),
         "oms_dca_min_pullback_usd": float(os.getenv("OMS_DCA_MIN_PULLBACK_USD", "1.0")),
+        "oms_reverse_on_signal": os.getenv("OMS_REVERSE_ON_SIGNAL", "false").lower() == "true",
         "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
         "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
         "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
@@ -1029,6 +1030,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="oms_scalp"><label>Nachkauf: max. Stufen</label><input type="number" step="1" id="oms_dca_max_entries"></div>
   <div data-mode="oms_scalp"><label>Nachkauf: Größen-Faktor je Stufe (0-1, fallend)</label><input type="number" step="0.05" id="oms_dca_size_fraction"></div>
   <div data-mode="oms_scalp"><label>Nachkauf: Mindest-Rücksetzer ($, bevor nachgekauft wird)</label><input type="number" step="0.1" id="oms_dca_min_pullback_usd"></div>
+  <div data-mode="oms_scalp"><label>Bei Gegen-Signal sofort umdrehen (Reverse) statt auf SL/TP1/Trail zu warten</label>
+    <select class="cfg" id="oms_reverse_on_signal">
+      <option value="false">Aus (nur SL/TP1/Trail schließt die Position)</option>
+      <option value="true">An (bestätigtes Gegen-Signal dreht sofort um)</option>
+    </select>
+  </div>
 
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
@@ -2446,6 +2453,7 @@ function renderOmsChart(history, markers, pos) {
     exit_sl: { shape: 'x', color: '#f0526b', label: 'SL' },
     exit_tp1: { shape: 'circle', color: '#22c55e', r: 4, label: 'TP1' },
     exit_trail: { shape: 'circle', color: '#3b82f6', r: 4, label: 'Exit' },
+    exit_reverse: { shape: 'x', color: '#a855f7', label: 'Reverse' },
   };
   const markerSvgs = (markers || []).filter(m => m.ts >= minT && m.ts <= maxT).map(m => {
     const x = xOf(m.ts), y = yOf(m.price);
@@ -2462,7 +2470,7 @@ function renderOmsChart(history, markers, pos) {
   }).join('');
 
   return `<div class="panel-card" style="padding:8px 10px;">
-    <div style="font-size:11px; color:var(--text-dim); margin-bottom:4px;">Preisverlauf (15 Min) · 🔺LONG · 🔻SHORT · ⭕Nachkauf · ✖️SL · 🟢TP1 · 🔵Trail-Exit</div>
+    <div style="font-size:11px; color:var(--text-dim); margin-bottom:4px;">Preisverlauf (15 Min) · 🔺LONG · 🔻SHORT · ⭕Nachkauf · ✖️SL · 🟢TP1 · 🔵Trail-Exit · 🟣Reverse</div>
     <svg viewBox="0 0 ${w} ${h}" style="width:100%; height:130px; display:block;">
       ${levelLines}
       <polyline points="${points}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
@@ -2638,6 +2646,7 @@ async function refresh() {
     document.getElementById('oms_dca_max_entries').value = data.config.oms_dca_max_entries;
     document.getElementById('oms_dca_size_fraction').value = data.config.oms_dca_size_fraction;
     document.getElementById('oms_dca_min_pullback_usd').value = data.config.oms_dca_min_pullback_usd;
+    document.getElementById('oms_reverse_on_signal').value = String(data.config.oms_reverse_on_signal);
     document.getElementById('fib_resolution').value = data.config.fib_resolution;
     document.getElementById('fib_lookback_candles').value = data.config.fib_lookback_candles;
     document.getElementById('fib_entry1_level').value = data.config.fib_entry1_level;
@@ -2912,6 +2921,7 @@ function buildConfigPayload() {
     oms_dca_max_entries: parseInt(document.getElementById('oms_dca_max_entries').value),
     oms_dca_size_fraction: parseFloat(document.getElementById('oms_dca_size_fraction').value),
     oms_dca_min_pullback_usd: parseFloat(document.getElementById('oms_dca_min_pullback_usd').value),
+    oms_reverse_on_signal: document.getElementById('oms_reverse_on_signal').value === 'true',
     fib_resolution: document.getElementById('fib_resolution').value,
     fib_lookback_candles: parseInt(document.getElementById('fib_lookback_candles').value),
     fib_entry1_level: parseFloat(document.getElementById('fib_entry1_level').value),
@@ -3164,6 +3174,7 @@ async def handle_config_update(request):
                 "oms_funding_filter_enabled", "oms_funding_max_abs", "oms_cooldown_seconds",
                 "oms_tp1_usd", "oms_tp1_close_pct", "oms_sl_usd", "oms_trail_distance_usd",
                 "oms_dca_enabled", "oms_dca_max_entries", "oms_dca_size_fraction", "oms_dca_min_pullback_usd",
+                "oms_reverse_on_signal",
                 "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
                 "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds",
                 "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_tp_usd", "rp_sl_usd",
