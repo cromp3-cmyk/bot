@@ -1882,8 +1882,10 @@ async def scalp_board_poll_loop(symbol):
             board = {}
             for label, seconds in SCALP_BOARD_TIMEFRAMES:
                 if seconds == 60:
+                    # Laufende Kerze bewusst mitnehmen (kein [:-1]) - reine Beobachtungswerte,
+                    # sollen sich live bewegen statt bis zu 60 Sek. auf einem Plateau zu bleiben
                     data = await fetch_candles_binance_multi(symbol, "1m", count_back=120)
-                    candles = (data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
+                    candles = (data[2], data[3], data[4]) if data else None
                 else:
                     # 30s/45s brauchen den echten 1s-Puffer (binance_1s_poll_loop), der aus
                     # Kostengruenden weiterhin nur bei aktivem Bot gefuellt wird - liefert also
@@ -1930,8 +1932,13 @@ async def quad_stoch_poll_loop(symbol):
                 local = get_seconds_candles(st, 30, needed_bars)
                 candles = (local[2], local[3], local[4]) if local else None
             else:
+                # Bewusst die LAUFENDE (noch unfertige) Kerze mitnehmen (kein [:-1] wie sonst
+                # ueblich bei echten Handelssignalen) - das ist hier reine Beobachtung, kein
+                # Trading-Signal, und soll sich wie bei TradingView live/kontinuierlich bewegen
+                # statt bis zu 60 Sekunden lang auf einem Plateau zu verharren und dann zu
+                # springen, sobald die Minute abgeschlossen ist.
                 data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
-                candles = (data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
+                candles = (data[2], data[3], data[4]) if data else None
 
             if candles and len(candles[2]) > 60:
                 h, l, c = candles
