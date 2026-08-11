@@ -37,6 +37,8 @@ CT_STATE = {
     "leaderboard_error": None,
     "watched": {},
     "copy_log": [],  # sichtbares Log aller Copy-Versuche (dry_run/success/error/skipped) fuers Dashboard
+    "copy_positions": {},  # address -> {coin: {direction, entry_price, size, opened_at, margin, leverage}} - UNSERE eigenen kopierten Positionen, getrennt von den Positionen des Traders
+    "copy_stats": {},  # address -> {trades, wins, losses, total_pnl_usd} - echte Einstieg->Ausstieg-PnL-Statistik
 }
 CT_COPY_LOG_MAX = 200
 
@@ -84,6 +86,64 @@ async def execute_copy_trade(symbol, direction, reference_price, margin, leverag
             return {"status": "success", "detail": str(tx_hash)}
     finally:
         await client.close()
+
+
+async def execute_copy_close(symbol, position_direction, size_coin_units, reference_price):
+    """Schliesst eine kopierte Position in EXAKT der Groesse, die beim Einstieg (bzw. nach
+    Nachkaeufen) tatsaechlich kopiert wurde - NICHT neu aus Margin*Hebel berechnet, da sich der
+    Preis seither veraendert haben kann und execute_copy_trade() sonst eine falsche Groesse
+    zum Schliessen verwenden wuerde. Schliessen einer Long-Position heisst verkaufen (Ask),
+    Schliessen einer Short-Position heisst kaufen (Bid)."""
+    if symbol not in MARKET_INDICES:
+        msg = f"Coin {symbol} nicht auf Lighter gemappt"
+        debug_log(f"⚠️ [CopyTrading] {msg} - Schliessen übersprungen")
+        return {"status": "skipped", "detail": msg}
+
+    if CT_CONFIG["dry_run"]:
+        debug_log(f"🧪 [CopyTrading] DRY_RUN - würde schliessen: {position_direction.upper()}-Position {symbol} Größe {round(size_coin_units,6)} @ ~{reference_price}")
+        return {"status": "dry_run", "detail": None}
+
+    client = get_lighter_client()
+    if client is None:
+        return {"status": "error", "detail": "Kein Lighter-Client verfügbar"}
+    try:
+        market_index = MARKET_INDICES[symbol]
+        precision = get_precision(symbol)
+        base_amount = int(size_coin_units * precision)
+        if base_amount <= 0:
+            return {"status": "skipped", "detail": "Größe nach Rundung 0"}
+        is_ask = position_direction == "long"  # Long schliessen = verkaufen
+        tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, reference_price)
+        if err:
+            debug_log(f"⚠️ [CopyTrading] Schliess-Order fehlgeschlagen für {symbol}", {"error": str(err)})
+            return {"status": "error", "detail": str(err)}
+        else:
+            debug_log(f"✅ [CopyTrading] ECHTE Position geschlossen: {position_direction.upper()} {symbol} @ ~{reference_price}", {"tx_hash": str(tx_hash)})
+            return {"status": "success", "detail": str(tx_hash)}
+    finally:
+        await client.close()
+
+
+def _record_copy_close(address, label, coin, direction, entry_price, exit_price, size, reason):
+    """Verbucht das Ergebnis einer geschlossenen kopierten Position in copy_stats (aggregiert
+    pro Trader) und haengt einen PnL-Eintrag ans Copy-Trade-Log an - das ist die eigentliche
+    Einstieg->Ausstieg-PnL-Verfolgung, unabhaengig von den einzelnen Kopier-Versuchen."""
+    pnl_usd = (exit_price - entry_price) * size if direction == "long" else (entry_price - exit_price) * size
+    stats = CT_STATE["copy_stats"].setdefault(address, {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0})
+    stats["trades"] += 1
+    if pnl_usd >= 0:
+        stats["wins"] += 1
+    else:
+        stats["losses"] += 1
+    stats["total_pnl_usd"] = round(stats["total_pnl_usd"] + pnl_usd, 4)
+    CT_STATE["copy_log"].insert(0, {
+        "ts": int(time.time() * 1000), "trader_label": label, "address": address,
+        "coin": coin, "direction": direction, "price": exit_price, "dry_run": CT_CONFIG["dry_run"],
+        "status": "closed", "action": reason, "pnl_usd": round(pnl_usd, 4),
+        "entry_price": entry_price, "size": size,
+    })
+    CT_STATE["copy_log"] = CT_STATE["copy_log"][:CT_COPY_LOG_MAX]
+    return pnl_usd
 
 
 
@@ -198,6 +258,7 @@ async def ct_leaderboard_refresh_loop():
                         # dass alle leaderboard_top_n Trader dauerhaft im 15s-Takt abgefragt werden.
                         CT_STATE["watched"][addr] = {
                             "label": f"#{i+1} (Leaderboard)", "copy_enabled": False, "monitor_enabled": False,
+                            "copy_skip_nachkauf": False,
                             "coin_settings": {}, "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
                             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "leaderboard",
                             "position_meta": {}, "leaderboard_pnl": row.get("pnl"),
@@ -214,6 +275,7 @@ async def ct_watch_loop():
         if addr not in CT_STATE["watched"]:
             CT_STATE["watched"][addr] = {
                 "label": "Manuell hinzugefügt", "copy_enabled": False, "monitor_enabled": False,
+                "copy_skip_nachkauf": False,
                 "coin_settings": {}, "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
                 "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
                 "position_meta": {}, "leaderboard_pnl": None,
@@ -255,38 +317,102 @@ async def ct_watch_loop():
                             info["last_fill_time"] = f["time"]
                             coin = f.get("coin")
                             side = f.get("side")
-                            direction = "long" if side == "B" else "short"
+                            fill_direction = "long" if side == "B" else "short"
                             price = float(f.get("px", 0) or 0)
+                            fill_size = float(f.get("sz", 0) or 0)
+                            dir_field = f.get("dir", "") or ""
+                            is_close_fill = dir_field.startswith("Close")
+                            is_open_fill = dir_field.startswith("Open") or not dir_field  # Fallback falls dir mal fehlt
 
+                            # --- Klassifikation nur fuers Verhalten/Anzeige (Neu/Nachkauf/Reverse-Spalte) ---
+                            action = None
                             prev_meta = meta.get(coin)
                             now_iso = datetime.now().isoformat()
                             if prev_meta is None:
-                                meta[coin] = {"opened_at": now_iso, "direction": direction, "entries": 1, "last_action": "Neu"}
+                                meta[coin] = {"opened_at": now_iso, "direction": fill_direction, "entries": 1, "last_action": "Neu"}
                                 stats["neu"] += 1
-                            elif prev_meta["direction"] == direction:
+                                action = "Neu"
+                            elif prev_meta["direction"] == fill_direction:
                                 prev_meta["entries"] += 1
                                 prev_meta["last_action"] = "Nachkauf"
                                 stats["nachkauf"] += 1
+                                action = "Nachkauf"
                             else:
-                                meta[coin] = {"opened_at": now_iso, "direction": direction, "entries": 1, "last_action": "Reverse"}
+                                meta[coin] = {"opened_at": now_iso, "direction": fill_direction, "entries": 1, "last_action": "Reverse"}
                                 stats["reverse"] += 1
+                                action = "Reverse"
 
-                            # Nur kopieren, wenn Copy an ist UND dieser Coin explizit fuer diesen
-                            # Trader freigeschaltet wurde (keine Coin-Einstellung = wird NICHT kopiert)
+                            if not (info["copy_enabled"] and price > 0):
+                                continue
                             coin_cfg = (info.get("coin_settings") or {}).get(coin)
-                            if info["copy_enabled"] and coin_cfg and coin_cfg.get("enabled", True) and price > 0:
-                                margin = coin_cfg.get("margin") or info.get("copy_margin", CT_CONFIG["copy_margin"])
-                                leverage = coin_cfg.get("leverage") or info.get("copy_leverage", CT_CONFIG["copy_leverage"])
-                                debug_log(f"🆕 [CopyTrading] Kopiere Fill bei {info['label']} ({address[:8]}...): {direction.upper()} {coin} @ {price}")
-                                result = await execute_copy_trade(coin, direction, price, margin, leverage)
-                                CT_STATE["copy_log"].insert(0, {
-                                    "ts": int(time.time() * 1000), "trader_label": info["label"], "address": address,
-                                    "coin": coin, "direction": direction, "price": price, "margin": margin,
-                                    "leverage": leverage, "dry_run": CT_CONFIG["dry_run"],
-                                    "status": result["status"], "detail": result.get("detail"),
-                                })
-                                CT_STATE["copy_log"] = CT_STATE["copy_log"][:CT_COPY_LOG_MAX]
+                            if not (coin_cfg and coin_cfg.get("enabled", True)):
+                                continue
+
+                            our_pos = CT_STATE["copy_positions"].get(address, {}).get(coin)
+
+                            # --- Trader beginnt/vollendet einen Ausstieg -> UNSERE ganze kopierte
+                            # Position schliessen (Einstieg->Ausstieg-PnL wird hier verbucht).
+                            # Bewusst die GESAMTE Position schliessen statt anteilig, da wir die
+                            # Restgroesse des Traders nicht 1:1 nachbilden (andere Margin/Hebel). ---
+                            if is_close_fill and our_pos:
+                                close_result = await execute_copy_close(coin, our_pos["direction"], our_pos["size"], price)
+                                pnl_usd = _record_copy_close(address, info["label"], coin, our_pos["direction"],
+                                                              our_pos["entry_price"], price, our_pos["size"], "Close")
+                                debug_log(f"🏁 [CopyTrading] Kopierte Position geschlossen bei {info['label']} ({address[:8]}...): "
+                                          f"{our_pos['direction'].upper()} {coin} PnL ${round(pnl_usd,3)} ({close_result['status']})")
+                                del CT_STATE["copy_positions"][address][coin]
                                 copy_actions += 1
+                                await save_ct_copy_state()
+                                continue
+
+                            if not is_open_fill:
+                                continue  # z.B. reine "Close"-Fills ohne eigene offene Position - nichts zu tun
+
+                            skip_as_nachkauf = info.get("copy_skip_nachkauf", False) and action == "Nachkauf"
+
+                            # Verteidigend: falls der Trader ohne separaten Close-Fill direkt dreht
+                            # (unser our_pos zeigt noch in die alte Richtung) - erst schliessen
+                            if our_pos and our_pos["direction"] != fill_direction:
+                                close_result = await execute_copy_close(coin, our_pos["direction"], our_pos["size"], price)
+                                pnl_usd = _record_copy_close(address, info["label"], coin, our_pos["direction"],
+                                                              our_pos["entry_price"], price, our_pos["size"], "Reverse")
+                                debug_log(f"🔄 [CopyTrading] Kopierte Position gedreht bei {info['label']} ({address[:8]}...): "
+                                          f"PnL ${round(pnl_usd,3)} ({close_result['status']})")
+                                del CT_STATE["copy_positions"][address][coin]
+                                our_pos = None
+                                copy_actions += 1
+                                await save_ct_copy_state()
+
+                            if skip_as_nachkauf:
+                                debug_log(f"⏭️ [CopyTrading] Nachkauf bei {info['label']} ({address[:8]}...) übersprungen (nur Neu/Reverse aktiv): {fill_direction.upper()} {coin} @ {price}")
+                                continue
+
+                            margin = coin_cfg.get("margin") or info.get("copy_margin", CT_CONFIG["copy_margin"])
+                            leverage = coin_cfg.get("leverage") or info.get("copy_leverage", CT_CONFIG["copy_leverage"])
+                            debug_log(f"🆕 [CopyTrading] Kopiere Fill ({action}) bei {info['label']} ({address[:8]}...): {fill_direction.upper()} {coin} @ {price}")
+                            result = await execute_copy_trade(coin, fill_direction, price, margin, leverage)
+                            CT_STATE["copy_log"].insert(0, {
+                                "ts": int(time.time() * 1000), "trader_label": info["label"], "address": address,
+                                "coin": coin, "direction": fill_direction, "price": price, "margin": margin,
+                                "leverage": leverage, "dry_run": CT_CONFIG["dry_run"],
+                                "status": result["status"], "detail": result.get("detail"), "action": action,
+                            })
+                            CT_STATE["copy_log"] = CT_STATE["copy_log"][:CT_COPY_LOG_MAX]
+                            copy_actions += 1
+
+                            if result["status"] in ("success", "dry_run"):
+                                add_size = (margin * leverage) / price
+                                trader_positions = CT_STATE["copy_positions"].setdefault(address, {})
+                                if our_pos:
+                                    total_size = our_pos["size"] + add_size
+                                    our_pos["entry_price"] = (our_pos["entry_price"] * our_pos["size"] + price * add_size) / total_size
+                                    our_pos["size"] = total_size
+                                else:
+                                    trader_positions[coin] = {
+                                        "direction": fill_direction, "entry_price": price, "size": add_size,
+                                        "opened_at": now_iso, "margin": margin, "leverage": leverage,
+                                    }
+                                await save_ct_copy_state()
 
                         if new_fills:
                             # Eine Sammelzeile statt einer Zeile pro Fill - haelt das Log lesbar,
@@ -310,6 +436,7 @@ async def save_ct_watched():
             addr: {
                 "label": info.get("label"), "copy_enabled": info.get("copy_enabled", False),
                 "monitor_enabled": info.get("monitor_enabled", False),
+                "copy_skip_nachkauf": info.get("copy_skip_nachkauf", False),
                 "coin_settings": info.get("coin_settings", {}), "copy_margin": info.get("copy_margin"),
                 "copy_leverage": info.get("copy_leverage"), "source": info.get("source"),
                 "behavior_stats": info.get("behavior_stats", {"neu": 0, "nachkauf": 0, "reverse": 0}),
@@ -333,6 +460,7 @@ async def load_ct_watched():
                 CT_STATE["watched"][addr] = {
                     "label": cfg.get("label", "Wiederhergestellt"), "copy_enabled": cfg.get("copy_enabled", False),
                     "monitor_enabled": cfg.get("monitor_enabled", False),
+                    "copy_skip_nachkauf": cfg.get("copy_skip_nachkauf", False),
                     "coin_settings": cfg.get("coin_settings", {}), "copy_margin": cfg.get("copy_margin", CT_CONFIG["copy_margin"]),
                     "copy_leverage": cfg.get("copy_leverage", CT_CONFIG["copy_leverage"]), "source": cfg.get("source", "manual"),
                     "last_fill_time": None, "positions": [], "recent_fills": [], "position_meta": {},
@@ -341,6 +469,38 @@ async def load_ct_watched():
             debug_log(f"✅ {len(saved)} Copy-Trading-Trader aus Redis wiederhergestellt")
     except Exception as e:
         debug_log("⚠️ Laden der Copy-Trading-Einstellungen fehlgeschlagen", {"error": str(e)})
+    await load_ct_copy_state()
+
+
+async def save_ct_copy_state():
+    """Speichert offene kopierte Positionen + PnL-Statistik separat von den Trader-Einstellungen,
+    da sich diese bei jedem Fill aendern koennen (nicht nur bei manuellen Schalter-Klicks) -
+    echte offene Positionen (reales Geld, falls nicht DRY_RUN) muessen einen Neustart ueberleben."""
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        await r.set("gridbot:ct_copy_positions", json.dumps(CT_STATE["copy_positions"]))
+        await r.set("gridbot:ct_copy_stats", json.dumps(CT_STATE["copy_stats"]))
+    except Exception as e:
+        debug_log("⚠️ Speichern der Copy-Positionen fehlgeschlagen", {"error": str(e)})
+
+
+async def load_ct_copy_state():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        raw_pos = await r.get("gridbot:ct_copy_positions")
+        if raw_pos:
+            CT_STATE["copy_positions"] = json.loads(raw_pos)
+        raw_stats = await r.get("gridbot:ct_copy_stats")
+        if raw_stats:
+            CT_STATE["copy_stats"] = json.loads(raw_stats)
+        if raw_pos or raw_stats:
+            debug_log("✅ Copy-Trading-Positionen/Statistik aus Redis wiederhergestellt")
+    except Exception as e:
+        debug_log("⚠️ Laden der Copy-Positionen fehlgeschlagen", {"error": str(e)})
 
 
 CT_DASHBOARD_HTML = """<!DOCTYPE html>
@@ -411,14 +571,14 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
 <h2>Beobachtete Trader (anklicken für Details)</h2>
 <div style="color:var(--dim); font-size:12px; margin-top:6px;">Nur Trader mit "Beobachten AN" oder "Copy AN" werden laufend abgefragt (userState/userFills) - alle anderen stehen nur mit ihrer Leaderboard-PnL in der Liste, ohne staendige Anfragen an Hyperliquid.</div>
 <table id="copy-table">
-  <thead><tr><th>Label</th><th>Adresse</th><th>Leaderboard-PnL</th><th>Offene Positionen</th><th>Verhalten (Neu/Nachkauf/Reverse)</th><th>Konfigurierte Coins</th><th>Beobachten</th><th>Copy</th></tr></thead>
+  <thead><tr><th>Label</th><th>Adresse</th><th>Leaderboard-PnL</th><th>Unser Copy-PnL</th><th>Offene Positionen</th><th>Verhalten (Neu/Nachkauf/Reverse)</th><th>Konfigurierte Coins</th><th>Beobachten</th><th>Copy</th><th>Copy-Filter</th></tr></thead>
   <tbody></tbody>
 </table>
 
 <h2>📋 Copy-Trade-Log <span id="copy-log-mode" style="font-size:13px; font-weight:normal;"></span></h2>
 <div id="copy-log-empty" style="color:var(--dim); font-size:13px; display:none;">Noch keine Copy-Versuche - entweder wurde noch kein neuer Fill bei einem beobachteten Trader erkannt, oder für den Coin ist keine Einstellung hinterlegt (siehe Trader-Details).</div>
 <table id="copy-log-table" style="display:none;">
-  <thead><tr><th>Zeit</th><th>Trader</th><th>Coin</th><th>Richtung</th><th>Preis</th><th>Margin/Hebel</th><th>Status</th></tr></thead>
+  <thead><tr><th>Zeit</th><th>Trader</th><th>Coin</th><th>Richtung</th><th>Preis</th><th>Margin/Hebel</th><th>Status</th><th>PnL $</th></tr></thead>
   <tbody></tbody>
 </table>
 
@@ -546,6 +706,8 @@ async function refresh() {
   renderPosTable();
 
   window.watchedData = data.watched;  // fuer's Modal zwischenspeichern
+  const copyStats = data.copy_stats || {};
+  const copyPositions = data.copy_positions || {};
 
   // Trader-Übersicht (klickbar)
   const copyRows = Object.entries(data.watched).map(([addr, info]) => {
@@ -559,19 +721,26 @@ async function refresh() {
     const nachkaufQuote = statsTotal > 0 ? Math.round(stats.nachkauf / statsTotal * 100) : null;
     const statsHtml = statsTotal === 0 ? '<span style="color:var(--dim);">noch keine Daten</span>' :
       `${stats.neu} Neu / ${stats.nachkauf} Nachkauf / ${stats.reverse} Reverse${nachkaufQuote !== null ? ` <span style="color:var(--dim);">(${nachkaufQuote}% Nachkauf-Quote)</span>` : ''}`;
+    const cs = copyStats[addr];
+    const openCount = Object.keys(copyPositions[addr] || {}).length;
+    const copyPnlHtml = !cs || cs.trades === 0
+      ? '<span style="color:var(--dim);">noch keine geschlossenen Copy-Trades</span>'
+      : `<span class="${cs.total_pnl_usd >= 0 ? 'green' : 'red'}">${cs.total_pnl_usd}$</span> <span style="color:var(--dim); font-size:11px;">(${cs.trades} Trades, ${Math.round(cs.wins/cs.trades*100)}% Trefferquote${openCount>0?`, ${openCount} offen`:''})</span>`;
     return `
       <tr>
         <td style="cursor:pointer; color:var(--accent);" onclick="openModal('${addr}')">${info.label} 🔍</td>
         <td class="addr">${addr.slice(0,10)}...${addr.slice(-6)}</td>
         <td>${pnlHtml}</td>
+        <td style="font-size:12px;">${copyPnlHtml}</td>
         <td>${posSummary}</td>
         <td style="font-size:12px;">${statsHtml}</td>
         <td>${coinCount} Coin${coinCount===1?'':'s'} konfiguriert</td>
         <td><button class="${info.monitor_enabled?'monitor-on':'monitor-off'}" onclick="toggleMonitor('${addr}', ${!info.monitor_enabled})">${info.monitor_enabled?'Beobachten AN':'Beobachten AUS'}</button></td>
         <td><button class="${info.copy_enabled?'copy-on':'copy-off'}" onclick="toggleCopy('${addr}', ${!info.copy_enabled})">${info.copy_enabled?'Copy AN':'Copy AUS'}</button></td>
+        <td><button class="${info.copy_skip_nachkauf?'copy-on':'copy-off'}" onclick="toggleSkipNachkauf('${addr}', ${!info.copy_skip_nachkauf})" title="Bei An werden nur frische Einstiege (Neu) und Richtungswechsel (Reverse) kopiert, Nachkäufe (DCA) werden übersprungen">${info.copy_skip_nachkauf?'Nur Neu/Reverse':'Alles kopieren'}</button></td>
       </tr>`;
   }).join('');
-  document.querySelector('#copy-table tbody').innerHTML = copyRows || '<tr><td colspan="8">Noch keine Trader beobachtet...</td></tr>';
+  document.querySelector('#copy-table tbody').innerHTML = copyRows || '<tr><td colspan="10">Noch keine Trader beobachtet...</td></tr>';
 
   // Copy-Trade-Log: jeder Versuch, egal ob simuliert (DRY_RUN), erfolgreich oder fehlgeschlagen
   document.getElementById('copy-log-mode').innerText = data.dry_run ? '(DRY_RUN - hier siehst du, was simuliert würde)' : '(LIVE)';
@@ -582,7 +751,7 @@ async function refresh() {
   } else {
     document.getElementById('copy-log-empty').style.display = 'none';
     document.getElementById('copy-log-table').style.display = '';
-    const statusLabel = {dry_run: '🧪 simuliert', success: '✅ erfolgreich', error: '❌ Fehler', skipped: '⏭️ übersprungen'};
+    const statusLabel = {dry_run: '🧪 simuliert', success: '✅ erfolgreich', error: '❌ Fehler', skipped: '⏭️ übersprungen', closed: '🏁 geschlossen'};
     document.querySelector('#copy-log-table tbody').innerHTML = copyLog.map(e => `
       <tr>
         <td>${new Date(e.ts).toLocaleString('de-DE')}</td>
@@ -590,8 +759,9 @@ async function refresh() {
         <td>${e.coin}</td>
         <td class="${e.direction==='long'?'green':'red'}">${e.direction==='long'?'🟢 Long':'🔴 Short'}</td>
         <td>${e.price}</td>
-        <td>${e.margin}$ / ${e.leverage}x</td>
-        <td title="${e.detail || ''}">${statusLabel[e.status] || e.status}</td>
+        <td>${e.margin != null ? `${e.margin}$ / ${e.leverage}x` : '-'}</td>
+        <td title="${e.detail || e.action || ''}">${statusLabel[e.status] || e.status}${e.action ? ` (${e.action})` : ''}</td>
+        <td class="${e.pnl_usd == null ? '' : (e.pnl_usd >= 0 ? 'green' : 'red')}">${e.pnl_usd != null ? e.pnl_usd : '-'}</td>
       </tr>`).join('');
   }
 
@@ -727,6 +897,11 @@ async function toggleMonitor(address, enable) {
   refresh();
 }
 
+async function toggleSkipNachkauf(address, enable) {
+  await fetch('/api/ct/skip_nachkauf', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, enable}) });
+  refresh();
+}
+
 document.getElementById('btn-add-address').addEventListener('click', async () => {
   const addr = document.getElementById('new-address').value.trim();
   if (!addr) return;
@@ -777,6 +952,8 @@ async def handle_ct_status(request):
         "watched": CT_STATE["watched"],
         "trend_meter": compute_trend_meter(),
         "copy_log": CT_STATE["copy_log"][:100],
+        "copy_positions": CT_STATE["copy_positions"],
+        "copy_stats": CT_STATE["copy_stats"],
     })
 
 
@@ -788,6 +965,7 @@ async def handle_ct_watch(request):
     if addr not in CT_STATE["watched"]:
         CT_STATE["watched"][addr] = {
             "label": "Manuell hinzugefügt", "copy_enabled": False, "monitor_enabled": True,
+            "copy_skip_nachkauf": False,
             "coin_settings": {}, "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
             "position_meta": {}, "leaderboard_pnl": None,
@@ -817,6 +995,20 @@ async def handle_ct_monitor_toggle(request):
     if addr in CT_STATE["watched"]:
         CT_STATE["watched"][addr]["monitor_enabled"] = enable
         debug_log(f"{'👁️' if enable else '🚫'} [CopyTrading] Beobachtung für {addr} {'aktiviert' if enable else 'deaktiviert'}")
+        await save_ct_watched()
+    return web.json_response({"success": True})
+
+
+async def handle_ct_skip_nachkauf_toggle(request):
+    """Schaltet 'Nur Neu/Reverse kopieren' an/aus - bei An werden Fills, die als reiner
+    Nachkauf klassifiziert wurden (gleiche Richtung wie die schon offene Position bei diesem
+    Trader auf diesem Coin), NICHT mitkopiert, nur frische Einstiege und Richtungswechsel."""
+    body = await request.json()
+    addr = body.get("address")
+    enable = bool(body.get("enable"))
+    if addr in CT_STATE["watched"]:
+        CT_STATE["watched"][addr]["copy_skip_nachkauf"] = enable
+        debug_log(f"{'🎯' if enable else '➕'} [CopyTrading] 'Nur Neu/Reverse' für {addr} {'aktiviert' if enable else 'deaktiviert'}")
         await save_ct_watched()
     return web.json_response({"success": True})
 

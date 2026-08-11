@@ -25,7 +25,7 @@ from strategies import (
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
     handle_ct_index, handle_ct_status, handle_ct_watch, handle_ct_copy_toggle,
-    handle_ct_monitor_toggle,
+    handle_ct_monitor_toggle, handle_ct_skip_nachkauf_toggle,
     handle_ct_set_coin_setting, handle_ct_remove_coin_setting, handle_ct_set_trader_defaults,
 )
 
@@ -51,6 +51,7 @@ async def start_web_server():
     app.router.add_post("/api/ct/watch", handle_ct_watch)
     app.router.add_post("/api/ct/copy", handle_ct_copy_toggle)
     app.router.add_post("/api/ct/monitor", handle_ct_monitor_toggle)
+    app.router.add_post("/api/ct/skip_nachkauf", handle_ct_skip_nachkauf_toggle)
     app.router.add_post("/api/ct/coin_setting", handle_ct_set_coin_setting)
     app.router.add_post("/api/ct/remove_coin_setting", handle_ct_remove_coin_setting)
     app.router.add_post("/api/ct/trader_defaults", handle_ct_set_trader_defaults)
