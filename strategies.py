@@ -221,6 +221,36 @@ def resample_candles(data, factor):
 SUB_MINUTE_RESOLUTIONS = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}  # Sekunden je Kerze, alle aus dem 1s-Puffer
 
 
+def _resample_seconds_candles(data, seconds):
+    """Wie resample_candles(), aber fuer SEKUNDEN-Buckets statt Minuten - resample_candles
+    geht fest von Minuten-Kerzen aus (bucket_ms = factor * 60_000), was bei 1-Sekunden-
+    Quelldaten und z.B. seconds=30 einen 30-MINUTEN-Bucket ergeben wuerde (1800 statt 30
+    Kerzen pro Bucket) und dadurch praktisch nie einen vollstaendigen Bucket liefert. Das war
+    ein echter Bug: get_seconds_candles() rief bisher direkt resample_candles(..., seconds)
+    auf, wodurch alle Sekunden-Zeitrahmen (10s/15s/30s/45s) ueber den echten
+    Binance-1s-Puffer faktisch nie genug Kerzen zurueckgaben."""
+    timestamps, opens, highs, lows, closes = data
+    n = len(closes)
+    if n == 0:
+        return [], [], [], [], []
+    bucket_ms = seconds * 1000
+    out_ts, out_o, out_h, out_l, out_c = [], [], [], [], []
+    i = 0
+    while i < n:
+        bucket = timestamps[i] // bucket_ms
+        j = i
+        while j < n and timestamps[j] // bucket_ms == bucket:
+            j += 1
+        if j - i == seconds:
+            out_ts.append(timestamps[i])
+            out_o.append(opens[i])
+            out_h.append(max(highs[i:j]))
+            out_l.append(min(lows[i:j]))
+            out_c.append(closes[j - 1])
+        i = j
+    return out_ts, out_o, out_h, out_l, out_c
+
+
 def get_seconds_candles(state, seconds, needed_bars):
     """Baut Kerzen mit 'seconds' Sekunden Laenge (10/15/30). Bevorzugt den Puffer echter
     Binance-1s-Kerzen (siehe binance_1s_poll_loop) - reicht der noch nicht (frisch
@@ -237,7 +267,7 @@ def get_seconds_candles(state, seconds, needed_bars):
     h = [c["h"] for c in source]
     l = [c["l"] for c in source]
     cl = [c["c"] for c in source]
-    r_ts, r_o, r_h, r_l, r_c = resample_candles((ts, o, h, l, cl), seconds)
+    r_ts, r_o, r_h, r_l, r_c = _resample_seconds_candles((ts, o, h, l, cl), seconds)
     if len(r_c) > needed_bars:
         return r_ts[-needed_bars:], r_o[-needed_bars:], r_h[-needed_bars:], r_l[-needed_bars:], r_c[-needed_bars:]
     return r_ts, r_o, r_h, r_l, r_c
@@ -396,6 +426,25 @@ async def fib_reversal_poll_loop(symbol):
 
         await asyncio.sleep(30)
 
+
+
+def compute_stochastic(highs, lows, closes, k_period, smooth_k, d_period):
+    """Standard-Stochastic-Oszillator: %K = 100 * (Close - Tiefstes Tief) / (Hoechstes Hoch -
+    Tiefstes Tief) ueber k_period, danach %K geglaettet (smooth_k) und %D als SMA von %K
+    (d_period). Reagiert bei kurzen Perioden schneller auf rohe Kursausschlaege als RSI -
+    deshalb fuers Scalp-Board als Haupt-Timing-Oszillator genutzt."""
+    n = len(closes)
+    if n == 0:
+        return [], []
+    raw_k = [50.0] * n
+    for i in range(n):
+        start = max(0, i - k_period + 1)
+        hh = max(highs[start:i + 1])
+        ll = min(lows[start:i + 1])
+        raw_k[i] = 50.0 if hh == ll else 100 * (closes[i] - ll) / (hh - ll)
+    k = _sma_series(raw_k, smooth_k) if smooth_k > 1 else raw_k
+    d = _sma_series(k, d_period)
+    return k, d
 
 
 def compute_atr(highs, lows, closes, period):
@@ -1814,6 +1863,51 @@ async def oms_rsi_poll_loop(symbol):
         await asyncio.sleep(10)
 
 
+SCALP_BOARD_TIMEFRAMES = [("30s", 30), ("45s", 45), ("60s", 60)]
+
+
+async def scalp_board_poll_loop(symbol):
+    """Manuelles Scalp-Board: RSI (kurze Periode), Stochastic und MACD auf 30s/45s/60s
+    PARALLEL berechnet, plus CVD ueber dieselben drei Fenster (aus dem sowieso schon global
+    gepflegten Trade-Puffer, siehe _cvd_ratio_over). Bewusst UNABHAENGIG vom aktuellen
+    entry_mode - das ist ein reines Beobachtungs-/Handwerkszeug fuer manuelles Scalping, egal
+    welche automatische Strategie gerade laeuft. Laeuft nur, solange der Bot fuer den Coin
+    aktiv ist (bot_active), da die 30s/45s-Kerzen aus demselben 1s-Puffer stammen, der aus
+    Kostengruenden nur bei aktivem Bot gefuellt wird (siehe binance_1s_poll_loop)."""
+    b = BOTS[symbol]
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["bot_active"]:
+                st = b["state"]
+                board = {}
+                for label, seconds in SCALP_BOARD_TIMEFRAMES:
+                    if seconds == 60:
+                        data = await fetch_candles_binance_multi(symbol, "1m", count_back=120)
+                        candles = (data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
+                    else:
+                        local = get_seconds_candles(st, seconds, 120)
+                        candles = (local[2], local[3], local[4]) if local else None
+
+                    if candles and len(candles[2]) > 20:
+                        h, l, c = candles
+                        rsi_series = compute_rsi(c, 8)
+                        k, d = compute_stochastic(h, l, c, 5, 3, 3)
+                        macd, macd_sig = compute_macd_line_and_signal(c, 5, 13, 3)
+                        board[label] = {
+                            "rsi": round(rsi_series[-1], 1),
+                            "stoch_k": round(k[-1], 1), "stoch_d": round(d[-1], 1),
+                            "macd_hist": round(macd[-1] - macd_sig[-1], 5),
+                            "cvd": _cvd_ratio_over(st, seconds),
+                        }
+                    else:
+                        board[label] = None
+                st["scalp_board"] = board
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Scalp-Board-Berechnung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        await asyncio.sleep(5)
+
+
 async def sg_poll_loop(symbol):
     """Signal-Grid: Grid-Mechanik dupliziert (kein Flip-Exit, TP als %/$ vom Ø-Einstieg,
     Nachkauf bis max. Stufen) - aber Ein-/Nachkauf werden nicht durch Preisabstand ausgeloest,
@@ -2333,13 +2427,28 @@ def update_oms_cvd(symbol, trades):
         is_maker_ask = bool(t.get("is_maker_ask", False))
         delta = size if is_maker_ask else -size
         buf.append((delta, size, now))
-    window = cfg.get("oms_cvd_window_seconds", 10)
+    # Puffer wird auf MINDESTENS 60s vorgehalten (nicht nur das konfigurierte OMS-Fenster) -
+    # das manuelle Scalp-Board braucht dieselben Rohdaten fuer eigene 30s/45s/60s-CVD-Werte,
+    # ohne einen zweiten, redundanten Trade-Puffer zu pflegen.
+    window = max(cfg.get("oms_cvd_window_seconds", 10), 60)
     cutoff = now - window
     buf = [d for d in buf if d[2] >= cutoff]
     st["oms_cvd_buffer"] = buf
     net = sum(d for d, v, ts in buf)
     vol = sum(v for d, v, ts in buf)
     st["oms_cvd_ratio"] = round(0.0 if vol == 0 else net / vol, 4)
+
+
+def _cvd_ratio_over(st, window_seconds):
+    """Berechnet CVD-Verhaeltnis ueber ein BELIEBIGES Zeitfenster aus demselben Rohpuffer, den
+    update_oms_cvd() sowieso schon fuer JEDES Symbol kontinuierlich pflegt (unabhaengig vom
+    aktuellen entry_mode) - fuers Scalp-Board, das 30s/45s/60s parallel braucht."""
+    now = time.time()
+    cutoff = now - window_seconds
+    buf = [d for d in st.get("oms_cvd_buffer", []) if d[2] >= cutoff]
+    net = sum(d for d, v, ts in buf)
+    vol = sum(v for d, v, ts in buf)
+    return round(0.0 if vol == 0 else net / vol, 4)
 
 
 def update_oms_liquidations(symbol, liq_trades):

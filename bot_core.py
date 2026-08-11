@@ -407,6 +407,7 @@ def default_state():
         "oms_funding_rate": None, "oms_last_signal_direction": None, "oms_last_trade_time": 0.0,
         "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None, "oms_rsi_ok": None, "oms_rsi": None,
         "oms_liq_buffer": [], "oms_liq_ratio": None, "oms_liq_count": 0, "oms_liq_ok": None,
+        "scalp_board": {},
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -1868,6 +1869,7 @@ const OMS_WIDGET_DEFS = [
     <div id="mini-candles" style="display:flex; gap:3px; align-items:center; height:60px;"></div>` },
   { id: "gsi-chart", title: "📈 Preisverlauf", x: 4, y: 6, w: 8, h: 5, body: '<div id="oms-chart-wrap"></div>' },
   { id: "gsi-obi", title: "〰️ OBI-Verlauf", x: 0, y: 11, w: 12, h: 4, body: '<div style="position:relative; height:100%; min-height:180px;"><canvas id="obiChart"></canvas></div>' },
+  { id: "gsi-scalp-board", title: "⚡ Scalp-Board (30s/45s/60s)", x: 0, y: 15, w: 12, h: 5, body: '<div id="scalp-board-wrap"></div>' },
 ];
 
 let omsGrid;
@@ -2492,6 +2494,45 @@ function renderOmsLiqGauge(liqRatio, minRatio, liqCount) {
     'Forcierte Short-Liquidation (Zwangskauf) = bullischer Druck, forcierte Long-Liquidation (Zwangsverkauf) = bärischer Druck. Anders als CVD sind das keine freiwilligen Trades, sondern echte Zwangsereignisse - oft Vorbote kurzer, heftiger Gegenbewegungen (Squeeze).' + note);
 }
 
+function renderScalpBoard(board) {
+  const tfs = [['30s','30s'], ['45s','45s'], ['60s','60s']];
+  if (!board || tfs.every(([k]) => !board[k])) {
+    return '<div style="padding:14px; color:var(--text-dim); font-size:13px;">Sammelt noch Daten... (braucht den Bot im aktiven Zustand für den Coin, damit die 30s/45s/60s-Kerzen gefüllt werden)</div>';
+  }
+  const rsiCell = v => {
+    if (v == null) return '<td>-</td>';
+    const color = v >= 70 ? 'red' : v <= 30 ? 'green' : '';
+    return `<td class="${color}">${v}</td>`;
+  };
+  const stochCell = tf => {
+    if (!tf) return '<td>-</td>';
+    const color = tf.stoch_k >= 80 ? 'red' : tf.stoch_k <= 20 ? 'green' : '';
+    return `<td class="${color}">${tf.stoch_k} / ${tf.stoch_d}</td>`;
+  };
+  const macdCell = v => {
+    if (v == null) return '<td>-</td>';
+    return `<td class="${v >= 0 ? 'green' : 'red'}">${v >= 0 ? '▲' : '▼'} ${v}</td>`;
+  };
+  const cvdCell = v => {
+    if (v == null) return '<td>-</td>';
+    const color = v >= 0.15 ? 'green' : v <= -0.15 ? 'red' : '';
+    return `<td class="${color}">${v}</td>`;
+  };
+  const row = (label, cells) => `<tr><td style="color:var(--text-dim); text-align:left;">${label}</td>${cells}</tr>`;
+  return `<div style="padding:4px 10px;">
+    <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">Rein manuell zur Entscheidungshilfe - RSI(8) rot ≥70/grün ≤30 · Stochastic(5,3,3) K/D rot ≥80/grün ≤20 · MACD-Histogramm(5,13,3) grün=positiv · CVD grün/rot ab ±0.15</div>
+    <table style="width:100%; text-align:center;">
+      <thead><tr><th style="text-align:left;"></th><th>30 Sek.</th><th>45 Sek.</th><th>60 Sek.</th></tr></thead>
+      <tbody>
+        ${row('RSI(8)', tfs.map(([k]) => rsiCell(board[k]?.rsi)).join(''))}
+        ${row('Stochastic %K/%D', tfs.map(([k]) => stochCell(board[k])).join(''))}
+        ${row('MACD-Hist', tfs.map(([k]) => macdCell(board[k]?.macd_hist)).join(''))}
+        ${row('CVD', tfs.map(([k]) => cvdCell(board[k]?.cvd)).join(''))}
+      </tbody>
+    </table>
+  </div>`;
+}
+
 function renderOmsChecklist(data) {
   const row = (label, status, detail) => {
     const icon = status === true ? '✅' : status === false ? '❌' : '➖';
@@ -2617,8 +2658,11 @@ async function refresh() {
   };
   const isOms = data.config.entry_mode === 'oms_scalp';
   const isObiLikeMode = isOms || data.config.entry_mode === 'obi_scalp';
-  document.getElementById('oms-grid').style.display = isObiLikeMode ? '' : 'none';
-  document.getElementById('oms-grid-header').style.display = isObiLikeMode ? '' : 'none';
+  // Das Grid selbst ist jetzt IMMER sichtbar (Pocket-Trading und das Scalp-Board sind
+  // absichtlich unabhaengig von der gewaehlten Strategie nutzbar) - nur einzelne Kacheln
+  // darin bleiben an bestimmte Modi gebunden (z.B. die OBI-/CVD-Gauges an oms_scalp).
+  document.getElementById('oms-grid').style.display = '';
+  document.getElementById('oms-grid-header').style.display = '';
   showGridWidget('gsi-signal', isOms);
   showGridWidget('gsi-gauge', isOms);
   showGridWidget('gsi-cvd-gauge', isOms);
@@ -2626,8 +2670,10 @@ async function refresh() {
   showGridWidget('gsi-liq-gauge', isOms);
   showGridWidget('gsi-checklist', isOms);
   showGridWidget('gsi-chart', isOms);
-  showGridWidget('gsi-pocket', isObiLikeMode);
+  showGridWidget('gsi-pocket', true);
   showGridWidget('gsi-obi', isObiLikeMode);
+  showGridWidget('gsi-scalp-board', true);
+  document.getElementById('scalp-board-wrap').innerHTML = renderScalpBoard(data.scalp_board);
 
   if (isOms) {
     const sig = data.oms_signal;
@@ -2962,15 +3008,13 @@ async function refresh() {
   }
 
   try {
-    if (data.config.entry_mode === 'obi_scalp' || data.config.entry_mode === 'oms_scalp') {
-      document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
-      document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
-      document.getElementById('pocket-entry').innerText = data.avg_entry_price ?? '-';
-      const pnlEl = document.getElementById('pocket-pnl');
-      pnlEl.innerText = data.unrealized_pnl_usd ?? '-';
-      pnlEl.className = (data.unrealized_pnl_usd ?? 0) >= 0 ? 'value green' : 'value red';
-      renderMiniCandles(hist);
-    }
+    document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
+    document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
+    document.getElementById('pocket-entry').innerText = data.avg_entry_price ?? '-';
+    const pnlEl = document.getElementById('pocket-pnl');
+    pnlEl.innerText = data.unrealized_pnl_usd ?? '-';
+    pnlEl.className = (data.unrealized_pnl_usd ?? 0) >= 0 ? 'value green' : 'value red';
+    renderMiniCandles(hist);
   } catch (e) {
     console.error('Pocket-Trading-Fehler:', e);
   }
@@ -3258,6 +3302,7 @@ async def handle_status(request):
         "oms_funding_ok": st.get("oms_funding_ok"), "oms_rsi_ok": st.get("oms_rsi_ok"), "oms_rsi": st.get("oms_rsi"),
         "oms_oi_ok": st.get("oms_oi_ok"), "oms_oi_score": st.get("oms_oi_score"), "oms_open_interest": st.get("oms_open_interest"),
         "oms_liq_ok": st.get("oms_liq_ok"), "oms_liq_ratio": st.get("oms_liq_ratio"), "oms_liq_count": st.get("oms_liq_count"),
+        "scalp_board": st.get("scalp_board", {}),
         "oms_cvd_ratio": st.get("oms_cvd_ratio"), "oms_funding_rate": st.get("oms_funding_rate"),
         "oms_tp1_done": st.get("oms_tp1_done"), "oms_trail_price": st.get("oms_trail_price"),
         "oms_dca_count": st.get("oms_dca_count"),
