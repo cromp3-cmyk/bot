@@ -2529,8 +2529,10 @@ async def handle_oms_signal_check(symbol):
 
 async def check_oms_exit_management(symbol, price):
     """Wird bei jedem Preis-Tick aufgerufen. SL zuerst (fester $-Betrag auf die GESAMTE
-    Position, NICHT die Liquidation), dann TP1 (Teilverkauf - danach startet Trailing fuer
-    den Rest; kein separater Break-Even-SL noetig, der TP1-Gewinn ist schon real realisiert)."""
+    Position, NICHT die Liquidation), danach je nach oms_exit_mode entweder:
+    - "single_tp": einfacher TP - kompletter Ausstieg sobald oms_tp1_usd erreicht ist.
+    - "tp1_trail": TP1 (Teilverkauf) - danach startet Trailing fuer den Rest; kein separater
+      Break-Even-SL noetig, der TP1-Gewinn ist schon real realisiert."""
     if symbol not in BOTS:
         return
     b = BOTS[symbol]
@@ -2548,12 +2550,22 @@ async def check_oms_exit_management(symbol, price):
         return
     pnl_usd = (price - entry) * size if pos == "long" else (entry - price) * size
 
-    if not st["oms_tp1_done"]:
-        if pnl_usd <= -cfg["oms_sl_usd"]:
-            await execute_exit(symbol, price, "SL")
-            _oms_record_marker(st, price, "exit_sl")
+    if pnl_usd <= -cfg["oms_sl_usd"]:
+        await execute_exit(symbol, price, "SL")
+        _oms_record_marker(st, price, "exit_sl")
+        _oms_reset_position_state(st)
+        return
+
+    exit_mode = cfg.get("oms_exit_mode", "tp1_trail")
+
+    if exit_mode == "single_tp":
+        if pnl_usd >= cfg["oms_tp1_usd"]:
+            await execute_exit(symbol, price, "TP")
+            _oms_record_marker(st, price, "exit_tp")
             _oms_reset_position_state(st)
-            return
+        return
+
+    if not st["oms_tp1_done"]:
         if pnl_usd >= cfg["oms_tp1_usd"]:
             fraction = cfg["oms_tp1_close_pct"] / 100
             ok = await execute_partial_exit(symbol, price, fraction, "TP1")

@@ -234,6 +234,7 @@ def default_config():
         "oms_funding_max_abs": float(os.getenv("OMS_FUNDING_MAX_ABS", "0.0005")),
         "oms_cooldown_seconds": float(os.getenv("OMS_COOLDOWN_SECONDS", "5")),
         "oms_tp1_usd": float(os.getenv("OMS_TP1_USD", "2.5")),
+        "oms_exit_mode": os.getenv("OMS_EXIT_MODE", "tp1_trail"),  # "tp1_trail" oder "single_tp"
         "oms_tp1_close_pct": float(os.getenv("OMS_TP1_CLOSE_PCT", "50")),
         "oms_sl_usd": float(os.getenv("OMS_SL_USD", "3.5")),
         "oms_trail_distance_usd": float(os.getenv("OMS_TRAIL_DISTANCE_USD", "1.5")),
@@ -1021,10 +1022,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="oms_scalp"><label>Funding-Grenze (absolut, z.B. 0.0005 = 0.05%)</label><input type="number" step="0.0001" id="oms_funding_max_abs"></div>
   <div data-mode="oms_scalp"><label>Cooldown zwischen Signalen (Sek.)</label><input type="number" step="1" id="oms_cooldown_seconds"></div>
-  <div data-mode="oms_scalp"><label>TP1 Ziel ($, Teilverkauf)</label><input type="number" step="0.1" id="oms_tp1_usd"></div>
-  <div data-mode="oms_scalp"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" id="oms_tp1_close_pct"></div>
+  <div data-mode="oms_scalp"><label>Exit-Modus</label>
+    <select class="cfg" id="oms_exit_mode">
+      <option value="tp1_trail">TP1 + Trailing (Teilverkauf, Rest wird nachgezogen)</option>
+      <option value="single_tp">Nur TP (kompletter Ausstieg bei Zielerreichung, kein Teilverkauf/Trailing)</option>
+    </select>
+  </div>
+  <div data-mode="oms_scalp"><label id="oms_tp1_usd_label">TP1 Ziel ($, Teilverkauf)</label><input type="number" step="0.1" id="oms_tp1_usd"></div>
+  <div data-mode="oms_scalp" data-oms-exit-mode="tp1_trail"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" id="oms_tp1_close_pct"></div>
   <div data-mode="oms_scalp"><label>Stop-Loss ($, gesamte Position - NICHT die Liquidation)</label><input type="number" step="0.1" id="oms_sl_usd"></div>
-  <div data-mode="oms_scalp"><label>Trailing-Abstand nach TP1 ($)</label><input type="number" step="0.1" id="oms_trail_distance_usd"></div>
+  <div data-mode="oms_scalp" data-oms-exit-mode="tp1_trail"><label>Trailing-Abstand nach TP1 ($)</label><input type="number" step="0.1" id="oms_trail_distance_usd"></div>
   <div data-mode="oms_scalp"><label>Nachkauf (DCA)</label>
     <select class="cfg" id="oms_dca_enabled">
       <option value="true">An</option>
@@ -1930,10 +1937,23 @@ function updateModeFields() {
   const isOms = mode === 'oms_scalp';
   document.getElementById('backtest-zone').style.display = isOms ? 'none' : '';
   document.getElementById('generic-chart-wrap').style.display = isOms ? 'none' : '';
+  if (isOms) updateOmsExitModeFields();
+}
+
+function updateOmsExitModeFields() {
+  const exitMode = document.getElementById('oms_exit_mode').value;
+  document.querySelectorAll('[data-oms-exit-mode]').forEach(el => {
+    el.style.display = (el.dataset.omsExitMode === exitMode) ? '' : 'none';
+  });
+  document.getElementById('oms_tp1_usd_label').innerText = exitMode === 'single_tp' ? 'TP Ziel ($)' : 'TP1 Ziel ($, Teilverkauf)';
 }
 document.getElementById('entry_mode').addEventListener('change', () => {
   window.formTouched = true;
   updateModeFields();
+});
+document.getElementById('oms_exit_mode').addEventListener('change', () => {
+  window.formTouched = true;
+  updateOmsExitModeFields();
 });
 
 async function loadSymbols() {
@@ -2467,7 +2487,7 @@ function renderOmsChart(history, markers, pos) {
 
   let levelLines = '';
   if (slPrice != null) levelLines += `<line x1="${pad}" y1="${yOf(slPrice).toFixed(1)}" x2="${w-pad}" y2="${yOf(slPrice).toFixed(1)}" stroke="#f0526b" stroke-width="1" stroke-dasharray="4,3"/><text x="${w-pad}" y="${(yOf(slPrice)-3).toFixed(1)}" fill="#f0526b" font-size="9" text-anchor="end">SL</text>`;
-  if (tp1Price != null) levelLines += `<line x1="${pad}" y1="${yOf(tp1Price).toFixed(1)}" x2="${w-pad}" y2="${yOf(tp1Price).toFixed(1)}" stroke="#22c55e" stroke-width="1" stroke-dasharray="4,3"/><text x="${w-pad}" y="${(yOf(tp1Price)-3).toFixed(1)}" fill="#22c55e" font-size="9" text-anchor="end">TP1</text>`;
+  if (tp1Price != null) levelLines += `<line x1="${pad}" y1="${yOf(tp1Price).toFixed(1)}" x2="${w-pad}" y2="${yOf(tp1Price).toFixed(1)}" stroke="#22c55e" stroke-width="1" stroke-dasharray="4,3"/><text x="${w-pad}" y="${(yOf(tp1Price)-3).toFixed(1)}" fill="#22c55e" font-size="9" text-anchor="end">${pos && pos.exit_mode === 'single_tp' ? 'TP' : 'TP1'}</text>`;
   if (trailPrice != null) levelLines += `<line x1="${pad}" y1="${yOf(trailPrice).toFixed(1)}" x2="${w-pad}" y2="${yOf(trailPrice).toFixed(1)}" stroke="#3b82f6" stroke-width="1" stroke-dasharray="4,3"/><text x="${w-pad}" y="${(yOf(trailPrice)-3).toFixed(1)}" fill="#3b82f6" font-size="9" text-anchor="end">Trail</text>`;
 
   const styles = {
@@ -2477,6 +2497,7 @@ function renderOmsChart(history, markers, pos) {
     dca_short: { shape: 'circle', color: '#fca5a5', r: 3, label: '+' },
     exit_sl: { shape: 'x', color: '#f0526b', label: 'SL' },
     exit_tp1: { shape: 'circle', color: '#22c55e', r: 4, label: 'TP1' },
+    exit_tp: { shape: 'circle', color: '#22c55e', r: 5, label: 'TP' },
     exit_trail: { shape: 'circle', color: '#3b82f6', r: 4, label: 'Exit' },
     exit_reverse: { shape: 'x', color: '#a855f7', label: 'Reverse' },
   };
@@ -2574,7 +2595,7 @@ async function refresh() {
     chartWrap.innerHTML = renderOmsChart(data.oms_price_history, data.oms_markers, {
       position: data.position, avg_entry_price: data.avg_entry_price, size: data.total_coin_size,
       sl_usd: data.config.oms_sl_usd, tp1_usd: data.config.oms_tp1_usd,
-      tp1_done: data.oms_tp1_done, trail_price: data.oms_trail_price,
+      tp1_done: data.oms_tp1_done, trail_price: data.oms_trail_price, exit_mode: data.config.oms_exit_mode,
     });
   }
 
@@ -2665,6 +2686,7 @@ async function refresh() {
     document.getElementById('oms_funding_max_abs').value = data.config.oms_funding_max_abs;
     document.getElementById('oms_cooldown_seconds').value = data.config.oms_cooldown_seconds;
     document.getElementById('oms_tp1_usd').value = data.config.oms_tp1_usd;
+    document.getElementById('oms_exit_mode').value = data.config.oms_exit_mode;
     document.getElementById('oms_tp1_close_pct').value = data.config.oms_tp1_close_pct;
     document.getElementById('oms_sl_usd').value = data.config.oms_sl_usd;
     document.getElementById('oms_trail_distance_usd').value = data.config.oms_trail_distance_usd;
@@ -2944,6 +2966,7 @@ function buildConfigPayload() {
     oms_funding_max_abs: parseFloat(document.getElementById('oms_funding_max_abs').value),
     oms_cooldown_seconds: parseFloat(document.getElementById('oms_cooldown_seconds').value),
     oms_tp1_usd: parseFloat(document.getElementById('oms_tp1_usd').value),
+    oms_exit_mode: document.getElementById('oms_exit_mode').value,
     oms_tp1_close_pct: parseFloat(document.getElementById('oms_tp1_close_pct').value),
     oms_sl_usd: parseFloat(document.getElementById('oms_sl_usd').value),
     oms_trail_distance_usd: parseFloat(document.getElementById('oms_trail_distance_usd').value),
@@ -3206,7 +3229,7 @@ async def handle_config_update(request):
                 "oms_levels", "oms_obi_threshold", "oms_window_fast_seconds", "oms_window_medium_seconds",
                 "oms_window_slow_seconds", "oms_cvd_confirm_enabled", "oms_cvd_window_seconds", "oms_cvd_min_ratio",
                 "oms_funding_filter_enabled", "oms_funding_max_abs", "oms_cooldown_seconds",
-                "oms_tp1_usd", "oms_tp1_close_pct", "oms_sl_usd", "oms_trail_distance_usd",
+                "oms_tp1_usd", "oms_exit_mode", "oms_tp1_close_pct", "oms_sl_usd", "oms_trail_distance_usd",
                 "oms_dca_enabled", "oms_dca_max_entries", "oms_dca_size_fraction", "oms_dca_min_pullback_usd",
                 "oms_reverse_on_signal",
                 "oms_rsi_filter_enabled", "oms_rsi_resolution", "oms_rsi_period", "oms_rsi_midline",
