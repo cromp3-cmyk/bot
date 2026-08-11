@@ -2342,6 +2342,88 @@ def update_oms_cvd(symbol, trades):
     st["oms_cvd_ratio"] = round(0.0 if vol == 0 else net / vol, 4)
 
 
+def update_oms_liquidations(symbol, liq_trades):
+    """Liquidationen aus dem trade-Kanal (separates 'liquidation_trades'-Array, getrennt von den
+    normalen Trades). Gleiche Ratio-Logik wie CVD (is_maker_ask=True -> Short wurde zwangsweise
+    zugekauft -> bullischer Druck, is_maker_ask=False -> Long wurde zwangsweise verkauft ->
+    baerischer Druck), aber laengeres Zeitfenster als CVD, da Liquidationen seltener sind als
+    normale Trades und ein kurzes Fenster meist einfach leer waere."""
+    if symbol not in BOTS or not liq_trades:
+        return
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    now = time.time()
+    buf = st["oms_liq_buffer"]
+    for t in liq_trades:
+        try:
+            size = float(t.get("size", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if size <= 0:
+            continue
+        is_maker_ask = bool(t.get("is_maker_ask", False))
+        delta = size if is_maker_ask else -size
+        buf.append((delta, size, now))
+    window = cfg.get("oms_liq_window_seconds", 60)
+    cutoff = now - window
+    buf = [d for d in buf if d[2] >= cutoff]
+    st["oms_liq_buffer"] = buf
+    net = sum(d for d, v, ts in buf)
+    vol = sum(v for d, v, ts in buf)
+    st["oms_liq_ratio"] = round(0.0 if vol == 0 else net / vol, 4)
+    st["oms_liq_count"] = len(buf)
+
+
+def update_oms_oi(symbol, oi_now):
+    """Open Interest kombiniert mit der Preisrichtung im selben Zeitfenster (aus dem ohnehin
+    gepflegten oms_price_history), um herzuleiten, welche Seite gerade dominiert:
+    Preis rauf + OI rauf = neue Longs (starkes bullisches Signal, +1.0)
+    Preis rauf + OI runter = Short-Eindeckung (schwaecher bullisch, +0.4 - reiner Squeeze,
+                              keine neue Ueberzeugung)
+    Preis runter + OI rauf = neue Shorts (starkes baerisches Signal, -1.0)
+    Preis runter + OI runter = Long-Kapitulation (schwaecher baerisch, -0.4)
+    OI aendert sich kaum = neutral (0.0). Open Interest selbst hat keine 'Richtung' (Long- und
+    Short-OI sind immer gleich gross) - erst die Kombination mit der Preisrichtung macht daraus
+    ein Signal, wer gerade tatsaechlich Position aufbaut statt nur hin- und herzuhandeln."""
+    if symbol not in BOTS or oi_now is None:
+        return
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    now = time.time()
+    hist = st["oms_oi_history"]
+    hist.append((now, oi_now))
+    window = cfg.get("oms_oi_window_seconds", 30)
+    cutoff = now - window
+    hist = [h for h in hist if h[0] >= cutoff]
+    st["oms_oi_history"] = hist
+    st["oms_open_interest"] = oi_now
+
+    if len(hist) < 2:
+        st["oms_oi_score"] = None
+        return
+    oi_old = hist[0][1]
+    oi_delta_pct = (oi_now - oi_old) / oi_old if oi_old else 0.0
+
+    price_hist = [(ts, p) for ts, p in st.get("oms_price_history", []) if ts >= cutoff]
+    if len(price_hist) < 2:
+        st["oms_oi_score"] = None
+        return
+    price_old, price_now = price_hist[0][1], price_hist[-1][1]
+    price_delta_pct = (price_now - price_old) / price_old if price_old else 0.0
+
+    oi_threshold = cfg.get("oms_oi_min_change_pct", 0.001)
+    if abs(oi_delta_pct) < oi_threshold or price_delta_pct == 0:
+        st["oms_oi_score"] = 0.0
+    elif price_delta_pct > 0 and oi_delta_pct > 0:
+        st["oms_oi_score"] = 1.0
+    elif price_delta_pct > 0 and oi_delta_pct < 0:
+        st["oms_oi_score"] = 0.4
+    elif price_delta_pct < 0 and oi_delta_pct > 0:
+        st["oms_oi_score"] = -1.0
+    else:
+        st["oms_oi_score"] = -0.4
+
+
 def _oms_reset_position_state(st):
     st["oms_tp1_done"] = False
     st["oms_trail_price"] = None
@@ -2457,6 +2539,36 @@ async def handle_oms_signal_check(symbol):
             if not rsi_ok:
                 direction = None
     st["oms_rsi_ok"] = rsi_ok
+
+    # OI-Filter: nur in die Richtung erlauben, die der OI-Score gerade stuetzt (siehe update_oms_oi
+    # fuer die Herleitung: Preisrichtung + OI-Aenderung kombiniert)
+    oi_enabled = cfg.get("oms_oi_filter_enabled", False)
+    oi_ok = None
+    if direction is not None and oi_enabled:
+        oi_score = st.get("oms_oi_score")
+        min_score = cfg.get("oms_oi_min_score", 0.3)
+        if oi_score is not None:
+            oi_ok = not ((direction == "long" and oi_score < min_score) or
+                        (direction == "short" and oi_score > -min_score))
+            if not oi_ok:
+                direction = None
+    st["oms_oi_ok"] = oi_ok
+
+    # Liquidations-Filter: bestaetigt Richtung, wenn Zwangs-Liquidationen (echte Events, kein
+    # Sentiment) in dieselbe Richtung zeigen wie das Signal
+    liq_enabled = cfg.get("oms_liq_filter_enabled", False)
+    liq_ok = None
+    if direction is not None and liq_enabled:
+        liq_ratio = st.get("oms_liq_ratio")
+        min_ratio = cfg.get("oms_liq_min_ratio", 0.2)
+        if liq_ratio is not None and st.get("oms_liq_count", 0) > 0:
+            liq_ok = not ((direction == "long" and liq_ratio < min_ratio) or
+                         (direction == "short" and liq_ratio > -min_ratio))
+            if not liq_ok:
+                direction = None
+        # Wenn im Fenster keine Liquidationen stattfanden, blockiert der Filter NICHT (kein
+        # Liquidations-Event ist kein Gegen-Signal, nur ein fehlendes Bestaetigungs-Signal)
+    st["oms_liq_ok"] = liq_ok
 
     # Trend-Meter: IMMER aktualisieren, unabhaengig von bot_active/Cooldown/Position - das ist
     # die Live-Anzeige "JETZT LONG"/"JETZT SHORT" zum manuellen Nachhandeln
@@ -2998,7 +3110,9 @@ async def trading_loop():
 
                     if channel.startswith("trade") and symbol:
                         trades = msg.get("trades", [])
+                        liq_trades = msg.get("liquidation_trades", [])
                         update_oms_cvd(symbol, trades)
+                        update_oms_liquidations(symbol, liq_trades)
                         if trades:
                             price = float(trades[-1]["price"])
                             try:
@@ -3013,6 +3127,12 @@ async def trading_loop():
                         if rate is not None:
                             try:
                                 BOTS[symbol]["state"]["oms_funding_rate"] = float(rate)
+                            except (TypeError, ValueError):
+                                pass
+                        oi = stats.get("open_interest")
+                        if oi is not None:
+                            try:
+                                update_oms_oi(symbol, float(oi))
                             except (TypeError, ValueError):
                                 pass
 

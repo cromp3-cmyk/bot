@@ -247,6 +247,13 @@ def default_config():
         "oms_rsi_resolution": os.getenv("OMS_RSI_RESOLUTION", "1m"),
         "oms_rsi_period": int(os.getenv("OMS_RSI_PERIOD", "14")),
         "oms_rsi_midline": float(os.getenv("OMS_RSI_MIDLINE", "50")),
+        "oms_oi_filter_enabled": os.getenv("OMS_OI_FILTER_ENABLED", "false").lower() == "true",
+        "oms_oi_window_seconds": float(os.getenv("OMS_OI_WINDOW_SECONDS", "30")),
+        "oms_oi_min_change_pct": float(os.getenv("OMS_OI_MIN_CHANGE_PCT", "0.001")),
+        "oms_oi_min_score": float(os.getenv("OMS_OI_MIN_SCORE", "0.3")),
+        "oms_liq_filter_enabled": os.getenv("OMS_LIQ_FILTER_ENABLED", "false").lower() == "true",
+        "oms_liq_window_seconds": float(os.getenv("OMS_LIQ_WINDOW_SECONDS", "60")),
+        "oms_liq_min_ratio": float(os.getenv("OMS_LIQ_MIN_RATIO", "0.2")),
         "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
         "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
         "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
@@ -399,6 +406,8 @@ def default_state():
         "oms_cvd_buffer": [], "oms_cvd_ratio": None,
         "oms_funding_rate": None, "oms_last_signal_direction": None, "oms_last_trade_time": 0.0,
         "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None, "oms_rsi_ok": None, "oms_rsi": None,
+        "oms_liq_buffer": [], "oms_liq_ratio": None, "oms_liq_count": 0, "oms_liq_ok": None,
+        "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
         "oms_dca_count": 0, "oms_last_entry_price": None,
@@ -1066,6 +1075,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="oms_scalp"><label>RSI Periode</label><input type="number" step="1" id="oms_rsi_period"></div>
   <div data-mode="oms_scalp"><label>RSI Mittellinie</label><input type="number" step="1" id="oms_rsi_midline"></div>
+  <div data-mode="oms_scalp"><label>Open-Interest-Filter (Preis+OI kombiniert muss Richtung stützen)</label>
+    <select class="cfg" id="oms_oi_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="oms_scalp"><label>OI Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_oi_window_seconds"></div>
+  <div data-mode="oms_scalp"><label>OI Mindest-Änderung (%, z.B. 0.001 = 0.1%)</label><input type="number" step="0.0001" id="oms_oi_min_change_pct"></div>
+  <div data-mode="oms_scalp"><label>OI Mindest-Score (0-1)</label><input type="number" step="0.05" id="oms_oi_min_score"></div>
+  <div data-mode="oms_scalp"><label>Liquidations-Filter (Zwangsliquidationen müssen Richtung stützen)</label>
+    <select class="cfg" id="oms_liq_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="oms_scalp"><label>Liquidations Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_liq_window_seconds"></div>
+  <div data-mode="oms_scalp"><label>Liquidations Mindest-Verhältnis (0-1)</label><input type="number" step="0.05" id="oms_liq_min_ratio"></div>
 
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
@@ -1823,8 +1849,10 @@ const OMS_WIDGET_DEFS = [
     body: '<div id="oms-trend-meter" style="padding:16px; border-radius:10px; text-align:center; font-weight:800; font-size:20px;"></div><div id="oms-trend-meter-detail" style="margin-top:8px; font-size:11px; color:var(--text-dim); text-align:center;"></div>' },
   { id: "gsi-gauge", title: "📶 OBI-Gauge", x: 4, y: 0, w: 4, h: 3, body: '<div id="oms-gauge-wrap"></div>' },
   { id: "gsi-cvd-gauge", title: "💹 CVD-Gauge", x: 8, y: 0, w: 4, h: 3, body: '<div id="oms-cvd-gauge-wrap"></div>' },
-  { id: "gsi-checklist", title: "✅ Warum feuert's?", x: 0, y: 3, w: 4, h: 3, body: '<div id="oms-checklist-wrap"></div>' },
-  { id: "gsi-pocket", title: "⚡ Pocket-Trading", x: 4, y: 3, w: 4, h: 5, body: `
+  { id: "gsi-oi-gauge", title: "📊 Open-Interest-Gauge", x: 0, y: 3, w: 4, h: 3, body: '<div id="oms-oi-gauge-wrap"></div>' },
+  { id: "gsi-liq-gauge", title: "💥 Liquidations-Gauge", x: 4, y: 3, w: 4, h: 3, body: '<div id="oms-liq-gauge-wrap"></div>' },
+  { id: "gsi-checklist", title: "✅ Warum feuert's?", x: 8, y: 3, w: 4, h: 3, body: '<div id="oms-checklist-wrap"></div>' },
+  { id: "gsi-pocket", title: "⚡ Pocket-Trading", x: 0, y: 6, w: 4, h: 5, body: `
     <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; font-size:11px;">
       <div><div class="label">Margin</div><div class="value" id="pocket-margin" style="font-size:14px;">-</div></div>
       <div><div class="label">Position</div><div class="value" id="pocket-position" style="font-size:14px;">-</div></div>
@@ -1838,8 +1866,8 @@ const OMS_WIDGET_DEFS = [
     </div>
     <div class="label" style="margin-bottom:4px; font-size:10px;">Letzte 10 Kerzen</div>
     <div id="mini-candles" style="display:flex; gap:3px; align-items:center; height:60px;"></div>` },
-  { id: "gsi-chart", title: "📈 Preisverlauf", x: 8, y: 3, w: 4, h: 5, body: '<div id="oms-chart-wrap"></div>' },
-  { id: "gsi-obi", title: "〰️ OBI-Verlauf", x: 0, y: 8, w: 12, h: 4, body: '<div style="position:relative; height:100%; min-height:180px;"><canvas id="obiChart"></canvas></div>' },
+  { id: "gsi-chart", title: "📈 Preisverlauf", x: 4, y: 6, w: 8, h: 5, body: '<div id="oms-chart-wrap"></div>' },
+  { id: "gsi-obi", title: "〰️ OBI-Verlauf", x: 0, y: 11, w: 12, h: 4, body: '<div style="position:relative; height:100%; min-height:180px;"><canvas id="obiChart"></canvas></div>' },
 ];
 
 let omsGrid;
@@ -2420,22 +2448,38 @@ function _omsGaugeStageLabel(v, t) {
   return 'STARK SHORT';
 }
 
-function renderOmsCvdGauge(cvdRatio, minRatio) {
-  const t = minRatio ?? 0.15;
+function renderOmsSimpleGauge(value, threshold, title, explanation) {
+  const t = threshold ?? 0.15;
   const clamp = v => Math.max(-1, Math.min(1, v ?? 0));
   const pctOf = v => (clamp(v) + 1) / 2 * 100;
   const zoneStop1 = ((1 - t) / 2 * 100).toFixed(0);
   const zoneStop2 = (50 + t / 2 * 50).toFixed(0);
   return `<div class="panel-card" style="padding:14px;">
-    <div style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Cumulative Volume Delta (CVD) — Stufe: <b style="color:var(--text);">${_omsGaugeStageLabel(cvdRatio, t)}</b></div>
+    <div style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">${title} — Stufe: <b style="color:var(--text);">${_omsGaugeStageLabel(value, t)}</b></div>
     <div style="position:relative; height:28px; border-radius:6px; background:linear-gradient(90deg, #f0526b 0%, #7c3f47 ${zoneStop1}%, #3a3f52 48%, #3a3f52 52%, #2f6b45 ${zoneStop2}%, #22c55e 100%);">
-      <div style="position:absolute; top:-4px; left:${pctOf(cvdRatio)}%; width:2px; height:36px; background:#fff; transform:translateX(-1px);" title="aktuelles CVD-Verhältnis"></div>
+      <div style="position:absolute; top:-4px; left:${pctOf(value)}%; width:2px; height:36px; background:#fff; transform:translateX(-1px);"></div>
     </div>
     <div style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-dim); margin-top:4px;">
       <span>Stark Short</span><span>Neutral</span><span>Stark Long</span>
     </div>
-    <div style="font-size:11px; color:var(--text-dim); margin-top:6px;">Zeigt, wer gerade aktiv (aggressiv) kauft/verkauft - anders als OBI, das nur zeigt, wer im Orderbuch bereitsteht. Muss "Vor-Long"/"Stark Long" (bzw. Short) erreichen, um ein OBI-Signal zu bestätigen.</div>
+    <div style="font-size:11px; color:var(--text-dim); margin-top:6px;">${explanation}</div>
   </div>`;
+}
+
+function renderOmsCvdGauge(cvdRatio, minRatio) {
+  return renderOmsSimpleGauge(cvdRatio, minRatio ?? 0.15, 'Cumulative Volume Delta (CVD)',
+    'Zeigt, wer gerade aktiv (aggressiv) kauft/verkauft - anders als OBI, das nur zeigt, wer im Orderbuch bereitsteht. Muss "Vor-Long"/"Stark Long" (bzw. Short) erreichen, um ein OBI-Signal zu bestätigen.');
+}
+
+function renderOmsOiGauge(oiScore, minScore) {
+  return renderOmsSimpleGauge(oiScore, minScore ?? 0.3, 'Open Interest (Preis + OI kombiniert)',
+    'Stark Long/Short = Preis UND offene Positionen laufen in dieselbe Richtung (neues Geld, echte Überzeugung). Vor-Long/Vor-Short = nur Eindeckung/Kapitulation der Gegenseite (schwächer, kann schnell drehen). Neutral = OI ändert sich kaum.');
+}
+
+function renderOmsLiqGauge(liqRatio, minRatio, liqCount) {
+  const note = (liqCount ?? 0) === 0 ? '<br><i>Keine Liquidationen im aktuellen Zeitfenster.</i>' : '';
+  return renderOmsSimpleGauge(liqRatio, minRatio ?? 0.2, 'Liquidationen (Zwangs-Events)',
+    'Forcierte Short-Liquidation (Zwangskauf) = bullischer Druck, forcierte Long-Liquidation (Zwangsverkauf) = bärischer Druck. Anders als CVD sind das keine freiwilligen Trades, sondern echte Zwangsereignisse - oft Vorbote kurzer, heftiger Gegenbewegungen (Squeeze).' + note);
 }
 
 function renderOmsChecklist(data) {
@@ -2450,12 +2494,16 @@ function renderOmsChecklist(data) {
   const cvdDetail = data.config.oms_cvd_confirm_enabled ? `CVD ${data.oms_cvd_ratio ?? '-'} (min. ${data.config.oms_cvd_min_ratio})` : 'deaktiviert';
   const fundingDetail = data.config.oms_funding_filter_enabled ? `${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'} (Grenze ${(data.config.oms_funding_max_abs*100).toFixed(3)}%)` : 'deaktiviert';
   const rsiDetail = data.config.oms_rsi_filter_enabled ? `RSI ${data.oms_rsi ?? '-'} (Mittellinie ${data.config.oms_rsi_midline})` : 'deaktiviert';
+  const oiDetail = data.config.oms_oi_filter_enabled ? `Score ${data.oms_oi_score ?? '-'} (min. ${data.config.oms_oi_min_score})` : 'deaktiviert';
+  const liqDetail = data.config.oms_liq_filter_enabled ? `${data.oms_liq_ratio ?? '-'} (${data.oms_liq_count ?? 0} Events im Fenster, min. ${data.config.oms_liq_min_ratio})` : 'deaktiviert';
   return `<div class="panel-card" style="padding:14px;">
     <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">Warum feuert (nicht)?</div>
     ${row('OBI-Übereinstimmung (3 Fenster gleiche Richtung)', obiOk, obiDetail)}
     ${row('CVD-Bestätigung', data.oms_cvd_ok, cvdDetail)}
     ${row('Funding-Filter bestanden', data.oms_funding_ok, fundingDetail)}
     ${row('RSI-Regime-Filter bestanden', data.oms_rsi_ok, rsiDetail)}
+    ${row('Open-Interest-Filter bestanden', data.oms_oi_ok, oiDetail)}
+    ${row('Liquidations-Filter bestanden', data.oms_liq_ok, liqDetail)}
   </div>`;
 }
 
@@ -2564,6 +2612,8 @@ async function refresh() {
   showGridWidget('gsi-signal', isOms);
   showGridWidget('gsi-gauge', isOms);
   showGridWidget('gsi-cvd-gauge', isOms);
+  showGridWidget('gsi-oi-gauge', isOms);
+  showGridWidget('gsi-liq-gauge', isOms);
   showGridWidget('gsi-checklist', isOms);
   showGridWidget('gsi-chart', isOms);
   showGridWidget('gsi-pocket', isObiLikeMode);
@@ -2591,6 +2641,8 @@ async function refresh() {
 
     gaugeWrap.innerHTML = renderOmsGauge(data.oms_obi_fast, data.oms_obi_medium, data.oms_obi_slow, data.config.oms_obi_threshold);
     document.getElementById('oms-cvd-gauge-wrap').innerHTML = renderOmsCvdGauge(data.oms_cvd_ratio, data.config.oms_cvd_min_ratio);
+    document.getElementById('oms-oi-gauge-wrap').innerHTML = renderOmsOiGauge(data.oms_oi_score, data.config.oms_oi_min_score);
+    document.getElementById('oms-liq-gauge-wrap').innerHTML = renderOmsLiqGauge(data.oms_liq_ratio, data.config.oms_liq_min_ratio, data.oms_liq_count);
     checklistWrap.innerHTML = renderOmsChecklist(data);
     chartWrap.innerHTML = renderOmsChart(data.oms_price_history, data.oms_markers, {
       position: data.position, avg_entry_price: data.avg_entry_price, size: data.total_coin_size,
@@ -2699,6 +2751,13 @@ async function refresh() {
     document.getElementById('oms_rsi_resolution').value = data.config.oms_rsi_resolution;
     document.getElementById('oms_rsi_period').value = data.config.oms_rsi_period;
     document.getElementById('oms_rsi_midline').value = data.config.oms_rsi_midline;
+    document.getElementById('oms_oi_filter_enabled').value = String(data.config.oms_oi_filter_enabled);
+    document.getElementById('oms_oi_window_seconds').value = data.config.oms_oi_window_seconds;
+    document.getElementById('oms_oi_min_change_pct').value = data.config.oms_oi_min_change_pct;
+    document.getElementById('oms_oi_min_score').value = data.config.oms_oi_min_score;
+    document.getElementById('oms_liq_filter_enabled').value = String(data.config.oms_liq_filter_enabled);
+    document.getElementById('oms_liq_window_seconds').value = data.config.oms_liq_window_seconds;
+    document.getElementById('oms_liq_min_ratio').value = data.config.oms_liq_min_ratio;
     document.getElementById('fib_resolution').value = data.config.fib_resolution;
     document.getElementById('fib_lookback_candles').value = data.config.fib_lookback_candles;
     document.getElementById('fib_entry1_level').value = data.config.fib_entry1_level;
@@ -2979,6 +3038,13 @@ function buildConfigPayload() {
     oms_rsi_resolution: document.getElementById('oms_rsi_resolution').value,
     oms_rsi_period: parseInt(document.getElementById('oms_rsi_period').value),
     oms_rsi_midline: parseFloat(document.getElementById('oms_rsi_midline').value),
+    oms_oi_filter_enabled: document.getElementById('oms_oi_filter_enabled').value === 'true',
+    oms_oi_window_seconds: parseFloat(document.getElementById('oms_oi_window_seconds').value),
+    oms_oi_min_change_pct: parseFloat(document.getElementById('oms_oi_min_change_pct').value),
+    oms_oi_min_score: parseFloat(document.getElementById('oms_oi_min_score').value),
+    oms_liq_filter_enabled: document.getElementById('oms_liq_filter_enabled').value === 'true',
+    oms_liq_window_seconds: parseFloat(document.getElementById('oms_liq_window_seconds').value),
+    oms_liq_min_ratio: parseFloat(document.getElementById('oms_liq_min_ratio').value),
     fib_resolution: document.getElementById('fib_resolution').value,
     fib_lookback_candles: parseInt(document.getElementById('fib_lookback_candles').value),
     fib_entry1_level: parseFloat(document.getElementById('fib_entry1_level').value),
@@ -3121,7 +3187,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','oms_rsi_period','oms_rsi_midline','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','wtc_direction_mode','wtc_dca_enabled','wtc_dca_max_entries','wtc_dca_cooldown_seconds','wtc_stf_filter_enabled','wtc_stf_resolution','sg_tp_step_pct','sg_tp_step_usd','sg_max_nachkauf','sg_dca_cooldown_seconds','sg_invert_direction','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','rp_mode','rp_resolution','rp_lookback','rp_ob_os_level','rp_tp_usd','rp_sl_usd','rp_breakeven_enabled','rp_breakeven_trigger_usd','rp_breakeven_lock_usd','rp_squeeze_lookback','rp_squeeze_threshold_pct','rp_require_squeeze','zscore_lookback_period','zscore_ema_smooth','zscore_threshold','stf_atr_period','stf_factor','stf_af_period','stf_af_smooth','stf_chop_length','stf_chop_threshold','stf_ema_length','stf_tp_usd','stf_sl_usd','ce_atr_period','ce_atr_mult','ce_invert_direction','ce_tp_usd','ce_sl_usd','ce_sl_cooldown_seconds','ut_atr_period','ut_key_value','ut_invert_direction','ut_tp_usd','ut_sl_usd','ut_sl_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','wtc_channel_length','wtc_average_length','wtc_ma_length','wtc_require_obos','wtc_ob_level','wtc_os_level','wtc_invert_direction','wtc_tp_usd','wtc_sl_usd','wtc_sl_cooldown_seconds','wtc_direction_mode','wtc_dca_enabled','wtc_dca_max_entries','wtc_dca_cooldown_seconds','wtc_stf_filter_enabled','wtc_stf_resolution','sg_tp_step_pct','sg_tp_step_usd','sg_max_nachkauf','sg_dca_cooldown_seconds','sg_invert_direction','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -3177,6 +3243,8 @@ async def handle_status(request):
         "oms_obi_medium": st.get("oms_obi_medium"), "oms_obi_slow": st.get("oms_obi_slow"),
         "oms_obi_direction": st.get("oms_obi_direction"), "oms_cvd_ok": st.get("oms_cvd_ok"),
         "oms_funding_ok": st.get("oms_funding_ok"), "oms_rsi_ok": st.get("oms_rsi_ok"), "oms_rsi": st.get("oms_rsi"),
+        "oms_oi_ok": st.get("oms_oi_ok"), "oms_oi_score": st.get("oms_oi_score"), "oms_open_interest": st.get("oms_open_interest"),
+        "oms_liq_ok": st.get("oms_liq_ok"), "oms_liq_ratio": st.get("oms_liq_ratio"), "oms_liq_count": st.get("oms_liq_count"),
         "oms_cvd_ratio": st.get("oms_cvd_ratio"), "oms_funding_rate": st.get("oms_funding_rate"),
         "oms_tp1_done": st.get("oms_tp1_done"), "oms_trail_price": st.get("oms_trail_price"),
         "oms_dca_count": st.get("oms_dca_count"),
@@ -3233,6 +3301,8 @@ async def handle_config_update(request):
                 "oms_dca_enabled", "oms_dca_max_entries", "oms_dca_size_fraction", "oms_dca_min_pullback_usd",
                 "oms_reverse_on_signal",
                 "oms_rsi_filter_enabled", "oms_rsi_resolution", "oms_rsi_period", "oms_rsi_midline",
+                "oms_oi_filter_enabled", "oms_oi_window_seconds", "oms_oi_min_change_pct", "oms_oi_min_score",
+                "oms_liq_filter_enabled", "oms_liq_window_seconds", "oms_liq_min_ratio",
                 "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
                 "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds",
                 "rp_mode", "rp_resolution", "rp_lookback", "rp_ob_os_level", "rp_tp_usd", "rp_sl_usd",
