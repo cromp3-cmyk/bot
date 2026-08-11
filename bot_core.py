@@ -254,6 +254,7 @@ def default_config():
         "oms_liq_filter_enabled": os.getenv("OMS_LIQ_FILTER_ENABLED", "false").lower() == "true",
         "oms_liq_window_seconds": float(os.getenv("OMS_LIQ_WINDOW_SECONDS", "60")),
         "oms_liq_min_ratio": float(os.getenv("OMS_LIQ_MIN_RATIO", "0.2")),
+        "quad_stoch_resolution": os.getenv("QUAD_STOCH_RESOLUTION", "1m"),
         "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
         "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
         "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
@@ -408,6 +409,7 @@ def default_state():
         "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None, "oms_rsi_ok": None, "oms_rsi": None,
         "oms_liq_buffer": [], "oms_liq_ratio": None, "oms_liq_count": 0, "oms_liq_ok": None,
         "scalp_board": {},
+        "quad_stoch_history": [],
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -1839,6 +1841,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 let priceChart;
 let obiChart;
+let quadStochChart;
 
 // ===== Verschieb-/größenveränderbares Widget-Dashboard (wie bei Lighter) =====
 // Jede Kachel behält ihre bestehende ID (oms-trend-meter, oms-gauge-wrap, ...) im Inneren -
@@ -1870,6 +1873,15 @@ const OMS_WIDGET_DEFS = [
   { id: "gsi-chart", title: "📈 Preisverlauf", x: 4, y: 6, w: 8, h: 5, body: '<div id="oms-chart-wrap"></div>' },
   { id: "gsi-obi", title: "〰️ OBI-Verlauf", x: 0, y: 11, w: 12, h: 4, body: '<div style="position:relative; height:100%; min-height:180px;"><canvas id="obiChart"></canvas></div>' },
   { id: "gsi-scalp-board", title: "⚡ Scalp-Board (30s/45s/60s)", x: 0, y: 15, w: 12, h: 5, body: '<div id="scalp-board-wrap"></div>' },
+  { id: "gsi-quad-stoch", title: "〰️ Quad-Stochastic-Verlauf", x: 0, y: 20, w: 12, h: 5, body: `
+    <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
+      <select id="quad-stoch-resolution-select" style="font-size:11px; padding:3px 8px; background:var(--panel); color:var(--text); border:1px solid var(--panel-border); border-radius:6px;">
+        <option value="30s">30 Sekunden</option>
+        <option value="1m">1 Minute</option>
+        <option value="5m">5 Minuten</option>
+      </select>
+    </div>
+    <div style="position:relative; height:calc(100% - 34px); min-height:160px;"><canvas id="quadStochChart"></canvas></div>` },
 ];
 
 let omsGrid;
@@ -1917,6 +1929,16 @@ function initOmsGrid() {
     const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method: 'POST' });
     const data = await res.json();
     if (data.error) alert(data.error);
+    refresh();
+  });
+
+  // Quad-Stochastic Zeitrahmen-Dropdown: schreibt direkt (Partial-Update, kein ganzes
+  // Formular noetig) ins Config-Backend und laedt die Anzeige neu
+  document.getElementById('quad-stoch-resolution-select').addEventListener('change', async (e) => {
+    await fetch(`/api/config?symbol=${currentSymbol}`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ quad_stoch_resolution: e.target.value })
+    });
     refresh();
   });
 }
@@ -2674,6 +2696,7 @@ async function refresh() {
   showGridWidget('gsi-obi', isObiLikeMode);
   showGridWidget('gsi-scalp-board', true);
   document.getElementById('scalp-board-wrap').innerHTML = renderScalpBoard(data.scalp_board);
+  showGridWidget('gsi-quad-stoch', true);
 
   if (isOms) {
     const sig = data.oms_signal;
@@ -3008,6 +3031,46 @@ async function refresh() {
   }
 
   try {
+    const resSelect = document.getElementById('quad-stoch-resolution-select');
+    if (resSelect && document.activeElement !== resSelect) {
+      resSelect.value = data.config.quad_stoch_resolution || '1m';
+    }
+    const qHist = data.quad_stoch_history || [];
+    if (qHist.length > 0) {
+      const qLabels = qHist.map(p => new Date(p.ts).toLocaleTimeString());
+      const qDatasets = [
+        { label:'Stoch 1 (9,3)', data: qHist.map(p=>p.s1), borderColor:'#f87171', pointRadius:0, borderWidth:2 },
+        { label:'Stoch 2 (14,3)', data: qHist.map(p=>p.s2), borderColor:'#4ade80', pointRadius:0, borderWidth:1 },
+        { label:'Stoch 3 (40,4)', data: qHist.map(p=>p.s3), borderColor:'#22d3ee', pointRadius:0, borderWidth:1 },
+        { label:'Stoch 4 (60,10)', data: qHist.map(p=>p.s4), borderColor:'#e879f9', pointRadius:0, borderWidth:1 },
+        { label:'Überkauft', data: Array(qHist.length).fill(80), borderColor:'#6b7280', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+        { label:'Überverkauft', data: Array(qHist.length).fill(20), borderColor:'#6b7280', borderDash:[4,4], pointRadius:0, borderWidth:1 },
+      ];
+      const qCanvas = document.getElementById('quadStochChart');
+      if (qCanvas) {
+        if (!quadStochChart) {
+          quadStochChart = new Chart(qCanvas, {
+            type: 'line',
+            data: { labels: qLabels, datasets: qDatasets },
+            options: {
+              responsive:true, maintainAspectRatio:false, animation:false,
+              scales: { x:{ display:false }, y:{ min:0, max:100, ticks:{color:'#9ca3af'} } },
+              plugins:{legend:{labels:{color:'#e5e7eb', boxWidth:10, font:{size:10}}}}
+            }
+          });
+          requestAnimationFrame(() => quadStochChart && quadStochChart.resize());
+        } else {
+          quadStochChart.data.labels = qLabels;
+          quadStochChart.data.datasets = qDatasets;
+          quadStochChart.update('none');
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Quad-Stochastic-Chart-Fehler:', e);
+  }
+
+  try {
     document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
     document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
     document.getElementById('pocket-entry').innerText = data.avg_entry_price ?? '-';
@@ -3303,6 +3366,7 @@ async def handle_status(request):
         "oms_oi_ok": st.get("oms_oi_ok"), "oms_oi_score": st.get("oms_oi_score"), "oms_open_interest": st.get("oms_open_interest"),
         "oms_liq_ok": st.get("oms_liq_ok"), "oms_liq_ratio": st.get("oms_liq_ratio"), "oms_liq_count": st.get("oms_liq_count"),
         "scalp_board": st.get("scalp_board", {}),
+        "quad_stoch_history": st.get("quad_stoch_history", [])[-300:],
         "oms_cvd_ratio": st.get("oms_cvd_ratio"), "oms_funding_rate": st.get("oms_funding_rate"),
         "oms_tp1_done": st.get("oms_tp1_done"), "oms_trail_price": st.get("oms_trail_price"),
         "oms_dca_count": st.get("oms_dca_count"),
@@ -3387,7 +3451,8 @@ async def handle_config_update(request):
                 "wtc_direction_mode", "wtc_dca_enabled", "wtc_dca_max_entries", "wtc_dca_cooldown_seconds",
                 "wtc_stf_filter_enabled", "wtc_stf_resolution",
                 "sg_signal_source", "sg_resolution", "sg_entry_trigger", "sg_invert_direction",
-                "sg_tp_mode", "sg_tp_step_pct", "sg_tp_step_usd", "sg_max_nachkauf", "sg_dca_cooldown_seconds"]:
+                "sg_tp_mode", "sg_tp_step_pct", "sg_tp_step_usd", "sg_max_nachkauf", "sg_dca_cooldown_seconds",
+                "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

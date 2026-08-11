@@ -1908,6 +1908,42 @@ async def scalp_board_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+async def quad_stoch_poll_loop(symbol):
+    """Reiner Anzeige-Verlauf (wie OBI-Verlauf) fuer 4 Stochastics unterschiedlicher Laenge
+    (9/3, 14/3, 40/4, 60/10 - wie im 'Quad Stochastic Divergence'-Indikator, nur die Linien
+    selbst, ohne die Pivot-/Divergenz-Erkennung). Zeitrahmen ueber quad_stoch_resolution frei
+    waehlbar (30s/1m/5m), unabhaengig vom entry_mode - reiner Beobachtungs-Chart."""
+    b = BOTS[symbol]
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["bot_active"]:
+                st = b["state"]
+                resolution = cfg.get("quad_stoch_resolution", "1m")
+                needed_bars = 150
+                if resolution == "30s":
+                    local = get_seconds_candles(st, 30, needed_bars)
+                    candles = (local[2], local[3], local[4]) if local else None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    candles = (data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
+
+                if candles and len(candles[2]) > 60:
+                    h, l, c = candles
+                    s1, _ = compute_stochastic(h, l, c, 9, 3, 1)
+                    s2, _ = compute_stochastic(h, l, c, 14, 3, 1)
+                    s3, _ = compute_stochastic(h, l, c, 40, 4, 1)
+                    s4, _ = compute_stochastic(h, l, c, 60, 10, 1)
+                    hist = st["quad_stoch_history"]
+                    hist.append({"ts": int(time.time() * 1000), "s1": round(s1[-1], 1), "s2": round(s2[-1], 1),
+                                 "s3": round(s3[-1], 1), "s4": round(s4[-1], 1)})
+                    if len(hist) > 300:
+                        st["quad_stoch_history"] = hist[-300:]
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Quad-Stochastic-Berechnung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        await asyncio.sleep(5)
+
+
 async def sg_poll_loop(symbol):
     """Signal-Grid: Grid-Mechanik dupliziert (kein Flip-Exit, TP als %/$ vom Ø-Einstieg,
     Nachkauf bis max. Stufen) - aber Ein-/Nachkauf werden nicht durch Preisabstand ausgeloest,
