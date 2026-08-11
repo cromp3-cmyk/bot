@@ -44,17 +44,18 @@ CT_COPY_LOG_MAX = 200
 
 
 
-async def execute_copy_trade(symbol, direction, reference_price, margin, leverage):
+async def execute_copy_trade(symbol, direction, reference_price, margin, leverage, dry_run):
     """Kopiert die RICHTUNG eines Trades mit der fuer diesen Trader/Coin eingestellten Margin/Hebel.
-    Gibt ein Status-Dict zurueck (fuer das sichtbare Copy-Trade-Log im Dashboard) statt nur zu
-    loggen - vorher gab es keine Stelle, an der man im Dashboard nachvollziehen konnte, was
-    tatsaechlich (simuliert oder echt) kopiert wurde."""
+    dry_run wird PRO TRADER uebergeben (nicht mehr global) - jeder Trader kann einzeln auf
+    simuliert oder live gestellt werden. Gibt ein Status-Dict zurueck (fuer das sichtbare
+    Copy-Trade-Log im Dashboard) statt nur zu loggen - vorher gab es keine Stelle, an der man im
+    Dashboard nachvollziehen konnte, was tatsaechlich (simuliert oder echt) kopiert wurde."""
     if symbol not in MARKET_INDICES:
         msg = f"Coin {symbol} nicht auf Lighter gemappt"
         debug_log(f"⚠️ [CopyTrading] {msg} - übersprungen")
         return {"status": "skipped", "detail": msg}
 
-    if CT_CONFIG["dry_run"]:
+    if dry_run:
         debug_log(f"🧪 [CopyTrading] DRY_RUN - würde kopieren: {direction.upper()} {symbol} @ ~{reference_price} (Margin {margin}, Hebel {leverage}x)")
         return {"status": "dry_run", "detail": None}
 
@@ -88,18 +89,21 @@ async def execute_copy_trade(symbol, direction, reference_price, margin, leverag
         await client.close()
 
 
-async def execute_copy_close(symbol, position_direction, size_coin_units, reference_price):
+async def execute_copy_close(symbol, position_direction, size_coin_units, reference_price, dry_run):
     """Schliesst eine kopierte Position in EXAKT der Groesse, die beim Einstieg (bzw. nach
     Nachkaeufen) tatsaechlich kopiert wurde - NICHT neu aus Margin*Hebel berechnet, da sich der
     Preis seither veraendert haben kann und execute_copy_trade() sonst eine falsche Groesse
     zum Schliessen verwenden wuerde. Schliessen einer Long-Position heisst verkaufen (Ask),
-    Schliessen einer Short-Position heisst kaufen (Bid)."""
+    Schliessen einer Short-Position heisst kaufen (Bid). dry_run kommt vom Trader, der die
+    Position eroeffnet hat (aus copy_positions gespeichert), nicht vom AKTUELLEN Trader-Schalter -
+    so bleibt eine echte offene Position auch dann echt schliessbar, wenn der Schalter zwischen
+    Einstieg und Ausstieg umgestellt wurde."""
     if symbol not in MARKET_INDICES:
         msg = f"Coin {symbol} nicht auf Lighter gemappt"
         debug_log(f"⚠️ [CopyTrading] {msg} - Schliessen übersprungen")
         return {"status": "skipped", "detail": msg}
 
-    if CT_CONFIG["dry_run"]:
+    if dry_run:
         debug_log(f"🧪 [CopyTrading] DRY_RUN - würde schliessen: {position_direction.upper()}-Position {symbol} Größe {round(size_coin_units,6)} @ ~{reference_price}")
         return {"status": "dry_run", "detail": None}
 
@@ -124,10 +128,12 @@ async def execute_copy_close(symbol, position_direction, size_coin_units, refere
         await client.close()
 
 
-def _record_copy_close(address, label, coin, direction, entry_price, exit_price, size, reason):
+def _record_copy_close(address, label, coin, direction, entry_price, exit_price, size, reason, dry_run):
     """Verbucht das Ergebnis einer geschlossenen kopierten Position in copy_stats (aggregiert
     pro Trader) und haengt einen PnL-Eintrag ans Copy-Trade-Log an - das ist die eigentliche
-    Einstieg->Ausstieg-PnL-Verfolgung, unabhaengig von den einzelnen Kopier-Versuchen."""
+    Einstieg->Ausstieg-PnL-Verfolgung, unabhaengig von den einzelnen Kopier-Versuchen. Simulierte
+    (dry_run) und echte Trades fliessen bewusst in DIESELBE Statistik ein - der Trader-Schalter
+    entscheidet nur, ob Order wirklich ausgefuehrt wird, nicht ob das Ergebnis gezaehlt wird."""
     pnl_usd = (exit_price - entry_price) * size if direction == "long" else (entry_price - exit_price) * size
     stats = CT_STATE["copy_stats"].setdefault(address, {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0})
     stats["trades"] += 1
@@ -138,7 +144,7 @@ def _record_copy_close(address, label, coin, direction, entry_price, exit_price,
     stats["total_pnl_usd"] = round(stats["total_pnl_usd"] + pnl_usd, 4)
     CT_STATE["copy_log"].insert(0, {
         "ts": int(time.time() * 1000), "trader_label": label, "address": address,
-        "coin": coin, "direction": direction, "price": exit_price, "dry_run": CT_CONFIG["dry_run"],
+        "coin": coin, "direction": direction, "price": exit_price, "dry_run": dry_run,
         "status": "closed", "action": reason, "pnl_usd": round(pnl_usd, 4),
         "entry_price": entry_price, "size": size,
     })
@@ -258,7 +264,7 @@ async def ct_leaderboard_refresh_loop():
                         # dass alle leaderboard_top_n Trader dauerhaft im 15s-Takt abgefragt werden.
                         CT_STATE["watched"][addr] = {
                             "label": f"#{i+1} (Leaderboard)", "copy_enabled": False, "monitor_enabled": False,
-                            "copy_skip_nachkauf": False,
+                            "copy_skip_nachkauf": False, "dry_run": CT_CONFIG["dry_run"], "copy_all_coins": False,
                             "coin_settings": {}, "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
                             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "leaderboard",
                             "position_meta": {}, "leaderboard_pnl": row.get("pnl"),
@@ -275,7 +281,7 @@ async def ct_watch_loop():
         if addr not in CT_STATE["watched"]:
             CT_STATE["watched"][addr] = {
                 "label": "Manuell hinzugefügt", "copy_enabled": False, "monitor_enabled": False,
-                "copy_skip_nachkauf": False,
+                "copy_skip_nachkauf": False, "dry_run": CT_CONFIG["dry_run"], "copy_all_coins": False,
                 "coin_settings": {}, "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
                 "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
                 "position_meta": {}, "leaderboard_pnl": None,
@@ -345,24 +351,41 @@ async def ct_watch_loop():
                             if not (info["copy_enabled"] and price > 0):
                                 continue
                             coin_cfg = (info.get("coin_settings") or {}).get(coin)
-                            if not (coin_cfg and coin_cfg.get("enabled", True)):
-                                continue
-
                             our_pos = CT_STATE["copy_positions"].get(address, {}).get(coin)
+
+                            # "Alle Coins kopieren": ohne explizite Coin-Einstellung trotzdem
+                            # erlaubt (nutzt die Trader-Standard-Margin/-Hebel), es sei denn der
+                            # Coin wurde explizit deaktiviert (coin_cfg mit enabled=False = gezielter
+                            # Ausschluss). Ohne "Alle Coins kopieren" bleibt's beim alten Verhalten:
+                            # nur Coins mit expliziter, aktivierter Einstellung werden kopiert.
+                            copy_all = info.get("copy_all_coins", False)
+                            if copy_all:
+                                coin_allowed_for_new = coin_cfg is None or coin_cfg.get("enabled", True)
+                            else:
+                                coin_allowed_for_new = coin_cfg is not None and coin_cfg.get("enabled", True)
 
                             # --- Trader beginnt/vollendet einen Ausstieg -> UNSERE ganze kopierte
                             # Position schliessen (Einstieg->Ausstieg-PnL wird hier verbucht).
-                            # Bewusst die GESAMTE Position schliessen statt anteilig, da wir die
-                            # Restgroesse des Traders nicht 1:1 nachbilden (andere Margin/Hebel). ---
+                            # IMMER versuchen, wenn wir unsererseits noch offen sind - auch wenn
+                            # der Coin inzwischen deaktiviert wurde (sonst bleibt eine bereits
+                            # eingegangene Position fuer immer haengen). Bewusst die GESAMTE
+                            # Position schliessen statt anteilig, da wir die Restgroesse des
+                            # Traders nicht 1:1 nachbilden (andere Margin/Hebel). dry_run kommt
+                            # aus der Position selbst (Stand beim Einstieg), nicht vom aktuellen
+                            # Trader-Schalter - siehe execute_copy_close(). ---
                             if is_close_fill and our_pos:
-                                close_result = await execute_copy_close(coin, our_pos["direction"], our_pos["size"], price)
+                                pos_dry_run = our_pos.get("dry_run", CT_CONFIG["dry_run"])
+                                close_result = await execute_copy_close(coin, our_pos["direction"], our_pos["size"], price, pos_dry_run)
                                 pnl_usd = _record_copy_close(address, info["label"], coin, our_pos["direction"],
-                                                              our_pos["entry_price"], price, our_pos["size"], "Close")
+                                                              our_pos["entry_price"], price, our_pos["size"], "Close", pos_dry_run)
                                 debug_log(f"🏁 [CopyTrading] Kopierte Position geschlossen bei {info['label']} ({address[:8]}...): "
                                           f"{our_pos['direction'].upper()} {coin} PnL ${round(pnl_usd,3)} ({close_result['status']})")
                                 del CT_STATE["copy_positions"][address][coin]
                                 copy_actions += 1
                                 await save_ct_copy_state()
+                                continue
+
+                            if not coin_allowed_for_new:
                                 continue
 
                             if not is_open_fill:
@@ -373,9 +396,10 @@ async def ct_watch_loop():
                             # Verteidigend: falls der Trader ohne separaten Close-Fill direkt dreht
                             # (unser our_pos zeigt noch in die alte Richtung) - erst schliessen
                             if our_pos and our_pos["direction"] != fill_direction:
-                                close_result = await execute_copy_close(coin, our_pos["direction"], our_pos["size"], price)
+                                pos_dry_run = our_pos.get("dry_run", CT_CONFIG["dry_run"])
+                                close_result = await execute_copy_close(coin, our_pos["direction"], our_pos["size"], price, pos_dry_run)
                                 pnl_usd = _record_copy_close(address, info["label"], coin, our_pos["direction"],
-                                                              our_pos["entry_price"], price, our_pos["size"], "Reverse")
+                                                              our_pos["entry_price"], price, our_pos["size"], "Reverse", pos_dry_run)
                                 debug_log(f"🔄 [CopyTrading] Kopierte Position gedreht bei {info['label']} ({address[:8]}...): "
                                           f"PnL ${round(pnl_usd,3)} ({close_result['status']})")
                                 del CT_STATE["copy_positions"][address][coin]
@@ -387,14 +411,15 @@ async def ct_watch_loop():
                                 debug_log(f"⏭️ [CopyTrading] Nachkauf bei {info['label']} ({address[:8]}...) übersprungen (nur Neu/Reverse aktiv): {fill_direction.upper()} {coin} @ {price}")
                                 continue
 
-                            margin = coin_cfg.get("margin") or info.get("copy_margin", CT_CONFIG["copy_margin"])
-                            leverage = coin_cfg.get("leverage") or info.get("copy_leverage", CT_CONFIG["copy_leverage"])
+                            margin = (coin_cfg.get("margin") if coin_cfg else None) or info.get("copy_margin", CT_CONFIG["copy_margin"])
+                            leverage = (coin_cfg.get("leverage") if coin_cfg else None) or info.get("copy_leverage", CT_CONFIG["copy_leverage"])
+                            trader_dry_run = info.get("dry_run", CT_CONFIG["dry_run"])
                             debug_log(f"🆕 [CopyTrading] Kopiere Fill ({action}) bei {info['label']} ({address[:8]}...): {fill_direction.upper()} {coin} @ {price}")
-                            result = await execute_copy_trade(coin, fill_direction, price, margin, leverage)
+                            result = await execute_copy_trade(coin, fill_direction, price, margin, leverage, trader_dry_run)
                             CT_STATE["copy_log"].insert(0, {
                                 "ts": int(time.time() * 1000), "trader_label": info["label"], "address": address,
                                 "coin": coin, "direction": fill_direction, "price": price, "margin": margin,
-                                "leverage": leverage, "dry_run": CT_CONFIG["dry_run"],
+                                "leverage": leverage, "dry_run": trader_dry_run,
                                 "status": result["status"], "detail": result.get("detail"), "action": action,
                             })
                             CT_STATE["copy_log"] = CT_STATE["copy_log"][:CT_COPY_LOG_MAX]
@@ -411,6 +436,7 @@ async def ct_watch_loop():
                                     trader_positions[coin] = {
                                         "direction": fill_direction, "entry_price": price, "size": add_size,
                                         "opened_at": now_iso, "margin": margin, "leverage": leverage,
+                                        "dry_run": trader_dry_run,
                                     }
                                 await save_ct_copy_state()
 
@@ -437,6 +463,8 @@ async def save_ct_watched():
                 "label": info.get("label"), "copy_enabled": info.get("copy_enabled", False),
                 "monitor_enabled": info.get("monitor_enabled", False),
                 "copy_skip_nachkauf": info.get("copy_skip_nachkauf", False),
+                "dry_run": info.get("dry_run", CT_CONFIG["dry_run"]),
+                "copy_all_coins": info.get("copy_all_coins", False),
                 "coin_settings": info.get("coin_settings", {}), "copy_margin": info.get("copy_margin"),
                 "copy_leverage": info.get("copy_leverage"), "source": info.get("source"),
                 "behavior_stats": info.get("behavior_stats", {"neu": 0, "nachkauf": 0, "reverse": 0}),
@@ -461,6 +489,8 @@ async def load_ct_watched():
                     "label": cfg.get("label", "Wiederhergestellt"), "copy_enabled": cfg.get("copy_enabled", False),
                     "monitor_enabled": cfg.get("monitor_enabled", False),
                     "copy_skip_nachkauf": cfg.get("copy_skip_nachkauf", False),
+                    "dry_run": cfg.get("dry_run", CT_CONFIG["dry_run"]),
+                    "copy_all_coins": cfg.get("copy_all_coins", False),
                     "coin_settings": cfg.get("coin_settings", {}), "copy_margin": cfg.get("copy_margin", CT_CONFIG["copy_margin"]),
                     "copy_leverage": cfg.get("copy_leverage", CT_CONFIG["copy_leverage"]), "source": cfg.get("source", "manual"),
                     "last_fill_time": None, "positions": [], "recent_fills": [], "position_meta": {},
@@ -528,6 +558,10 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
   button.copy-off { background:linear-gradient(135deg,#475569,#334155); }
   button.monitor-on { background:linear-gradient(135deg,#3b82f6,#1d4ed8); }
   button.monitor-off { background:linear-gradient(135deg,#475569,#334155); }
+  button.dry-run-on { background:linear-gradient(135deg,#8b5cf6,#6d28d9); }
+  button.dry-run-off { background:linear-gradient(135deg,#dc2626,#991b1b); font-weight:800; }
+  button.copy-all-on { background:linear-gradient(135deg,#059669,#047857); }
+  button.copy-all-off { background:linear-gradient(135deg,#475569,#334155); }
   .warn { background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.35); color:#fca5b1; padding:10px 14px; border-radius:10px; font-size:13px; margin-top:10px; }
   .addr { font-family:monospace; font-size:12px; color:var(--dim); }
   .fill-buy { color:var(--green); } .fill-sell { color:var(--red); }
@@ -571,7 +605,7 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
 <h2>Beobachtete Trader (anklicken für Details)</h2>
 <div style="color:var(--dim); font-size:12px; margin-top:6px;">Nur Trader mit "Beobachten AN" oder "Copy AN" werden laufend abgefragt (userState/userFills) - alle anderen stehen nur mit ihrer Leaderboard-PnL in der Liste, ohne staendige Anfragen an Hyperliquid.</div>
 <table id="copy-table">
-  <thead><tr><th>Label</th><th>Adresse</th><th>Leaderboard-PnL</th><th>Unser Copy-PnL</th><th>Offene Positionen</th><th>Verhalten (Neu/Nachkauf/Reverse)</th><th>Konfigurierte Coins</th><th>Beobachten</th><th>Copy</th><th>Copy-Filter</th></tr></thead>
+  <thead><tr><th>Label</th><th>Adresse</th><th>Leaderboard-PnL</th><th>Unser Copy-PnL</th><th>Offene Positionen</th><th>Verhalten (Neu/Nachkauf/Reverse)</th><th>Konfigurierte Coins</th><th>Beobachten</th><th>Copy</th><th>Copy-Filter</th><th>Modus</th><th>Coin-Umfang</th></tr></thead>
   <tbody></tbody>
 </table>
 
@@ -738,9 +772,11 @@ async function refresh() {
         <td><button class="${info.monitor_enabled?'monitor-on':'monitor-off'}" onclick="toggleMonitor('${addr}', ${!info.monitor_enabled})">${info.monitor_enabled?'Beobachten AN':'Beobachten AUS'}</button></td>
         <td><button class="${info.copy_enabled?'copy-on':'copy-off'}" onclick="toggleCopy('${addr}', ${!info.copy_enabled})">${info.copy_enabled?'Copy AN':'Copy AUS'}</button></td>
         <td><button class="${info.copy_skip_nachkauf?'copy-on':'copy-off'}" onclick="toggleSkipNachkauf('${addr}', ${!info.copy_skip_nachkauf})" title="Bei An werden nur frische Einstiege (Neu) und Richtungswechsel (Reverse) kopiert, Nachkäufe (DCA) werden übersprungen">${info.copy_skip_nachkauf?'Nur Neu/Reverse':'Alles kopieren'}</button></td>
+        <td><button class="${info.dry_run!==false?'dry-run-on':'dry-run-off'}" onclick="toggleDryRun('${addr}', ${!(info.dry_run!==false)})" title="${info.dry_run!==false?'Simuliert - es wird KEINE echte Order platziert':'LIVE - hier werden ECHTE Orders mit echtem Geld platziert!'}">${info.dry_run!==false?'🧪 Dry-Run':'🔴 LIVE'}</button></td>
+        <td><button class="${info.copy_all_coins?'copy-all-on':'copy-all-off'}" onclick="toggleCopyAllCoins('${addr}', ${!info.copy_all_coins})" title="Bei An werden auch Coins OHNE eigene Einstellung mit der Standard-Margin/-Hebel kopiert - einzelne Coins lassen sich trotzdem gezielt ausschließen">${info.copy_all_coins?'🌐 Alle Coins':'🎯 Nur konfigurierte'}</button></td>
       </tr>`;
   }).join('');
-  document.querySelector('#copy-table tbody').innerHTML = copyRows || '<tr><td colspan="10">Noch keine Trader beobachtet...</td></tr>';
+  document.querySelector('#copy-table tbody').innerHTML = copyRows || '<tr><td colspan="12">Noch keine Trader beobachtet...</td></tr>';
 
   // Copy-Trade-Log: jeder Versuch, egal ob simuliert (DRY_RUN), erfolgreich oder fehlgeschlagen
   document.getElementById('copy-log-mode').innerText = data.dry_run ? '(DRY_RUN - hier siehst du, was simuliert würde)' : '(LIVE)';
@@ -902,6 +938,22 @@ async function toggleSkipNachkauf(address, enable) {
   refresh();
 }
 
+async function toggleDryRun(address, enable) {
+  if (!enable) {
+    // Umschalten auf LIVE = echtes Geld - eine Sicherheitsabfrage ist hier bewusst im Weg
+    if (!confirm('Wirklich auf LIVE umschalten? Ab jetzt werden für diesen Trader ECHTE Orders mit echtem Geld platziert!')) {
+      return;
+    }
+  }
+  await fetch('/api/ct/dry_run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, enable}) });
+  refresh();
+}
+
+async function toggleCopyAllCoins(address, enable) {
+  await fetch('/api/ct/copy_all_coins', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address, enable}) });
+  refresh();
+}
+
 document.getElementById('btn-add-address').addEventListener('click', async () => {
   const addr = document.getElementById('new-address').value.trim();
   if (!addr) return;
@@ -965,7 +1017,7 @@ async def handle_ct_watch(request):
     if addr not in CT_STATE["watched"]:
         CT_STATE["watched"][addr] = {
             "label": "Manuell hinzugefügt", "copy_enabled": False, "monitor_enabled": True,
-            "copy_skip_nachkauf": False,
+            "copy_skip_nachkauf": False, "dry_run": CT_CONFIG["dry_run"], "copy_all_coins": False,
             "coin_settings": {}, "copy_margin": CT_CONFIG["copy_margin"], "copy_leverage": CT_CONFIG["copy_leverage"],
             "last_fill_time": None, "positions": [], "recent_fills": [], "source": "manual",
             "position_meta": {}, "leaderboard_pnl": None,
@@ -1009,6 +1061,37 @@ async def handle_ct_skip_nachkauf_toggle(request):
     if addr in CT_STATE["watched"]:
         CT_STATE["watched"][addr]["copy_skip_nachkauf"] = enable
         debug_log(f"{'🎯' if enable else '➕'} [CopyTrading] 'Nur Neu/Reverse' für {addr} {'aktiviert' if enable else 'deaktiviert'}")
+        await save_ct_watched()
+    return web.json_response({"success": True})
+
+
+async def handle_ct_dry_run_toggle(request):
+    """Schaltet Dry-Run PRO TRADER an/aus - unabhaengig vom globalen CT_DRY_RUN. Neue Trader
+    starten mit dem globalen Wert als Default, koennen aber einzeln umgestellt werden. Bereits
+    offene kopierte Positionen behalten den dry_run-Stand von ihrem Einstieg (siehe
+    execute_copy_close), damit ein Umschalten eine bereits echte Position nicht ploetzlich nur
+    noch simuliert schliesst."""
+    body = await request.json()
+    addr = body.get("address")
+    enable = bool(body.get("enable"))
+    if addr in CT_STATE["watched"]:
+        CT_STATE["watched"][addr]["dry_run"] = enable
+        debug_log(f"{'🧪' if enable else '🔴'} [CopyTrading] Dry-Run für {addr} {'aktiviert (simuliert)' if enable else 'deaktiviert (LIVE!)'}")
+        await save_ct_watched()
+    return web.json_response({"success": True})
+
+
+async def handle_ct_copy_all_coins_toggle(request):
+    """Schaltet 'Alle Coins kopieren' an/aus - bei An werden auch Coins ohne explizite
+    Coin-Einstellung kopiert (mit der Trader-Standard-Margin/-Hebel), es sei denn ein Coin wurde
+    per coin_settings mit enabled=False gezielt ausgeschlossen. Bei Aus (Standard) bleibt's beim
+    bisherigen Verhalten: nur explizit freigeschaltete Coins werden kopiert."""
+    body = await request.json()
+    addr = body.get("address")
+    enable = bool(body.get("enable"))
+    if addr in CT_STATE["watched"]:
+        CT_STATE["watched"][addr]["copy_all_coins"] = enable
+        debug_log(f"{'🌐' if enable else '🎯'} [CopyTrading] 'Alle Coins kopieren' für {addr} {'aktiviert' if enable else 'deaktiviert'}")
         await save_ct_watched()
     return web.json_response({"success": True})
 
