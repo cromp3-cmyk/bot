@@ -1882,10 +1882,10 @@ async def scalp_board_poll_loop(symbol):
             board = {}
             for label, seconds in SCALP_BOARD_TIMEFRAMES:
                 if seconds == 60:
-                    # Nur abgeschlossene Kerzen (wie bei TradingView/Pine - der Wert aendert
-                    # sich erst bei Kerzenschluss, nicht waehrend die Kerze noch laeuft)
+                    # Laufende Kerze live mit dabei (wie TradingView - Kerze steigt, Wert
+                    # bewegt sich mit, nicht erst bei Kerzenschluss)
                     data = await fetch_candles_binance_multi(symbol, "1m", count_back=120)
-                    candles = (data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
+                    candles = (data[2], data[3], data[4]) if data else None
                 else:
                     # 30s/45s brauchen den echten 1s-Puffer (binance_1s_poll_loop), der aus
                     # Kostengruenden weiterhin nur bei aktivem Bot gefuellt wird - liefert also
@@ -1921,13 +1921,12 @@ async def quad_stoch_poll_loop(symbol):
     waehlbar (30s/1m/5m), unabhaengig vom entry_mode UND vom bot_active-Status - reiner
     Beobachtungs-Chart, soll auch bei pausiertem Bot funktionieren (nur die 30s-Aufloesung
     braucht weiterhin den bot_active-gated 1s-Puffer, 1m/5m laufen per REST immer).
-    NUR abgeschlossene Kerzen (wie bei TradingView/Pine - der Wert aendert sich erst bei
-    Kerzenschluss, nicht waehrend die Kerze noch laeuft). Ein neuer Punkt wird nur angehaengt,
-    wenn die letzte abgeschlossene Kerze tatsaechlich eine NEUE ist - sonst wuerde der Chart
-    trotzdem alle 5 Sekunden einen (identischen) Punkt bekommen und wie eine Treppenstufe
-    aussehen, obwohl sich der Wert in Wahrheit erst einmal pro Kerze aendert."""
+    NUTZT BEWUSST DIE LAUFENDE (noch unfertige) Kerze live mit - wie bei TradingView bewegt
+    sich die Linie WAEHREND die Kerze laeuft mit dem Kurs mit (Kerze steigt -> Linie steigt),
+    nicht nur einmal pro abgeschlossener Kerze. Kein Trading-Signal, daher unproblematisch,
+    dass sich der letzte Punkt noch aendern kann, bevor die Kerze schliesst (kein Repainting-
+    Risiko wie bei einer echten Strategie, die hier eine Entscheidung treffen wuerde)."""
     b = BOTS[symbol]
-    last_candle_ts = None
     while True:
         try:
             cfg = b["config"]
@@ -1936,25 +1935,22 @@ async def quad_stoch_poll_loop(symbol):
             needed_bars = 150
             if resolution == "30s":
                 local = get_seconds_candles(st, 30, needed_bars)
-                candles = (local[0], local[2], local[3], local[4]) if local else None
+                candles = (local[2], local[3], local[4]) if local else None
             else:
                 data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
-                candles = (data[0][:-1], data[2][:-1], data[3][:-1], data[4][:-1]) if data else None
+                candles = (data[2], data[3], data[4]) if data else None
 
-            if candles and len(candles[3]) > 60:
-                ts_series, h, l, c = candles
-                current_candle_ts = ts_series[-1]
-                if current_candle_ts != last_candle_ts:
-                    last_candle_ts = current_candle_ts
-                    s1, _ = compute_stochastic(h, l, c, 9, 3, 1)
-                    s2, _ = compute_stochastic(h, l, c, 14, 3, 1)
-                    s3, _ = compute_stochastic(h, l, c, 40, 4, 1)
-                    s4, _ = compute_stochastic(h, l, c, 60, 10, 1)
-                    hist = st["quad_stoch_history"]
-                    hist.append({"ts": int(time.time() * 1000), "s1": round(s1[-1], 1), "s2": round(s2[-1], 1),
-                                 "s3": round(s3[-1], 1), "s4": round(s4[-1], 1)})
-                    if len(hist) > 300:
-                        st["quad_stoch_history"] = hist[-300:]
+            if candles and len(candles[2]) > 60:
+                h, l, c = candles
+                s1, _ = compute_stochastic(h, l, c, 9, 3, 1)
+                s2, _ = compute_stochastic(h, l, c, 14, 3, 1)
+                s3, _ = compute_stochastic(h, l, c, 40, 4, 1)
+                s4, _ = compute_stochastic(h, l, c, 60, 10, 1)
+                hist = st["quad_stoch_history"]
+                hist.append({"ts": int(time.time() * 1000), "s1": round(s1[-1], 1), "s2": round(s2[-1], 1),
+                             "s3": round(s3[-1], 1), "s4": round(s4[-1], 1)})
+                if len(hist) > 300:
+                    st["quad_stoch_history"] = hist[-300:]
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Quad-Stochastic-Berechnung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         await asyncio.sleep(5)
