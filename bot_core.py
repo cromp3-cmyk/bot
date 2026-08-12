@@ -281,6 +281,25 @@ def default_config():
         "ht_tp2_close_pct": float(os.getenv("HT_TP2_CLOSE_PCT", "50")),
         "ht_sl_enabled": os.getenv("HT_SL_ENABLED", "true").lower() == "true",
         "ht_sl_cooldown_seconds": float(os.getenv("HT_SL_COOLDOWN_SECONDS", "30")),
+        # Diamond Algo (portiert aus dem gleichnamigen Pine-v5-Indikator) - nur der Signal-Kern:
+        # SuperTrend(Sensitivity*2, ATR-Periode) + SMA-Filter, optionaler 200er-EMA-Trendfilter
+        # fuer "Smart"-Signale (im Original nur Label-Text, hier ein echter Filter). SL/TP
+        # ATR-basiert wie im Original (atrBand = ta.atr(atrLen) * atrRisk), TP als R:R-Vielfaches:
+        "da_resolution": os.getenv("DA_RESOLUTION", "5m"),
+        "da_atr_period": int(os.getenv("DA_ATR_PERIOD", "11")),
+        "da_sensitivity": float(os.getenv("DA_SENSITIVITY", "2.0")),
+        "da_sma_period": int(os.getenv("DA_SMA_PERIOD", "13")),
+        "da_ema_trend_period": int(os.getenv("DA_EMA_TREND_PERIOD", "200")),
+        "da_signal_mode": os.getenv("DA_SIGNAL_MODE", "all"),  # "all" oder "smart_only"
+        "da_entry_trigger": os.getenv("DA_ENTRY_TRIGGER", "candle_close"),
+        "da_exit_trigger": os.getenv("DA_EXIT_TRIGGER", "candle_close"),
+        "da_invert_direction": os.getenv("DA_INVERT_DIRECTION", "false").lower() == "true",
+        "da_sl_enabled": os.getenv("DA_SL_ENABLED", "true").lower() == "true",
+        "da_tp_enabled": os.getenv("DA_TP_ENABLED", "true").lower() == "true",
+        "da_risk_atr_period": int(os.getenv("DA_RISK_ATR_PERIOD", "14")),
+        "da_risk_mult": float(os.getenv("DA_RISK_MULT", "1.0")),
+        "da_tp_rr": float(os.getenv("DA_TP_RR", "2.0")),
+        "da_sl_cooldown_seconds": float(os.getenv("DA_SL_COOLDOWN_SECONDS", "30")),
     }
 
 
@@ -305,6 +324,8 @@ def default_state():
         "oms_liq_buffer": [], "oms_liq_ratio": None, "oms_liq_count": 0, "oms_liq_ok": None,
         "scalp_board": {},
         "quad_stoch_history": [],
+        "da_highs": [], "da_lows": [], "da_closes": [], "da_direction": None,
+        "da_atr_risk_last": None, "da_sl_price": None, "da_tp_price": None, "da_sl_cooldown_until": 0.0,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -810,6 +831,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="oms_scalp">OBI-Momentum-Scalp (OBI + CVD-Bestätigung + Funding-Filter, TP1+Trailing, Nachkauf)</option>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
       <option value="halftrend">HalfTrend (Swing-Hoch/-Tief-Trendwechsel, optional ATR2-basiertes SL+TP, invertierbar)</option>
+      <option value="diamond_algo">Diamond Algo (SuperTrend+SMA-Signal, optional 200-EMA-Smart-Filter, ATR-basiertes SL+TP)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1041,6 +1063,70 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="halftrend"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ht_sl_cooldown_seconds"></div>
+
+  <div data-mode="diamond_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📡 <b>Signal</b>: SuperTrend (Sensitivity×2 als ATR-Multiplikator) kreuzt den Kurs + SMA-Filter bestätigt.
+    💎 <b>Smart</b>: zusätzlich muss der 200er-EMA-Trend zustimmen (Original-Skript nennt das nur so, hier ein echter Filter).
+    🎯 <b>SL/TP</b> optional, ATR-basiert wie im Original.
+  </div>
+  <div data-mode="diamond_algo"><label>Zeitrahmen</label>
+    <select class="cfg" id="da_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="diamond_algo"><label>ATR-Periode (SuperTrend-Kern)</label><input type="number" step="1" id="da_atr_period"></div>
+  <div data-mode="diamond_algo"><label>Sensitivity (ATR-Multiplikator = Sensitivity × 2 - höher = weniger empfindlich!)</label><input type="number" step="0.1" id="da_sensitivity"></div>
+  <div data-mode="diamond_algo"><label>SMA-Filter-Periode</label><input type="number" step="1" id="da_sma_period"></div>
+  <div data-mode="diamond_algo"><label>EMA-Trendfilter-Periode (für Smart-Signale)</label><input type="number" step="1" id="da_ema_trend_period"></div>
+  <div data-mode="diamond_algo"><label>Signal-Auswahl</label>
+    <select class="cfg" id="da_signal_mode">
+      <option value="all">Alle Signale (Buy/Sell)</option>
+      <option value="smart_only">Nur Smart-Signale (200-EMA-bestätigt)</option>
+    </select>
+  </div>
+  <div data-mode="diamond_algo"><label>Einstieg auslösen</label>
+    <select class="cfg" id="da_entry_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="diamond_algo"><label>Ausstieg auslösen</label>
+    <select class="cfg" id="da_exit_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="diamond_algo"><label>Richtung invertieren (Kontra-Modus)</label>
+    <select class="cfg" id="da_invert_direction">
+      <option value="false">Aus (normal)</option>
+      <option value="true">An (invertiert)</option>
+    </select>
+  </div>
+  <div data-mode="diamond_algo"><label>Stop-Loss (ATR(Risk-Periode) × Risk-Multiplikator)</label>
+    <select class="cfg" id="da_sl_enabled">
+      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="diamond_algo"><label>Take-Profit (SL-Abstand × R:R-Multiplikator)</label>
+    <select class="cfg" id="da_tp_enabled">
+      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="diamond_algo"><label>Risiko-ATR-Periode (separat vom Signal-ATR, Original-Default 14)</label><input type="number" step="1" id="da_risk_atr_period"></div>
+  <div data-mode="diamond_algo"><label>Risiko-Multiplikator (Original: "Risk %", Default 1)</label><input type="number" step="0.1" id="da_risk_mult"></div>
+  <div data-mode="diamond_algo"><label>TP R:R-Multiplikator (Original: TP1=1, TP2=2, TP3=3)</label><input type="number" step="0.5" id="da_tp_rr"></div>
+  <div data-mode="diamond_algo"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="da_sl_cooldown_seconds"></div>
+
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1179,6 +1265,57 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="ht_amplitude">Amplitude ⇅</th>
       <th class="sortable" data-key="ht_channel_deviation">Channel Dev ⇅</th>
       <th class="sortable" data-key="ht_base_risk_mult">Base Risk ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<div data-mode-section="diamond_algo" style="display:none;">
+<h2 class="section-title">🎲 Diamond-Algo-Parameter-Sweep (ATR-Periode × Sensitivity)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet alle Kombinationen aus ATR-Periode (SuperTrend-Kernbaustein) und Sensitivity (ATR-
+    Multiplikator = Sensitivity × 2) gegeneinander - das sind die beiden Parameter, die im
+    Original tatsächlich das Signal beeinflussen. SMA-/EMA-Perioden bleiben auf den aktuell
+    gespeicherten Werten. Ergebnisse mit weniger als 5 Trades sind statistisch kaum
+    aussagekräftig und werden nach unten sortiert, aber nicht versteckt.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="da-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>ATR-Periode von</label><input type="number" step="1" id="da-sweep-period-min" value="5" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" id="da-sweep-period-max" value="20" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" id="da-sweep-period-step" value="1" style="width:70px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Sensitivity von</label><input type="number" step="0.1" id="da-sweep-sens-min" value="1.0" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" id="da-sweep-sens-max" value="5.0" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.1" id="da-sweep-sens-step" value="0.5" style="width:70px;"></div>
+    <button id="btn-da-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="da-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <table id="da-sweep-results-table" style="display:none; margin-top:12px;">
+    <thead><tr>
+      <th class="sortable" data-key="da_atr_period">ATR-Periode ⇅</th>
+      <th class="sortable" data-key="da_sensitivity">Sensitivity ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="da-sweep-worst-title">📉 Die 20 schlechtesten Kombinationen (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="da-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="da_atr_period">ATR-Periode ⇅</th>
+      <th class="sortable" data-key="da_sensitivity">Sensitivity ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -1529,6 +1666,12 @@ function resetBacktestUI() {
   document.getElementById('ht-sweep-worst-title').style.display = 'none';
   window.htSweepResultsData = [];
   window.htSweepWorstData = [];
+  document.getElementById('da-sweep-status').innerText = '';
+  document.getElementById('da-sweep-results-table').style.display = 'none';
+  document.getElementById('da-sweep-worst-table').style.display = 'none';
+  document.getElementById('da-sweep-worst-title').style.display = 'none';
+  window.daSweepResultsData = [];
+  window.daSweepWorstData = [];
 }
 
 document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
@@ -1597,6 +1740,67 @@ const htSweepRowHtml = (r) => `
 const renderHtSweepResults = makeSortableTable('ht-sweep-results-table', () => window.htSweepResultsData, htSweepRowHtml);
 const renderHtSweepWorst = makeSortableTable('ht-sweep-worst-table', () => window.htSweepWorstData, htSweepRowHtml);
 
+document.getElementById('btn-da-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-da-sweep');
+  const statusEl = document.getElementById('da-sweep-status');
+  const tableEl = document.getElementById('da-sweep-results-table');
+  const worstTableEl = document.getElementById('da-sweep-worst-table');
+  const worstTitleEl = document.getElementById('da-sweep-worst-title');
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('da-sweep-days').value) || 30,
+    atr_period_min: parseInt(document.getElementById('da-sweep-period-min').value),
+    atr_period_max: parseInt(document.getElementById('da-sweep-period-max').value),
+    atr_period_step: parseInt(document.getElementById('da-sweep-period-step').value),
+    sensitivity_min: parseFloat(document.getElementById('da-sweep-sens-min').value),
+    sensitivity_max: parseFloat(document.getElementById('da-sweep-sens-max').value),
+    sensitivity_step: parseFloat(document.getElementById('da-sweep-sens-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  tableEl.style.display = 'none';
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Kombinationen etwas dauern.`;
+  try {
+    const res = await fetch(`/api/da_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
+      window.daSweepResultsData = data.results || [];
+      window.daSweepWorstData = data.worst_results || [];
+      renderDaSweepResults();
+      renderDaSweepWorst();
+      tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.daSweepResultsData = [];
+window.daSweepWorstData = [];
+const daSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.da_atr_period}</td>
+    <td>${r.da_sensitivity}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderDaSweepResults = makeSortableTable('da-sweep-results-table', () => window.daSweepResultsData, daSweepRowHtml);
+const renderDaSweepWorst = makeSortableTable('da-sweep-worst-table', () => window.daSweepWorstData, daSweepRowHtml);
 
 
 
@@ -1910,6 +2114,8 @@ async function refresh() {
     <div class="card"><div class="label">HalfTrend (${data.config.entry_mode==='halftrend'?'aktiv':'inaktiv'})</div><div class="value ${data.ht_direction===1?'green':data.ht_direction===-1?'red':''}">${data.ht_direction===1?'LONG-Signal':data.ht_direction===-1?'SHORT-Signal':'-'}</div></div>
     <div class="card"><div class="label">HalfTrend SL</div><div class="value">${data.ht_sl_price!=null?data.ht_sl_price.toFixed(4):'-'}${data.ht_tp1_done?' (Break-Even)':''}</div></div>
     <div class="card"><div class="label">HalfTrend TP1 / TP2 / TP3</div><div class="value">${data.ht_tp1_price!=null?data.ht_tp1_price.toFixed(4):'-'}${data.ht_tp1_done?'✓':''} / ${data.ht_tp2_price!=null?data.ht_tp2_price.toFixed(4):'-'}${data.ht_tp2_done?'✓':''} / ${data.ht_tp3_price!=null?data.ht_tp3_price.toFixed(4):'-'}</div></div>
+    <div class="card"><div class="label">Diamond Algo (${data.config.entry_mode==='diamond_algo'?'aktiv':'inaktiv'})</div><div class="value ${data.da_direction===1?'green':data.da_direction===-1?'red':''}">${data.da_direction===1?'LONG-Signal':data.da_direction===-1?'SHORT-Signal':'-'}</div></div>
+    <div class="card"><div class="label">Diamond Algo SL / TP</div><div class="value">${data.da_sl_price!=null?data.da_sl_price.toFixed(4):'-'} / ${data.da_tp_price!=null?data.da_tp_price.toFixed(4):'-'}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
@@ -2004,6 +2210,21 @@ async function refresh() {
     document.getElementById('ht_tp2_close_pct').value = data.config.ht_tp2_close_pct;
     document.getElementById('ht_sl_enabled').value = String(data.config.ht_sl_enabled);
     document.getElementById('ht_sl_cooldown_seconds').value = data.config.ht_sl_cooldown_seconds;
+    document.getElementById('da_resolution').value = data.config.da_resolution;
+    document.getElementById('da_atr_period').value = data.config.da_atr_period;
+    document.getElementById('da_sensitivity').value = data.config.da_sensitivity;
+    document.getElementById('da_sma_period').value = data.config.da_sma_period;
+    document.getElementById('da_ema_trend_period').value = data.config.da_ema_trend_period;
+    document.getElementById('da_signal_mode').value = data.config.da_signal_mode;
+    document.getElementById('da_entry_trigger').value = data.config.da_entry_trigger;
+    document.getElementById('da_exit_trigger').value = data.config.da_exit_trigger;
+    document.getElementById('da_invert_direction').value = String(data.config.da_invert_direction);
+    document.getElementById('da_sl_enabled').value = String(data.config.da_sl_enabled);
+    document.getElementById('da_tp_enabled').value = String(data.config.da_tp_enabled);
+    document.getElementById('da_risk_atr_period').value = data.config.da_risk_atr_period;
+    document.getElementById('da_risk_mult').value = data.config.da_risk_mult;
+    document.getElementById('da_tp_rr').value = data.config.da_tp_rr;
+    document.getElementById('da_sl_cooldown_seconds').value = data.config.da_sl_cooldown_seconds;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -2244,6 +2465,21 @@ function buildConfigPayload() {
     ht_tp2_close_pct: parseFloat(document.getElementById('ht_tp2_close_pct').value),
     ht_sl_enabled: document.getElementById('ht_sl_enabled').value === 'true',
     ht_sl_cooldown_seconds: parseFloat(document.getElementById('ht_sl_cooldown_seconds').value),
+    da_resolution: document.getElementById('da_resolution').value,
+    da_atr_period: parseInt(document.getElementById('da_atr_period').value),
+    da_sensitivity: parseFloat(document.getElementById('da_sensitivity').value),
+    da_sma_period: parseInt(document.getElementById('da_sma_period').value),
+    da_ema_trend_period: parseInt(document.getElementById('da_ema_trend_period').value),
+    da_signal_mode: document.getElementById('da_signal_mode').value,
+    da_entry_trigger: document.getElementById('da_entry_trigger').value,
+    da_exit_trigger: document.getElementById('da_exit_trigger').value,
+    da_invert_direction: document.getElementById('da_invert_direction').value === 'true',
+    da_sl_enabled: document.getElementById('da_sl_enabled').value === 'true',
+    da_tp_enabled: document.getElementById('da_tp_enabled').value === 'true',
+    da_risk_atr_period: parseInt(document.getElementById('da_risk_atr_period').value),
+    da_risk_mult: parseFloat(document.getElementById('da_risk_mult').value),
+    da_tp_rr: parseFloat(document.getElementById('da_tp_rr').value),
+    da_sl_cooldown_seconds: parseFloat(document.getElementById('da_sl_cooldown_seconds').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -2277,7 +2513,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','da_atr_period','da_sensitivity','da_sma_period','da_ema_trend_period','da_invert_direction','da_risk_atr_period','da_risk_mult','da_tp_rr','da_sl_cooldown_seconds','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2349,6 +2585,7 @@ async def handle_status(request):
         "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"),
         "ht_tp1_price": st.get("ht_tp1_price"), "ht_tp2_price": st.get("ht_tp2_price"), "ht_tp3_price": st.get("ht_tp3_price"),
         "ht_tp1_done": st.get("ht_tp1_done"), "ht_tp2_done": st.get("ht_tp2_done"),
+        "da_direction": st.get("da_direction"), "da_sl_price": st.get("da_sl_price"), "da_tp_price": st.get("da_tp_price"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -2389,6 +2626,9 @@ async def handle_config_update(request):
                 "ht_resolution", "ht_amplitude", "ht_channel_deviation", "ht_base_risk_mult",
                 "ht_entry_trigger", "ht_exit_trigger", "ht_invert_direction",
                 "ht_tp_enabled", "ht_tp1_close_pct", "ht_tp2_close_pct", "ht_sl_enabled", "ht_sl_cooldown_seconds",
+                "da_resolution", "da_atr_period", "da_sensitivity", "da_sma_period", "da_ema_trend_period",
+                "da_signal_mode", "da_entry_trigger", "da_exit_trigger", "da_invert_direction",
+                "da_sl_enabled", "da_tp_enabled", "da_risk_atr_period", "da_risk_mult", "da_tp_rr", "da_sl_cooldown_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
@@ -2463,6 +2703,35 @@ async def handle_ht_sweep(request):
     result = await run_ht_param_sweep(symbol, cfg, days, amplitude_min, amplitude_max, amplitude_step,
                                        channel_dev_min, channel_dev_max, channel_dev_step,
                                        base_risk_min, base_risk_max, base_risk_step)
+    return web.json_response(result)
+
+
+async def handle_da_sweep(request):
+    """'Monte-Carlo'-Parametersweep fuer Diamond Algo: testet einen Bereich von ATR-Periode
+    und Sensitivity gegeneinander und gibt die besten/schlechtesten Kombinationen zurueck."""
+    from strategies import run_da_param_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        atr_period_min = max(1, int(body.get("atr_period_min", 5)))
+        atr_period_max = max(atr_period_min, int(body.get("atr_period_max", 20)))
+        atr_period_step = max(1, int(body.get("atr_period_step", 1)))
+        sensitivity_min = max(0.01, float(body.get("sensitivity_min", 1.0)))
+        sensitivity_max = max(sensitivity_min, float(body.get("sensitivity_max", 5.0)))
+        sensitivity_step = max(0.01, float(body.get("sensitivity_step", 0.5)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_da_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
+                                       sensitivity_min, sensitivity_max, sensitivity_step)
     return web.json_response(result)
 
 

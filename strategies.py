@@ -474,6 +474,71 @@ def _sma_series(values, length):
     return out
 
 
+def compute_diamond_supertrend(highs, lows, closes, factor, atr_period):
+    """Portiert aus 'Diamond Algo' (Pine v5) - der SuperTrend-Kernbaustein (Standard-SuperTrend-
+    Algorithmus). factor = Sensitivity * 2 (siehe Original: supertrend(close, nsensitivity*2, 11)).
+    Gibt (supertrend_line, direction) zurueck - direction 1 = bullisch (Linie = unteres Band),
+    -1 = baerisch (Linie = oberes Band), wie im Original-Skript (NICHT dieselbe Konvention wie bei
+    compute_halftrend, dort ist 0=bullisch - hier bewusst beim Original-Vorzeichen geblieben)."""
+    n = len(closes)
+    if n == 0:
+        return [], []
+    atr = compute_atr(highs, lows, closes, atr_period)
+    lower_band_prev = 0.0
+    upper_band_prev = 0.0
+    st_prev = None
+    st_out = [0.0] * n
+    dir_out = [1] * n
+    for i in range(n):
+        basic_upper = closes[i] + factor * atr[i]
+        basic_lower = closes[i] - factor * atr[i]
+        prev_close = closes[i - 1] if i > 0 else closes[i]
+
+        lower_band = basic_lower if (basic_lower > lower_band_prev or prev_close < lower_band_prev) else lower_band_prev
+        upper_band = basic_upper if (basic_upper < upper_band_prev or prev_close > upper_band_prev) else upper_band_prev
+
+        if i == 0:
+            direction = 1
+        elif st_prev == upper_band_prev:
+            direction = -1 if closes[i] > upper_band else 1
+        else:
+            direction = 1 if closes[i] < lower_band else -1
+
+        st = lower_band if direction == -1 else upper_band
+        st_out[i] = st
+        dir_out[i] = direction
+
+        lower_band_prev = lower_band
+        upper_band_prev = upper_band
+        st_prev = st
+    return st_out, dir_out
+
+
+def compute_diamond_signal(highs, lows, closes, atr_period, sensitivity, sma_period, ema_trend_period):
+    """Komplettes Diamond-Algo-Signal: SuperTrend-Crossover + SMA-Filter (Basis-Signal), plus
+    200er-EMA-Trendfilter fuer die 'Smart'-Qualifizierung (im Original nur Label-Text, hier ein
+    echter, waehlbarer Filter - siehe da_signal_mode). Gibt (buy, sell, smart_buy, smart_sell)
+    als Bool-Listen zurueck."""
+    n = len(closes)
+    factor = sensitivity * 2
+    st_line, _ = compute_diamond_supertrend(highs, lows, closes, factor, atr_period)
+    sma = _sma_series(closes, sma_period)
+    ema200 = _ema_series(closes, ema_trend_period)
+
+    buy = [False] * n
+    sell = [False] * n
+    smart_buy = [False] * n
+    smart_sell = [False] * n
+    for i in range(1, n):
+        crossover = closes[i - 1] <= st_line[i - 1] and closes[i] > st_line[i]
+        crossunder = closes[i - 1] >= st_line[i - 1] and closes[i] < st_line[i]
+        buy[i] = crossover and closes[i] >= sma[i]
+        sell[i] = crossunder and closes[i] <= sma[i]
+        smart_buy[i] = buy[i] and closes[i] > ema200[i]
+        smart_sell[i] = sell[i] and closes[i] < ema200[i]
+    return buy, sell, smart_buy, smart_sell
+
+
 def compute_halftrend(highs, lows, closes, amplitude, channel_deviation):
     """Portiert aus 'HalfTrend Long/Short Signal Engine [BigBeluga]' (Basis-Trendlogik von
     everget's originalem HalfTrend-Indikator) - nur der Teil, der tatsaechlich Long/Short
@@ -826,6 +891,169 @@ async def ht_poll_loop(symbol):
                         debug_log(f"⏳ [{symbol}] HalfTrend wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] HalfTrend-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+def _da_reset_state(st):
+    st["da_sl_price"] = None
+    st["da_tp_price"] = None
+
+
+async def check_da_sl_tp(symbol, price):
+    """Prueft SL/TP - beide als fester $-Betrag auf die GESAMTE Position, bei Einstieg einmalig
+    aus ATR(da_risk_atr_period)*da_risk_mult berechnet (wie im Original: atrBand = ta.atr(atrLen)
+    * atrRisk), TP-Abstand = SL-Abstand * da_tp_rr (Original hat TP1/TP2/TP3 bei 1:1/2:1/3:1 -
+    hier ein frei waehlbarer einzelner R:R-Multiplikator statt gestufter Teilverkaeufe)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    sl_price = st.get("da_sl_price")
+    tp_price = st.get("da_tp_price")
+    if sl_price is None and tp_price is None:
+        return
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
+    if hit_sl:
+        debug_log(f"🚪 [{symbol}] Diamond Algo SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, "SL")
+        st["da_sl_cooldown_until"] = time.time() + cfg.get("da_sl_cooldown_seconds", 30)
+        _da_reset_state(st)
+    elif hit_tp:
+        debug_log(f"🚪 [{symbol}] Diamond Algo TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP")
+        _da_reset_state(st)
+
+
+async def check_da_entry(symbol, buy_signal, sell_signal, price, atr_risk_now):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if time.time() < st.get("da_sl_cooldown_until", 0.0):
+        return
+    if not (buy_signal or sell_signal):
+        return
+    direction = "long" if buy_signal else "short"
+    debug_log(f"📡 [{symbol}] Diamond Algo Signal: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+    if st["position"] is None:
+        return
+    _da_reset_state(st)
+    if cfg.get("da_sl_enabled", True) and atr_risk_now is not None:
+        dist_sl = atr_risk_now * cfg.get("da_risk_mult", 1.0)
+        st["da_sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
+        if cfg.get("da_tp_enabled", True):
+            dist_tp = dist_sl * cfg.get("da_tp_rr", 1.0)
+            st["da_tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
+    elif cfg.get("da_tp_enabled", True) and atr_risk_now is not None:
+        # TP auch ohne SL moeglich (dann wird der R:R-Multiplikator direkt auf den Risiko-ATR-
+        # Abstand angewandt, ohne dass ein SL tatsaechlich gesetzt wird)
+        dist_tp = atr_risk_now * cfg.get("da_risk_mult", 1.0) * cfg.get("da_tp_rr", 1.0)
+        st["da_tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
+
+
+async def check_da_exit(symbol, buy_signal, sell_signal, price):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if st["position"] == "long" and sell_signal:
+        debug_log(f"🚪 [{symbol}] Diamond Algo Exit: LONG @ {price} (Sell-Signal)")
+        await execute_exit(symbol, price, "DA-FLIP-EXIT")
+        _da_reset_state(st)
+    elif st["position"] == "short" and buy_signal:
+        debug_log(f"🚪 [{symbol}] Diamond Algo Exit: SHORT @ {price} (Buy-Signal)")
+        await execute_exit(symbol, price, "DA-FLIP-EXIT")
+        _da_reset_state(st)
+
+
+async def da_poll_loop(symbol):
+    """Diamond Algo (portiert aus dem gleichnamigen Pine-v5-Indikator) - nur der Signal-Kern:
+    SuperTrend(Sensitivity*2, ATR-Periode) mit SMA-Filter fuer Buy/Sell, plus optionaler 200er-
+    EMA-Trendfilter fuer 'Smart'-Signale (im Original nur Label-Text, hier ein echter waehlbarer
+    Filter - siehe da_signal_mode). SL/TP optional, ATR-basiert (wie im Original: atrBand =
+    ta.atr(atrLen) * atrRisk), TP als R:R-Vielfaches vom SL-Abstand. Ausstieg sonst immer beim
+    Gegen-Signal (Flip-System). Kein Supply/Demand, keine Trend Cloud/Session-Anzeige - das war
+    im Original rein optisch/Beiwerk ohne Einfluss auf Buy/Sell."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "diamond_algo" and cfg["bot_active"]:
+                resolution = cfg["da_resolution"]
+                atr_period = cfg["da_atr_period"]
+                risk_atr_period = cfg.get("da_risk_atr_period", 14)
+                sma_period = cfg["da_sma_period"]
+                ema_trend_period = cfg["da_ema_trend_period"]
+                min_needed = max(atr_period, risk_atr_period, sma_period, ema_trend_period) + 5
+                needed_bars = min(1000, max(min_needed * 2, 200))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_processed_ts != signal_key
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    buy, sell, smart_buy, smart_sell = compute_diamond_signal(
+                        closed_h, closed_l, closed_c, atr_period, cfg["da_sensitivity"], sma_period, ema_trend_period)
+                    atr_risk_series = compute_atr(closed_h, closed_l, closed_c, risk_atr_period)
+                    keep = min_needed + 5
+                    st["da_highs"] = closed_h[-keep:]
+                    st["da_lows"] = closed_l[-keep:]
+                    st["da_closes"] = closed_c[-keep:]
+                    invert = cfg.get("da_invert_direction", False)
+                    signal_mode = cfg.get("da_signal_mode", "all")
+                    buy_now = smart_buy[-1] if signal_mode == "smart_only" else buy[-1]
+                    sell_now = smart_sell[-1] if signal_mode == "smart_only" else sell[-1]
+                    if invert:
+                        buy_now, sell_now = sell_now, buy_now
+                    st["da_direction"] = (1 if buy[-1] else (-1 if sell[-1] else st.get("da_direction"))) * (-1 if invert else 1)
+                    st["da_atr_risk_last"] = atr_risk_series[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] Diamond Algo aktiv: Preis={closed_c[-1]}, ATR-Risk={round(atr_risk_series[-1],4)}, "
+                                  f"Modus={signal_mode}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if is_new_candle:
+                        last_processed_ts = signal_key
+                        if cfg.get("da_exit_trigger", "candle_close") == "candle_close":
+                            await check_da_exit(symbol, buy_now, sell_now, price)
+                        if cfg.get("da_entry_trigger", "candle_close") == "candle_close":
+                            await check_da_entry(symbol, buy_now, sell_now, price, atr_risk_series[-1])
+
+                    await check_da_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Diamond Algo wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Diamond Algo wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Diamond-Algo-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
 
@@ -1843,6 +2071,35 @@ async def on_price_update(symbol, price):
         await check_ht_sl_tp(symbol, price)
         return
 
+    if cfg["entry_mode"] == "diamond_algo":
+        entry_trigger = cfg.get("da_entry_trigger", "candle_close")
+        exit_trigger = cfg.get("da_exit_trigger", "candle_close")
+        if entry_trigger == "tick" or exit_trigger == "tick":
+            try:
+                ch, cl, cc = st.get("da_highs"), st.get("da_lows"), st.get("da_closes")
+                if ch and cl and cc and len(cc) >= 2:
+                    live_h = ch[:-1] + [max(ch[-1], price)]
+                    live_l = cl[:-1] + [min(cl[-1], price)]
+                    live_c = cc[:-1] + [price]
+                    buy, sell, smart_buy, smart_sell = compute_diamond_signal(
+                        live_h, live_l, live_c, cfg["da_atr_period"], cfg["da_sensitivity"],
+                        cfg["da_sma_period"], cfg["da_ema_trend_period"])
+                    signal_mode = cfg.get("da_signal_mode", "all")
+                    buy_now = smart_buy[-1] if signal_mode == "smart_only" else buy[-1]
+                    sell_now = smart_sell[-1] if signal_mode == "smart_only" else sell[-1]
+                    if cfg.get("da_invert_direction", False):
+                        buy_now, sell_now = sell_now, buy_now
+                    atr_risk_series = compute_atr(live_h, live_l, live_c, cfg.get("da_risk_atr_period", 14))
+                    if exit_trigger == "tick":
+                        await check_da_exit(symbol, buy_now, sell_now, price)
+                    if entry_trigger == "tick":
+                        await check_da_entry(symbol, buy_now, sell_now, price, atr_risk_series[-1])
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] Diamond Algo Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await check_da_sl_tp(symbol, price)
+        return
+
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
@@ -2051,6 +2308,82 @@ def backtest_halftrend(candles, cfg):
     return _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup)
 
 
+def _simulate_diamond_trades(candles, cfg, buy, sell, smart_buy, smart_sell, atr_risk, warmup):
+    """Kern-Simulation fuer Diamond Algo, getrennt von der Signal-Berechnung (compute_diamond_signal)
+    damit der Parameter-Sweep buy/sell/atr_risk nur EINMAL pro ATR-Periode x Sensitivity-Kombination
+    berechnen muss. SL/TP-Abstand wird bei jedem Einstieg neu aus dem dann aktuellen ATR(risk_atr_period)
+    berechnet (wie im Original: atrBand = ta.atr(atrLen) * atrRisk), TP = SL-Abstand * R:R-Multiplikator."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    signal_mode = cfg.get("da_signal_mode", "all")
+    invert = cfg.get("da_invert_direction", False)
+    sl_enabled = cfg.get("da_sl_enabled", True)
+    tp_enabled = cfg.get("da_tp_enabled", True)
+    risk_mult = cfg.get("da_risk_mult", 1.0)
+    tp_rr = cfg.get("da_tp_rr", 1.0)
+    sl_cooldown_ms = cfg.get("da_sl_cooldown_seconds", 30) * 1000
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            pdir, entry, size = position["dir"], position["entry"], position["size"]
+            sl_price, tp_price = position.get("sl_price"), position.get("tp_price")
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, pdir, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, pdir, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        buy_now = smart_buy[i] if signal_mode == "smart_only" else buy[i]
+        sell_now = smart_sell[i] if signal_mode == "smart_only" else sell[i]
+        if invert:
+            buy_now, sell_now = sell_now, buy_now
+
+        if position is not None:
+            if (position["dir"] == "long" and sell_now) or (position["dir"] == "short" and buy_now):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "DA-FLIP-EXIT", ts=ts)
+                position = None
+
+        in_sl_cooldown = sl_enabled and sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and (buy_now or sell_now):
+            direction = "long" if buy_now else "short"
+            size = (margin * leverage) / price
+            dist_sl = atr_risk[i] * risk_mult if (sl_enabled or tp_enabled) else None
+            sl_price = (price - dist_sl if direction == "long" else price + dist_sl) if (sl_enabled and dist_sl is not None) else None
+            tp_price = None
+            if tp_enabled and dist_sl is not None:
+                dist_tp = dist_sl * tp_rr
+                tp_price = price + dist_tp if direction == "long" else price - dist_tp
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_diamond_algo(candles, cfg):
+    h, l, c = candles[2], candles[3], candles[4]
+    atr_period = cfg["da_atr_period"]
+    risk_atr_period = cfg.get("da_risk_atr_period", 14)
+    sma_period = cfg["da_sma_period"]
+    ema_trend_period = cfg["da_ema_trend_period"]
+    buy, sell, smart_buy, smart_sell = compute_diamond_signal(h, l, c, atr_period, cfg["da_sensitivity"], sma_period, ema_trend_period)
+    atr_risk = compute_atr(h, l, c, risk_atr_period)
+    warmup = max(atr_period, risk_atr_period, sma_period, ema_trend_period) + 5
+    return _simulate_diamond_trades(candles, cfg, buy, sell, smart_buy, smart_sell, atr_risk, warmup)
+
+
 def _bt_close_trade(trades, direction, entry, exit_price, size, i, entry_i, reason, ts=None):
     pnl = (exit_price - entry) * size if direction == "long" else (entry - exit_price) * size
     trade = {"dir": direction, "entry": entry, "exit": exit_price, "reason": reason,
@@ -2221,6 +2554,71 @@ async def run_ht_param_sweep(symbol, cfg, days, amplitude_min, amplitude_max, am
     }
 
 
+DA_SWEEP_MAX_COMBOS = 400
+DA_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+async def run_da_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
+                              sensitivity_min, sensitivity_max, sensitivity_step):
+    """'Monte-Carlo'-Parametersweep fuer Diamond Algo: testet einen Bereich von ATR-Periode
+    (SuperTrend-Kernbaustein) und Sensitivity (ATR-Multiplikator = Sensitivity*2) gegeneinander -
+    das sind die beiden Parameter, die im Original wirklich das Signal beeinflussen (SMA-/EMA-
+    Perioden bleiben auf den aktuell gespeicherten Werten, da sie selten geaendert werden)."""
+    max_candles = BACKTEST_MAX_CANDLES["diamond_algo"]
+    resolution = cfg.get("da_resolution", "5m")
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles)
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 150:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    atr_periods = sorted(set(int(round(atr_period_min + i * atr_period_step))
+                              for i in range(int((atr_period_max - atr_period_min) / max(atr_period_step, 1e-9)) + 1)
+                              if atr_period_min + i * atr_period_step <= atr_period_max + 1e-9))
+    sensitivities = sorted(set(round(sensitivity_min + i * sensitivity_step, 4)
+                                for i in range(int((sensitivity_max - sensitivity_min) / max(sensitivity_step, 1e-9)) + 1)
+                                if sensitivity_min + i * sensitivity_step <= sensitivity_max + 1e-9))
+    atr_periods = [a for a in atr_periods if a >= 1]
+    sensitivities = [s for s in sensitivities if s > 0]
+
+    total_combos = len(atr_periods) * len(sensitivities)
+    if total_combos == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
+    if total_combos > DA_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {DA_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    h, l, c = candles[2], candles[3], candles[4]
+    sma_period = cfg["da_sma_period"]
+    ema_trend_period = cfg["da_ema_trend_period"]
+    risk_atr_period = cfg.get("da_risk_atr_period", 14)
+    atr_risk = compute_atr(h, l, c, risk_atr_period)
+    warmup = max(max(atr_periods), risk_atr_period, sma_period, ema_trend_period) + 5
+
+    results = []
+    for atr_p in atr_periods:
+        for sens in sensitivities:
+            buy, sell, smart_buy, smart_sell = compute_diamond_signal(h, l, c, atr_p, sens, sma_period, ema_trend_period)
+            cfg_copy = dict(cfg)
+            cfg_copy["da_atr_period"] = atr_p
+            cfg_copy["da_sensitivity"] = sens
+            trades = _simulate_diamond_trades(candles, cfg_copy, buy, sell, smart_buy, smart_sell, atr_risk, warmup)
+            stats = summarize_backtest_trades(trades)
+            results.append({"da_atr_period": atr_p, "da_sensitivity": sens, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= DA_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
+        "min_reliable_trades": DA_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": total_combos,
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
+
+
 from collections import OrderedDict
 
 _backtest_candle_cache = OrderedDict()  # key: (symbol, resolution) -> {"fetched_at": float, "days": int, "candles": (...)}
@@ -2289,21 +2687,23 @@ async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles):
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000,
     "halftrend": 100_000,
+    "diamond_algo": 100_000,
 }
 
 BACKTEST_FUNCS = {
     "fib_reversal": backtest_fib_reversal,
     "halftrend": backtest_halftrend,
+    "diamond_algo": backtest_diamond_algo,
 }
 
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution"}[entry_mode]
+    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -

@@ -12,12 +12,13 @@ from bot_core import (
     debug_log, PORT, SYMBOLS, BOTS, load_bot_configs, load_bot_state, state_persist_loop,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_ht_sweep,
+    handle_manual_trade, handle_backtest, handle_ht_sweep, handle_da_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
     trading_loop, fib_reversal_poll_loop, binance_1s_poll_loop,
     ht_poll_loop, oms_rsi_poll_loop, scalp_board_poll_loop, quad_stoch_poll_loop,
+    da_poll_loop,
 )
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
@@ -40,6 +41,7 @@ async def start_web_server():
     app.router.add_post("/api/manual_trade", handle_manual_trade)
     app.router.add_post("/api/backtest", handle_backtest)
     app.router.add_post("/api/ht_sweep", handle_ht_sweep)
+    app.router.add_post("/api/da_sweep", handle_da_sweep)
     app.router.add_post("/api/reset", handle_reset)
     app.router.add_get("/copytrading", handle_ct_index)
     app.router.add_get("/api/ct/status", handle_ct_status)
@@ -88,6 +90,7 @@ async def main():
         *[oms_rsi_poll_loop(s) for s in SYMBOLS],
         *[scalp_board_poll_loop(s) for s in SYMBOLS],
         *[quad_stoch_poll_loop(s) for s in SYMBOLS],
+        *[da_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),
