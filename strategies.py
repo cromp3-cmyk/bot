@@ -514,6 +514,112 @@ def compute_diamond_supertrend(highs, lows, closes, factor, atr_period):
     return st_out, dir_out
 
 
+def compute_heikin_ashi(opens, highs, lows, closes):
+    """Rechnet normale OHLC-Kerzen in Heikin-Ashi-Kerzen um (wie bei TradingView, wenn man den
+    Chart-Typ auf 'Heikin Ashi' umstellt). Heikin-Ashi glaettet den Kursverlauf, indem jede Kerze
+    den Durchschnitt der vorherigen mit einrechnet - Trends wirken dadurch 'glatter' (weniger
+    kleine Gegenkerzen), Wendepunkte fallen dafuer etwas verzoegert auf. Gibt (ha_open, ha_high,
+    ha_low, ha_close) zurueck - diese vier werden dann anstelle der normalen OHLC-Werte in die
+    Signal-Berechnung (compute_diamond_signal, compute_atr) gegeben."""
+    n = len(closes)
+    ha_close = [(opens[i] + highs[i] + lows[i] + closes[i]) / 4 for i in range(n)]
+    ha_open = [0.0] * n
+    ha_high = [0.0] * n
+    ha_low = [0.0] * n
+    for i in range(n):
+        ha_open[i] = (opens[i] + closes[i]) / 2 if i == 0 else (ha_open[i - 1] + ha_close[i - 1]) / 2
+        ha_high[i] = max(highs[i], ha_open[i], ha_close[i])
+        ha_low[i] = min(lows[i], ha_open[i], ha_close[i])
+    return ha_open, ha_high, ha_low, ha_close
+
+
+def compute_elte_supertrend(opens, highs, lows, closes, factor, atr_period):
+    """Portiert aus 'ELTE SMART' (Pine v5) - SuperTrend auf ohlc4 (Durchschnitt aus O/H/L/C)
+    statt nur Close, etwas geglaettet. WICHTIG: andere Vorzeichen-Konvention als bei Diamond
+    Algo! Hier gilt die STANDARD-Konvention: direction=1 -> lowerBand (bullisch, Linie unter dem
+    Kurs), direction=-1 -> upperBand (baerisch, Linie ueber dem Kurs) - im Original-Skript exakt
+    so verdrahtet (anders als beim Diamond-Algo-Original, das die Zuordnung vertauscht hatte).
+    'factor' darf ein fester Wert ODER eine pro-Kerze wechselnde Liste sein (fuer Auto-Sensitivity,
+    da die sich mit der Marktvolatilitaet Kerze fuer Kerze aendert)."""
+    n = len(closes)
+    if n == 0:
+        return [], []
+    is_series = isinstance(factor, (list, tuple))
+    ohlc4 = [(opens[i] + highs[i] + lows[i] + closes[i]) / 4 for i in range(n)]
+    atr = compute_atr(highs, lows, closes, atr_period)
+    lower_band_prev = 0.0
+    upper_band_prev = 0.0
+    st_prev = None
+    st_out = [0.0] * n
+    dir_out = [1] * n
+    for i in range(n):
+        f = factor[i] if is_series else factor
+        basic_upper = ohlc4[i] + f * atr[i]
+        basic_lower = ohlc4[i] - f * atr[i]
+        prev_close = closes[i - 1] if i > 0 else closes[i]
+
+        lower_band = basic_lower if (basic_lower > lower_band_prev or prev_close < lower_band_prev) else lower_band_prev
+        upper_band = basic_upper if (basic_upper < upper_band_prev or prev_close > upper_band_prev) else upper_band_prev
+
+        if i == 0:
+            direction = 1
+        elif st_prev == upper_band_prev:
+            direction = 1 if closes[i] > upper_band else -1
+        else:
+            direction = -1 if closes[i] < lower_band else 1
+
+        st = lower_band if direction == 1 else upper_band
+        st_out[i] = st
+        dir_out[i] = direction
+
+        lower_band_prev = lower_band
+        upper_band_prev = upper_band
+        st_prev = st
+    return st_out, dir_out
+
+
+def compute_es_auto_sensitivity(closes, vol_period, vol_ma_len):
+    """Portiert aus 'ELTE SMART' - EWMA-Volatilitaet (Lambda-gewichteter gleitender Durchschnitt
+    der quadrierten Log-Returns), dann Vergleich mit dem eigenen 55er-Durchschnitt in relativen
+    Baendern (60%/20%/140%/180%/240%) -> daraus ergibt sich automatisch ein SuperTrend-
+    Sensitivity-Wert zwischen 2.85 und 4.0, je nachdem ob die aktuelle Volatilitaet ueber/unter
+    ihrem eigenen historischen Schnitt liegt. Der Annualisierungsfaktor (sqrt(365)*100 im
+    Original) kuerzt sich in den relativen Bandvergleichen komplett heraus und wird hier deshalb
+    weggelassen (aendert das Ergebnis nicht, nur die absolute Hv-Skala)."""
+    n = len(closes)
+    if n < 2:
+        return [3.0] * n
+    lam = (vol_period - 1) / (vol_period + 1)
+    logr = [0.0] + [math.log(closes[i] / closes[i - 1]) if closes[i - 1] > 0 else 0.0 for i in range(1, n)]
+    squared = [x * x for x in logr]
+    v = [0.0] * n
+    for i in range(n):
+        v[i] = squared[i] if i == 0 else lam * v[i - 1] + (1 - lam) * squared[i]
+    hv = [math.sqrt(x) for x in v]
+    avg_hv = _sma_series(hv, vol_ma_len)
+
+    sensitivity = [3.0] * n
+    for i in range(n):
+        h, a = hv[i], avg_hv[i]
+        maa, mab, mac = a * 1.40, a * 1.80, a * 2.40
+        mad_, mae_ = a * 0.60, a * 0.20
+        if h < maa and h > a:
+            sensitivity[i] = 3.15
+        elif h < mab and h > maa:
+            sensitivity[i] = 3.5
+        elif h < mac and h > mab:
+            sensitivity[i] = 3.6
+        elif h > mac:
+            sensitivity[i] = 4.0
+        elif h < maa and h > mad_:
+            sensitivity[i] = 3.0
+        elif h < mad_ and h > mae_:
+            sensitivity[i] = 2.85
+        elif h < mae_:
+            sensitivity[i] = 3.0
+    return sensitivity
+
+
 def compute_diamond_signal(highs, lows, closes, atr_period, sensitivity, sma_period, ema_trend_period):
     """Komplettes Diamond-Algo-Signal: SuperTrend-Crossover + SMA-Filter (Basis-Signal), plus
     200er-EMA-Trendfilter fuer die 'Smart'-Qualifizierung (im Original nur Label-Text, hier ein
@@ -998,14 +1104,14 @@ async def da_poll_loop(symbol):
                 if resolution in SUB_MINUTE_RESOLUTIONS:
                     local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     if local:
-                        closed_ts, _, closed_h, closed_l, closed_c = local
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
                     else:
                         closed_ts = None
                 else:
                     data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
                     if data:
                         timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
                     else:
                         closed_ts = None
 
@@ -1017,10 +1123,20 @@ async def da_poll_loop(symbol):
                     is_new_candle = last_processed_ts != signal_key
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
 
+                    if cfg.get("da_use_heikin_ashi", False):
+                        # Heikin-Ashi-Umrechnung VOR der Signal-Berechnung - wie bei TradingView,
+                        # wenn man den Chart-Typ umstellt. Reale Preise (price/last_price) bleiben
+                        # fuer die tatsaechliche Order-Ausfuehrung unveraendert, nur das SIGNAL
+                        # selbst rechnet auf den geglaetteten HA-Kerzen.
+                        _, sig_h, sig_l, sig_c = compute_heikin_ashi(closed_o, closed_h, closed_l, closed_c)
+                    else:
+                        sig_h, sig_l, sig_c = closed_h, closed_l, closed_c
+
                     buy, sell, smart_buy, smart_sell = compute_diamond_signal(
-                        closed_h, closed_l, closed_c, atr_period, cfg["da_sensitivity"], sma_period, ema_trend_period)
-                    atr_risk_series = compute_atr(closed_h, closed_l, closed_c, risk_atr_period)
+                        sig_h, sig_l, sig_c, atr_period, cfg["da_sensitivity"], sma_period, ema_trend_period)
+                    atr_risk_series = compute_atr(sig_h, sig_l, sig_c, risk_atr_period)
                     keep = min_needed + 5
+                    st["da_opens"] = closed_o[-keep:]
                     st["da_highs"] = closed_h[-keep:]
                     st["da_lows"] = closed_l[-keep:]
                     st["da_closes"] = closed_c[-keep:]
@@ -1054,6 +1170,212 @@ async def da_poll_loop(symbol):
                         debug_log(f"⏳ [{symbol}] Diamond Algo wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Diamond-Algo-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+def _es_reset_state(st):
+    st["es_sl_price"] = None
+    st["es_tp1_price"] = None
+    st["es_tp2_price"] = None
+    st["es_tp3_price"] = None
+    st["es_tp1_done"] = False
+    st["es_tp2_done"] = False
+
+
+async def check_es_sl_tp(symbol, price):
+    """Prueft SL sowie TP1/TP2/TP3 (im Original nur Preis-Linien zur Orientierung, hier als
+    echte Teilverkaeufe umgesetzt - analog HalfTrend, aber mit einem zusaetzlichen Schritt, den
+    das Original nicht hat: SL springt nach TP1 auf Break-Even UND nach TP2 nochmal weiter auf
+    den TP1-Preis (statt auf Break-Even stehen zu bleiben) - so ist ab TP2 immer schon ein
+    Teilgewinn abgesichert, nicht nur die Einstiegsposition."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+
+    sl_price = st.get("es_sl_price")
+    if sl_price is not None:
+        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+        if hit_sl:
+            if st.get("es_tp2_done"):
+                reason = "TP1-LOCK"
+            elif st.get("es_tp1_done"):
+                reason = "BREAKEVEN"
+            else:
+                reason = "SL"
+            debug_log(f"🚪 [{symbol}] ELTE Smart {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+            await execute_exit(symbol, price, reason)
+            if reason == "SL":
+                st["es_sl_cooldown_until"] = time.time() + cfg.get("es_sl_cooldown_seconds", 30)
+            _es_reset_state(st)
+            return
+
+    if not st.get("es_tp1_done") and st.get("es_tp1_price") is not None:
+        tp1_price = st["es_tp1_price"]
+        if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
+            fraction = cfg.get("es_tp1_close_pct", 50) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+            if ok:
+                st["es_tp1_done"] = True
+                st["es_sl_price"] = st["avg_entry_price"]  # Break-Even
+                debug_log(f"📡 [{symbol}] ELTE Smart TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'],4)}) gesetzt")
+        return
+
+    if not st.get("es_tp2_done") and st.get("es_tp2_price") is not None:
+        tp2_price = st["es_tp2_price"]
+        if (pos == "long" and price >= tp2_price) or (pos == "short" and price <= tp2_price):
+            fraction = cfg.get("es_tp2_close_pct", 50) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP2")
+            if ok:
+                st["es_tp2_done"] = True
+                st["es_sl_price"] = st["es_tp1_price"]  # SL zieht weiter auf TP1-Preis
+                debug_log(f"📡 [{symbol}] ELTE Smart TP2 erreicht - SL auf TP1-Preis ({round(st['es_tp1_price'],4)}) gezogen")
+        return
+
+    tp3_price = st.get("es_tp3_price")
+    if tp3_price is not None:
+        if (pos == "long" and price >= tp3_price) or (pos == "short" and price <= tp3_price):
+            debug_log(f"🚪 [{symbol}] ELTE Smart TP3 (Rest): {pos.upper()} @ {price}")
+            await execute_exit(symbol, price, "TP3")
+            _es_reset_state(st)
+
+
+async def check_es_entry(symbol, buy_signal, sell_signal, price, risk_atr_now):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if time.time() < st.get("es_sl_cooldown_until", 0.0):
+        return
+    if not (buy_signal or sell_signal):
+        return
+    direction = "long" if buy_signal else "short"
+    debug_log(f"📡 [{symbol}] ELTE Smart Signal: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+    if st["position"] is None:
+        return
+    _es_reset_state(st)
+    if risk_atr_now is not None:
+        dist = risk_atr_now * cfg.get("es_risk_mult", 2.2)
+        if direction == "long":
+            st["es_sl_price"] = price - dist
+            st["es_tp1_price"] = price + dist * cfg.get("es_tp1_rr", 1.0)
+            st["es_tp2_price"] = price + dist * cfg.get("es_tp2_rr", 2.0)
+            st["es_tp3_price"] = price + dist * cfg.get("es_tp3_rr", 3.0)
+        else:
+            st["es_sl_price"] = price + dist
+            st["es_tp1_price"] = price - dist * cfg.get("es_tp1_rr", 1.0)
+            st["es_tp2_price"] = price - dist * cfg.get("es_tp2_rr", 2.0)
+            st["es_tp3_price"] = price - dist * cfg.get("es_tp3_rr", 3.0)
+
+
+async def check_es_exit(symbol, buy_signal, sell_signal, price):
+    """Ausstieg immer beim Gegen-Signal (schliesst den kompletten Rest, egal welche TP-Stufe
+    gerade aktiv ist) - wie bei allen anderen Flip-Strategien."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None:
+        return
+    if st["position"] == "long" and sell_signal:
+        debug_log(f"🚪 [{symbol}] ELTE Smart Exit: LONG @ {price} (Sell-Signal)")
+        await execute_exit(symbol, price, "ES-FLIP-EXIT")
+        _es_reset_state(st)
+    elif st["position"] == "short" and buy_signal:
+        debug_log(f"🚪 [{symbol}] ELTE Smart Exit: SHORT @ {price} (Buy-Signal)")
+        await execute_exit(symbol, price, "ES-FLIP-EXIT")
+        _es_reset_state(st)
+
+
+async def es_poll_loop(symbol):
+    """ELTE Smart (portiert aus dem gleichnamigen Pine-v5-Indikator, nur 'Normal'-Modus + Auto-
+    Sensitivity) - SuperTrend(ohlc4) mit automatisch aus der Marktvolatilitaet abgeleiteter
+    Sensitivity (siehe compute_es_auto_sensitivity), reiner Crossover-Trigger ohne Zusatzfilter.
+    TP1(50%)->Break-Even, TP2(50% vom Rest)->SL auf TP1, TP3(Rest) - alles ATR-basiert
+    (Risiko-ATR-Periode x Risiko-Multiplikator), Ausstieg sonst immer beim Gegen-Signal."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "elte_smart" and cfg["bot_active"]:
+                resolution = cfg["es_resolution"]
+                atr_period = cfg["es_atr_period"]
+                risk_atr_period = cfg.get("es_risk_atr_period", 14)
+                vol_period = cfg.get("es_vol_period", 10)
+                vol_ma_len = cfg.get("es_vol_ma_len", 55)
+                min_needed = max(atr_period, risk_atr_period, vol_ma_len + vol_period) + 5
+                needed_bars = min(1000, max(min_needed * 2, 200))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    is_new_candle = last_processed_ts != signal_key
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    if cfg.get("es_auto_sensitivity", True):
+                        sensitivity = compute_es_auto_sensitivity(closed_c, vol_period, vol_ma_len)
+                    else:
+                        sensitivity = cfg.get("es_sensitivity", 3.0)
+                    st_line, direction = compute_elte_supertrend(closed_o, closed_h, closed_l, closed_c, sensitivity, atr_period)
+                    risk_atr_series = compute_atr(closed_h, closed_l, closed_c, risk_atr_period)
+
+                    keep = min_needed + 5
+                    st["es_opens"] = closed_o[-keep:]
+                    st["es_highs"] = closed_h[-keep:]
+                    st["es_lows"] = closed_l[-keep:]
+                    st["es_closes"] = closed_c[-keep:]
+
+                    buy_now = closed_c[-2] <= st_line[-2] and closed_c[-1] > st_line[-1]
+                    sell_now = closed_c[-2] >= st_line[-2] and closed_c[-1] < st_line[-1]
+                    invert = cfg.get("es_invert_direction", False)
+                    if invert:
+                        buy_now, sell_now = sell_now, buy_now
+                    st["es_direction"] = direction[-1] * (-1 if invert else 1)
+                    st["es_sensitivity_last"] = sensitivity[-1] if isinstance(sensitivity, list) else sensitivity
+                    st["es_risk_atr_last"] = risk_atr_series[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] ELTE Smart aktiv: Preis={closed_c[-1]}, Sensitivity={round(st['es_sensitivity_last'],2)}, "
+                                  f"Risk-ATR={round(risk_atr_series[-1],4)}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if is_new_candle:
+                        last_processed_ts = signal_key
+                        if cfg.get("es_exit_trigger", "candle_close") == "candle_close":
+                            await check_es_exit(symbol, buy_now, sell_now, price)
+                        if cfg.get("es_entry_trigger", "candle_close") == "candle_close":
+                            await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1])
+
+                    await check_es_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] ELTE Smart wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] ELTE Smart wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] ELTE-Smart-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
 
@@ -2076,20 +2398,25 @@ async def on_price_update(symbol, price):
         exit_trigger = cfg.get("da_exit_trigger", "candle_close")
         if entry_trigger == "tick" or exit_trigger == "tick":
             try:
-                ch, cl, cc = st.get("da_highs"), st.get("da_lows"), st.get("da_closes")
-                if ch and cl and cc and len(cc) >= 2:
+                co, ch, cl, cc = st.get("da_opens"), st.get("da_highs"), st.get("da_lows"), st.get("da_closes")
+                if co and ch and cl and cc and len(cc) >= 2:
+                    live_o = co
                     live_h = ch[:-1] + [max(ch[-1], price)]
                     live_l = cl[:-1] + [min(cl[-1], price)]
                     live_c = cc[:-1] + [price]
+                    if cfg.get("da_use_heikin_ashi", False):
+                        _, sig_h, sig_l, sig_c = compute_heikin_ashi(live_o, live_h, live_l, live_c)
+                    else:
+                        sig_h, sig_l, sig_c = live_h, live_l, live_c
                     buy, sell, smart_buy, smart_sell = compute_diamond_signal(
-                        live_h, live_l, live_c, cfg["da_atr_period"], cfg["da_sensitivity"],
+                        sig_h, sig_l, sig_c, cfg["da_atr_period"], cfg["da_sensitivity"],
                         cfg["da_sma_period"], cfg["da_ema_trend_period"])
                     signal_mode = cfg.get("da_signal_mode", "all")
                     buy_now = smart_buy[-1] if signal_mode == "smart_only" else buy[-1]
                     sell_now = smart_sell[-1] if signal_mode == "smart_only" else sell[-1]
                     if cfg.get("da_invert_direction", False):
                         buy_now, sell_now = sell_now, buy_now
-                    atr_risk_series = compute_atr(live_h, live_l, live_c, cfg.get("da_risk_atr_period", 14))
+                    atr_risk_series = compute_atr(sig_h, sig_l, sig_c, cfg.get("da_risk_atr_period", 14))
                     if exit_trigger == "tick":
                         await check_da_exit(symbol, buy_now, sell_now, price)
                     if entry_trigger == "tick":
@@ -2098,6 +2425,37 @@ async def on_price_update(symbol, price):
                 debug_log(f"⚠️ [{symbol}] Diamond Algo Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await check_da_sl_tp(symbol, price)
+        return
+
+    if cfg["entry_mode"] == "elte_smart":
+        entry_trigger = cfg.get("es_entry_trigger", "candle_close")
+        exit_trigger = cfg.get("es_exit_trigger", "candle_close")
+        if entry_trigger == "tick" or exit_trigger == "tick":
+            try:
+                co, ch, cl, cc = st.get("es_opens"), st.get("es_highs"), st.get("es_lows"), st.get("es_closes")
+                if co and ch and cl and cc and len(cc) >= 2:
+                    live_o = co
+                    live_h = ch[:-1] + [max(ch[-1], price)]
+                    live_l = cl[:-1] + [min(cl[-1], price)]
+                    live_c = cc[:-1] + [price]
+                    if cfg.get("es_auto_sensitivity", True):
+                        sensitivity = compute_es_auto_sensitivity(live_c, cfg.get("es_vol_period", 10), cfg.get("es_vol_ma_len", 55))
+                    else:
+                        sensitivity = cfg.get("es_sensitivity", 3.0)
+                    st_line, _ = compute_elte_supertrend(live_o, live_h, live_l, live_c, sensitivity, cfg["es_atr_period"])
+                    buy_now = live_c[-2] <= st_line[-2] and live_c[-1] > st_line[-1]
+                    sell_now = live_c[-2] >= st_line[-2] and live_c[-1] < st_line[-1]
+                    if cfg.get("es_invert_direction", False):
+                        buy_now, sell_now = sell_now, buy_now
+                    risk_atr_series = compute_atr(live_h, live_l, live_c, cfg.get("es_risk_atr_period", 14))
+                    if exit_trigger == "tick":
+                        await check_es_exit(symbol, buy_now, sell_now, price)
+                    if entry_trigger == "tick":
+                        await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1])
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] ELTE Smart Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await check_es_sl_tp(symbol, price)
         return
 
     if st["position"] is None:
@@ -2296,6 +2654,113 @@ def _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup):
     return trades
 
 
+def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
+    """Kern-Simulation fuer ELTE Smart. Wie _simulate_halftrend_trades, aber mit einem
+    zusaetzlichen Schritt, den HalfTrend nicht hat: SL springt nach TP2 nochmal weiter auf den
+    TP1-Preis (statt auf Break-Even stehen zu bleiben) - ab TP2 ist also immer schon ein
+    Teilgewinn abgesichert."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    risk_mult = cfg.get("es_risk_mult", 2.2)
+    tp1_frac = cfg.get("es_tp1_close_pct", 50) / 100
+    tp2_frac = cfg.get("es_tp2_close_pct", 50) / 100
+    tp1_rr = cfg.get("es_tp1_rr", 1.0)
+    tp2_rr = cfg.get("es_tp2_rr", 2.0)
+    tp3_rr = cfg.get("es_tp3_rr", 3.0)
+    sl_cooldown_ms = cfg.get("es_sl_cooldown_seconds", 30) * 1000
+    invert = cfg.get("es_invert_direction", False)
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position.get("sl_price")
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            if hit_sl:
+                reason = "TP1-LOCK" if position["tp2_done"] else ("BREAKEVEN" if position["tp1_done"] else "SL")
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif not position["tp1_done"] and position.get("tp1_price") is not None:
+                tp1_price = position["tp1_price"]
+                if (pdir == "long" and h[i] >= tp1_price) or (pdir == "short" and l[i] <= tp1_price):
+                    close_size = position["size"] * tp1_frac
+                    _bt_close_trade(trades, pdir, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                    position["size"] -= close_size
+                    position["tp1_done"] = True
+                    position["sl_price"] = entry  # Break-Even
+            elif position["tp1_done"] and not position["tp2_done"] and position.get("tp2_price") is not None:
+                tp2_price = position["tp2_price"]
+                if (pdir == "long" and h[i] >= tp2_price) or (pdir == "short" and l[i] <= tp2_price):
+                    close_size = position["size"] * tp2_frac
+                    _bt_close_trade(trades, pdir, entry, tp2_price, close_size, i, position["entry_i"], "TP2", ts=ts)
+                    position["size"] -= close_size
+                    position["tp2_done"] = True
+                    position["sl_price"] = position["tp1_price"]  # SL zieht weiter auf TP1
+            elif position["tp1_done"] and position["tp2_done"] and position.get("tp3_price") is not None:
+                tp3_price = position["tp3_price"]
+                if (pdir == "long" and h[i] >= tp3_price) or (pdir == "short" and l[i] <= tp3_price):
+                    _bt_close_trade(trades, pdir, entry, tp3_price, position["size"], i, position["entry_i"], "TP3", ts=ts)
+                    position = None
+
+        buy_signal, sell_signal = buy[i], sell[i]
+        if invert:
+            buy_signal, sell_signal = sell_signal, buy_signal
+
+        if position is not None:
+            if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ES-FLIP-EXIT", ts=ts)
+                position = None
+
+        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and (buy_signal or sell_signal):
+            direction = "long" if buy_signal else "short"
+            size = (margin * leverage) / price
+            dist = risk_atr[i] * risk_mult
+            if direction == "long":
+                sl_price = price - dist
+                tp1_price, tp2_price, tp3_price = price + dist * tp1_rr, price + dist * tp2_rr, price + dist * tp3_rr
+            else:
+                sl_price = price + dist
+                tp1_price, tp2_price, tp3_price = price - dist * tp1_rr, price - dist * tp2_rr, price - dist * tp3_rr
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
+                        "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price, "tp3_price": tp3_price,
+                        "tp1_done": False, "tp2_done": False}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_elte_smart(candles, cfg):
+    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
+    atr_period = cfg["es_atr_period"]
+    risk_atr_period = cfg.get("es_risk_atr_period", 14)
+    vol_period = cfg.get("es_vol_period", 10)
+    vol_ma_len = cfg.get("es_vol_ma_len", 55)
+    if cfg.get("es_auto_sensitivity", True):
+        sensitivity = compute_es_auto_sensitivity(c, vol_period, vol_ma_len)
+    else:
+        sensitivity = cfg.get("es_sensitivity", 3.0)
+    st_line, _ = compute_elte_supertrend(o, h, l, c, sensitivity, atr_period)
+    n = len(c)
+    buy = [False] * n
+    sell = [False] * n
+    for i in range(1, n):
+        buy[i] = c[i - 1] <= st_line[i - 1] and c[i] > st_line[i]
+        sell[i] = c[i - 1] >= st_line[i - 1] and c[i] < st_line[i]
+    risk_atr = compute_atr(h, l, c, risk_atr_period)
+    warmup = max(atr_period, risk_atr_period, vol_ma_len + vol_period) + 5
+    return _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup)
+
+
 def backtest_halftrend(candles, cfg):
     """Backtest laeuft immer 'kerzenbasiert'. Intrabar-Pruefung fuer SL/TP1/TP2/TP3 wie bei den
     anderen Strategien - hier sind die Abstaende ATR2-basiert (Channel-Deviation bzw. Base-Risk-
@@ -2373,13 +2838,20 @@ def _simulate_diamond_trades(candles, cfg, buy, sell, smart_buy, smart_sell, atr
 
 
 def backtest_diamond_algo(candles, cfg):
-    h, l, c = candles[2], candles[3], candles[4]
+    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
     atr_period = cfg["da_atr_period"]
     risk_atr_period = cfg.get("da_risk_atr_period", 14)
     sma_period = cfg["da_sma_period"]
     ema_trend_period = cfg["da_ema_trend_period"]
-    buy, sell, smart_buy, smart_sell = compute_diamond_signal(h, l, c, atr_period, cfg["da_sensitivity"], sma_period, ema_trend_period)
-    atr_risk = compute_atr(h, l, c, risk_atr_period)
+    if cfg.get("da_use_heikin_ashi", False):
+        # Signal UND Risiko-ATR rechnen auf Heikin-Ashi-Kerzen, SL/TP-Ausloesung im Backtest
+        # bleibt trotzdem an den ECHTEN Kerzen (candles) haengen, da im Live-Handel auch der
+        # echte Marktpreis ausgeloest wird, nicht der geglaettete HA-Wert.
+        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
+    else:
+        sig_h, sig_l, sig_c = h, l, c
+    buy, sell, smart_buy, smart_sell = compute_diamond_signal(sig_h, sig_l, sig_c, atr_period, cfg["da_sensitivity"], sma_period, ema_trend_period)
+    atr_risk = compute_atr(sig_h, sig_l, sig_c, risk_atr_period)
     warmup = max(atr_period, risk_atr_period, sma_period, ema_trend_period) + 5
     return _simulate_diamond_trades(candles, cfg, buy, sell, smart_buy, smart_sell, atr_risk, warmup)
 
@@ -2587,17 +3059,21 @@ async def run_da_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, 
     if total_combos > DA_SWEEP_MAX_COMBOS:
         return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {DA_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
 
-    h, l, c = candles[2], candles[3], candles[4]
+    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
     sma_period = cfg["da_sma_period"]
     ema_trend_period = cfg["da_ema_trend_period"]
     risk_atr_period = cfg.get("da_risk_atr_period", 14)
-    atr_risk = compute_atr(h, l, c, risk_atr_period)
+    if cfg.get("da_use_heikin_ashi", False):
+        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
+    else:
+        sig_h, sig_l, sig_c = h, l, c
+    atr_risk = compute_atr(sig_h, sig_l, sig_c, risk_atr_period)
     warmup = max(max(atr_periods), risk_atr_period, sma_period, ema_trend_period) + 5
 
     results = []
     for atr_p in atr_periods:
         for sens in sensitivities:
-            buy, sell, smart_buy, smart_sell = compute_diamond_signal(h, l, c, atr_p, sens, sma_period, ema_trend_period)
+            buy, sell, smart_buy, smart_sell = compute_diamond_signal(sig_h, sig_l, sig_c, atr_p, sens, sma_period, ema_trend_period)
             cfg_copy = dict(cfg)
             cfg_copy["da_atr_period"] = atr_p
             cfg_copy["da_sensitivity"] = sens
@@ -2688,22 +3164,24 @@ BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000,
     "halftrend": 100_000,
     "diamond_algo": 100_000,
+    "elte_smart": 100_000,
 }
 
 BACKTEST_FUNCS = {
     "fib_reversal": backtest_fib_reversal,
     "halftrend": backtest_halftrend,
     "diamond_algo": backtest_diamond_algo,
+    "elte_smart": backtest_elte_smart,
 }
 
 
 async def run_backtest(symbol, entry_mode, cfg, days):
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution"}[entry_mode]
+    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -

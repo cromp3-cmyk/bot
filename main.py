@@ -18,7 +18,7 @@ from bot_core import (
 from strategies import (
     trading_loop, fib_reversal_poll_loop, binance_1s_poll_loop,
     ht_poll_loop, oms_rsi_poll_loop, scalp_board_poll_loop, quad_stoch_poll_loop,
-    da_poll_loop,
+    da_poll_loop, es_poll_loop,
 )
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
@@ -91,6 +91,7 @@ async def main():
         *[scalp_board_poll_loop(s) for s in SYMBOLS],
         *[quad_stoch_poll_loop(s) for s in SYMBOLS],
         *[da_poll_loop(s) for s in SYMBOLS],
+        *[es_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),

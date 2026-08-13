@@ -300,6 +300,27 @@ def default_config():
         "da_risk_mult": float(os.getenv("DA_RISK_MULT", "1.0")),
         "da_tp_rr": float(os.getenv("DA_TP_RR", "2.0")),
         "da_sl_cooldown_seconds": float(os.getenv("DA_SL_COOLDOWN_SECONDS", "30")),
+        "da_use_heikin_ashi": os.getenv("DA_USE_HEIKIN_ASHI", "false").lower() == "true",
+        # ELTE Smart (portiert aus dem gleichnamigen Pine-v5-Indikator, nur "Normal"-Modus):
+        # SuperTrend(ohlc4) mit automatisch aus der Marktvolatilitaet abgeleiteter Sensitivity.
+        # TP1(50%)->Break-Even, TP2(50% vom Rest=25% gesamt)->SL auf TP1, TP3(Rest):
+        "es_resolution": os.getenv("ES_RESOLUTION", "5m"),
+        "es_atr_period": int(os.getenv("ES_ATR_PERIOD", "10")),
+        "es_auto_sensitivity": os.getenv("ES_AUTO_SENSITIVITY", "true").lower() == "true",
+        "es_sensitivity": float(os.getenv("ES_SENSITIVITY", "3.0")),
+        "es_vol_period": int(os.getenv("ES_VOL_PERIOD", "10")),
+        "es_vol_ma_len": int(os.getenv("ES_VOL_MA_LEN", "55")),
+        "es_entry_trigger": os.getenv("ES_ENTRY_TRIGGER", "candle_close"),
+        "es_exit_trigger": os.getenv("ES_EXIT_TRIGGER", "candle_close"),
+        "es_invert_direction": os.getenv("ES_INVERT_DIRECTION", "false").lower() == "true",
+        "es_risk_atr_period": int(os.getenv("ES_RISK_ATR_PERIOD", "14")),
+        "es_risk_mult": float(os.getenv("ES_RISK_MULT", "2.2")),
+        "es_tp1_close_pct": float(os.getenv("ES_TP1_CLOSE_PCT", "50")),
+        "es_tp2_close_pct": float(os.getenv("ES_TP2_CLOSE_PCT", "50")),
+        "es_tp1_rr": float(os.getenv("ES_TP1_RR", "1.0")),
+        "es_tp2_rr": float(os.getenv("ES_TP2_RR", "2.0")),
+        "es_tp3_rr": float(os.getenv("ES_TP3_RR", "3.0")),
+        "es_sl_cooldown_seconds": float(os.getenv("ES_SL_COOLDOWN_SECONDS", "30")),
     }
 
 
@@ -324,8 +345,12 @@ def default_state():
         "oms_liq_buffer": [], "oms_liq_ratio": None, "oms_liq_count": 0, "oms_liq_ok": None,
         "scalp_board": {},
         "quad_stoch_history": [],
-        "da_highs": [], "da_lows": [], "da_closes": [], "da_direction": None,
+        "da_opens": [], "da_highs": [], "da_lows": [], "da_closes": [], "da_direction": None,
         "da_atr_risk_last": None, "da_sl_price": None, "da_tp_price": None, "da_sl_cooldown_until": 0.0,
+        "es_opens": [], "es_highs": [], "es_lows": [], "es_closes": [], "es_direction": None,
+        "es_sensitivity_last": None, "es_risk_atr_last": None, "es_sl_cooldown_until": 0.0,
+        "es_sl_price": None, "es_tp1_price": None, "es_tp2_price": None, "es_tp3_price": None,
+        "es_tp1_done": False, "es_tp2_done": False,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -832,6 +857,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
       <option value="halftrend">HalfTrend (Swing-Hoch/-Tief-Trendwechsel, optional ATR2-basiertes SL+TP, invertierbar)</option>
       <option value="diamond_algo">Diamond Algo (SuperTrend+SMA-Signal, optional 200-EMA-Smart-Filter, ATR-basiertes SL+TP)</option>
+      <option value="elte_smart">ELTE Smart (SuperTrend auf ohlc4 mit Auto-Sensitivity, TP1/TP2/TP3 gestufte Teilverkäufe mit nachziehendem SL)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1126,6 +1152,67 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="diamond_algo"><label>Risiko-Multiplikator (Original: "Risk %", Default 1)</label><input type="number" step="0.1" id="da_risk_mult"></div>
   <div data-mode="diamond_algo"><label>TP R:R-Multiplikator (Original: TP1=1, TP2=2, TP3=3)</label><input type="number" step="0.5" id="da_tp_rr"></div>
   <div data-mode="diamond_algo"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="da_sl_cooldown_seconds"></div>
+  <div data-mode="diamond_algo"><label>Kerzenart für die Signalberechnung</label>
+    <select class="cfg" id="da_use_heikin_ashi">
+      <option value="false">Normale Kerzen</option>
+      <option value="true">Heikin Ashi (wie bei TradingView Chart-Typ-Umschaltung - glättet den Trend, SL/TP lösen trotzdem am echten Kurs aus)</option>
+    </select>
+  </div>
+
+  <div data-mode="elte_smart" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📡 <b>Signal</b>: SuperTrend auf ohlc4 kreuzt den Kurs - reiner Crossover, kein Zusatzfilter (Original "Normal"-Modus).
+    🎯 <b>Sensitivity</b> standardmäßig automatisch aus der Marktvolatilität abgeleitet (2.85-4.0).
+    💰 <b>TP1 50% → Break-Even, TP2 50% vom Rest (=25% gesamt) → SL auf TP1, TP3 Rest.</b>
+  </div>
+  <div data-mode="elte_smart"><label>Zeitrahmen</label>
+    <select class="cfg" id="es_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="elte_smart"><label>ATR-Periode (SuperTrend-Kern)</label><input type="number" step="1" id="es_atr_period"></div>
+  <div data-mode="elte_smart"><label>Sensitivity-Modus</label>
+    <select class="cfg" id="es_auto_sensitivity">
+      <option value="true">Automatisch (aus Marktvolatilität abgeleitet)</option>
+      <option value="false">Manuell (fester Wert)</option>
+    </select>
+  </div>
+  <div data-mode="elte_smart"><label>Sensitivity (nur bei manuellem Modus)</label><input type="number" step="0.1" id="es_sensitivity"></div>
+  <div data-mode="elte_smart"><label>Volatilitäts-Periode (EWMA, für Auto-Sensitivity)</label><input type="number" step="1" id="es_vol_period"></div>
+  <div data-mode="elte_smart"><label>Volatilitäts-Durchschnitt-Periode (für Auto-Sensitivity)</label><input type="number" step="1" id="es_vol_ma_len"></div>
+  <div data-mode="elte_smart"><label>Einstieg auslösen</label>
+    <select class="cfg" id="es_entry_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="elte_smart"><label>Ausstieg auslösen</label>
+    <select class="cfg" id="es_exit_trigger">
+      <option value="candle_close">Bei Kerzenschluss</option>
+      <option value="tick">Sofort bei jedem Preis-Tick</option>
+    </select>
+  </div>
+  <div data-mode="elte_smart"><label>Richtung invertieren (Kontra-Modus)</label>
+    <select class="cfg" id="es_invert_direction">
+      <option value="false">Aus (normal)</option>
+      <option value="true">An (invertiert)</option>
+    </select>
+  </div>
+  <div data-mode="elte_smart"><label>Risiko-ATR-Periode (Original-Default 14)</label><input type="number" step="1" id="es_risk_atr_period"></div>
+  <div data-mode="elte_smart"><label>Risiko-Multiplikator (Original-Default 2.2)</label><input type="number" step="0.1" id="es_risk_mult"></div>
+  <div data-mode="elte_smart"><label>TP1 Teilverkauf (% der Gesamtposition)</label><input type="number" step="1" id="es_tp1_close_pct"></div>
+  <div data-mode="elte_smart"><label>TP2 Teilverkauf (% der VERBLEIBENDEN Position)</label><input type="number" step="1" id="es_tp2_close_pct"></div>
+  <div data-mode="elte_smart"><label>TP1 R:R-Multiplikator</label><input type="number" step="0.5" id="es_tp1_rr"></div>
+  <div data-mode="elte_smart"><label>TP2 R:R-Multiplikator</label><input type="number" step="0.5" id="es_tp2_rr"></div>
+  <div data-mode="elte_smart"><label>TP3 R:R-Multiplikator</label><input type="number" step="0.5" id="es_tp3_rr"></div>
+  <div data-mode="elte_smart"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="es_sl_cooldown_seconds"></div>
 
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
@@ -2116,6 +2203,8 @@ async function refresh() {
     <div class="card"><div class="label">HalfTrend TP1 / TP2 / TP3</div><div class="value">${data.ht_tp1_price!=null?data.ht_tp1_price.toFixed(4):'-'}${data.ht_tp1_done?'✓':''} / ${data.ht_tp2_price!=null?data.ht_tp2_price.toFixed(4):'-'}${data.ht_tp2_done?'✓':''} / ${data.ht_tp3_price!=null?data.ht_tp3_price.toFixed(4):'-'}</div></div>
     <div class="card"><div class="label">Diamond Algo (${data.config.entry_mode==='diamond_algo'?'aktiv':'inaktiv'})</div><div class="value ${data.da_direction===1?'green':data.da_direction===-1?'red':''}">${data.da_direction===1?'LONG-Signal':data.da_direction===-1?'SHORT-Signal':'-'}</div></div>
     <div class="card"><div class="label">Diamond Algo SL / TP</div><div class="value">${data.da_sl_price!=null?data.da_sl_price.toFixed(4):'-'} / ${data.da_tp_price!=null?data.da_tp_price.toFixed(4):'-'}</div></div>
+    <div class="card"><div class="label">ELTE Smart (${data.config.entry_mode==='elte_smart'?'aktiv':'inaktiv'})</div><div class="value ${data.es_direction===1?'green':data.es_direction===-1?'red':''}">${data.es_direction===1?'LONG-Signal':data.es_direction===-1?'SHORT-Signal':'-'} (Sens. ${data.es_sensitivity_last!=null?data.es_sensitivity_last.toFixed(2):'-'})</div></div>
+    <div class="card"><div class="label">ELTE Smart SL / TP1 / TP2 / TP3</div><div class="value">${data.es_sl_price!=null?data.es_sl_price.toFixed(4):'-'} / ${data.es_tp1_price!=null?data.es_tp1_price.toFixed(4):'-'}${data.es_tp1_done?'✓':''} / ${data.es_tp2_price!=null?data.es_tp2_price.toFixed(4):'-'}${data.es_tp2_done?'✓':''} / ${data.es_tp3_price!=null?data.es_tp3_price.toFixed(4):'-'}</div></div>
     <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
     <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
     <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
@@ -2225,6 +2314,24 @@ async function refresh() {
     document.getElementById('da_risk_mult').value = data.config.da_risk_mult;
     document.getElementById('da_tp_rr').value = data.config.da_tp_rr;
     document.getElementById('da_sl_cooldown_seconds').value = data.config.da_sl_cooldown_seconds;
+    document.getElementById('da_use_heikin_ashi').value = String(data.config.da_use_heikin_ashi);
+    document.getElementById('es_resolution').value = data.config.es_resolution;
+    document.getElementById('es_atr_period').value = data.config.es_atr_period;
+    document.getElementById('es_auto_sensitivity').value = String(data.config.es_auto_sensitivity);
+    document.getElementById('es_sensitivity').value = data.config.es_sensitivity;
+    document.getElementById('es_vol_period').value = data.config.es_vol_period;
+    document.getElementById('es_vol_ma_len').value = data.config.es_vol_ma_len;
+    document.getElementById('es_entry_trigger').value = data.config.es_entry_trigger;
+    document.getElementById('es_exit_trigger').value = data.config.es_exit_trigger;
+    document.getElementById('es_invert_direction').value = String(data.config.es_invert_direction);
+    document.getElementById('es_risk_atr_period').value = data.config.es_risk_atr_period;
+    document.getElementById('es_risk_mult').value = data.config.es_risk_mult;
+    document.getElementById('es_tp1_close_pct').value = data.config.es_tp1_close_pct;
+    document.getElementById('es_tp2_close_pct').value = data.config.es_tp2_close_pct;
+    document.getElementById('es_tp1_rr').value = data.config.es_tp1_rr;
+    document.getElementById('es_tp2_rr').value = data.config.es_tp2_rr;
+    document.getElementById('es_tp3_rr').value = data.config.es_tp3_rr;
+    document.getElementById('es_sl_cooldown_seconds').value = data.config.es_sl_cooldown_seconds;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -2480,6 +2587,24 @@ function buildConfigPayload() {
     da_risk_mult: parseFloat(document.getElementById('da_risk_mult').value),
     da_tp_rr: parseFloat(document.getElementById('da_tp_rr').value),
     da_sl_cooldown_seconds: parseFloat(document.getElementById('da_sl_cooldown_seconds').value),
+    da_use_heikin_ashi: document.getElementById('da_use_heikin_ashi').value === 'true',
+    es_resolution: document.getElementById('es_resolution').value,
+    es_atr_period: parseInt(document.getElementById('es_atr_period').value),
+    es_auto_sensitivity: document.getElementById('es_auto_sensitivity').value === 'true',
+    es_sensitivity: parseFloat(document.getElementById('es_sensitivity').value),
+    es_vol_period: parseInt(document.getElementById('es_vol_period').value),
+    es_vol_ma_len: parseInt(document.getElementById('es_vol_ma_len').value),
+    es_entry_trigger: document.getElementById('es_entry_trigger').value,
+    es_exit_trigger: document.getElementById('es_exit_trigger').value,
+    es_invert_direction: document.getElementById('es_invert_direction').value === 'true',
+    es_risk_atr_period: parseInt(document.getElementById('es_risk_atr_period').value),
+    es_risk_mult: parseFloat(document.getElementById('es_risk_mult').value),
+    es_tp1_close_pct: parseFloat(document.getElementById('es_tp1_close_pct').value),
+    es_tp2_close_pct: parseFloat(document.getElementById('es_tp2_close_pct').value),
+    es_tp1_rr: parseFloat(document.getElementById('es_tp1_rr').value),
+    es_tp2_rr: parseFloat(document.getElementById('es_tp2_rr').value),
+    es_tp3_rr: parseFloat(document.getElementById('es_tp3_rr').value),
+    es_sl_cooldown_seconds: parseFloat(document.getElementById('es_sl_cooldown_seconds').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -2513,7 +2638,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','da_atr_period','da_sensitivity','da_sma_period','da_ema_trend_period','da_invert_direction','da_risk_atr_period','da_risk_mult','da_tp_rr','da_sl_cooldown_seconds','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','da_atr_period','da_sensitivity','da_sma_period','da_ema_trend_period','da_invert_direction','da_risk_atr_period','da_risk_mult','da_tp_rr','da_sl_cooldown_seconds','es_atr_period','es_sensitivity','es_vol_period','es_vol_ma_len','es_invert_direction','es_risk_atr_period','es_risk_mult','es_tp1_close_pct','es_tp2_close_pct','es_tp1_rr','es_tp2_rr','es_tp3_rr','es_sl_cooldown_seconds','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2586,6 +2711,10 @@ async def handle_status(request):
         "ht_tp1_price": st.get("ht_tp1_price"), "ht_tp2_price": st.get("ht_tp2_price"), "ht_tp3_price": st.get("ht_tp3_price"),
         "ht_tp1_done": st.get("ht_tp1_done"), "ht_tp2_done": st.get("ht_tp2_done"),
         "da_direction": st.get("da_direction"), "da_sl_price": st.get("da_sl_price"), "da_tp_price": st.get("da_tp_price"),
+        "es_direction": st.get("es_direction"), "es_sensitivity_last": st.get("es_sensitivity_last"),
+        "es_sl_price": st.get("es_sl_price"), "es_tp1_price": st.get("es_tp1_price"),
+        "es_tp2_price": st.get("es_tp2_price"), "es_tp3_price": st.get("es_tp3_price"),
+        "es_tp1_done": st.get("es_tp1_done"), "es_tp2_done": st.get("es_tp2_done"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -2629,6 +2758,11 @@ async def handle_config_update(request):
                 "da_resolution", "da_atr_period", "da_sensitivity", "da_sma_period", "da_ema_trend_period",
                 "da_signal_mode", "da_entry_trigger", "da_exit_trigger", "da_invert_direction",
                 "da_sl_enabled", "da_tp_enabled", "da_risk_atr_period", "da_risk_mult", "da_tp_rr", "da_sl_cooldown_seconds",
+                "da_use_heikin_ashi",
+                "es_resolution", "es_atr_period", "es_auto_sensitivity", "es_sensitivity",
+                "es_vol_period", "es_vol_ma_len", "es_entry_trigger", "es_exit_trigger", "es_invert_direction",
+                "es_risk_atr_period", "es_risk_mult", "es_tp1_close_pct", "es_tp2_close_pct",
+                "es_tp1_rr", "es_tp2_rr", "es_tp3_rr", "es_sl_cooldown_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
