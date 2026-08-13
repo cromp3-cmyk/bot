@@ -1274,19 +1274,25 @@ async def check_es_entry(symbol, buy_signal, sell_signal, price, risk_atr_now):
 
 async def check_es_exit(symbol, buy_signal, sell_signal, price):
     """Ausstieg immer beim Gegen-Signal (schliesst den kompletten Rest, egal welche TP-Stufe
-    gerade aktiv ist) - wie bei allen anderen Flip-Strategien."""
+    gerade aktiv ist). Gibt True zurueck, wenn gerade ein Flip-Exit passiert ist - der Aufrufer
+    nutzt das, um (falls es_reenter_on_flip aus ist, Standard) den Einstieg fuer DIESEN Bar zu
+    ueberspringen, auch wenn dasselbe Signal technisch auch eine neue Position eroeffnen wuerde.
+    So wird auf ein wirklich NEUES Signal gewartet, statt sofort in die Gegenrichtung zu drehen."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or st["position"] is None or price is None:
-        return
+        return False
     if st["position"] == "long" and sell_signal:
         debug_log(f"🚪 [{symbol}] ELTE Smart Exit: LONG @ {price} (Sell-Signal)")
         await execute_exit(symbol, price, "ES-FLIP-EXIT")
         _es_reset_state(st)
+        return True
     elif st["position"] == "short" and buy_signal:
         debug_log(f"🚪 [{symbol}] ELTE Smart Exit: SHORT @ {price} (Buy-Signal)")
         await execute_exit(symbol, price, "ES-FLIP-EXIT")
         _es_reset_state(st)
+        return True
+    return False
 
 
 async def es_poll_loop(symbol):
@@ -1363,10 +1369,12 @@ async def es_poll_loop(symbol):
 
                     if is_new_candle:
                         last_processed_ts = signal_key
+                        just_flipped = False
                         if cfg.get("es_exit_trigger", "candle_close") == "candle_close":
-                            await check_es_exit(symbol, buy_now, sell_now, price)
+                            just_flipped = await check_es_exit(symbol, buy_now, sell_now, price)
                         if cfg.get("es_entry_trigger", "candle_close") == "candle_close":
-                            await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1])
+                            if not just_flipped or cfg.get("es_reenter_on_flip", False):
+                                await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1])
 
                     await check_es_sl_tp(symbol, price)
                 elif due_heartbeat:
@@ -2449,10 +2457,12 @@ async def on_price_update(symbol, price):
                     if cfg.get("es_invert_direction", False):
                         buy_now, sell_now = sell_now, buy_now
                     risk_atr_series = compute_atr(live_h, live_l, live_c, cfg.get("es_risk_atr_period", 14))
+                    just_flipped = False
                     if exit_trigger == "tick":
-                        await check_es_exit(symbol, buy_now, sell_now, price)
+                        just_flipped = await check_es_exit(symbol, buy_now, sell_now, price)
                     if entry_trigger == "tick":
-                        await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1])
+                        if not just_flipped or cfg.get("es_reenter_on_flip", False):
+                            await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1])
             except Exception as e:
                 debug_log(f"⚠️ [{symbol}] ELTE Smart Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
@@ -2714,13 +2724,16 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
         if invert:
             buy_signal, sell_signal = sell_signal, buy_signal
 
+        just_flipped = False
         if position is not None:
             if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ES-FLIP-EXIT", ts=ts)
                 position = None
+                just_flipped = True
 
         in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-        if position is None and not in_sl_cooldown and (buy_signal or sell_signal):
+        allow_entry = not just_flipped or cfg.get("es_reenter_on_flip", False)
+        if position is None and not in_sl_cooldown and allow_entry and (buy_signal or sell_signal):
             direction = "long" if buy_signal else "short"
             size = (margin * leverage) / price
             dist = risk_atr[i] * risk_mult
@@ -2935,26 +2948,53 @@ def backtest_fib_reversal(candles, cfg):
 
 
 def summarize_backtest_trades(trades):
+    """WICHTIG: 'trades' kann mehrere Zeilen fuer EINE echte Position enthalten (TP1/TP2/TP3
+    als separate Teilverkaeufe derselben Position - siehe _bt_close_trade). Trefferquote und
+    Ø-Gewinn/-Verlust werden deshalb auf POSITIONS-Ebene berechnet (alle Zeilen mit demselben
+    Einstiegszeitpunkt werden zu einem Netto-Ergebnis zusammengefasst) - sonst wuerde eine
+    Position, die TP1+TP2+TP3 durchlaeuft, dreifach als 'Gewinn' gezaehlt, eine SL-Position aber
+    nur einfach als 'Verlust' - das verzerrt die Trefferquote massiv nach oben (in der Praxis
+    beobachtet: 70% pro Teilverkauf-Zeile vs. 52% pro echter Position auf denselben Daten).
+    Max-Drawdown bleibt bewusst auf Zeilenebene (echter Zeitreihen-Wert, jeder Teilverkauf
+    veraendert das Konto tatsaechlich genau dann, wenn er passiert)."""
     n = len(trades)
     if n == 0:
-        return {"trades": 0, "win_rate_pct": 0, "total_pnl_usd": 0, "avg_win_usd": 0, "avg_loss_usd": 0,
+        return {"trades": 0, "fills": 0, "win_rate_pct": 0, "total_pnl_usd": 0, "avg_win_usd": 0, "avg_loss_usd": 0,
                 "max_drawdown_usd": 0, "avg_bars_held": 0}
-    wins = [t for t in trades if t["pnl"] > 0]
-    losses = [t for t in trades if t["pnl"] <= 0]
+
     total_pnl = sum(t["pnl"] for t in trades)
     equity = peak = max_dd = 0.0
     for t in trades:
         equity += t["pnl"]
         peak = max(peak, equity)
         max_dd = min(max_dd, equity - peak)
+
+    # Teilverkaeufe zu echten Positionen gruppieren (gleicher Einstiegszeitpunkt = dieselbe
+    # Position). Fallback auf einzeln zaehlen, falls mal kein entry_ts vorhanden sein sollte.
+    positions = {}
+    order = []
+    for t in trades:
+        key = t.get("entry_ts", id(t))
+        if key not in positions:
+            positions[key] = {"pnl": 0.0, "last_exit_i": None, "entry_i": None, "bars_held": 0}
+            order.append(key)
+        positions[key]["pnl"] += t["pnl"]
+        positions[key]["bars_held"] = max(positions[key]["bars_held"], t["bars_held"])
+
+    pos_list = [positions[k] for k in order]
+    wins = [p for p in pos_list if p["pnl"] > 0]
+    losses = [p for p in pos_list if p["pnl"] <= 0]
+    n_pos = len(pos_list)
+
     return {
-        "trades": n,
-        "win_rate_pct": round(len(wins) / n * 100, 1),
+        "trades": n_pos,
+        "fills": n,
+        "win_rate_pct": round(len(wins) / n_pos * 100, 1),
         "total_pnl_usd": round(total_pnl, 2),
-        "avg_win_usd": round(sum(t["pnl"] for t in wins) / len(wins), 2) if wins else 0,
-        "avg_loss_usd": round(sum(t["pnl"] for t in losses) / len(losses), 2) if losses else 0,
+        "avg_win_usd": round(sum(p["pnl"] for p in wins) / len(wins), 2) if wins else 0,
+        "avg_loss_usd": round(sum(p["pnl"] for p in losses) / len(losses), 2) if losses else 0,
         "max_drawdown_usd": round(max_dd, 2),
-        "avg_bars_held": round(sum(t["bars_held"] for t in trades) / n, 1),
+        "avg_bars_held": round(sum(p["bars_held"] for p in pos_list) / n_pos, 1),
     }
 
 

@@ -321,6 +321,7 @@ def default_config():
         "es_tp2_rr": float(os.getenv("ES_TP2_RR", "2.0")),
         "es_tp3_rr": float(os.getenv("ES_TP3_RR", "3.0")),
         "es_sl_cooldown_seconds": float(os.getenv("ES_SL_COOLDOWN_SECONDS", "30")),
+        "es_reenter_on_flip": os.getenv("ES_REENTER_ON_FLIP", "false").lower() == "true",
     }
 
 
@@ -1213,6 +1214,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="elte_smart"><label>TP2 R:R-Multiplikator</label><input type="number" step="0.5" id="es_tp2_rr"></div>
   <div data-mode="elte_smart"><label>TP3 R:R-Multiplikator</label><input type="number" step="0.5" id="es_tp3_rr"></div>
   <div data-mode="elte_smart"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="es_sl_cooldown_seconds"></div>
+  <div data-mode="elte_smart"><label>Bei Gegen-Signal sofort umdrehen (Reverse)</label>
+    <select class="cfg" id="es_reenter_on_flip">
+      <option value="false">Aus (Standard) - Gegen-Signal schließt nur, neue Position erst bei einem wirklich neuen Signal</option>
+      <option value="true">An - dasselbe Gegen-Signal schließt UND eröffnet sofort die Gegenposition</option>
+    </select>
+  </div>
 
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
@@ -1737,14 +1744,27 @@ window.btTradesData = [];
 // Stabile Gruppen-Farbe je Trade (entry_ts) - haengt NICHT von der Zeilen-Reihenfolge ab,
 // bleibt also auch nach Sortieren nach einer anderen Spalte konsistent zugeordnet
 const BT_GROUP_COLORS = ['#60a5fa', '#f472b6', '#34d399', '#fbbf24', '#a78bfa', '#fb923c', '#22d3ee', '#f87171'];
-function btGroupColor(entryTs) {
-  const str = String(entryTs);
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
-  return BT_GROUP_COLORS[hash % BT_GROUP_COLORS.length];
+// Gruppen-Farbe nach ERSCHEINUNGSREIHENFOLGE in der aktuell angezeigten Sortierung vergeben,
+// nicht per Hash - Hash-Kollisionen liessen bei vielen Trades zu haeufig benachbarte, aber
+// UNTERSCHIEDLICHE Positionen dieselbe Farbe bekommen (sah aus wie ein einziger großer Trade).
+// Mit Reihenfolge-Vergabe bekommt garantiert jede neue Gruppe eine andere Farbe als die direkt
+// vorherige, unabhaengig davon, wonach gerade sortiert ist.
+let btColorMap = {};
+function computeBtColorMap(rows) {
+  const map = {};
+  let idx = 0;
+  for (const r of rows) {
+    const key = String(r.entry_ts);
+    if (!(key in map)) {
+      map[key] = BT_GROUP_COLORS[idx % BT_GROUP_COLORS.length];
+      idx++;
+    }
+  }
+  return map;
 }
-const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTradesData, (r, i) => {
-  const groupColor = btGroupColor(r.entry_ts);
+const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTradesData, (r, i, allRows) => {
+  if (i === 0) btColorMap = computeBtColorMap(allRows);
+  const groupColor = btColorMap[String(r.entry_ts)];
   const pnlClass = r.pnl > 0 ? 'green' : r.pnl < 0 ? 'red' : '';
   return `
   <tr style="border-left: 4px solid ${groupColor};">
@@ -2347,6 +2367,7 @@ async function refresh() {
     document.getElementById('es_tp2_rr').value = data.config.es_tp2_rr;
     document.getElementById('es_tp3_rr').value = data.config.es_tp3_rr;
     document.getElementById('es_sl_cooldown_seconds').value = data.config.es_sl_cooldown_seconds;
+    document.getElementById('es_reenter_on_flip').value = String(data.config.es_reenter_on_flip);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -2620,6 +2641,7 @@ function buildConfigPayload() {
     es_tp2_rr: parseFloat(document.getElementById('es_tp2_rr').value),
     es_tp3_rr: parseFloat(document.getElementById('es_tp3_rr').value),
     es_sl_cooldown_seconds: parseFloat(document.getElementById('es_sl_cooldown_seconds').value),
+    es_reenter_on_flip: document.getElementById('es_reenter_on_flip').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -2777,7 +2799,7 @@ async def handle_config_update(request):
                 "es_resolution", "es_atr_period", "es_auto_sensitivity", "es_sensitivity",
                 "es_vol_period", "es_vol_ma_len", "es_entry_trigger", "es_exit_trigger", "es_invert_direction",
                 "es_risk_atr_period", "es_risk_mult", "es_tp1_close_pct", "es_tp2_close_pct",
-                "es_tp1_rr", "es_tp2_rr", "es_tp3_rr", "es_sl_cooldown_seconds",
+                "es_tp1_rr", "es_tp2_rr", "es_tp3_rr", "es_sl_cooldown_seconds", "es_reenter_on_flip",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
