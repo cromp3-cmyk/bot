@@ -1282,18 +1282,36 @@ async def check_es_entry(symbol, buy_signal, sell_signal, price, risk_atr_now):
     if st["position"] is None:
         return
     _es_reset_state(st)
+
+    sl_enabled = cfg.get("es_sl_enabled", True)
+    tp_enabled = cfg.get("es_tp_enabled", True)
+    if not sl_enabled and not tp_enabled:
+        return  # reines Flip-System - keine SL-/TP-Preise setzen, check_es_sl_tp hat dann nichts zu tun
+
     if risk_atr_now is not None:
-        dist = risk_atr_now * cfg.get("es_risk_mult", 2.2)
+        dist = risk_atr_now * cfg.get("es_risk_mult", 2.2)  # bleibt IMMER die Basis fuer TP1/TP2/TP3
+
+        dist_sl = dist
+        if sl_enabled and cfg.get("es_sl_mode", "atr") == "manual":
+            size = st.get("total_coin_size") or 0
+            manual_usd = cfg.get("es_sl_manual_usd", 5.0)
+            if size > 0:
+                dist_sl = manual_usd / size  # fester $-Verlust auf die GESAMTE Position umgerechnet in Preisabstand
+
         if direction == "long":
-            st["es_sl_price"] = price - dist
-            st["es_tp1_price"] = price + dist * cfg.get("es_tp1_rr", 1.0)
-            st["es_tp2_price"] = price + dist * cfg.get("es_tp2_rr", 2.0)
-            st["es_tp3_price"] = price + dist * cfg.get("es_tp3_rr", 3.0)
+            if sl_enabled:
+                st["es_sl_price"] = price - dist_sl
+            if tp_enabled:
+                st["es_tp1_price"] = price + dist * cfg.get("es_tp1_rr", 1.0)
+                st["es_tp2_price"] = price + dist * cfg.get("es_tp2_rr", 2.0)
+                st["es_tp3_price"] = price + dist * cfg.get("es_tp3_rr", 3.0)
         else:
-            st["es_sl_price"] = price + dist
-            st["es_tp1_price"] = price - dist * cfg.get("es_tp1_rr", 1.0)
-            st["es_tp2_price"] = price - dist * cfg.get("es_tp2_rr", 2.0)
-            st["es_tp3_price"] = price - dist * cfg.get("es_tp3_rr", 3.0)
+            if sl_enabled:
+                st["es_sl_price"] = price + dist_sl
+            if tp_enabled:
+                st["es_tp1_price"] = price - dist * cfg.get("es_tp1_rr", 1.0)
+                st["es_tp2_price"] = price - dist * cfg.get("es_tp2_rr", 2.0)
+                st["es_tp3_price"] = price - dist * cfg.get("es_tp3_rr", 3.0)
 
 
 async def check_es_exit(symbol, buy_signal, sell_signal, price):
@@ -2698,6 +2716,10 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     risk_mult = cfg.get("es_risk_mult", 2.2)
+    sl_enabled = cfg.get("es_sl_enabled", True)
+    tp_enabled = cfg.get("es_tp_enabled", True)
+    sl_mode = cfg.get("es_sl_mode", "atr")
+    sl_manual_usd = cfg.get("es_sl_manual_usd", 5.0)
     tp1_frac = cfg.get("es_tp1_close_pct", 50) / 100
     tp2_frac = cfg.get("es_tp2_close_pct", 50) / 100
     tp1_rr = cfg.get("es_tp1_rr", 1.0)
@@ -2760,13 +2782,22 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
         if position is None and not in_sl_cooldown and allow_entry and (buy_signal or sell_signal):
             direction = "long" if buy_signal else "short"
             size = (margin * leverage) / price
-            dist = risk_atr[i] * risk_mult
-            if direction == "long":
-                sl_price = price - dist
-                tp1_price, tp2_price, tp3_price = price + dist * tp1_rr, price + dist * tp2_rr, price + dist * tp3_rr
-            else:
-                sl_price = price + dist
-                tp1_price, tp2_price, tp3_price = price - dist * tp1_rr, price - dist * tp2_rr, price - dist * tp3_rr
+            sl_price = tp1_price = tp2_price = tp3_price = None
+            if sl_enabled or tp_enabled:
+                dist = risk_atr[i] * risk_mult  # bleibt IMMER die Basis fuer TP1/TP2/TP3
+                dist_sl = dist
+                if sl_enabled and sl_mode == "manual" and size > 0:
+                    dist_sl = sl_manual_usd / size
+                if direction == "long":
+                    if sl_enabled:
+                        sl_price = price - dist_sl
+                    if tp_enabled:
+                        tp1_price, tp2_price, tp3_price = price + dist * tp1_rr, price + dist * tp2_rr, price + dist * tp3_rr
+                else:
+                    if sl_enabled:
+                        sl_price = price + dist_sl
+                    if tp_enabled:
+                        tp1_price, tp2_price, tp3_price = price - dist * tp1_rr, price - dist * tp2_rr, price - dist * tp3_rr
             position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
                         "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price, "tp3_price": tp3_price,
                         "tp1_done": False, "tp2_done": False}
