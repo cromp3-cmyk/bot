@@ -1004,6 +1004,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="30s">30 Sekunden</option>
       <option value="45s">45 Sekunden</option>
       <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
     </select>
@@ -1053,6 +1054,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="1h">1 Stunde</option>
@@ -1108,6 +1110,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="1h">1 Stunde</option>
@@ -1177,6 +1180,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="1h">1 Stunde</option>
@@ -1484,6 +1488,7 @@ const OMS_WIDGET_DEFS = [
       <select id="quad-stoch-resolution-select" style="font-size:11px; padding:3px 8px; background:var(--panel); color:var(--text); border:1px solid var(--panel-border); border-radius:6px;">
         <option value="30s">30 Sekunden</option>
         <option value="1m">1 Minute</option>
+        <option value="2m">2 Minuten</option>
         <option value="5m">5 Minuten</option>
       </select>
     </div>

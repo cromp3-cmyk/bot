@@ -77,7 +77,7 @@ BINANCE_INTERVAL_MS = {
 }
 
 
-SYNTHETIC_RESOLUTIONS = {"10s": ("1s", 10), "15s": ("1s", 15), "30s": ("1s", 30), "45s": ("1s", 45)}  # Zeitrahmen, die Binance nicht nativ anbietet
+SYNTHETIC_RESOLUTIONS = {"10s": ("1s", 10), "15s": ("1s", 15), "30s": ("1s", 30), "45s": ("1s", 45), "2m": ("1m", 2)}  # Zeitrahmen, die Binance nicht nativ anbietet
 
 
 async def fetch_historical_candles_binance(symbol, resolution, days, max_candles, market_type="spot"):
@@ -152,7 +152,15 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     closes = [float(r[4]) for r in all_rows]
 
     if synth:
-        timestamps, opens, highs, lows, closes = resample_candles((timestamps, opens, highs, lows, closes), synth[1])
+        # Sekunden-Basis (10s/15s/30s/45s aus 1s-Kerzen) braucht die SEKUNDEN-Bucket-Funktion,
+        # nicht die Minuten-basierte resample_candles() - sonst entsteht derselbe Bug wie vorher
+        # bei get_seconds_candles() (30-Minuten- statt 30-Sekunden-Buckets, praktisch nie genug
+        # Kerzen pro Bucket). Minuten-Basis (z.B. 2m aus 1m-Kerzen) nutzt weiterhin die normale
+        # resample_candles(), da deren Minuten-Mathematik dafuer korrekt ist.
+        if base_resolution == "1s":
+            timestamps, opens, highs, lows, closes = _resample_seconds_candles((timestamps, opens, highs, lows, closes), synth[1])
+        else:
+            timestamps, opens, highs, lows, closes = resample_candles((timestamps, opens, highs, lows, closes), synth[1])
 
     if len(closes) > max_candles:
         timestamps = timestamps[-max_candles:]
@@ -348,6 +356,8 @@ async def fetch_candles_binance_multi(symbol, resolution, count_back=150, market
         data = await fetch_candles_binance(symbol, base_resolution, count_back=count_back * factor, market_type=market_type)
         if data is None:
             return None
+        if base_resolution == "1s":
+            return _resample_seconds_candles(data, factor)
         return resample_candles(data, factor)
     return await fetch_candles_binance(symbol, resolution, count_back=count_back, market_type=market_type)
 
