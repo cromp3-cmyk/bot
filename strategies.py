@@ -1146,7 +1146,8 @@ async def da_poll_loop(symbol):
                     sell_now = smart_sell[-1] if signal_mode == "smart_only" else sell[-1]
                     if invert:
                         buy_now, sell_now = sell_now, buy_now
-                    st["da_direction"] = (1 if buy[-1] else (-1 if sell[-1] else st.get("da_direction"))) * (-1 if invert else 1)
+                    raw_direction = 1 if buy[-1] else (-1 if sell[-1] else st.get("da_direction"))
+                    st["da_direction"] = raw_direction * (-1 if invert else 1) if raw_direction is not None else None
                     st["da_atr_risk_last"] = atr_risk_series[-1]
 
                     if due_heartbeat:
