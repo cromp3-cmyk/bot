@@ -26,15 +26,27 @@ BINANCE_SYMBOL_MAP = {
 }
 
 
-async def fetch_candles_binance(symbol, resolution, count_back=150):
+BINANCE_BASE_URLS = {
+    "spot": "https://api.binance.com/api/v3/klines",
+    "futures": "https://fapi.binance.com/fapi/v1/klines",  # USD-M Perpetual Futures - gleiche
+    # Symbolnamen wie Spot (z.B. "BTCUSDT"), aber eigener Preis (leicht abweichend von Spot,
+    # das ist die Quelle, die z.B. "BTCUSDT.P" auf TradingView zeigt)
+}
+
+
+async def fetch_candles_binance(symbol, resolution, count_back=150, market_type="spot"):
     """Alternative Kerzenquelle - Binance hat deutlich mehr Liquiditaet als Lighter,
     kann daher weniger anfaellig fuer kurze Preis-Spikes/Wicks sein, die auf einer
-    kleineren Perp-DEX Fehlsignale ausloesen wuerden."""
+    kleineren Perp-DEX Fehlsignale ausloesen wuerden. market_type waehlt zwischen Binance-Spot
+    (Standard) und Binance-USD-M-Futures (Perpetual) - falls man 1:1 mit einem TradingView-Chart
+    auf ".P"-Symbolen vergleichen will, braucht man 'futures', da Spot- und Futures-Kurs leicht
+    voneinander abweichen."""
     pair = BINANCE_SYMBOL_MAP.get(symbol)
     if not pair:
         return None
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
+        base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
+        url = f"{base_url}?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
@@ -68,12 +80,12 @@ BINANCE_INTERVAL_MS = {
 SYNTHETIC_RESOLUTIONS = {"10s": ("1s", 10), "15s": ("1s", 15), "30s": ("1s", 30), "45s": ("1s", 45)}  # Zeitrahmen, die Binance nicht nativ anbietet
 
 
-async def fetch_historical_candles_binance(symbol, resolution, days, max_candles):
+async def fetch_historical_candles_binance(symbol, resolution, days, max_candles, market_type="spot"):
     """Holt bis zu 'days' Tage Kerzenhistorie von Binance fuer Backtests, in 1000er-
     Batches paginiert (endTime schrittweise nach hinten). '2m'/'30s' werden - wie live -
     aus 1m- bzw. 1s-Kerzen synthetisch zusammengesetzt (siehe SYNTHETIC_RESOLUTIONS).
     max_candles begrenzt hart, wie viele Kerzen am Ende verarbeitet werden
-    (Performance-Schutz fuer den Render-Server)."""
+    (Performance-Schutz fuer den Render-Server). market_type: 'spot' oder 'futures'."""
     pair = BINANCE_SYMBOL_MAP.get(symbol)
     if not pair:
         return None, "Coin nicht auf Binance verfügbar"
@@ -86,6 +98,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     start_time = end_time - total_ms
     # Hartes Limit an Basis-Kerzen (vor evtl. Zusammenfassung), damit die Anfrage nicht ausufert
     hard_candle_cap = max_candles * fetch_factor + 2000
+    base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
 
     all_rows = []
     cursor = end_time
@@ -93,7 +106,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     try:
         async with aiohttp.ClientSession() as session:
             while cursor > start_time and len(all_rows) < hard_candle_cap:
-                url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
+                url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
                 retry_count = 0
                 batch = None
                 while retry_count < 5:
@@ -288,7 +301,8 @@ async def binance_1s_poll_loop(symbol):
 
     if not st.get("binance_1s_buffer"):
         try:
-            seed, err = await fetch_historical_candles_binance(symbol, "1s", days=0.125, max_candles=10800)  # ~3 Stunden
+            market_type = b["config"].get("binance_market_type", "spot")
+            seed, err = await fetch_historical_candles_binance(symbol, "1s", days=0.125, max_candles=10800, market_type=market_type)  # ~3 Stunden
             if seed:
                 timestamps, opens, highs, lows, closes = seed
                 st["binance_1s_buffer"] = [
@@ -325,17 +339,17 @@ async def binance_1s_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
-async def fetch_candles_binance_multi(symbol, resolution, count_back=150):
+async def fetch_candles_binance_multi(symbol, resolution, count_back=150, market_type="spot"):
     """Wie fetch_candles_binance, kann aber zusaetzlich synthetische Zeitrahmen liefern
     (z.B. 2m), die Binance selbst nicht unterstuetzt - dafuer wird die naechstkleinere
     native Aufloesung geholt und zu groesseren Kerzen zusammengefasst."""
     if resolution in SYNTHETIC_RESOLUTIONS:
         base_resolution, factor = SYNTHETIC_RESOLUTIONS[resolution]
-        data = await fetch_candles_binance(symbol, base_resolution, count_back=count_back * factor)
+        data = await fetch_candles_binance(symbol, base_resolution, count_back=count_back * factor, market_type=market_type)
         if data is None:
             return None
         return resample_candles(data, factor)
-    return await fetch_candles_binance(symbol, resolution, count_back=count_back)
+    return await fetch_candles_binance(symbol, resolution, count_back=count_back, market_type=market_type)
 
 
 def _ema_series(values, length):
@@ -946,7 +960,7 @@ async def ht_poll_loop(symbol):
                     else:
                         closed_ts = None
                 else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
                     if data:
                         timestamps, opens, highs, lows, closes = data
                         closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
@@ -1108,7 +1122,7 @@ async def da_poll_loop(symbol):
                     else:
                         closed_ts = None
                 else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
                     if data:
                         timestamps, opens, highs, lows, closes = data
                         closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
@@ -1325,7 +1339,7 @@ async def es_poll_loop(symbol):
                     else:
                         closed_ts = None
                 else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
                     if data:
                         timestamps, opens, highs, lows, closes = data
                         closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
@@ -1409,7 +1423,7 @@ async def oms_rsi_poll_loop(symbol):
                     local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     closed_c = local[4] if local else None
                 else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
                     closed_c = data[4][:-1] if data else None
 
                 if closed_c and len(closed_c) > period:
@@ -1441,7 +1455,7 @@ async def scalp_board_poll_loop(symbol):
                 if seconds == 60:
                     # Laufende Kerze live mit dabei (wie TradingView - Kerze steigt, Wert
                     # bewegt sich mit, nicht erst bei Kerzenschluss)
-                    data = await fetch_candles_binance_multi(symbol, "1m", count_back=120)
+                    data = await fetch_candles_binance_multi(symbol, "1m", count_back=120, market_type=cfg.get("binance_market_type", "spot"))
                     candles = (data[2], data[3], data[4]) if data else None
                 else:
                     # 30s/45s brauchen den echten 1s-Puffer (binance_1s_poll_loop), der aus
@@ -1494,7 +1508,7 @@ async def quad_stoch_poll_loop(symbol):
                 local = get_seconds_candles(st, 30, needed_bars)
                 candles = (local[2], local[3], local[4]) if local else None
             else:
-                data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars)
+                data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
                 candles = (data[2], data[3], data[4]) if data else None
 
             if candles and len(candles[2]) > 60:
@@ -3013,7 +3027,7 @@ async def run_ht_param_sweep(symbol, cfg, days, amplitude_min, amplitude_max, am
     Channel-Deviation x Base-Risk-Kombinationen wiederverwendet, aehnlich dem Chandelier-Sweep."""
     max_candles = BACKTEST_MAX_CANDLES["halftrend"]
     resolution = cfg.get("ht_resolution", "5m")
-    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles)
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
     if err:
         return {"error": err}
     if not candles or len(candles[4]) < 150:
@@ -3079,7 +3093,7 @@ async def run_da_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, 
     Perioden bleiben auf den aktuell gespeicherten Werten, da sie selten geaendert werden)."""
     max_candles = BACKTEST_MAX_CANDLES["diamond_algo"]
     resolution = cfg.get("da_resolution", "5m")
-    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles)
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
     if err:
         return {"error": err}
     if not candles or len(candles[4]) < 150:
@@ -3178,13 +3192,13 @@ def _trim_candles_to_days(candles, days, max_candles):
     return ts, o, h, l, c
 
 
-async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles):
+async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type="spot"):
     """Gemeinsame Kerzen-Cache-Logik (sonst 1:1 dupliziert) - wird gebraucht, weil Chandelier
     Exit im Backtest ggf. ZWEI verschiedene Aufloesungen gleichzeitig braucht (eigener
     Zeitrahmen + hoeherer SuperTrend-Filter-Zeitrahmen)."""
     if resolution in SUB_MINUTE_RESOLUTIONS:
         max_candles = min(max_candles, 5000)
-    cache_key = (symbol, resolution)
+    cache_key = (symbol, resolution, market_type)
     cached = _backtest_cache_get(cache_key)
     now = time.time()
     cache_used = False
@@ -3195,7 +3209,7 @@ async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles):
         err = None
         cache_used = True
     else:
-        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
+        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles, market_type=market_type)
         if candles:
             _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
     return candles, err, cache_used
@@ -3230,7 +3244,7 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         # Binance-Anfragen.
         max_candles = min(max_candles, 5000)
 
-    cache_key = (symbol, resolution)
+    cache_key = (symbol, resolution, cfg.get("binance_market_type", "spot"))
     cached = _backtest_cache_get(cache_key)
     now = time.time()
     cache_used = False
@@ -3246,7 +3260,7 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         err = None
         cache_used = True
     else:
-        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles)
+        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
         if candles:
             _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
 
