@@ -1262,6 +1262,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div><div class="label">Kerzen verarbeitet</div><div class="value" id="bt-candles">-</div></div>
       <div><div class="label">Zeitraum tatsächlich</div><div class="value" id="bt-days">-</div></div>
       <div><div class="label">Trades</div><div class="value" id="bt-trades">-</div></div>
+      <div><div class="label">davon Teilverkäufe (Fills)</div><div class="value" id="bt-fills">-</div></div>
       <div><div class="label">Trefferquote</div><div class="value" id="bt-winrate">-</div></div>
       <div><div class="label">Gesamt-PnL $</div><div class="value" id="bt-pnl">-</div></div>
       <div><div class="label">Max Drawdown $</div><div class="value" id="bt-dd">-</div></div>
@@ -1671,6 +1672,7 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
       document.getElementById('bt-candles').innerText = data.candles_processed;
       document.getElementById('bt-days').innerText = data.actual_days_covered;
       document.getElementById('bt-trades').innerText = data.stats.trades;
+      document.getElementById('bt-fills').innerText = data.stats.fills ?? data.stats.trades;
       document.getElementById('bt-winrate').innerText = data.stats.win_rate_pct + '%';
       const pnlEl = document.getElementById('bt-pnl');
       pnlEl.innerText = data.stats.total_pnl_usd;
@@ -1732,16 +1734,29 @@ function fmtTs(ts) {
 }
 
 window.btTradesData = [];
-const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTradesData, (r, i) => `
-  <tr>
+// Stabile Gruppen-Farbe je Trade (entry_ts) - haengt NICHT von der Zeilen-Reihenfolge ab,
+// bleibt also auch nach Sortieren nach einer anderen Spalte konsistent zugeordnet
+const BT_GROUP_COLORS = ['#60a5fa', '#f472b6', '#34d399', '#fbbf24', '#a78bfa', '#fb923c', '#22d3ee', '#f87171'];
+function btGroupColor(entryTs) {
+  const str = String(entryTs);
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  return BT_GROUP_COLORS[hash % BT_GROUP_COLORS.length];
+}
+const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTradesData, (r, i) => {
+  const groupColor = btGroupColor(r.entry_ts);
+  const pnlClass = r.pnl > 0 ? 'green' : r.pnl < 0 ? 'red' : '';
+  return `
+  <tr style="border-left: 4px solid ${groupColor};">
     <td>${fmtTs(r.entry_ts)}</td>
     <td>${r.dir === 'long' ? '🟢 Long' : '🔴 Short'}</td>
     <td>${r.entry}</td>
     <td>${fmtTs(r.exit_ts)}</td>
     <td>${r.exit}</td>
     <td>${r.reason}</td>
-    <td class="${r.pnl >= 0 ? 'green' : 'red'}">${r.pnl.toFixed(2)}</td>
-  </tr>`);
+    <td class="${pnlClass}">${r.pnl.toFixed(2)}</td>
+  </tr>`;
+});
 
 function resetBacktestUI() {
   document.getElementById('backtest-results').style.display = 'none';
