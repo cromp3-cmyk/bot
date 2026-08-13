@@ -45,7 +45,13 @@ async def fetch_candles_binance(symbol, resolution, count_back=150, market_type=
     if not pair:
         return None
     try:
-        base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
+        # Binance Futures (fapi) bietet KEINE 1-Sekunden-Kerzen an (nur Spot) - die sind aber
+        # die Grundlage fuer alle Sekunden-Aufloesungen (10s/15s/30s/45s). Ohne diesen Fallback
+        # wuerde ein "1s"-Request an fapi.binance.com schlicht fehlschlagen ("Keine Daten").
+        effective_market_type = market_type
+        if resolution == "1s" and market_type == "futures":
+            effective_market_type = "spot"
+        base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
         url = f"{base_url}?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -98,7 +104,11 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     start_time = end_time - total_ms
     # Hartes Limit an Basis-Kerzen (vor evtl. Zusammenfassung), damit die Anfrage nicht ausufert
     hard_candle_cap = max_candles * fetch_factor + 2000
-    base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
+    # Binance Futures (fapi) bietet KEINE 1-Sekunden-Kerzen an (nur Spot) - ohne diesen
+    # Fallback wuerde jede Sekunden-Aufloesung (10s/15s/30s/45s) mit "Keine Daten erhalten"
+    # fehlschlagen, sobald "futures" als Datenquelle eingestellt ist.
+    effective_market_type = "spot" if base_resolution == "1s" and market_type == "futures" else market_type
+    base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
 
     all_rows = []
     cursor = end_time
