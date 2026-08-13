@@ -34,7 +34,7 @@ async def fetch_candles_binance(symbol, resolution, count_back=150):
     if not pair:
         return None
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
+        url = f"https://api.binance.com/fapi/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
@@ -93,7 +93,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     try:
         async with aiohttp.ClientSession() as session:
             while cursor > start_time and len(all_rows) < hard_candle_cap:
-                url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
+                url = f"https://api.binance.com/fapi/v3/klines?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
                 retry_count = 0
                 batch = None
                 while retry_count < 5:
@@ -160,7 +160,7 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
     if not pair:
         return None
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
+        url = f"https://api.binance.com/fapi/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
