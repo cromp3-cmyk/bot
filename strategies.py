@@ -1289,7 +1289,7 @@ async def check_es_sl_tp(symbol, price):
             _es_reset_state(st)
 
 
-async def check_es_entry(symbol, buy_signal, sell_signal, price, risk_atr_now):
+async def check_es_entry(symbol, buy_signal, sell_signal, price, risk_atr_now, signal_low=None, signal_high=None):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or st["position"] is not None or price is None:
@@ -1311,29 +1311,43 @@ async def check_es_entry(symbol, buy_signal, sell_signal, price, risk_atr_now):
         return  # reines Flip-System - keine SL-/TP-Preise setzen, check_es_sl_tp hat dann nichts zu tun
 
     if risk_atr_now is not None:
-        dist = risk_atr_now * cfg.get("es_risk_mult", 2.2)  # bleibt IMMER die Basis fuer TP1/TP2/TP3
+        atr_band = risk_atr_now * cfg.get("es_risk_mult", 2.2)
 
-        dist_sl = dist
+        # Original-Formel: atrStop = trigger ? low - atrBand : high + atrBand - der SL geht vom
+        # TIEF/HOCH der Signalkerze aus, NICHT vom Schlusskurs (Entry). TP1/TP2/TP3 sind dann
+        # Vielfache des TATSAECHLICHEN Einstieg-zu-SL-Abstands (der dadurch groesser ist als der
+        # reine ATR-Wert, wegen des Kerzendochts) - nicht des reinen ATR-Bands. Fallback auf die
+        # alte, einfachere Rechnung, falls kein Tief/Hoch übergeben wurde (z.B. Tick-Trigger ohne
+        # Kerzendaten).
         if sl_enabled and cfg.get("es_sl_mode", "atr") == "manual":
             size = st.get("total_coin_size") or 0
             manual_usd = cfg.get("es_sl_manual_usd", 5.0)
-            if size > 0:
-                dist_sl = manual_usd / size  # fester $-Verlust auf die GESAMTE Position umgerechnet in Preisabstand
+            dist_sl = (manual_usd / size) if size > 0 else atr_band  # fester $-Verlust auf die GESAMTE Position umgerechnet in Preisabstand
+            sl_price = price - dist_sl if direction == "long" else price + dist_sl
+            dist_for_tp = atr_band  # TP bleibt bei manuellem SL rein ATR-basiert, wie besprochen
+        else:
+            if direction == "long" and signal_low is not None:
+                sl_price = signal_low - atr_band
+            elif direction == "short" and signal_high is not None:
+                sl_price = signal_high + atr_band
+            else:
+                sl_price = price - atr_band if direction == "long" else price + atr_band
+            dist_for_tp = abs(price - sl_price)  # ECHTER Einstieg-zu-SL-Abstand, wie im Original
 
         if direction == "long":
             if sl_enabled:
-                st["es_sl_price"] = price - dist_sl
+                st["es_sl_price"] = sl_price
             if tp_enabled:
-                st["es_tp1_price"] = price + dist * cfg.get("es_tp1_rr", 1.0)
-                st["es_tp2_price"] = price + dist * cfg.get("es_tp2_rr", 2.0)
-                st["es_tp3_price"] = price + dist * cfg.get("es_tp3_rr", 3.0)
+                st["es_tp1_price"] = price + dist_for_tp * cfg.get("es_tp1_rr", 1.0)
+                st["es_tp2_price"] = price + dist_for_tp * cfg.get("es_tp2_rr", 2.0)
+                st["es_tp3_price"] = price + dist_for_tp * cfg.get("es_tp3_rr", 3.0)
         else:
             if sl_enabled:
-                st["es_sl_price"] = price + dist_sl
+                st["es_sl_price"] = sl_price
             if tp_enabled:
-                st["es_tp1_price"] = price - dist * cfg.get("es_tp1_rr", 1.0)
-                st["es_tp2_price"] = price - dist * cfg.get("es_tp2_rr", 2.0)
-                st["es_tp3_price"] = price - dist * cfg.get("es_tp3_rr", 3.0)
+                st["es_tp1_price"] = price - dist_for_tp * cfg.get("es_tp1_rr", 1.0)
+                st["es_tp2_price"] = price - dist_for_tp * cfg.get("es_tp2_rr", 2.0)
+                st["es_tp3_price"] = price - dist_for_tp * cfg.get("es_tp3_rr", 3.0)
 
 
 async def check_es_exit(symbol, buy_signal, sell_signal, price):
@@ -1438,7 +1452,7 @@ async def es_poll_loop(symbol):
                             just_flipped = await check_es_exit(symbol, buy_now, sell_now, price)
                         if cfg.get("es_entry_trigger", "candle_close") == "candle_close":
                             if not just_flipped or cfg.get("es_reenter_on_flip", False):
-                                await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1])
+                                await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1], signal_low=closed_l[-1], signal_high=closed_h[-1])
 
                     await check_es_sl_tp(symbol, price)
                 elif due_heartbeat:
@@ -2526,7 +2540,7 @@ async def on_price_update(symbol, price):
                         just_flipped = await check_es_exit(symbol, buy_now, sell_now, price)
                     if entry_trigger == "tick":
                         if not just_flipped or cfg.get("es_reenter_on_flip", False):
-                            await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1])
+                            await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1], signal_low=live_l[-1], signal_high=live_h[-1])
             except Exception as e:
                 debug_log(f"⚠️ [{symbol}] ELTE Smart Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
@@ -2806,20 +2820,24 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
             size = (margin * leverage) / price
             sl_price = tp1_price = tp2_price = tp3_price = None
             if sl_enabled or tp_enabled:
-                dist = risk_atr[i] * risk_mult  # bleibt IMMER die Basis fuer TP1/TP2/TP3
-                dist_sl = dist
+                atr_band = risk_atr[i] * risk_mult
                 if sl_enabled and sl_mode == "manual" and size > 0:
                     dist_sl = sl_manual_usd / size
-                if direction == "long":
-                    if sl_enabled:
-                        sl_price = price - dist_sl
-                    if tp_enabled:
-                        tp1_price, tp2_price, tp3_price = price + dist * tp1_rr, price + dist * tp2_rr, price + dist * tp3_rr
+                    sl_price = price - dist_sl if direction == "long" else price + dist_sl
+                    dist_for_tp = atr_band  # TP bleibt bei manuellem SL rein ATR-basiert, wie besprochen
                 else:
-                    if sl_enabled:
-                        sl_price = price + dist_sl
-                    if tp_enabled:
-                        tp1_price, tp2_price, tp3_price = price - dist * tp1_rr, price - dist * tp2_rr, price - dist * tp3_rr
+                    # Original-Formel: atrStop = trigger ? low - atrBand : high + atrBand - SL
+                    # geht vom Tief/Hoch der Signalkerze aus, nicht vom Schlusskurs. TP1/TP2/TP3
+                    # sind Vielfache des TATSAECHLICHEN Einstieg-zu-SL-Abstands.
+                    sl_price = (l[i] - atr_band) if direction == "long" else (h[i] + atr_band)
+                    dist_for_tp = abs(price - sl_price)
+                if not sl_enabled:
+                    sl_price = None
+                if tp_enabled:
+                    if direction == "long":
+                        tp1_price, tp2_price, tp3_price = price + dist_for_tp * tp1_rr, price + dist_for_tp * tp2_rr, price + dist_for_tp * tp3_rr
+                    else:
+                        tp1_price, tp2_price, tp3_price = price - dist_for_tp * tp1_rr, price - dist_for_tp * tp2_rr, price - dist_for_tp * tp3_rr
             position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
                         "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price, "tp3_price": tp3_price,
                         "tp1_done": False, "tp2_done": False}
