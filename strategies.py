@@ -271,7 +271,18 @@ def _resample_seconds_candles(data, seconds):
     Kerzen pro Bucket) und dadurch praktisch nie einen vollstaendigen Bucket liefert. Das war
     ein echter Bug: get_seconds_candles() rief bisher direkt resample_candles(..., seconds)
     auf, wodurch alle Sekunden-Zeitrahmen (10s/15s/30s/45s) ueber den echten
-    Binance-1s-Puffer faktisch nie genug Kerzen zurueckgaben."""
+    Binance-1s-Puffer faktisch nie genug Kerzen zurueckgaben.
+
+    ZWEITER BUG (behoben): frueher wurde ein Bucket nur akzeptiert, wenn er EXAKT 'seconds'
+    Roh-Kerzen enthielt (j - i == seconds). Reale 1s-Daten haben aber gelegentlich kleine
+    Luecken (WS-Reconnect, verpasster Tick, Rate-Limit) - bei 45s faellt EIN fehlender Tick
+    kaum ins Gewicht (~2% der Kerze), bei 10s/15s aber viel staerker (~7-10%), wodurch bei
+    kurzen Aufloesungen SEHR VIEL MEHR Buckets komplett verworfen wurden und die Strategie
+    dort effektiv kaum neue, abgeschlossene Kerzen bekam (== kaum je ein neuer Trigger-Wechsel,
+    obwohl der Kurs sich eigentlich bewegt hat). Jetzt wird jeder BEREITS VERGANGENE Bucket
+    auch mit weniger Ticks akzeptiert (er ist ja trotzdem echt abgeschlossen) - nur der ALLER-
+    LETZTE Bucket (koennte die gerade noch laufende, unfertige Kerze sein) muss weiterhin
+    vollstaendig sein, sonst wird er verworfen (Repainting-Schutz bleibt erhalten)."""
     timestamps, opens, highs, lows, closes = data
     n = len(closes)
     if n == 0:
@@ -284,7 +295,9 @@ def _resample_seconds_candles(data, seconds):
         j = i
         while j < n and timestamps[j] // bucket_ms == bucket:
             j += 1
-        if j - i == seconds:
+        is_last_bucket = j == n
+        complete_enough = (j - i == seconds) if is_last_bucket else (j - i >= 1)
+        if complete_enough:
             out_ts.append(timestamps[i])
             out_o.append(opens[i])
             out_h.append(max(highs[i:j]))
