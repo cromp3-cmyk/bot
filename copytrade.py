@@ -423,7 +423,8 @@ async def ct_watch_loop():
                                 "status": result["status"], "detail": result.get("detail"), "action": action,
                             })
                             CT_STATE["copy_log"] = CT_STATE["copy_log"][:CT_COPY_LOG_MAX]
-                            copy_actions += 1
+                            if result["status"] in ("success", "dry_run"):
+                                copy_actions += 1
 
                             if result["status"] in ("success", "dry_run"):
                                 add_size = (margin * leverage) / price

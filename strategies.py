@@ -22,8 +22,12 @@ BINANCE_SYMBOL_MAP = {
     "LINK": "LINKUSDT", "AVAX": "AVAXUSDT", "NEAR": "NEARUSDT", "DOT": "DOTUSDT", "TON": "TONUSDT",
     "SUI": "SUIUSDT", "BNB": "BNBUSDT", "UNI": "UNIUSDT", "APT": "APTUSDT", "ADA": "ADAUSDT",
     "TRX": "TRXUSDT", "LTC": "LTCUSDT", "BCH": "BCHUSDT", "HBAR": "HBARUSDT", "ICP": "ICPUSDT",
-    # HYPE und Forex/Rohstoffe (EURUSD, XAU, WTI, ...) gibt es nicht auf Binance - dafuer greift der Lighter-Fallback
+    "XAU": "XAUUSDT", "XAG": "XAGUSDT",  # Seit Jan. 2026 auf Binance, aber NUR als USDT-Perpetual-
+    # Future ("TradFi"-Kategorie) - es gibt dafuer KEIN Spot-Paar, siehe BINANCE_FUTURES_ONLY_SYMBOLS
+    # HYPE und WTI/Forex (EURUSD, ...) gibt es weiterhin nicht auf Binance - dafuer greift der Lighter-Fallback
 }
+
+BINANCE_FUTURES_ONLY_SYMBOLS = {"XAU", "XAG"}  # existieren auf Binance NUR als Futures, kein Spot-Paar
 
 
 BINANCE_BASE_URLS = {
@@ -51,6 +55,8 @@ async def fetch_candles_binance(symbol, resolution, count_back=150, market_type=
         effective_market_type = market_type
         if resolution == "1s" and market_type == "futures":
             effective_market_type = "spot"
+        elif symbol in BINANCE_FUTURES_ONLY_SYMBOLS:
+            effective_market_type = "futures"  # XAU/XAG gibt's nur als Future, kein Spot-Paar
         base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
         url = f"{base_url}?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
         async with aiohttp.ClientSession() as session:
@@ -108,6 +114,12 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     # Fallback wuerde jede Sekunden-Aufloesung (10s/15s/30s/45s) mit "Keine Daten erhalten"
     # fehlschlagen, sobald "futures" als Datenquelle eingestellt ist.
     effective_market_type = "spot" if base_resolution == "1s" and market_type == "futures" else market_type
+    if symbol in BINANCE_FUTURES_ONLY_SYMBOLS:
+        effective_market_type = "futures"  # XAU/XAG gibt's nur als Future, kein Spot-Paar - hat
+        # Vorrang, ausser bei Sekunden-Aufloesungen (die gehen fuer XAU/XAG dann leider gar
+        # nicht, da es weder ein Spot-Paar noch 1s-Futures-Kerzen gibt)
+        if base_resolution == "1s":
+            return None, "Sekunden-Auflösungen (10s/15s/30s/45s) sind für XAU/XAG nicht möglich - Binance bietet dafür weder ein Spot-Paar noch 1-Sekunden-Futures-Kerzen an."
     base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
 
     all_rows = []
