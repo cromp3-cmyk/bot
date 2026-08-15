@@ -1036,16 +1036,32 @@ async def ht_poll_loop(symbol):
                         debug_log(f"💓 [{symbol}] HalfTrend aktiv: Trend={'AUFWÄRTS' if dir_now==0 else 'ABWÄRTS'}, "
                                   f"ATR2={round(atr2[-1],4)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
-                    if is_new_candle:
-                        last_processed_ts = signal_key
-                        buy_signal = trend[-1] == 0 and trend[-2] == 1
-                        sell_signal = trend[-1] == 1 and trend[-2] == 0
+                    # Nachhol-Mechanismus (siehe ELTE Smart fuer die ausfuehrliche Begruendung):
+                    # normalerweise hoechstens EINE neue Kerze zwischen zwei 5-Sekunden-Polls,
+                    # aber bei kurzen Aufloesungen kann der Loop mal hinterherhinken - ohne diesen
+                    # Nachholmechanismus gingen dazwischenliegende Signale fuer immer verloren.
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 1:
+                            continue
+                        buy_signal = trend[idx] == 0 and trend[idx - 1] == 1
+                        sell_signal = trend[idx] == 1 and trend[idx - 1] == 0
                         if invert:
                             buy_signal, sell_signal = sell_signal, buy_signal
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
                         if cfg.get("ht_exit_trigger", "candle_close") == "candle_close":
-                            await check_ht_exit(symbol, buy_signal, sell_signal, price)
+                            await check_ht_exit(symbol, buy_signal, sell_signal, price_i)
                         if cfg.get("ht_entry_trigger", "candle_close") == "candle_close":
-                            await check_ht_entry(symbol, buy_signal, sell_signal, price, atr2[-1])
+                            await check_ht_entry(symbol, buy_signal, sell_signal, price_i, atr2[idx])
 
                     await check_ht_sl_tp(symbol, price)
                 elif due_heartbeat:
@@ -1201,10 +1217,6 @@ async def da_poll_loop(symbol):
                     st["da_closes"] = closed_c[-keep:]
                     invert = cfg.get("da_invert_direction", False)
                     signal_mode = cfg.get("da_signal_mode", "all")
-                    buy_now = smart_buy[-1] if signal_mode == "smart_only" else buy[-1]
-                    sell_now = smart_sell[-1] if signal_mode == "smart_only" else sell[-1]
-                    if invert:
-                        buy_now, sell_now = sell_now, buy_now
                     raw_direction = 1 if buy[-1] else (-1 if sell[-1] else st.get("da_direction"))
                     st["da_direction"] = raw_direction * (-1 if invert else 1) if raw_direction is not None else None
                     st["da_atr_risk_last"] = atr_risk_series[-1]
@@ -1214,12 +1226,32 @@ async def da_poll_loop(symbol):
                         debug_log(f"💓 [{symbol}] Diamond Algo aktiv: Preis={closed_c[-1]}, ATR-Risk={round(atr_risk_series[-1],4)}, "
                                   f"Modus={signal_mode}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
-                    if is_new_candle:
-                        last_processed_ts = signal_key
+                    # Nachhol-Mechanismus (siehe ELTE Smart fuer die ausfuehrliche Begruendung):
+                    # normalerweise hoechstens EINE neue Kerze zwischen zwei 5-Sekunden-Polls,
+                    # aber bei kurzen Aufloesungen kann der Loop mal hinterherhinken - ohne diesen
+                    # Nachholmechanismus gingen dazwischenliegende Signale fuer immer verloren.
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 1:
+                            continue
+                        buy_i = smart_buy[idx] if signal_mode == "smart_only" else buy[idx]
+                        sell_i = smart_sell[idx] if signal_mode == "smart_only" else sell[idx]
+                        if invert:
+                            buy_i, sell_i = sell_i, buy_i
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
                         if cfg.get("da_exit_trigger", "candle_close") == "candle_close":
-                            await check_da_exit(symbol, buy_now, sell_now, price)
+                            await check_da_exit(symbol, buy_i, sell_i, price_i)
                         if cfg.get("da_entry_trigger", "candle_close") == "candle_close":
-                            await check_da_entry(symbol, buy_now, sell_now, price, atr_risk_series[-1])
+                            await check_da_entry(symbol, buy_i, sell_i, price_i, atr_risk_series[idx])
 
                     await check_da_sl_tp(symbol, price)
                 elif due_heartbeat:
@@ -1444,11 +1476,7 @@ async def es_poll_loop(symbol):
                     st["es_lows"] = closed_l[-keep:]
                     st["es_closes"] = closed_c[-keep:]
 
-                    buy_now = closed_c[-2] <= st_line[-2] and closed_c[-1] > st_line[-1]
-                    sell_now = closed_c[-2] >= st_line[-2] and closed_c[-1] < st_line[-1]
                     invert = cfg.get("es_invert_direction", False)
-                    if invert:
-                        buy_now, sell_now = sell_now, buy_now
                     st["es_direction"] = direction[-1] * (-1 if invert else 1)
                     st["es_sensitivity_last"] = sensitivity[-1] if isinstance(sensitivity, list) else sensitivity
                     st["es_risk_atr_last"] = risk_atr_series[-1]
@@ -1458,14 +1486,41 @@ async def es_poll_loop(symbol):
                         debug_log(f"💓 [{symbol}] ELTE Smart aktiv: Preis={closed_c[-1]}, Sensitivity={round(st['es_sensitivity_last'],2)}, "
                                   f"Risk-ATR={round(risk_atr_series[-1],4)}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
-                    if is_new_candle:
-                        last_processed_ts = signal_key
+                    # Nachhol-Mechanismus: normalerweise ist zwischen zwei 5-Sekunden-Polls
+                    # hoechstens EINE neue Kerze fertig geworden - aber bei kurzen Aufloesungen
+                    # (10s/15s) und vielen gleichzeitig laufenden Coins/Strategien im selben
+                    # Event-Loop kann der Poll-Loop mal kurz hinterherhinken. Wuerde man dann nur
+                    # die JEWEILS NEUESTE Kerze pruefen, gingen alle dazwischenliegenden Kerzen
+                    # (und moegliche Signale darauf) fuer immer verloren - das erklaerte den
+                    # beobachteten Unterschied zwischen Live (wenige Trades) und Backtest (viele
+                    # Trades) fuer denselben Zeitraum, da der Backtest jede Kerze einzeln abarbeitet.
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]  # alter Zeitstempel aus dem Fenster gefallen
+
+                    for idx in new_indices:
+                        if idx < 1:
+                            continue
+                        buy_i = closed_c[idx - 1] <= st_line[idx - 1] and closed_c[idx] > st_line[idx]
+                        sell_i = closed_c[idx - 1] >= st_line[idx - 1] and closed_c[idx] < st_line[idx]
+                        if invert:
+                            buy_i, sell_i = sell_i, buy_i
+                        # Bei der neuesten Kerze den aktuellen Live-Preis nutzen (praeziser),
+                        # bei nachtraeglich aufgeholten (bereits vergangenen) Kerzen deren
+                        # eigenen Schlusskurs - der Live-Preis hat sich ja laengst weiterbewegt.
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
                         just_flipped = False
                         if cfg.get("es_exit_trigger", "candle_close") == "candle_close":
-                            just_flipped = await check_es_exit(symbol, buy_now, sell_now, price)
+                            just_flipped = await check_es_exit(symbol, buy_i, sell_i, price_i)
                         if cfg.get("es_entry_trigger", "candle_close") == "candle_close":
                             if not just_flipped or cfg.get("es_reenter_on_flip", False):
-                                await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1], signal_low=closed_l[-1], signal_high=closed_h[-1])
+                                await check_es_entry(symbol, buy_i, sell_i, price_i, risk_atr_series[idx], signal_low=closed_l[idx], signal_high=closed_h[idx])
 
                     await check_es_sl_tp(symbol, price)
                 elif due_heartbeat:
