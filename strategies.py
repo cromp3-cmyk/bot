@@ -1307,6 +1307,14 @@ async def check_es_sl_tp(symbol, price):
     if not st.get("es_tp1_done") and st.get("es_tp1_price") is not None:
         tp1_price = st["es_tp1_price"]
         if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
+            if cfg.get("es_tp_mode", "atr") == "manual":
+                # Fester TP-$-Betrag = EIN einzelnes Ziel, komplette Position schliesst dort -
+                # kein Teilverkauf, kein TP2/TP3 (die sind in diesem Modus ohnehin nicht gesetzt),
+                # genau wie beim festen SL auch nur ein einzelner Wert ist.
+                debug_log(f"🚪 [{symbol}] ELTE Smart TP (fest): {pos.upper()} @ {price} (Ziel war {round(tp1_price, 4)})")
+                await execute_exit(symbol, price, "TP")
+                _es_reset_state(st)
+                return
             fraction = cfg.get("es_tp1_close_pct", 50) / 100
             ok = await execute_partial_exit(symbol, price, fraction, "TP1")
             if ok:
@@ -1383,16 +1391,28 @@ async def check_es_entry(symbol, buy_signal, sell_signal, price, risk_atr_now, s
             if sl_enabled:
                 st["es_sl_price"] = sl_price
             if tp_enabled:
-                st["es_tp1_price"] = price + dist_for_tp * cfg.get("es_tp1_rr", 1.0)
-                st["es_tp2_price"] = price + dist_for_tp * cfg.get("es_tp2_rr", 2.0)
-                st["es_tp3_price"] = price + dist_for_tp * cfg.get("es_tp3_rr", 3.0)
+                if cfg.get("es_tp_mode", "atr") == "manual":
+                    size = st.get("total_coin_size") or 0
+                    tp_manual_usd = cfg.get("es_tp_manual_usd", 5.0)
+                    dist_tp = (tp_manual_usd / size) if size > 0 else dist_for_tp
+                    st["es_tp1_price"] = price + dist_tp  # EIN Ziel, TP2/TP3 bleiben unbenutzt (None)
+                else:
+                    st["es_tp1_price"] = price + dist_for_tp * cfg.get("es_tp1_rr", 1.0)
+                    st["es_tp2_price"] = price + dist_for_tp * cfg.get("es_tp2_rr", 2.0)
+                    st["es_tp3_price"] = price + dist_for_tp * cfg.get("es_tp3_rr", 3.0)
         else:
             if sl_enabled:
                 st["es_sl_price"] = sl_price
             if tp_enabled:
-                st["es_tp1_price"] = price - dist_for_tp * cfg.get("es_tp1_rr", 1.0)
-                st["es_tp2_price"] = price - dist_for_tp * cfg.get("es_tp2_rr", 2.0)
-                st["es_tp3_price"] = price - dist_for_tp * cfg.get("es_tp3_rr", 3.0)
+                if cfg.get("es_tp_mode", "atr") == "manual":
+                    size = st.get("total_coin_size") or 0
+                    tp_manual_usd = cfg.get("es_tp_manual_usd", 5.0)
+                    dist_tp = (tp_manual_usd / size) if size > 0 else dist_for_tp
+                    st["es_tp1_price"] = price - dist_tp
+                else:
+                    st["es_tp1_price"] = price - dist_for_tp * cfg.get("es_tp1_rr", 1.0)
+                    st["es_tp2_price"] = price - dist_for_tp * cfg.get("es_tp2_rr", 2.0)
+                    st["es_tp3_price"] = price - dist_for_tp * cfg.get("es_tp3_rr", 3.0)
 
 
 async def check_es_exit(symbol, buy_signal, sell_signal, price):
@@ -2824,6 +2844,8 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
     tp_enabled = cfg.get("es_tp_enabled", True)
     sl_mode = cfg.get("es_sl_mode", "atr")
     sl_manual_usd = cfg.get("es_sl_manual_usd", 5.0)
+    tp_mode = cfg.get("es_tp_mode", "atr")
+    tp_manual_usd = cfg.get("es_tp_manual_usd", 5.0)
     tp1_frac = cfg.get("es_tp1_close_pct", 50) / 100
     tp2_frac = cfg.get("es_tp2_close_pct", 50) / 100
     tp1_rr = cfg.get("es_tp1_rr", 1.0)
@@ -2851,11 +2873,15 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
             elif not position["tp1_done"] and position.get("tp1_price") is not None:
                 tp1_price = position["tp1_price"]
                 if (pdir == "long" and h[i] >= tp1_price) or (pdir == "short" and l[i] <= tp1_price):
-                    close_size = position["size"] * tp1_frac
-                    _bt_close_trade(trades, pdir, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
-                    position["size"] -= close_size
-                    position["tp1_done"] = True
-                    position["sl_price"] = entry  # Break-Even
+                    if position.get("tp_mode") == "manual":
+                        _bt_close_trade(trades, pdir, entry, tp1_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                        position = None
+                    else:
+                        close_size = position["size"] * tp1_frac
+                        _bt_close_trade(trades, pdir, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                        position["size"] -= close_size
+                        position["tp1_done"] = True
+                        position["sl_price"] = entry  # Break-Even
             elif position["tp1_done"] and not position["tp2_done"] and position.get("tp2_price") is not None:
                 tp2_price = position["tp2_price"]
                 if (pdir == "long" and h[i] >= tp2_price) or (pdir == "short" and l[i] <= tp2_price):
@@ -2902,12 +2928,17 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
                 if not sl_enabled:
                     sl_price = None
                 if tp_enabled:
-                    if direction == "long":
+                    if tp_mode == "manual" and size > 0:
+                        dist_tp = tp_manual_usd / size
+                        tp1_price = price + dist_tp if direction == "long" else price - dist_tp
+                        tp2_price = tp3_price = None  # nur EIN Ziel, wie beim festen SL
+                    elif direction == "long":
                         tp1_price, tp2_price, tp3_price = price + dist_for_tp * tp1_rr, price + dist_for_tp * tp2_rr, price + dist_for_tp * tp3_rr
                     else:
                         tp1_price, tp2_price, tp3_price = price - dist_for_tp * tp1_rr, price - dist_for_tp * tp2_rr, price - dist_for_tp * tp3_rr
             position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
                         "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price, "tp3_price": tp3_price,
+                        "tp_mode": tp_mode,
                         "tp1_done": False, "tp2_done": False}
 
     if position is not None:

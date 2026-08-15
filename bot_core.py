@@ -331,6 +331,8 @@ def default_config():
         "es_tp_enabled": os.getenv("ES_TP_ENABLED", "true").lower() == "true",
         "es_sl_mode": os.getenv("ES_SL_MODE", "atr"),  # "atr" oder "manual"
         "es_sl_manual_usd": float(os.getenv("ES_SL_MANUAL_USD", "5.0")),
+        "es_tp_mode": os.getenv("ES_TP_MODE", "atr"),  # "atr" (TP1/TP2/TP3-Stufen) oder "manual" (ein einzelnes festes $-Ziel)
+        "es_tp_manual_usd": float(os.getenv("ES_TP_MANUAL_USD", "5.0")),
     }
 
 
@@ -1252,6 +1254,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="false">Aus (nur Gegen-Signal schließt die Position - z.B. für reines Flip-System mit "Sofort umdrehen")</option>
     </select>
   </div>
+  <div data-mode="elte_smart"><label>TP-Modus</label>
+    <select class="cfg" id="es_tp_mode">
+      <option value="atr">ATR-basiert (TP1/TP2/TP3-Stufen mit Teilverkäufen, Original-System)</option>
+      <option value="manual">Fester $-Betrag (EIN einzelnes Ziel, komplette Position schließt dort - kein TP2/TP3)</option>
+    </select>
+  </div>
+  <div data-mode="elte_smart"><label>TP Fester $-Betrag (nur bei TP-Modus "Fest")</label><input type="number" step="0.5" id="es_tp_manual_usd"></div>
 
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
@@ -2410,6 +2419,8 @@ async function refresh() {
     document.getElementById('es_sl_enabled').value = String(data.config.es_sl_enabled);
     document.getElementById('es_sl_mode').value = data.config.es_sl_mode;
     document.getElementById('es_sl_manual_usd').value = data.config.es_sl_manual_usd;
+    document.getElementById('es_tp_mode').value = data.config.es_tp_mode;
+    document.getElementById('es_tp_manual_usd').value = data.config.es_tp_manual_usd;
     document.getElementById('es_tp_enabled').value = String(data.config.es_tp_enabled);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -2689,6 +2700,8 @@ function buildConfigPayload() {
     es_sl_enabled: document.getElementById('es_sl_enabled').value === 'true',
     es_sl_mode: document.getElementById('es_sl_mode').value,
     es_sl_manual_usd: parseFloat(document.getElementById('es_sl_manual_usd').value),
+    es_tp_mode: document.getElementById('es_tp_mode').value,
+    es_tp_manual_usd: parseFloat(document.getElementById('es_tp_manual_usd').value),
     es_tp_enabled: document.getElementById('es_tp_enabled').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -2724,7 +2737,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','da_atr_period','da_sensitivity','da_sma_period','da_ema_trend_period','da_invert_direction','da_risk_atr_period','da_risk_mult','da_tp_rr','da_sl_cooldown_seconds','es_atr_period','es_sensitivity','es_vol_period','es_vol_ma_len','es_invert_direction','es_risk_atr_period','es_risk_mult','es_tp1_close_pct','es_tp2_close_pct','es_tp1_rr','es_tp2_rr','es_tp3_rr','es_sl_cooldown_seconds','es_sl_manual_usd','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','da_atr_period','da_sensitivity','da_sma_period','da_ema_trend_period','da_invert_direction','da_risk_atr_period','da_risk_mult','da_tp_rr','da_sl_cooldown_seconds','es_atr_period','es_sensitivity','es_vol_period','es_vol_ma_len','es_invert_direction','es_risk_atr_period','es_risk_mult','es_tp1_close_pct','es_tp2_close_pct','es_tp1_rr','es_tp2_rr','es_tp3_rr','es_sl_cooldown_seconds','es_sl_manual_usd','es_tp_manual_usd','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2849,7 +2862,7 @@ async def handle_config_update(request):
                 "es_vol_period", "es_vol_ma_len", "es_entry_trigger", "es_exit_trigger", "es_invert_direction",
                 "es_risk_atr_period", "es_risk_mult", "es_tp1_close_pct", "es_tp2_close_pct",
                 "es_tp1_rr", "es_tp2_rr", "es_tp3_rr", "es_sl_cooldown_seconds", "es_reenter_on_flip",
-                "es_sl_enabled", "es_sl_mode", "es_sl_manual_usd", "es_tp_enabled",
+                "es_sl_enabled", "es_sl_mode", "es_sl_manual_usd", "es_tp_enabled", "es_tp_mode", "es_tp_manual_usd",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
