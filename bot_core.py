@@ -2899,13 +2899,22 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','da_atr_period','da_sensitivity','da_sma_period','da_ema_trend_period','da_invert_direction','da_risk_atr_period','da_risk_mult','da_tp_rr','da_sl_cooldown_seconds','es_atr_period','es_sensitivity','es_vol_period','es_vol_ma_len','es_invert_direction','es_risk_atr_period','es_risk_mult','es_tp1_close_pct','es_tp2_close_pct','es_tp1_rr','es_tp2_rr','es_tp3_rr','es_sl_cooldown_seconds','es_sl_manual_usd','es_tp_manual_usd','es_breakeven_trigger_pct','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
-  document.getElementById(id).addEventListener('input', (e) => {
+// GENERISCHER Schutz vor dem 3-Sekunden-Refresh: JEDES Formularfeld (alle <select class="cfg">
+// UND alle Zahlen-/Text-Eingabefelder mit id) setzt formTouched, sobald es beruehrt wird - vorher
+// gab es dafuer nur eine HANDGEPFLEGTE Liste (~100 Felder per 'input'-Event), die weder die ~48
+// Dropdown-Felder (die 'change' statt 'input' feuern) noch neu hinzugekommene Felder wie die
+// "Eigene Minuten"-Eingabe abdeckte - beim Tippen/Auswaehlen in einem nicht gelisteten Feld hat
+// der naechste Refresh (alle 3s) die Eingabe deshalb einfach wieder ueberschrieben, bevor
+// gespeichert werden konnte. Jetzt: JEDES Feld auf der Seite mit id ist automatisch geschuetzt.
+document.querySelectorAll('select.cfg, input[id]').forEach(el => {
+  const markTouched = (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
       e.target.value = e.target.value.replace(',', '.');
     }
-  });
+  };
+  el.addEventListener('input', markTouched);
+  el.addEventListener('change', markTouched);
 });
 
 (async () => {
