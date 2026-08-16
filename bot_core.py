@@ -1063,6 +1063,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="2m">2 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
     </select>
@@ -1119,6 +1120,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="2m">2 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
     </select>
@@ -1189,6 +1191,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="2m">2 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
     </select>
