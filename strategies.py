@@ -3371,6 +3371,59 @@ async def run_da_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, 
     }
 
 
+ES_SENS_SWEEP_MAX_COMBOS = 2000
+ES_SENS_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+async def run_es_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step):
+    """'Monte-Carlo'-Parametersweep fuer ELTE Smart, NUR ueber die manuelle Sensitivity - mit
+    zwei Nachkommastellen wie im Original-Skript (sensitivity11 = input.float(..., step=0.01,
+    minval=0.11, maxval=20)). Auto-Sensitivity wird fuer den Sweep zwangsweise deaktiviert -
+    der Sinn des Tests ist ja gerade, verschiedene FESTE Sensitivity-Werte gegeneinander zu
+    vergleichen (bei Auto-Sensitivity waere der Wert ja gar nicht mehr frei waehlbar). Alle
+    anderen ELTE-Smart-Einstellungen (ATR-Periode, SL/TP-Modus, R:R usw.) bleiben auf den
+    aktuell gespeicherten Werten."""
+    max_candles = BACKTEST_MAX_CANDLES["elte_smart"]
+    resolution = cfg.get("es_resolution", "5m")
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 150:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    steps = int(round((sens_max - sens_min) / max(sens_step, 1e-9)))
+    sens_values = sorted(set(round(sens_min + i * sens_step, 2) for i in range(steps + 1)
+                              if sens_min + i * sens_step <= sens_max + 1e-9))
+    sens_values = [v for v in sens_values if v > 0]
+
+    if len(sens_values) == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Werte."}
+    if len(sens_values) > ES_SENS_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Werte ({len(sens_values)}, Limit {ES_SENS_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    results = []
+    for sens in sens_values:
+        cfg_copy = dict(cfg)
+        cfg_copy["es_auto_sensitivity"] = False
+        cfg_copy["es_sensitivity"] = sens
+        trades = backtest_elte_smart(candles, cfg_copy)
+        stats = summarize_backtest_trades(trades)
+        results.append({"es_sensitivity": sens, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= ES_SENS_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
+        "min_reliable_trades": ES_SENS_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": len(sens_values),
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
+
+
 from collections import OrderedDict
 
 _backtest_candle_cache = OrderedDict()  # key: (symbol, resolution) -> {"fetched_at": float, "days": int, "candles": (...)}

@@ -1481,6 +1481,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="elte_smart" style="display:none;">
+<h2 class="section-title">🎲 ELTE-Smart-Sensitivity-Sweep</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet nur die manuelle Sensitivity (Auto-Sensitivity wird für den Sweep zwangsweise
+    deaktiviert) über einen Wertebereich - mit 2 Nachkommastellen, genau wie im Original-Skript
+    (Schritt 0,01, Bereich 0,11 bis 20). Alle anderen Einstellungen (ATR-Periode, SL/TP-Modus,
+    R:R usw.) bleiben auf den aktuell gespeicherten Werten. Ergebnisse mit weniger als 5 Trades
+    sind statistisch kaum aussagekräftig und werden nach unten sortiert, aber nicht versteckt.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="es-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Sensitivity von</label><input type="number" step="0.01" id="es-sweep-sens-min" value="0.11" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.01" id="es-sweep-sens-max" value="5.00" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.01" id="es-sweep-sens-step" value="0.01" style="width:90px;"></div>
+    <button id="btn-es-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="es-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <table id="es-sweep-results-table" style="display:none; margin-top:12px;">
+    <thead><tr>
+      <th class="sortable" data-key="es_sensitivity">Sensitivity ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="es-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="es-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="es_sensitivity">Sensitivity ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 
 </div>
 
@@ -1854,6 +1898,12 @@ function resetBacktestUI() {
   document.getElementById('da-sweep-worst-title').style.display = 'none';
   window.daSweepResultsData = [];
   window.daSweepWorstData = [];
+  document.getElementById('es-sweep-status').innerText = '';
+  document.getElementById('es-sweep-results-table').style.display = 'none';
+  document.getElementById('es-sweep-worst-table').style.display = 'none';
+  document.getElementById('es-sweep-worst-title').style.display = 'none';
+  window.esSweepResultsData = [];
+  window.esSweepWorstData = [];
 }
 
 document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
@@ -1983,6 +2033,64 @@ const daSweepRowHtml = (r) => `
   </tr>`;
 const renderDaSweepResults = makeSortableTable('da-sweep-results-table', () => window.daSweepResultsData, daSweepRowHtml);
 const renderDaSweepWorst = makeSortableTable('da-sweep-worst-table', () => window.daSweepWorstData, daSweepRowHtml);
+
+document.getElementById('btn-es-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-es-sweep');
+  const statusEl = document.getElementById('es-sweep-status');
+  const tableEl = document.getElementById('es-sweep-results-table');
+  const worstTableEl = document.getElementById('es-sweep-worst-table');
+  const worstTitleEl = document.getElementById('es-sweep-worst-title');
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('es-sweep-days').value) || 30,
+    sens_min: parseFloat(document.getElementById('es-sweep-sens-min').value),
+    sens_max: parseFloat(document.getElementById('es-sweep-sens-max').value),
+    sens_step: parseFloat(document.getElementById('es-sweep-sens-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  tableEl.style.display = 'none';
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Sensitivity-Werte... kann bei vielen Werten etwas dauern.`;
+  try {
+    const res = await fetch(`/api/es_sensitivity_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Sensitivity-Werte getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
+      window.esSweepResultsData = data.results || [];
+      window.esSweepWorstData = data.worst_results || [];
+      renderEsSweepResults();
+      renderEsSweepWorst();
+      tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.esSweepResultsData = [];
+window.esSweepWorstData = [];
+const esSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.es_sensitivity.toFixed(2)}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderEsSweepResults = makeSortableTable('es-sweep-results-table', () => window.esSweepResultsData, esSweepRowHtml);
+const renderEsSweepWorst = makeSortableTable('es-sweep-worst-table', () => window.esSweepWorstData, esSweepRowHtml);
 
 
 
@@ -2983,6 +3091,31 @@ async def handle_da_sweep(request):
 
     result = await run_da_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
                                        sensitivity_min, sensitivity_max, sensitivity_step)
+    return web.json_response(result)
+
+
+async def handle_es_sensitivity_sweep(request):
+    """'Monte-Carlo'-Parametersweep fuer ELTE Smart, NUR ueber die manuelle Sensitivity (2
+    Nachkommastellen wie im Original-Skript)."""
+    from strategies import run_es_sensitivity_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        sens_min = max(0.01, round(float(body.get("sens_min", 0.11)), 2))
+        sens_max = max(sens_min, round(float(body.get("sens_max", 5.0)), 2))
+        sens_step = max(0.01, round(float(body.get("sens_step", 0.01)), 2))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_es_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step)
     return web.json_response(result)
 
 
