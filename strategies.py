@@ -37,6 +37,37 @@ BINANCE_BASE_URLS = {
     # das ist die Quelle, die z.B. "BTCUSDT.P" auf TradingView zeigt)
 }
 
+# Globaler IP-Bann-Schutz: Binance antwortet bei zu vielen Anfragen mit HTTP 418 und einem
+# "banned until <epoch_ms>"-Zeitstempel. OHNE diesen Schutz wuerden alle Poll-Loops (viele Coins
+# x viele Strategien, jede alle 5s) WEITER Anfragen stellen, WAEHREND der Bann noch laeuft - das
+# verlaengert den Bann bei jeder weiteren Anfrage nur immer weiter (beobachtet: "banned until"
+# stieg mit jeder neuen Zeile im Log). Spot (api.binance.com) und Futures (fapi.binance.com) sind
+# getrennte Dienste mit eigenen Rate-Limits, deshalb getrennte Bann-Zeiten je market_type.
+_binance_ban_until_ms = {"spot": 0.0, "futures": 0.0}
+_binance_ban_logged_until = {"spot": 0.0, "futures": 0.0}  # verhindert Log-Spam waehrend des Banns
+
+
+def _binance_is_banned(market_type):
+    return time.time() * 1000 < _binance_ban_until_ms.get(market_type, 0.0)
+
+
+def _binance_register_ban(market_type, symbol, status, body_text):
+    import re
+    match = re.search(r"banned until (\d+)", body_text)
+    if match:
+        until_ms = int(match.group(1))
+    else:
+        # Kein Zeitstempel im Body gefunden (z.B. einfaches 429 ohne Bann) - trotzdem
+        # sicherheitshalber 60 Sekunden pausieren, statt sofort weiter zu haemmern
+        until_ms = time.time() * 1000 + 60_000
+    if until_ms > _binance_ban_until_ms.get(market_type, 0.0):
+        _binance_ban_until_ms[market_type] = until_ms
+    if _binance_ban_logged_until.get(market_type, 0.0) < until_ms:
+        _binance_ban_logged_until[market_type] = until_ms
+        wait_s = max(0, (until_ms - time.time() * 1000) / 1000)
+        debug_log(f"🚫 [Binance-{market_type}] IP-Bann erkannt (HTTP {status}, ausgelöst durch {symbol}) - "
+                  f"pausiere ALLE {market_type}-Anfragen für {round(wait_s)}s (bis {time.strftime('%H:%M:%S', time.localtime(until_ms/1000))})")
+
 
 async def fetch_candles_binance(symbol, resolution, count_back=150, market_type="spot"):
     """Alternative Kerzenquelle - Binance hat deutlich mehr Liquiditaet als Lighter,
@@ -57,10 +88,18 @@ async def fetch_candles_binance(symbol, resolution, count_back=150, market_type=
             effective_market_type = "spot"
         elif symbol in BINANCE_FUTURES_ONLY_SYMBOLS:
             effective_market_type = "futures"  # XAU/XAG gibt's nur als Future, kein Spot-Paar
+
+        if _binance_is_banned(effective_market_type):
+            return None  # aktiver Bann - keine Anfrage stellen, das wuerde ihn nur verlaengern
+
         base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
         url = f"{base_url}?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status in (418, 429):
+                    body = await resp.text()
+                    _binance_register_ban(effective_market_type, symbol, resp.status, body)
+                    return None
                 if resp.status != 200:
                     body = await resp.text()
                     debug_log(f"⚠️ [{symbol}] Binance-Kerzenabfrage HTTP {resp.status}", {"body": body[:300]})
@@ -128,29 +167,29 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     try:
         async with aiohttp.ClientSession() as session:
             while cursor > start_time and len(all_rows) < hard_candle_cap:
+                if _binance_is_banned(effective_market_type):
+                    # Aktiver Bann (von dieser oder einer ANDEREN gleichzeitig laufenden Coin-
+                    # Abfrage ausgeloest) - sofort abbrechen statt weiter zu haemmern, das
+                    # wuerde den Bann nur verlaengern.
+                    wait_s = max(0, (_binance_ban_until_ms.get(effective_market_type, 0.0) - time.time() * 1000) / 1000)
+                    return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
+
                 url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
-                retry_count = 0
-                batch = None
-                while retry_count < 5:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                        if resp.status == 429 or resp.status == 418:
-                            # Rate-Limit erreicht - NICHT abbrechen, sondern warten und
-                            # denselben Request nochmal versuchen (mit steigender Wartezeit).
-                            # Wichtig bei 30s-Anfragen, da die 2x so viele Basis-Kerzen wie
-                            # 15s brauchen und dadurch viel eher an das Limit stossen.
-                            retry_after = resp.headers.get("Retry-After")
-                            wait_s = float(retry_after) if retry_after else (1.5 * (retry_count + 1))
-                            await asyncio.sleep(wait_s)
-                            retry_count += 1
-                            continue
-                        if resp.status != 200:
-                            batch = None
-                            break
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status in (418, 429):
+                        # NICHT blind mit kurzer Pause wiederholen - das hat den Bann in der
+                        # Praxis immer weiter verlaengert. Stattdessen die tatsaechliche
+                        # "banned until"-Zeit aus der Antwort lesen, global fuer ALLE
+                        # gleichzeitig laufenden Coins sperren, und sofort abbrechen.
+                        body = await resp.text()
+                        _binance_register_ban(effective_market_type, symbol, resp.status, body)
+                        wait_s = max(0, (_binance_ban_until_ms.get(effective_market_type, 0.0) - time.time() * 1000) / 1000)
+                        return None, f"Binance-Ratelimit erreicht (IP-Bann für ca. {round(wait_s)}s) - bitte warten und erneut versuchen."
+                    if resp.status != 200:
+                        batch = None
+                    else:
                         batch = await resp.json()
-                    break
                 if batch is None:
-                    if retry_count >= 5:
-                        return None, f"Binance-Ratelimit nach {requests_made} Anfragen und 5 Wiederholungsversuchen weiterhin aktiv - bitte kurz warten und erneut versuchen."
                     break
                 requests_made += 1
                 if not batch:
