@@ -11,6 +11,7 @@ import time
 import traceback
 import bisect
 import math
+import re
 
 from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
@@ -161,6 +162,24 @@ BINANCE_INTERVAL_MS = {
 
 
 SYNTHETIC_RESOLUTIONS = {"10s": ("1s", 10), "15s": ("1s", 15), "30s": ("1s", 30), "45s": ("1s", 45), "2m": ("1m", 2)}  # Zeitrahmen, die Binance nicht nativ anbietet
+NATIVE_BINANCE_MINUTE_INTERVALS = {1, 3, 5, 15, 30}  # von Binance nativ unterstuetzte Minuten-Intervalle
+
+
+def resolve_synthetic_resolution(resolution):
+    """Gibt (Basis-Aufloesung, Faktor) zurueck, falls 'resolution' aus einer kleineren nativen
+    Binance-Aufloesung zusammengesetzt werden muss - sonst None (native Aufloesung, direkt
+    abrufbar). Deckt sowohl die festen Sekunden-Faelle (10s/15s/30s/45s aus 1s) als auch JEDE
+    beliebige, nicht-native Minutenzahl ab (z.B. '8m' oder '24m' aus 1m-Kerzen zusammengesetzt) -
+    Binance selbst bietet nativ nur 1m/3m/5m/15m/30m an, alles andere muss client-seitig
+    zusammengefasst werden."""
+    if resolution in SYNTHETIC_RESOLUTIONS:
+        return SYNTHETIC_RESOLUTIONS[resolution]
+    m = re.match(r"^(\d+)m$", resolution)
+    if m:
+        minutes = int(m.group(1))
+        if minutes > 0 and minutes not in NATIVE_BINANCE_MINUTE_INTERVALS:
+            return ("1m", minutes)
+    return None
 
 
 async def fetch_historical_candles_binance(symbol, resolution, days, max_candles, market_type="spot"):
@@ -173,7 +192,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     if not pair:
         return None, "Coin nicht auf Binance verfügbar"
 
-    synth = SYNTHETIC_RESOLUTIONS.get(resolution)
+    synth = resolve_synthetic_resolution(resolution)
     base_resolution = synth[0] if synth else resolution
     fetch_factor = synth[1] if synth else 1
     total_ms = days * 24 * 60 * 60 * 1000
@@ -463,10 +482,12 @@ async def binance_1s_poll_loop(symbol):
 
 async def fetch_candles_binance_multi(symbol, resolution, count_back=150, market_type="spot"):
     """Wie fetch_candles_binance, kann aber zusaetzlich synthetische Zeitrahmen liefern
-    (z.B. 2m), die Binance selbst nicht unterstuetzt - dafuer wird die naechstkleinere
-    native Aufloesung geholt und zu groesseren Kerzen zusammengefasst."""
-    if resolution in SYNTHETIC_RESOLUTIONS:
-        base_resolution, factor = SYNTHETIC_RESOLUTIONS[resolution]
+    (z.B. 2m oder eigene Minutenwerte wie 8m/24m), die Binance selbst nicht unterstuetzt -
+    dafuer wird die naechstkleinere native Aufloesung geholt und zu groesseren Kerzen
+    zusammengefasst."""
+    synth = resolve_synthetic_resolution(resolution)
+    if synth:
+        base_resolution, factor = synth
         data = await fetch_candles_binance(symbol, base_resolution, count_back=count_back * factor, market_type=market_type)
         if data is None:
             return None

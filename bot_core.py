@@ -1068,7 +1068,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="ht_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="halftrend"><label>Amplitude (Swing-Lookback)</label><input type="number" step="1" id="ht_amplitude"></div>
   <div data-mode="halftrend"><label>Channel Deviation (SL-Abstand in ATR2-Vielfachen)</label><input type="number" step="0.1" id="ht_channel_deviation"></div>
@@ -1125,7 +1127,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="da_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="diamond_algo"><label>ATR-Periode (SuperTrend-Kern)</label><input type="number" step="1" id="da_atr_period"></div>
   <div data-mode="diamond_algo"><label>Sensitivity (ATR-Multiplikator = Sensitivity × 2 - höher = weniger empfindlich!)</label><input type="number" step="0.01" id="da_sensitivity"></div>
@@ -1196,7 +1200,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="es_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="elte_smart"><label>ATR-Periode (SuperTrend-Kern)</label><input type="number" step="1" id="es_atr_period"></div>
   <div data-mode="elte_smart"><label>Sensitivity-Modus</label>
@@ -1882,6 +1888,38 @@ const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTrade
   </tr>`;
 });
 
+// Setzt einen Zeitrahmen-Dropdown (da_/es_/ht_resolution) korrekt, auch wenn der gespeicherte
+// Wert eine EIGENE Minutenzahl ist (z.B. "8m"), die keine feste <option> im Dropdown hat -
+// dann wird "custom" ausgewaehlt und das Zahlenfeld daneben eingeblendet/befuellt.
+function setResolutionField(fieldId, value) {
+  const select = document.getElementById(fieldId);
+  const customInput = document.getElementById(fieldId + '_custom_minutes');
+  const hasOption = Array.from(select.options).some(o => o.value === value);
+  if (hasOption) {
+    select.value = value;
+    customInput.style.display = 'none';
+  } else {
+    const m = /^(\d+)m$/.exec(value || '');
+    select.value = 'custom';
+    customInput.style.display = '';
+    customInput.value = m ? m[1] : '';
+  }
+}
+function getResolutionField(fieldId) {
+  const select = document.getElementById(fieldId);
+  if (select.value === 'custom') {
+    const n = document.getElementById(fieldId + '_custom_minutes').value;
+    return (n && parseInt(n) > 0) ? `${parseInt(n)}m` : '1m';
+  }
+  return select.value;
+}
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution').forEach(sel => {
+  sel.addEventListener('change', () => {
+    const customInput = document.getElementById(sel.id + '_custom_minutes');
+    customInput.style.display = sel.value === 'custom' ? '' : 'none';
+  });
+});
+
 function resetBacktestUI() {
   document.getElementById('backtest-results').style.display = 'none';
   document.getElementById('backtest-status').innerText = '';
@@ -2490,7 +2528,7 @@ async function refresh() {
     document.getElementById('fib_tp2_level').value = data.config.fib_tp2_level;
     document.getElementById('fib_sl_level').value = data.config.fib_sl_level;
     document.getElementById('fib_cooldown_seconds').value = data.config.fib_cooldown_seconds;
-    document.getElementById('ht_resolution').value = data.config.ht_resolution;
+    setResolutionField('ht_resolution', data.config.ht_resolution);
     document.getElementById('ht_amplitude').value = data.config.ht_amplitude;
     document.getElementById('ht_channel_deviation').value = data.config.ht_channel_deviation;
     document.getElementById('ht_base_risk_mult').value = data.config.ht_base_risk_mult;
@@ -2502,7 +2540,7 @@ async function refresh() {
     document.getElementById('ht_tp2_close_pct').value = data.config.ht_tp2_close_pct;
     document.getElementById('ht_sl_enabled').value = String(data.config.ht_sl_enabled);
     document.getElementById('ht_sl_cooldown_seconds').value = data.config.ht_sl_cooldown_seconds;
-    document.getElementById('da_resolution').value = data.config.da_resolution;
+    setResolutionField('da_resolution', data.config.da_resolution);
     document.getElementById('da_atr_period').value = data.config.da_atr_period;
     document.getElementById('da_sensitivity').value = data.config.da_sensitivity;
     document.getElementById('da_sma_period').value = data.config.da_sma_period;
@@ -2518,7 +2556,7 @@ async function refresh() {
     document.getElementById('da_tp_rr').value = data.config.da_tp_rr;
     document.getElementById('da_sl_cooldown_seconds').value = data.config.da_sl_cooldown_seconds;
     document.getElementById('da_use_heikin_ashi').value = String(data.config.da_use_heikin_ashi);
-    document.getElementById('es_resolution').value = data.config.es_resolution;
+    setResolutionField('es_resolution', data.config.es_resolution);
     document.getElementById('es_atr_period').value = data.config.es_atr_period;
     document.getElementById('es_auto_sensitivity').value = String(data.config.es_auto_sensitivity);
     document.getElementById('es_sensitivity').value = data.config.es_sensitivity;
@@ -2773,7 +2811,7 @@ function buildConfigPayload() {
     fib_tp2_level: parseFloat(document.getElementById('fib_tp2_level').value),
     fib_sl_level: parseFloat(document.getElementById('fib_sl_level').value),
     fib_cooldown_seconds: parseFloat(document.getElementById('fib_cooldown_seconds').value),
-    ht_resolution: document.getElementById('ht_resolution').value,
+    ht_resolution: getResolutionField('ht_resolution'),
     ht_amplitude: parseInt(document.getElementById('ht_amplitude').value),
     ht_channel_deviation: parseFloat(document.getElementById('ht_channel_deviation').value),
     ht_base_risk_mult: parseFloat(document.getElementById('ht_base_risk_mult').value),
@@ -2785,7 +2823,7 @@ function buildConfigPayload() {
     ht_tp2_close_pct: parseFloat(document.getElementById('ht_tp2_close_pct').value),
     ht_sl_enabled: document.getElementById('ht_sl_enabled').value === 'true',
     ht_sl_cooldown_seconds: parseFloat(document.getElementById('ht_sl_cooldown_seconds').value),
-    da_resolution: document.getElementById('da_resolution').value,
+    da_resolution: getResolutionField('da_resolution'),
     da_atr_period: parseInt(document.getElementById('da_atr_period').value),
     da_sensitivity: parseFloat(document.getElementById('da_sensitivity').value),
     da_sma_period: parseInt(document.getElementById('da_sma_period').value),
@@ -2801,7 +2839,7 @@ function buildConfigPayload() {
     da_tp_rr: parseFloat(document.getElementById('da_tp_rr').value),
     da_sl_cooldown_seconds: parseFloat(document.getElementById('da_sl_cooldown_seconds').value),
     da_use_heikin_ashi: document.getElementById('da_use_heikin_ashi').value === 'true',
-    es_resolution: document.getElementById('es_resolution').value,
+    es_resolution: getResolutionField('es_resolution'),
     es_atr_period: parseInt(document.getElementById('es_atr_period').value),
     es_auto_sensitivity: document.getElementById('es_auto_sensitivity').value === 'true',
     es_sensitivity: parseFloat(document.getElementById('es_sensitivity').value),
