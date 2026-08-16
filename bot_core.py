@@ -1128,7 +1128,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="diamond_algo"><label>ATR-Periode (SuperTrend-Kern)</label><input type="number" step="1" id="da_atr_period"></div>
-  <div data-mode="diamond_algo"><label>Sensitivity (ATR-Multiplikator = Sensitivity × 2 - höher = weniger empfindlich!)</label><input type="number" step="0.1" id="da_sensitivity"></div>
+  <div data-mode="diamond_algo"><label>Sensitivity (ATR-Multiplikator = Sensitivity × 2 - höher = weniger empfindlich!)</label><input type="number" step="0.01" id="da_sensitivity"></div>
   <div data-mode="diamond_algo"><label>SMA-Filter-Periode</label><input type="number" step="1" id="da_sma_period"></div>
   <div data-mode="diamond_algo"><label>EMA-Trendfilter-Periode (für Smart-Signale)</label><input type="number" step="1" id="da_ema_trend_period"></div>
   <div data-mode="diamond_algo"><label>Signal-Auswahl</label>
@@ -1205,7 +1205,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="false">Manuell (fester Wert)</option>
     </select>
   </div>
-  <div data-mode="elte_smart"><label>Sensitivity (nur bei manuellem Modus)</label><input type="number" step="0.1" id="es_sensitivity"></div>
+  <div data-mode="elte_smart"><label>Sensitivity (nur bei manuellem Modus)</label><input type="number" step="0.01" id="es_sensitivity"></div>
   <div data-mode="elte_smart"><label>Volatilitäts-Periode (EWMA, für Auto-Sensitivity)</label><input type="number" step="1" id="es_vol_period"></div>
   <div data-mode="elte_smart"><label>Volatilitäts-Durchschnitt-Periode (für Auto-Sensitivity)</label><input type="number" step="1" id="es_vol_ma_len"></div>
   <div data-mode="elte_smart"><label>Einstieg auslösen</label>
