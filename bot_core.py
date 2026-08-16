@@ -333,6 +333,8 @@ def default_config():
         "es_sl_manual_usd": float(os.getenv("ES_SL_MANUAL_USD", "5.0")),
         "es_tp_mode": os.getenv("ES_TP_MODE", "atr"),  # "atr" (TP1/TP2/TP3-Stufen) oder "manual" (ein einzelnes festes $-Ziel)
         "es_tp_manual_usd": float(os.getenv("ES_TP_MANUAL_USD", "5.0")),
+        "es_breakeven_pct_enabled": os.getenv("ES_BREAKEVEN_PCT_ENABLED", "false").lower() == "true",
+        "es_breakeven_trigger_pct": float(os.getenv("ES_BREAKEVEN_TRIGGER_PCT", "0.1")),
     }
 
 
@@ -362,7 +364,7 @@ def default_state():
         "es_opens": [], "es_highs": [], "es_lows": [], "es_closes": [], "es_direction": None,
         "es_sensitivity_last": None, "es_risk_atr_last": None, "es_sl_cooldown_until": 0.0,
         "es_sl_price": None, "es_tp1_price": None, "es_tp2_price": None, "es_tp3_price": None,
-        "es_tp1_done": False, "es_tp2_done": False,
+        "es_tp1_done": False, "es_tp2_done": False, "es_breakeven_pct_done": False,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -1264,6 +1266,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="elte_smart"><label>TP Fester $-Betrag (nur bei TP-Modus "Fest")</label><input type="number" step="0.5" id="es_tp_manual_usd"></div>
+  <div data-mode="elte_smart"><label>Prozent-Break-Even (unabhängig von TP1 - SL sofort auf Einstieg sobald Kurs sich X% bewegt hat)</label>
+    <select class="cfg" id="es_breakeven_pct_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="elte_smart"><label>Prozent-Break-Even Auslöse-Schwelle (%)</label><input type="number" step="0.01" id="es_breakeven_trigger_pct"></div>
 
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
@@ -2424,6 +2433,8 @@ async function refresh() {
     document.getElementById('es_sl_manual_usd').value = data.config.es_sl_manual_usd;
     document.getElementById('es_tp_mode').value = data.config.es_tp_mode;
     document.getElementById('es_tp_manual_usd').value = data.config.es_tp_manual_usd;
+    document.getElementById('es_breakeven_pct_enabled').value = String(data.config.es_breakeven_pct_enabled);
+    document.getElementById('es_breakeven_trigger_pct').value = data.config.es_breakeven_trigger_pct;
     document.getElementById('es_tp_enabled').value = String(data.config.es_tp_enabled);
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -2705,6 +2716,8 @@ function buildConfigPayload() {
     es_sl_manual_usd: parseFloat(document.getElementById('es_sl_manual_usd').value),
     es_tp_mode: document.getElementById('es_tp_mode').value,
     es_tp_manual_usd: parseFloat(document.getElementById('es_tp_manual_usd').value),
+    es_breakeven_pct_enabled: document.getElementById('es_breakeven_pct_enabled').value === 'true',
+    es_breakeven_trigger_pct: parseFloat(document.getElementById('es_breakeven_trigger_pct').value),
     es_tp_enabled: document.getElementById('es_tp_enabled').value === 'true',
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -2740,7 +2753,7 @@ function showToast(msg) {
   el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 1500);
 }
 
-['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','da_atr_period','da_sensitivity','da_sma_period','da_ema_trend_period','da_invert_direction','da_risk_atr_period','da_risk_mult','da_tp_rr','da_sl_cooldown_seconds','es_atr_period','es_sensitivity','es_vol_period','es_vol_ma_len','es_invert_direction','es_risk_atr_period','es_risk_mult','es_tp1_close_pct','es_tp2_close_pct','es_tp1_rr','es_tp2_rr','es_tp3_rr','es_sl_cooldown_seconds','es_sl_manual_usd','es_tp_manual_usd','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
+['margin','leverage','entry_mode','obi_threshold','obi_mode','obi_long_threshold','obi_short_threshold','obi_reversal_min_bounce','obi_instant_reset_ratio','obi_window_fast_seconds','obi_window_medium_seconds','obi_window_slow_seconds','obi_levels','obi_depth_weighting_enabled','obi_use_median','obi_min_liquidity','obi_breakeven_enabled','obi_breakeven_trigger_ratio','obi_breakeven_lock_usd','obi_breakeven_lock_pct','obi_tp_sl_mode','obi_tp_pct','obi_sl_pct','obi_tp_usd','obi_sl_usd','obi_cooldown_seconds','obi_trend_filter','obi_trend_ema_length','obi_spread_filter_enabled','obi_max_spread_pct','obi_vol_filter_enabled','obi_vol_window_seconds','obi_vol_min_pct','obi_vol_max_pct','oms_levels','oms_obi_threshold','oms_window_fast_seconds','oms_window_medium_seconds','oms_window_slow_seconds','oms_cvd_window_seconds','oms_cvd_min_ratio','oms_funding_max_abs','oms_cooldown_seconds','oms_tp1_usd','oms_tp1_close_pct','oms_sl_usd','oms_trail_distance_usd','oms_dca_max_entries','oms_dca_size_fraction','oms_dca_min_pullback_usd','fib_resolution','fib_lookback_candles','fib_entry1_level','fib_entry2_level','fib_tp1_level','fib_tp1_close_pct','fib_tp2_level','fib_sl_level','fib_cooldown_seconds','ht_amplitude','ht_channel_deviation','ht_base_risk_mult','ht_invert_direction','ht_tp1_close_pct','ht_tp2_close_pct','ht_sl_cooldown_seconds','da_atr_period','da_sensitivity','da_sma_period','da_ema_trend_period','da_invert_direction','da_risk_atr_period','da_risk_mult','da_tp_rr','da_sl_cooldown_seconds','es_atr_period','es_sensitivity','es_vol_period','es_vol_ma_len','es_invert_direction','es_risk_atr_period','es_risk_mult','es_tp1_close_pct','es_tp2_close_pct','es_tp1_rr','es_tp2_rr','es_tp3_rr','es_sl_cooldown_seconds','es_sl_manual_usd','es_tp_manual_usd','es_breakeven_trigger_pct','oms_rsi_period','oms_rsi_midline','oms_oi_window_seconds','oms_oi_min_change_pct','oms_oi_min_score','oms_liq_window_seconds','oms_liq_min_ratio','grid_mode','grid_step_pct','tp_step_pct','grid_step_usd','tp_step_usd','max_nachkauf','dry_run','auto_reverse'].forEach(id => {
   document.getElementById(id).addEventListener('input', (e) => {
     window.formTouched = true;
     if (typeof e.target.value === 'string' && e.target.value.includes(',')) {
@@ -2866,6 +2879,7 @@ async def handle_config_update(request):
                 "es_risk_atr_period", "es_risk_mult", "es_tp1_close_pct", "es_tp2_close_pct",
                 "es_tp1_rr", "es_tp2_rr", "es_tp3_rr", "es_sl_cooldown_seconds", "es_reenter_on_flip",
                 "es_sl_enabled", "es_sl_mode", "es_sl_manual_usd", "es_tp_enabled", "es_tp_mode", "es_tp_manual_usd",
+                "es_breakeven_pct_enabled", "es_breakeven_trigger_pct",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

@@ -1273,6 +1273,7 @@ def _es_reset_state(st):
     st["es_tp3_price"] = None
     st["es_tp1_done"] = False
     st["es_tp2_done"] = False
+    st["es_breakeven_pct_done"] = False
 
 
 async def check_es_sl_tp(symbol, price):
@@ -1287,6 +1288,21 @@ async def check_es_sl_tp(symbol, price):
         return
     pos = st["position"]
 
+    # Prozent-Break-Even (eigenstaendig, unabhaengig vom TP1-Break-Even): sobald sich der Kurs
+    # um X% in die richtige Richtung bewegt hat, SL sofort auf Einstieg ziehen - auch wenn TP1
+    # noch laengst nicht erreicht ist. Verbessert den SL nur (nie verschlechtern), laeuft nur
+    # einmal pro Position.
+    if cfg.get("es_breakeven_pct_enabled", False) and not st.get("es_breakeven_pct_done"):
+        entry = st["avg_entry_price"]
+        trigger_pct = cfg.get("es_breakeven_trigger_pct", 0.1) / 100
+        moved_pct = (price - entry) / entry if pos == "long" else (entry - price) / entry
+        if moved_pct >= trigger_pct:
+            current_sl = st.get("es_sl_price")
+            if current_sl is None or (pos == "long" and entry > current_sl) or (pos == "short" and entry < current_sl):
+                st["es_sl_price"] = entry
+                debug_log(f"📡 [{symbol}] ELTE Smart Prozent-Break-Even ausgelöst ({trigger_pct*100:.2f}% erreicht) - SL auf Einstieg ({round(entry,4)}) gesetzt")
+            st["es_breakeven_pct_done"] = True
+
     sl_price = st.get("es_sl_price")
     if sl_price is not None:
         hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
@@ -1295,6 +1311,8 @@ async def check_es_sl_tp(symbol, price):
                 reason = "TP1-LOCK"
             elif st.get("es_tp1_done"):
                 reason = "BREAKEVEN"
+            elif st.get("es_breakeven_pct_done") and abs(sl_price - st["avg_entry_price"]) < 1e-9:
+                reason = "BREAKEVEN-PCT"
             else:
                 reason = "SL"
             debug_log(f"🚪 [{symbol}] ELTE Smart {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
@@ -2853,6 +2871,8 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
     tp3_rr = cfg.get("es_tp3_rr", 3.0)
     sl_cooldown_ms = cfg.get("es_sl_cooldown_seconds", 30) * 1000
     invert = cfg.get("es_invert_direction", False)
+    breakeven_pct_enabled = cfg.get("es_breakeven_pct_enabled", False)
+    breakeven_trigger_pct = cfg.get("es_breakeven_trigger_pct", 0.1) / 100
 
     position = None
     trades = []
@@ -2863,10 +2883,31 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
 
         if position is not None:
             pdir, entry = position["dir"], position["entry"]
+
+            # Prozent-Break-Even (siehe check_es_sl_tp fuer die ausfuehrliche Begruendung):
+            # nutzt das GUENSTIGSTE Preis-Extrem innerhalb dieses Balkens (Hoch bei Long, Tief
+            # bei Short), um zu pruefen ob die Schwelle innerhalb der Kerze erreicht wurde -
+            # verbessert den SL nur, verschlechtert ihn nie, laeuft nur einmal pro Position.
+            if breakeven_pct_enabled and not position.get("breakeven_pct_done"):
+                best_price = h[i] if pdir == "long" else l[i]
+                moved_pct = (best_price - entry) / entry if pdir == "long" else (entry - best_price) / entry
+                if moved_pct >= breakeven_trigger_pct:
+                    current_sl = position.get("sl_price")
+                    if current_sl is None or (pdir == "long" and entry > current_sl) or (pdir == "short" and entry < current_sl):
+                        position["sl_price"] = entry
+                    position["breakeven_pct_done"] = True
+
             sl_price = position.get("sl_price")
             hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
             if hit_sl:
-                reason = "TP1-LOCK" if position["tp2_done"] else ("BREAKEVEN" if position["tp1_done"] else "SL")
+                if position["tp2_done"]:
+                    reason = "TP1-LOCK"
+                elif position["tp1_done"]:
+                    reason = "BREAKEVEN"
+                elif position.get("breakeven_pct_done") and abs(sl_price - entry) < 1e-9:
+                    reason = "BREAKEVEN-PCT"
+                else:
+                    reason = "SL"
                 _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
