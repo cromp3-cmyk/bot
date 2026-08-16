@@ -30,6 +30,29 @@ BINANCE_SYMBOL_MAP = {
 BINANCE_FUTURES_ONLY_SYMBOLS = {"XAU", "XAG"}  # existieren auf Binance NUR als Futures, kein Spot-Paar
 
 
+# Globale Anfragen-Drossel: OHNE das feuern alle 7 Poll-Loops (binance_1s, da, es, ht,
+# scalp_board, quad_stoch, oms_rsi) x alle aktiven Coins IM SELBEN MOMENT, weil sie alle exakt
+# 5 Sekunden schlafen und beim Bot-Start fast gleichzeitig gestartet sind - das bleibt fuer immer
+# synchron (klassisches "Thundering Herd"-Muster) und riss in der Praxis das Rate-Limit, obwohl
+# die DURCHSCHNITTLICHE Anfragenrate eigentlich im gruenen Bereich gewesen waere. Diese Drossel
+# verteilt alle Binance-Anfragen (ueber alle Coins/Loops hinweg) gleichmaessig statt in Buendeln.
+_binance_last_request_ts = 0.0
+_binance_throttle_lock = None  # wird beim ersten Gebrauch lazy angelegt (braucht einen laufenden Event-Loop)
+BINANCE_MIN_REQUEST_INTERVAL = 0.15  # Sekunden zwischen zwei Binance-Anfragen = max. ~6.7 Anfragen/Sekunde global
+
+
+async def _binance_throttle():
+    global _binance_last_request_ts, _binance_throttle_lock
+    if _binance_throttle_lock is None:
+        _binance_throttle_lock = asyncio.Lock()
+    async with _binance_throttle_lock:
+        now = time.time()
+        wait = BINANCE_MIN_REQUEST_INTERVAL - (now - _binance_last_request_ts)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _binance_last_request_ts = time.time()
+
+
 BINANCE_BASE_URLS = {
     "spot": "https://api.binance.com/api/v3/klines",
     "futures": "https://fapi.binance.com/fapi/v1/klines",  # USD-M Perpetual Futures - gleiche
@@ -79,21 +102,30 @@ async def fetch_candles_binance(symbol, resolution, count_back=150, market_type=
     pair = BINANCE_SYMBOL_MAP.get(symbol)
     if not pair:
         return None
+    if resolution == "1s" and symbol in BINANCE_FUTURES_ONLY_SYMBOLS:
+        # Weder Spot (kein XAUUSDT/XAGUSDT-Paar) noch Futures (keine 1s-Kerzen) koennen das
+        # liefern - erst gar keine Anfrage stellen statt sie mit Sicherheit fehlschlagen zu
+        # lassen (das hat vorher alle 5s "Invalid interval" produziert, da die "XAU/XAG->Futures"-
+        # Regel faelschlich Vorrang vor der "1s->immer Spot"-Regel hatte).
+        return None
     try:
         # Binance Futures (fapi) bietet KEINE 1-Sekunden-Kerzen an (nur Spot) - die sind aber
-        # die Grundlage fuer alle Sekunden-Aufloesungen (10s/15s/30s/45s). Ohne diesen Fallback
-        # wuerde ein "1s"-Request an fapi.binance.com schlicht fehlschlagen ("Keine Daten").
-        effective_market_type = market_type
-        if resolution == "1s" and market_type == "futures":
+        # die Grundlage fuer alle Sekunden-Aufloesungen (10s/15s/30s/45s). Diese Regel hat
+        # IMMER Vorrang vor der XAU/XAG-Futures-Regel (siehe Check oben), sonst wuerde "1s" an
+        # den Futures-Endpunkt gehen, der Sekunden-Intervalle gar nicht kennt ("Invalid interval").
+        if resolution == "1s":
             effective_market_type = "spot"
         elif symbol in BINANCE_FUTURES_ONLY_SYMBOLS:
             effective_market_type = "futures"  # XAU/XAG gibt's nur als Future, kein Spot-Paar
+        else:
+            effective_market_type = market_type
 
         if _binance_is_banned(effective_market_type):
             return None  # aktiver Bann - keine Anfrage stellen, das wuerde ihn nur verlaengern
 
         base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
         url = f"{base_url}?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
+        await _binance_throttle()
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status in (418, 429):
@@ -175,6 +207,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
                     return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
 
                 url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
+                await _binance_throttle()
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status in (418, 429):
                         # NICHT blind mit kurzer Pause wiederholen - das hat den Bann in der
@@ -241,10 +274,17 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
     pair = BINANCE_SYMBOL_MAP.get(symbol)
     if not pair:
         return None
+    if _binance_is_banned("spot"):
+        return None  # aktiver Bann - keine Anfrage stellen, das wuerde ihn nur verlaengern
     try:
+        await _binance_throttle()
         url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status in (418, 429):
+                    body = await resp.text()
+                    _binance_register_ban("spot", symbol, resp.status, body)
+                    return None
                 if resp.status != 200:
                     debug_log(f"⚠️ [{symbol}] Binance-Kerzenabfrage (mit Volumen) HTTP {resp.status}")
                     return None
