@@ -742,7 +742,69 @@ def compute_diamond_supertrend(highs, lows, closes, factor, atr_period):
     return st_out, dir_out
 
 
-def compute_heikin_ashi(opens, highs, lows, closes):
+def compute_wma_series(values, period):
+    """Gewichteter gleitender Durchschnitt (Pine's wma) - je juenger der Wert, desto hoeher das
+    Gewicht (1..period)."""
+    n = len(values)
+    out = [None] * n
+    denom = period * (period + 1) / 2
+    for i in range(n):
+        if i < period - 1:
+            continue
+        window = values[i - period + 1:i + 1]
+        out[i] = sum(window[j] * (j + 1) for j in range(period)) / denom
+    return out
+
+
+def compute_hull_ma(closes, period):
+    """Hull Moving Average (Pine's HMA): WMA(2*WMA(n/2) - WMA(n), sqrt(n)) - reagiert schneller
+    und mit weniger Verzoegerung als eine normale MA. Gibt die HMA-Linie zurueck; die Farbe
+    (gruen/rot) ergibt sich aus dem Vorzeichen der Steigung (aktueller Wert vs. vorheriger)."""
+    n = len(closes)
+    half = max(1, round(period / 2))
+    sqn = max(1, round(math.sqrt(period)))
+    wma_half = compute_wma_series(closes, half)
+    wma_full = compute_wma_series(closes, period)
+    diff = [(2 * wma_half[i] - wma_full[i]) if (wma_half[i] is not None and wma_full[i] is not None) else None for i in range(n)]
+    # compute_wma_series braucht `sqn` weitere echte Werte danach - fehlende (None) Stellen am
+    # Anfang einfach mit dem ersten gueltigen Wert auffuellen, damit compute_wma_series darauf
+    # rechnen kann (matcht die Pine-Verhalten "na" ohnehin nur als Warmup-Bereich).
+    first_valid = next((x for x in diff if x is not None), 0.0)
+    diff_filled = [x if x is not None else first_valid for x in diff]
+    hma = compute_wma_series(diff_filled, sqn)
+    return hma
+
+
+def compute_ut_bot(opens, highs, lows, closes, atr_period, sensitivity, use_heikin_ashi=False):
+    """UT Bot Alerts (weit verbreitetes Pine-Script): ATR-Trailing-Stop-Linie, BUY wenn der Kurs
+    (bzw. Heikin-Ashi-Kurs) von unten nach oben ueber die Stop-Linie kreuzt, SELL umgekehrt.
+    Gibt (buy, sell, stop_line) zurueck."""
+    if use_heikin_ashi:
+        _, h_src, l_src, src = compute_heikin_ashi(opens, highs, lows, closes)
+    else:
+        h_src, l_src, src = highs, lows, closes
+    atr = compute_atr(h_src, l_src, src, atr_period)
+    n = len(src)
+    nloss = [sensitivity * (atr[i] or 0) for i in range(n)]
+    stop = [0.0] * n
+    for i in range(n):
+        prev_stop = stop[i - 1] if i > 0 else 0.0
+        prev_src = src[i - 1] if i > 0 else src[i]
+        if src[i] > prev_stop and prev_src > prev_stop:
+            stop[i] = max(prev_stop, src[i] - nloss[i])
+        elif src[i] < prev_stop and prev_src < prev_stop:
+            stop[i] = min(prev_stop, src[i] + nloss[i])
+        else:
+            stop[i] = src[i] - nloss[i] if src[i] > prev_stop else src[i] + nloss[i]
+
+    buy = [False] * n
+    sell = [False] * n
+    for i in range(1, n):
+        above = src[i - 1] <= stop[i - 1] and src[i] > stop[i]
+        below = src[i - 1] >= stop[i - 1] and src[i] < stop[i]
+        buy[i] = src[i] > stop[i] and above
+        sell[i] = src[i] < stop[i] and below
+    return buy, sell, stop
     """Rechnet normale OHLC-Kerzen in Heikin-Ashi-Kerzen um (wie bei TradingView, wenn man den
     Chart-Typ auf 'Heikin Ashi' umstellt). Heikin-Ashi glaettet den Kursverlauf, indem jede Kerze
     den Durchschnitt der vorherigen mit einrechnet - Trends wirken dadurch 'glatter' (weniger
@@ -2280,6 +2342,158 @@ async def mo7_poll_loop(symbol):
                     debug_log(f"⏳ [{symbol}] MO7 wartet: keine/zu wenig Kerzen erhalten (Auflösung {resolution})")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] MO7-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+def compute_ut_hull_flip_signals(buy, sell, hull_green, cfg):
+    """Bestimmt WANN geflippt wird - waehlbar (utb_flip_trigger):
+    - 'hull_color': sobald die Hull-MA-Farbe wechselt (UT-Bot-Signal wird nur fuer den
+      allerersten Einstieg gebraucht, danach entscheidet nur noch Hull).
+    - 'hull_and_signal': Hull-Farbe UND UT-Bot-Signal muessen am selben Balken beide da sein.
+    - 'opposite_signal': nur das naechste Gegen-Signal von UT-Bot zaehlt, Hull spielt beim Flip
+      keine Rolle mehr (nur beim allerersten Einstieg als Filter)."""
+    trigger = cfg.get("utb_flip_trigger", "hull_color")
+    n = len(buy)
+    long_flip = [False] * n
+    short_flip = [False] * n
+    if trigger == "opposite_signal":
+        for i in range(n):
+            long_flip[i] = buy[i]
+            short_flip[i] = sell[i]
+    elif trigger == "hull_and_signal":
+        for i in range(n):
+            if hull_green[i] is None:
+                continue
+            long_flip[i] = buy[i] and hull_green[i]
+            short_flip[i] = sell[i] and not hull_green[i]
+    else:  # "hull_color"
+        for i in range(1, n):
+            if hull_green[i] is None or hull_green[i - 1] is None:
+                continue
+            long_flip[i] = hull_green[i] and not hull_green[i - 1]
+            short_flip[i] = (not hull_green[i]) and hull_green[i - 1]
+    return long_flip, short_flip
+
+
+async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull_green_i, price):
+    """Immer-im-Markt-System (kein SL/TP): beim allerersten Einstieg braucht es ein echtes
+    UT-Bot-Signal PLUS passende Hull-Farbe. Danach entscheidet nur noch der gewaehlte
+    Flip-Trigger (compute_ut_hull_flip_signals) ueber den naechsten Richtungswechsel. Bei
+    Long-/Short-only wird bei einem Gegen-Flip nicht auf die andere Seite gedreht, sondern nur
+    glattgestellt (echtes 'immer im Markt' ergibt bei einseitiger Richtung ja keinen Sinn)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    direction_mode = cfg.get("utb_direction_mode", "both")
+    pos = st["position"]
+
+    if pos is None:
+        if hull_green_i is None:
+            return
+        if buy_i and hull_green_i and direction_mode != "short_only":
+            debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg: LONG @ {price}")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+        elif sell_i and not hull_green_i and direction_mode != "long_only":
+            debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg: SHORT @ {price}")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+        return
+
+    if pos == "long" and short_flip_i:
+        if direction_mode == "long_only":
+            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit: LONG @ {price}")
+            await execute_exit(symbol, price, "UTB-HULL-EXIT")
+        else:
+            debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: LONG -> SHORT @ {price}")
+            await execute_exit(symbol, price, "UTB-HULL-FLIP")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+    elif pos == "short" and long_flip_i:
+        if direction_mode == "short_only":
+            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit: SHORT @ {price}")
+            await execute_exit(symbol, price, "UTB-HULL-EXIT")
+        else:
+            debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: SHORT -> LONG @ {price}")
+            await execute_exit(symbol, price, "UTB-HULL-FLIP")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+
+
+async def utb_poll_loop(symbol):
+    """UT Bot Alerts (ATR-Trailing-Stop) + Hull-MA-Filter, immer im Markt, kein SL/TP. Nutzt
+    dieselbe Kerzenquelle/Aufloesungs-Logik wie Candle Patterns (inkl. Sekunden-Aufloesungen und
+    eigene Minuten), da hier - anders als bei MO7 - kein Handelsvolumen gebraucht wird."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "ut_bot_hull" and cfg["bot_active"]:
+                resolution = cfg.get("utb_resolution", "5m")
+                hull_period = cfg.get("utb_hull_period", 31)
+                atr_period = cfg.get("utb_atr_period", 1)
+                min_needed = max(atr_period, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 5
+                needed_bars = min(1000, max(min_needed * 2, 220))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    buy, sell, stop_line = compute_ut_bot(closed_o, closed_h, closed_l, closed_c, atr_period, cfg.get("utb_sensitivity", 1.0), cfg.get("utb_heikin_ashi", False))
+                    hma = compute_hull_ma(closed_c, hull_period)
+                    hull_green = [None] * len(closed_c)
+                    for i in range(1, len(closed_c)):
+                        if hma[i] is not None and hma[i - 1] is not None:
+                            hull_green[i] = hma[i] > hma[i - 1]
+                    long_flip, short_flip = compute_ut_hull_flip_signals(buy, sell, hull_green, cfg)
+
+                    st["utb_last_hull_green"] = hull_green[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] UT-Bot+Hull aktiv: Preis={closed_c[-1]}, Hull-grün={hull_green[-1]}, "
+                                  f"Trigger={cfg.get('utb_flip_trigger')}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 2:
+                            continue
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        await check_uh_signal(symbol, buy[idx], sell[idx], long_flip[idx], short_flip[idx], hull_green[idx], price_i)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] UT-Bot+Hull wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] UT-Bot+Hull wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] UT-Bot+Hull-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
 
@@ -4479,6 +4693,90 @@ async def run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low
     }
 
 
+def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup):
+    """Immer-im-Markt-Simulation fuer UT Bot + Hull Flip - kein SL/TP, siehe check_uh_signal fuer
+    die identische Logik im Live-Betrieb."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    direction_mode = cfg.get("utb_direction_mode", "both")
+
+    position = None
+    trades = []
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is None:
+            if hull_green[i] is None:
+                continue
+            if buy[i] and hull_green[i] and direction_mode != "short_only":
+                size = (margin * leverage) / price
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+            elif sell[i] and not hull_green[i] and direction_mode != "long_only":
+                size = (margin * leverage) / price
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+            continue
+
+        if position["dir"] == "long" and short_flip[i]:
+            reason = "UTB-HULL-EXIT" if direction_mode == "long_only" else "UTB-HULL-FLIP"
+            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
+            if direction_mode == "long_only":
+                position = None
+            else:
+                size = (margin * leverage) / price
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+        elif position["dir"] == "short" and long_flip[i]:
+            reason = "UTB-HULL-EXIT" if direction_mode == "short_only" else "UTB-HULL-FLIP"
+            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
+            if direction_mode == "short_only":
+                position = None
+            else:
+                size = (margin * leverage) / price
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_ut_bot_hull(candles, cfg):
+    ts, o, h, l, c = candles
+    atr_period = cfg.get("utb_atr_period", 1)
+    sensitivity = cfg.get("utb_sensitivity", 1.0)
+    use_ha = cfg.get("utb_heikin_ashi", False)
+    hull_period = cfg.get("utb_hull_period", 31)
+    buy, sell, stop_line = compute_ut_bot(o, h, l, c, atr_period, sensitivity, use_ha)
+    hma = compute_hull_ma(c, hull_period)
+    hull_green = [None] * len(c)
+    for i in range(1, len(c)):
+        if hma[i] is not None and hma[i - 1] is not None:
+            hull_green[i] = hma[i] > hma[i - 1]
+    long_flip, short_flip = compute_ut_hull_flip_signals(buy, sell, hull_green, cfg)
+    warmup = max(atr_period, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 2
+    return _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup)
+
+
+UTB_ALL_TIMEFRAMES = ["10s", "15s", "30s", "45s", "1m", "2m", "3m", "5m", "15m", "30m", "1h", "2h", "4h"]
+
+
+async def run_utb_all_timeframes_backtest(symbol, cfg, days):
+    """Backtest über ALLE Zeitrahmen (wie gewünscht) - nutzt den generischen run_backtest()
+    einfach mehrfach mit ueberschriebener 'utb_resolution', spart dadurch eigene
+    Cache-/Fetch-Logik komplett."""
+    results = []
+    for res in UTB_ALL_TIMEFRAMES:
+        cfg_copy = dict(cfg)
+        cfg_copy["utb_resolution"] = res
+        r = await run_backtest(symbol, "ut_bot_hull", cfg_copy, days)
+        if "error" in r:
+            results.append({"resolution": res, "error": r["error"]})
+        else:
+            results.append({"resolution": res, **r["stats"]})
+    return {"symbol": symbol, "requested_days": days, "results": results}
+
+
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000,
     "halftrend": 100_000,
@@ -4486,6 +4784,7 @@ BACKTEST_MAX_CANDLES = {
     "elte_smart": 100_000,
     "candle_patterns": 100_000,
     "mo7_scalp": 100_000,
+    "ut_bot_hull": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -4494,6 +4793,7 @@ BACKTEST_FUNCS = {
     "diamond_algo": backtest_diamond_algo,
     "elte_smart": backtest_elte_smart,
     "candle_patterns": backtest_candle_patterns,
+    "ut_bot_hull": backtest_ut_bot_hull,
     # "mo7_scalp" bewusst NICHT hier drin - braucht eine 6er-Tupel-Kerzenquelle MIT Volumen
     # (MFI-Baustein), deshalb in run_backtest() als Sonderfall behandelt statt ueber diesen
     # generischen 5er-Tupel-Dispatch.
@@ -4524,11 +4824,11 @@ async def run_backtest(symbol, entry_mode, cfg, days):
         }
 
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution"}[entry_mode]
+    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -

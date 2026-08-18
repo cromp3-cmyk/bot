@@ -372,6 +372,13 @@ def default_config():
         "mo7_tp_enabled": os.getenv("MO7_TP_ENABLED", "true").lower() == "true",
         "mo7_tp_manual_usd": float(os.getenv("MO7_TP_MANUAL_USD", "5.0")),
         "mo7_sl_cooldown_seconds": float(os.getenv("MO7_SL_COOLDOWN_SECONDS", "30")),
+        "utb_resolution": os.getenv("UTB_RESOLUTION", "5m"),
+        "utb_atr_period": int(os.getenv("UTB_ATR_PERIOD", "1")),
+        "utb_sensitivity": float(os.getenv("UTB_SENSITIVITY", "1.0")),
+        "utb_heikin_ashi": os.getenv("UTB_HEIKIN_ASHI", "false").lower() == "true",
+        "utb_hull_period": int(os.getenv("UTB_HULL_PERIOD", "31")),
+        "utb_flip_trigger": os.getenv("UTB_FLIP_TRIGGER", "hull_color"),  # "hull_color" | "hull_and_signal" | "opposite_signal"
+        "utb_direction_mode": os.getenv("UTB_DIRECTION_MODE", "both"),
     }
 
 
@@ -407,6 +414,7 @@ def default_state():
         "cp_sl_price": None, "cp_tp_price": None, "cp_breakeven_done": False,
         "mo7_last_value": None, "mo7_sl_cooldown_until": 0.0,
         "mo7_sl_price": None, "mo7_tp_price": None,
+        "utb_last_hull_green": None,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -916,6 +924,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="elte_smart">ELTE Smart (SuperTrend auf ohlc4 mit Auto-Sensitivity, TP1/TP2/TP3 gestufte Teilverkäufe mit nachziehendem SL)</option>
       <option value="candle_patterns">Candle Patterns (3 Line Strike / Engulfing, SL+TP fest oder ATR-basiert, ATR-Breakeven)</option>
       <option value="mo7_scalp">MO7 Scalp (Composite-Oszillator aus 7 Indikatoren, Schwellenwert-Cross oder 5-Kerzen-Summe, fester SL+TP)</option>
+      <option value="ut_bot_hull">UT Bot + Hull Flip (ATR-Trailing-Stop, immer im Markt, Flip-Trigger wählbar, kein SL/TP)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1473,6 +1482,52 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="mo7_scalp"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="mo7_tp_manual_usd"></div>
   <div data-mode="mo7_scalp"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mo7_sl_cooldown_seconds"></div>
 
+  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌀 UT Bot Alerts (ATR-Trailing-Stop, weit verbreitetes Pine-Script) gefiltert durch die Hull
+    Moving Average-Farbe. IMMER IM MARKT (kein SL/TP, keine flache Position) - die Strategie
+    dreht kontinuierlich zwischen Long/Short. Flip-Trigger wählbar.
+  </div>
+  <div data-mode="ut_bot_hull"><label>Zeitrahmen</label>
+    <select class="cfg" id="utb_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="utb_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="ut_bot_hull"><label>ATR-Periode (UT-Bot, Original-Default 1)</label><input type="number" step="1" id="utb_atr_period"></div>
+  <div data-mode="ut_bot_hull"><label>Sensitivity (ATR-Multiplikator für die Trailing-Stop-Distanz)</label><input type="number" step="0.01" id="utb_sensitivity"></div>
+  <div data-mode="ut_bot_hull"><label>Signalquelle</label>
+    <select class="cfg" id="utb_heikin_ashi">
+      <option value="false">Normale Kerzen</option>
+      <option value="true">Heikin-Ashi-Kerzen</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot_hull"><label>Hull-MA-Periode</label><input type="number" step="1" id="utb_hull_period"></div>
+  <div data-mode="ut_bot_hull"><label>Flip-Trigger</label>
+    <select class="cfg" id="utb_flip_trigger">
+      <option value="hull_color">Nur Hull-Farbwechsel (UT-Bot-Signal nur für Ersteinstieg)</option>
+      <option value="hull_and_signal">Hull-Farbwechsel UND UT-Bot-Gegensignal gleichzeitig</option>
+      <option value="opposite_signal">Nur UT-Bot-Gegensignal (Hull nur für Ersteinstieg)</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot_hull"><label>Richtung</label>
+    <select class="cfg" id="utb_direction_mode">
+      <option value="both">Beide (immer im Markt, dreht zwischen Long/Short)</option>
+      <option value="long_only">Nur Long (bei Gegen-Flip glattstellen statt drehen)</option>
+      <option value="short_only">Nur Short (bei Gegen-Flip glattstellen statt drehen)</option>
+    </select>
+  </div>
+
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1764,6 +1819,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <thead><tr>
       <th class="sortable" data-key="mo7_sum_low">Long-Schwelle ⇅</th>
       <th class="sortable" data-key="mo7_sum_high">Short-Schwelle ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<div data-mode-section="ut_bot_hull" style="display:none;">
+<h2 class="section-title">🎲 UT-Bot+Hull Backtest über alle Zeitrahmen</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet dieselbe Einstellung (ATR-Periode, Sensitivity, Hull-Periode, Flip-Trigger, Richtung)
+    auf allen unterstützten Zeitrahmen gleichzeitig (10s bis 4h) und zeigt, welcher am besten
+    abschneidet.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="utb-sweep-days" value="30" style="width:90px;"></div>
+    <button id="btn-utb-sweep" style="padding:12px 24px;">🎲 Alle Zeitrahmen testen</button>
+  </div>
+  <div id="utb-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <table id="utb-sweep-results-table" style="display:none; margin-top:12px;">
+    <thead><tr>
+      <th class="sortable" data-key="resolution">Zeitrahmen ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -2157,7 +2239,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -2192,6 +2274,9 @@ function resetBacktestUI() {
   document.getElementById('mo7-sweep-worst-title').style.display = 'none';
   window.mo7SweepResultsData = [];
   window.mo7SweepWorstData = [];
+  document.getElementById('utb-sweep-status').innerText = '';
+  document.getElementById('utb-sweep-results-table').style.display = 'none';
+  window.utbSweepResultsData = [];
 }
 
 document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
@@ -2441,6 +2526,51 @@ const mo7SweepRowHtml = (r) => `
   </tr>`;
 const renderMo7SweepResults = makeSortableTable('mo7-sweep-results-table', () => window.mo7SweepResultsData, mo7SweepRowHtml);
 const renderMo7SweepWorst = makeSortableTable('mo7-sweep-worst-table', () => window.mo7SweepWorstData, mo7SweepRowHtml);
+
+document.getElementById('btn-utb-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-utb-sweep');
+  const statusEl = document.getElementById('utb-sweep-status');
+  const tableEl = document.getElementById('utb-sweep-results-table');
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('utb-sweep-days').value) || 30,
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  tableEl.style.display = 'none';
+  statusEl.innerText = `⏳ Teste alle Zeitrahmen (10s bis 4h)... kann etwas dauern.`;
+  try {
+    const res = await fetch(`/api/utb_all_timeframes?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.results.length} Zeitrahmen getestet (${payload.days} Tage).`;
+      window.utbSweepResultsData = (data.results || []).filter(r => !r.error);
+      renderUtbSweepResults();
+      tableEl.style.display = '';
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.utbSweepResultsData = [];
+const utbSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.resolution}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderUtbSweepResults = makeSortableTable('utb-sweep-results-table', () => window.utbSweepResultsData, utbSweepRowHtml);
 
 
 
@@ -2925,6 +3055,13 @@ async function refresh() {
     document.getElementById('mo7_tp_enabled').value = String(data.config.mo7_tp_enabled);
     document.getElementById('mo7_tp_manual_usd').value = data.config.mo7_tp_manual_usd;
     document.getElementById('mo7_sl_cooldown_seconds').value = data.config.mo7_sl_cooldown_seconds;
+    setResolutionField('utb_resolution', data.config.utb_resolution);
+    document.getElementById('utb_atr_period').value = data.config.utb_atr_period;
+    document.getElementById('utb_sensitivity').value = data.config.utb_sensitivity;
+    document.getElementById('utb_heikin_ashi').value = String(data.config.utb_heikin_ashi);
+    document.getElementById('utb_hull_period').value = data.config.utb_hull_period;
+    document.getElementById('utb_flip_trigger').value = data.config.utb_flip_trigger;
+    document.getElementById('utb_direction_mode').value = data.config.utb_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -3239,6 +3376,13 @@ function buildConfigPayload() {
     mo7_tp_enabled: document.getElementById('mo7_tp_enabled').value === 'true',
     mo7_tp_manual_usd: parseFloat(document.getElementById('mo7_tp_manual_usd').value),
     mo7_sl_cooldown_seconds: parseFloat(document.getElementById('mo7_sl_cooldown_seconds').value),
+    utb_resolution: getResolutionField('utb_resolution'),
+    utb_atr_period: parseInt(document.getElementById('utb_atr_period').value),
+    utb_sensitivity: parseFloat(document.getElementById('utb_sensitivity').value),
+    utb_heikin_ashi: document.getElementById('utb_heikin_ashi').value === 'true',
+    utb_hull_period: parseInt(document.getElementById('utb_hull_period').value),
+    utb_flip_trigger: document.getElementById('utb_flip_trigger').value,
+    utb_direction_mode: document.getElementById('utb_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -3363,6 +3507,7 @@ async def handle_status(request):
         "cp_tp_price": st.get("cp_tp_price"), "cp_breakeven_done": st.get("cp_breakeven_done"),
         "mo7_last_value": st.get("mo7_last_value"), "mo7_sl_price": st.get("mo7_sl_price"),
         "mo7_tp_price": st.get("mo7_tp_price"),
+        "utb_last_hull_green": st.get("utb_last_hull_green"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3422,6 +3567,8 @@ async def handle_config_update(request):
                 "mo7_sum_low", "mo7_sum_high", "mo7_direction_mode", "mo7_flip_exit_enabled",
                 "mo7_sl_enabled", "mo7_sl_manual_usd", "mo7_tp_enabled", "mo7_tp_manual_usd",
                 "mo7_sl_cooldown_seconds",
+                "utb_resolution", "utb_atr_period", "utb_sensitivity", "utb_heikin_ashi",
+                "utb_hull_period", "utb_flip_trigger", "utb_direction_mode",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
@@ -3580,6 +3727,28 @@ async def handle_mo7_sum_sweep(request):
 
     result = await run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low_step,
                                       sum_high_min, sum_high_max, sum_high_step)
+    return web.json_response(result)
+
+
+async def handle_utb_all_timeframes(request):
+    """Backtest fuer UT Bot + Hull Flip ueber ALLE unterstuetzten Zeitrahmen gleichzeitig (wie
+    gewuenscht) - liefert eine Vergleichstabelle."""
+    from strategies import run_utb_all_timeframes_backtest
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültiger Zeitraum."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_utb_all_timeframes_backtest(symbol, cfg, days)
     return web.json_response(result)
 
 
