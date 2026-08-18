@@ -353,6 +353,25 @@ def default_config():
         "cp_sl_cooldown_seconds": float(os.getenv("CP_SL_COOLDOWN_SECONDS", "30")),
         "cp_breakeven_enabled": os.getenv("CP_BREAKEVEN_ENABLED", "true").lower() == "true",
         "cp_breakeven_trigger_mult": float(os.getenv("CP_BREAKEVEN_TRIGGER_MULT", "0.5")),
+        "mo7_resolution": os.getenv("MO7_RESOLUTION", "5m"),
+        "mo7_entry_mode": os.getenv("MO7_ENTRY_MODE", "threshold_cross"),  # "threshold_cross" | "five_candle_sum"
+        "mo7_rsi_len": int(os.getenv("MO7_RSI_LEN", "14")),
+        "mo7_stoch_len": int(os.getenv("MO7_STOCH_LEN", "14")),
+        "mo7_wpr_len": int(os.getenv("MO7_WPR_LEN", "14")),
+        "mo7_mfi_len": int(os.getenv("MO7_MFI_LEN", "14")),
+        "mo7_macd_fast": int(os.getenv("MO7_MACD_FAST", "12")),
+        "mo7_macd_slow": int(os.getenv("MO7_MACD_SLOW", "26")),
+        "mo7_buy_threshold": float(os.getenv("MO7_BUY_THRESHOLD", "20")),
+        "mo7_sell_threshold": float(os.getenv("MO7_SELL_THRESHOLD", "85")),
+        "mo7_sum_low": float(os.getenv("MO7_SUM_LOW", "100")),
+        "mo7_sum_high": float(os.getenv("MO7_SUM_HIGH", "400")),
+        "mo7_direction_mode": os.getenv("MO7_DIRECTION_MODE", "both"),
+        "mo7_flip_exit_enabled": os.getenv("MO7_FLIP_EXIT_ENABLED", "true").lower() == "true",
+        "mo7_sl_enabled": os.getenv("MO7_SL_ENABLED", "true").lower() == "true",
+        "mo7_sl_manual_usd": float(os.getenv("MO7_SL_MANUAL_USD", "5.0")),
+        "mo7_tp_enabled": os.getenv("MO7_TP_ENABLED", "true").lower() == "true",
+        "mo7_tp_manual_usd": float(os.getenv("MO7_TP_MANUAL_USD", "5.0")),
+        "mo7_sl_cooldown_seconds": float(os.getenv("MO7_SL_COOLDOWN_SECONDS", "30")),
     }
 
 
@@ -386,6 +405,8 @@ def default_state():
         "cp_opens": [], "cp_highs": [], "cp_lows": [], "cp_closes": [], "cp_last_signal": None,
         "cp_risk_atr_last": None, "cp_sl_cooldown_until": 0.0,
         "cp_sl_price": None, "cp_tp_price": None, "cp_breakeven_done": False,
+        "mo7_last_value": None, "mo7_sl_cooldown_until": 0.0,
+        "mo7_sl_price": None, "mo7_tp_price": None,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -894,6 +915,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="diamond_algo">Diamond Algo (SuperTrend+SMA-Signal, optional 200-EMA-Smart-Filter, ATR-basiertes SL+TP)</option>
       <option value="elte_smart">ELTE Smart (SuperTrend auf ohlc4 mit Auto-Sensitivity, TP1/TP2/TP3 gestufte Teilverkäufe mit nachziehendem SL)</option>
       <option value="candle_patterns">Candle Patterns (3 Line Strike / Engulfing, SL+TP fest oder ATR-basiert, ATR-Breakeven)</option>
+      <option value="mo7_scalp">MO7 Scalp (Composite-Oszillator aus 7 Indikatoren, Schwellenwert-Cross oder 5-Kerzen-Summe, fester SL+TP)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1393,6 +1415,63 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="candle_patterns"><label>Breakeven Auslöse-Schwelle (× Risiko-ATR, Default 0.5 wie "The Phoenix")</label><input type="number" step="0.1" id="cp_breakeven_trigger_mult"></div>
+
+  <div data-mode="mo7_scalp" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📊 MO7 = Mittelwert aus RSI, Stochastic %K, Williams %R, MFI, MACD (normiert), ROC (normiert)
+    und Percent-Rank - alle 0-100 skaliert (portiert aus dem "MO7 Buy/Sell Signal"-Pine-Script).
+    NUR native Binance-Zeitrahmen (1m/3m/5m/15m/30m/1h/2h/4h) - kein 2m/Sekunden/eigene Minuten,
+    weil MFI Handelsvolumen braucht. Nur fester SL/TP (kein ATR-Modus, kein Breakeven).
+  </div>
+  <div data-mode="mo7_scalp"><label>Zeitrahmen</label>
+    <select class="cfg" id="mo7_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="2h">2 Stunden</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="mo7_scalp"><label>Einstiegsmodus</label>
+    <select class="cfg" id="mo7_entry_mode">
+      <option value="threshold_cross">Schwellenwert-Cross (BUY beim Unterschreiten der Buy-Schwelle, SELL beim Überschreiten der Sell-Schwelle)</option>
+      <option value="five_candle_sum">5-Kerzen-Summe (Summe der letzten 5 MO7-Werte unter/über eigener Schwelle)</option>
+    </select>
+  </div>
+  <div data-mode="mo7_scalp"><label>Buy-Schwelle (nur Schwellenwert-Cross, MO7 &lt; Wert)</label><input type="number" step="1" id="mo7_buy_threshold"></div>
+  <div data-mode="mo7_scalp"><label>Sell-Schwelle (nur Schwellenwert-Cross, MO7 &gt; Wert)</label><input type="number" step="1" id="mo7_sell_threshold"></div>
+  <div data-mode="mo7_scalp"><label>5-Kerzen-Summe Long-Schwelle (nur 5-Kerzen-Summe, Summe &lt; Wert)</label><input type="number" step="1" id="mo7_sum_low"></div>
+  <div data-mode="mo7_scalp"><label>5-Kerzen-Summe Short-Schwelle (nur 5-Kerzen-Summe, Summe &gt; Wert)</label><input type="number" step="1" id="mo7_sum_high"></div>
+  <div data-mode="mo7_scalp"><label>Richtung</label>
+    <select class="cfg" id="mo7_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="mo7_scalp"><label>Bei Gegen-Signal sofort schließen (Flip-Exit)</label>
+    <select class="cfg" id="mo7_flip_exit_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus - nur SL/TP entscheiden</option>
+    </select>
+  </div>
+  <div data-mode="mo7_scalp"><label>Stop-Loss</label>
+    <select class="cfg" id="mo7_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="mo7_scalp"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="mo7_sl_manual_usd"></div>
+  <div data-mode="mo7_scalp"><label>Take-Profit</label>
+    <select class="cfg" id="mo7_tp_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="mo7_scalp"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="mo7_tp_manual_usd"></div>
+  <div data-mode="mo7_scalp"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mo7_sl_cooldown_seconds"></div>
 
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
@@ -2714,6 +2793,19 @@ async function refresh() {
     document.getElementById('cp_tp_manual_usd').value = data.config.cp_tp_manual_usd;
     document.getElementById('cp_breakeven_enabled').value = String(data.config.cp_breakeven_enabled);
     document.getElementById('cp_breakeven_trigger_mult').value = data.config.cp_breakeven_trigger_mult;
+    document.getElementById('mo7_resolution').value = data.config.mo7_resolution;
+    document.getElementById('mo7_entry_mode').value = data.config.mo7_entry_mode;
+    document.getElementById('mo7_buy_threshold').value = data.config.mo7_buy_threshold;
+    document.getElementById('mo7_sell_threshold').value = data.config.mo7_sell_threshold;
+    document.getElementById('mo7_sum_low').value = data.config.mo7_sum_low;
+    document.getElementById('mo7_sum_high').value = data.config.mo7_sum_high;
+    document.getElementById('mo7_direction_mode').value = data.config.mo7_direction_mode;
+    document.getElementById('mo7_flip_exit_enabled').value = String(data.config.mo7_flip_exit_enabled);
+    document.getElementById('mo7_sl_enabled').value = String(data.config.mo7_sl_enabled);
+    document.getElementById('mo7_sl_manual_usd').value = data.config.mo7_sl_manual_usd;
+    document.getElementById('mo7_tp_enabled').value = String(data.config.mo7_tp_enabled);
+    document.getElementById('mo7_tp_manual_usd').value = data.config.mo7_tp_manual_usd;
+    document.getElementById('mo7_sl_cooldown_seconds').value = data.config.mo7_sl_cooldown_seconds;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -3015,6 +3107,19 @@ function buildConfigPayload() {
     cp_tp_manual_usd: parseFloat(document.getElementById('cp_tp_manual_usd').value),
     cp_breakeven_enabled: document.getElementById('cp_breakeven_enabled').value === 'true',
     cp_breakeven_trigger_mult: parseFloat(document.getElementById('cp_breakeven_trigger_mult').value),
+    mo7_resolution: document.getElementById('mo7_resolution').value,
+    mo7_entry_mode: document.getElementById('mo7_entry_mode').value,
+    mo7_buy_threshold: parseFloat(document.getElementById('mo7_buy_threshold').value),
+    mo7_sell_threshold: parseFloat(document.getElementById('mo7_sell_threshold').value),
+    mo7_sum_low: parseFloat(document.getElementById('mo7_sum_low').value),
+    mo7_sum_high: parseFloat(document.getElementById('mo7_sum_high').value),
+    mo7_direction_mode: document.getElementById('mo7_direction_mode').value,
+    mo7_flip_exit_enabled: document.getElementById('mo7_flip_exit_enabled').value === 'true',
+    mo7_sl_enabled: document.getElementById('mo7_sl_enabled').value === 'true',
+    mo7_sl_manual_usd: parseFloat(document.getElementById('mo7_sl_manual_usd').value),
+    mo7_tp_enabled: document.getElementById('mo7_tp_enabled').value === 'true',
+    mo7_tp_manual_usd: parseFloat(document.getElementById('mo7_tp_manual_usd').value),
+    mo7_sl_cooldown_seconds: parseFloat(document.getElementById('mo7_sl_cooldown_seconds').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -3137,6 +3242,8 @@ async def handle_status(request):
         "es_tp1_done": st.get("es_tp1_done"), "es_tp2_done": st.get("es_tp2_done"),
         "cp_last_signal": st.get("cp_last_signal"), "cp_sl_price": st.get("cp_sl_price"),
         "cp_tp_price": st.get("cp_tp_price"), "cp_breakeven_done": st.get("cp_breakeven_done"),
+        "mo7_last_value": st.get("mo7_last_value"), "mo7_sl_price": st.get("mo7_sl_price"),
+        "mo7_tp_price": st.get("mo7_tp_price"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3192,6 +3299,10 @@ async def handle_config_update(request):
                 "cp_sl_cooldown_seconds", "cp_sl_enabled", "cp_sl_mode", "cp_sl_manual_usd",
                 "cp_tp_enabled", "cp_tp_mode", "cp_tp_manual_usd",
                 "cp_breakeven_enabled", "cp_breakeven_trigger_mult",
+                "mo7_resolution", "mo7_entry_mode", "mo7_buy_threshold", "mo7_sell_threshold",
+                "mo7_sum_low", "mo7_sum_high", "mo7_direction_mode", "mo7_flip_exit_enabled",
+                "mo7_sl_enabled", "mo7_sl_manual_usd", "mo7_tp_enabled", "mo7_tp_manual_usd",
+                "mo7_sl_cooldown_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
@@ -3320,6 +3431,36 @@ async def handle_es_sensitivity_sweep(request):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
     result = await run_es_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step)
+    return web.json_response(result)
+
+
+async def handle_mo7_sum_sweep(request):
+    """'Monte-Carlo'-Parametersweep fuer den MO7 'five_candle_sum'-Einstiegsmodus: testet einen
+    Bereich von Long-/Short-Summenschwellen gegeneinander (der MO7-Score selbst wird nur EINMAL
+    berechnet und fuer alle Kombinationen wiederverwendet)."""
+    from strategies import run_mo7_sum_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        sum_low_min = max(0.0, float(body.get("sum_low_min", 20)))
+        sum_low_max = max(sum_low_min, float(body.get("sum_low_max", 200)))
+        sum_low_step = max(1.0, float(body.get("sum_low_step", 20)))
+        sum_high_min = max(0.0, float(body.get("sum_high_min", 300)))
+        sum_high_max = max(sum_high_min, float(body.get("sum_high_max", 480)))
+        sum_high_step = max(1.0, float(body.get("sum_high_step", 20)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low_step,
+                                      sum_high_min, sum_high_max, sum_high_step)
     return web.json_response(result)
 
 

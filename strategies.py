@@ -12,6 +12,7 @@ import traceback
 import bisect
 import math
 import re
+from collections import deque
 
 from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
@@ -283,6 +284,74 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
         closes = closes[-max_candles:]
 
     return (timestamps, opens, highs, lows, closes), None
+
+
+async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_candles, market_type="spot"):
+    """Wie fetch_historical_candles_binance, liefert zusaetzlich das Handelsvolumen - fuer MO7
+    (braucht MFI). Bewusst eine eigene, einfachere Variante statt die grosse Funktion umzubauen:
+    NUR native Binance-Intervalle werden unterstuetzt (kein 2m/10s/15s/30s/45s/custom - die
+    muessten sonst auch volumen-bewusst nachgebaut werden, was den Umfang stark aufblaeht).
+    MO7 auf 1m/3m/5m/15m/30m/1h/2h/4h einzuschraenken ist dafuer ein vertretbarer Kompromiss."""
+    pair = BINANCE_SYMBOL_MAP.get(symbol)
+    if not pair:
+        return None, "Coin nicht auf Binance verfügbar"
+    total_ms = days * 24 * 60 * 60 * 1000
+    end_time = int(time.time() * 1000)
+    start_time = end_time - total_ms
+    hard_candle_cap = max_candles + 2000
+    base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
+
+    all_rows = []
+    cursor = end_time
+    requests_made = 0
+    try:
+        async with aiohttp.ClientSession() as session:
+            while cursor > start_time and len(all_rows) < hard_candle_cap:
+                if _binance_is_banned(market_type):
+                    wait_s = max(0, (_binance_ban_until_ms.get(market_type, 0.0) - time.time() * 1000) / 1000)
+                    return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
+                url = f"{base_url}?symbol={pair}&interval={resolution}&limit=1000&endTime={cursor}"
+                await _binance_throttle()
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status in (418, 429):
+                        body = await resp.text()
+                        _binance_register_ban(market_type, symbol, resp.status, body)
+                        wait_s = max(0, (_binance_ban_until_ms.get(market_type, 0.0) - time.time() * 1000) / 1000)
+                        return None, f"Binance-Ratelimit erreicht (IP-Bann für ca. {round(wait_s)}s) - bitte warten und erneut versuchen."
+                    if resp.status != 200:
+                        batch = None
+                    else:
+                        batch = await resp.json()
+                if batch is None:
+                    break
+                requests_made += 1
+                if not batch:
+                    break
+                all_rows = batch + all_rows
+                cursor = int(batch[0][0]) - 1
+                if len(batch) < 1000:
+                    break
+                await asyncio.sleep(0.25)
+    except Exception as e:
+        return None, f"Abruf fehlgeschlagen nach {requests_made} Anfragen: {e}"
+
+    if not all_rows:
+        return None, "Keine Daten erhalten"
+
+    all_rows = [r for r in all_rows if int(r[0]) >= start_time]
+    timestamps = [int(r[0]) for r in all_rows]
+    opens = [float(r[1]) for r in all_rows]
+    highs = [float(r[2]) for r in all_rows]
+    lows = [float(r[3]) for r in all_rows]
+    closes = [float(r[4]) for r in all_rows]
+    volumes = [float(r[5]) for r in all_rows]
+
+    if len(closes) > max_candles:
+        timestamps, opens, highs, lows, closes, volumes = (
+            timestamps[-max_candles:], opens[-max_candles:], highs[-max_candles:],
+            lows[-max_candles:], closes[-max_candles:], volumes[-max_candles:])
+
+    return (timestamps, opens, highs, lows, closes, volumes), None
 
 
 async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
@@ -1963,6 +2032,254 @@ async def cp_poll_loop(symbol):
                         debug_log(f"⏳ [{symbol}] Candle-Patterns wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Candle-Patterns-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+def compute_wpr(highs, lows, closes, period):
+    """Williams %R (Pine's ta.wpr): -100 bis 0, misst Abstand des Schlusskurses vom
+    Hoch-/Tief-Bereich der letzten `period` Kerzen."""
+    n = len(closes)
+    out = [-50.0] * n
+    for i in range(n):
+        start = max(0, i - period + 1)
+        hh = max(highs[start:i + 1])
+        ll = min(lows[start:i + 1])
+        out[i] = -50.0 if hh == ll else -100 * (hh - closes[i]) / (hh - ll)
+    return out
+
+
+def compute_percentrank(values, period):
+    """Perzentil-Rang (Pine's ta.percentrank): Anteil der letzten `period` Werte (VOR dem
+    aktuellen), die kleiner sind als der aktuelle Wert, in Prozent (0-100)."""
+    n = len(values)
+    out = [50.0] * n
+    for i in range(n):
+        window = values[max(0, i - period):i]
+        if not window:
+            continue
+        count = sum(1 for v in window if v < values[i])
+        out[i] = 100.0 * count / len(window)
+    return out
+
+
+def _rolling_min_max(values, window):
+    """Effizientes gleitendes Minimum/Maximum (monotone Deque, O(n) statt O(n*window)) - noetig
+    weil MO7 ein 500-Kerzen-Fenster fuer MACD-/ROC-Normierung braucht und das bei 100.000
+    Backtest-Kerzen sonst zu langsam waere."""
+    n = len(values)
+    mins = [None] * n
+    maxs = [None] * n
+    min_dq = deque()
+    max_dq = deque()
+    for i in range(n):
+        v = values[i]
+        while min_dq and values[min_dq[-1]] >= v:
+            min_dq.pop()
+        min_dq.append(i)
+        while max_dq and values[max_dq[-1]] <= v:
+            max_dq.pop()
+        max_dq.append(i)
+        while min_dq[0] <= i - window:
+            min_dq.popleft()
+        while max_dq[0] <= i - window:
+            max_dq.popleft()
+        mins[i] = values[min_dq[0]]
+        maxs[i] = values[max_dq[0]]
+    return mins, maxs
+
+
+def compute_mo7_series(highs, lows, closes, volumes, cfg):
+    """MO7-Composite-Score (portiert aus dem 'MO7 Buy/Sell Signal'-Pine-Script): Mittelwert aus
+    RSI, Stochastic %K, Williams %R (normiert 0-100), MFI, MACD-Linie (normiert 0-100 ueber ein
+    500-Kerzen-Fenster), ROC (normiert 0-100 ueber ein 500-Kerzen-Fenster) und Percent-Rank(100).
+    Ergebnis 0-100, wie im Original."""
+    n = len(closes)
+    rsi = compute_rsi(closes, cfg.get("mo7_rsi_len", 14))
+    stoch_k, _ = compute_stochastic(highs, lows, closes, cfg.get("mo7_stoch_len", 14), 1, 1)
+    wpr_raw = compute_wpr(highs, lows, closes, cfg.get("mo7_wpr_len", 14))
+    wpr_val = [100 + w for w in wpr_raw]
+    mfi = compute_mfi(highs, lows, closes, volumes, cfg.get("mo7_mfi_len", 14))
+    macd_line, _ = compute_macd_line_and_signal(closes, cfg.get("mo7_macd_fast", 12), cfg.get("mo7_macd_slow", 26), 9)
+    macd_mins, macd_maxs = _rolling_min_max(macd_line, 500)
+    macd_norm = [50.0 if macd_maxs[i] == macd_mins[i] else (macd_line[i] - macd_mins[i]) / (macd_maxs[i] - macd_mins[i]) * 100 for i in range(n)]
+    roc = [0.0] * n
+    for i in range(1, n):
+        roc[i] = (closes[i] - closes[i - 1]) / closes[i - 1] * 100 if closes[i - 1] != 0 else 0.0
+    roc_mins, roc_maxs = _rolling_min_max(roc, 500)
+    roc_norm = [50.0 if roc_maxs[i] == roc_mins[i] else (roc[i] - roc_mins[i]) / (roc_maxs[i] - roc_mins[i]) * 100 for i in range(n)]
+    pr = compute_percentrank(closes, 100)
+
+    return [(rsi[i] + stoch_k[i] + wpr_val[i] + mfi[i] + macd_norm[i] + roc_norm[i] + pr[i]) / 7 for i in range(n)]
+
+
+def compute_mo7_signals(mo7, cfg):
+    """Zwei waehlbare Einstiegsmodi (mo7_entry_mode):
+    - 'threshold_cross': Einstieg nur beim UEBERSCHREITEN der Schwelle (wie das Alert-Cooldown im
+      Original), nicht bei jeder Kerze innerhalb der Zone -> BUY wenn MO7 gerade unter
+      mo7_buy_threshold faellt, SELL wenn gerade ueber mo7_sell_threshold steigt.
+    - 'five_candle_sum': eigene Idee - Summe der letzten 5 MO7-Werte < mo7_sum_low (stark
+      ueberverkauft ueber mehrere Kerzen hinweg) -> Long, > mo7_sum_high (stark ueberkauft) -> Short."""
+    n = len(mo7)
+    bull = [False] * n
+    bear = [False] * n
+    mode = cfg.get("mo7_entry_mode", "threshold_cross")
+    if mode == "five_candle_sum":
+        sum_low = cfg.get("mo7_sum_low", 100.0)
+        sum_high = cfg.get("mo7_sum_high", 400.0)
+        for i in range(4, n):
+            window_sum = sum(mo7[i - 4:i + 1])
+            bull[i] = window_sum < sum_low
+            bear[i] = window_sum > sum_high
+    else:
+        buy_th = cfg.get("mo7_buy_threshold", 20.0)
+        sell_th = cfg.get("mo7_sell_threshold", 85.0)
+        for i in range(1, n):
+            bull[i] = mo7[i] < buy_th and mo7[i - 1] >= buy_th
+            bear[i] = mo7[i] > sell_th and mo7[i - 1] <= sell_th
+    return bull, bear
+
+
+def _mo7_reset_state(st):
+    st["mo7_sl_price"] = None
+    st["mo7_tp_price"] = None
+
+
+async def check_mo7_sl_tp(symbol, price):
+    """Nur fester SL/TP (kein ATR-Modus, wie explizit gewuenscht) - simpler als bei Candle
+    Patterns/ELTE Smart: kein Breakeven."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    sl_price = st.get("mo7_sl_price")
+    tp_price = st.get("mo7_tp_price")
+    if sl_price is None and tp_price is None:
+        return
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
+    if hit_sl:
+        debug_log(f"🚪 [{symbol}] MO7 SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, "SL")
+        st["mo7_sl_cooldown_until"] = time.time() + cfg.get("mo7_sl_cooldown_seconds", 30)
+        _mo7_reset_state(st)
+    elif hit_tp:
+        debug_log(f"🚪 [{symbol}] MO7 TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP")
+        _mo7_reset_state(st)
+
+
+async def check_mo7_entry(symbol, buy_signal, sell_signal, price):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if time.time() < st.get("mo7_sl_cooldown_until", 0.0):
+        return
+    direction_mode = cfg.get("mo7_direction_mode", "both")
+    if direction_mode == "long_only":
+        sell_signal = False
+    elif direction_mode == "short_only":
+        buy_signal = False
+    if not (buy_signal or sell_signal):
+        return
+    direction = "long" if buy_signal else "short"
+    debug_log(f"📡 [{symbol}] MO7 Signal: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+    if st["position"] is None:
+        return
+    _mo7_reset_state(st)
+    size = st.get("total_coin_size") or 0
+    if cfg.get("mo7_sl_enabled", True) and size > 0:
+        dist_sl = cfg.get("mo7_sl_manual_usd", 5.0) / size
+        st["mo7_sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
+    if cfg.get("mo7_tp_enabled", True) and size > 0:
+        dist_tp = cfg.get("mo7_tp_manual_usd", 5.0) / size
+        st["mo7_tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
+
+
+async def check_mo7_exit(symbol, buy_signal, sell_signal, price):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is None or price is None or not cfg.get("mo7_flip_exit_enabled", True):
+        return False
+    if st["position"] == "long" and sell_signal:
+        debug_log(f"🚪 [{symbol}] MO7 Exit: LONG @ {price} (Gegen-Signal)")
+        await execute_exit(symbol, price, "MO7-FLIP-EXIT")
+        _mo7_reset_state(st)
+        return True
+    elif st["position"] == "short" and buy_signal:
+        debug_log(f"🚪 [{symbol}] MO7 Exit: SHORT @ {price} (Gegen-Signal)")
+        await execute_exit(symbol, price, "MO7-FLIP-EXIT")
+        _mo7_reset_state(st)
+        return True
+    return False
+
+
+async def mo7_poll_loop(symbol):
+    """MO7-Composite-Oszillator (portiert aus dem 'MO7 Buy/Sell Signal'-Pine-Script) als eigene
+    Strategie. NUR native Binance-Zeitrahmen (kein 2m/10s/15s/30s/45s/custom), weil MFI
+    Handelsvolumen braucht und das nur fuer native Intervalle unkompliziert abrufbar ist."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "mo7_scalp" and cfg["bot_active"]:
+                resolution = cfg.get("mo7_resolution", "5m")
+                needed_bars = 520  # 500er-Normierungsfenster + Puffer
+                st = b["state"]
+
+                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
+                if data:
+                    timestamps, opens, highs, lows, closes, volumes = data
+                    closed_ts, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                else:
+                    closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > 20:
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    mo7 = compute_mo7_series(closed_h, closed_l, closed_c, closed_v, cfg)
+                    bull, bear = compute_mo7_signals(mo7, cfg)
+
+                    st["mo7_last_value"] = mo7[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] MO7 aktiv: Preis={closed_c[-1]}, MO7={round(mo7[-1],2)}, "
+                                  f"Modus={cfg.get('mo7_entry_mode')}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 4:
+                            continue
+                        buy_i, sell_i = bull[idx], bear[idx]
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        just_flipped = await check_mo7_exit(symbol, buy_i, sell_i, price_i)
+                        if not just_flipped:
+                            await check_mo7_entry(symbol, buy_i, sell_i, price_i)
+
+                    await check_mo7_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    debug_log(f"⏳ [{symbol}] MO7 wartet: keine/zu wenig Kerzen erhalten (Auflösung {resolution})")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] MO7-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
 
@@ -3995,12 +4312,180 @@ async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, 
     return candles, err, cache_used
 
 
+def _simulate_mo7_trades(candles_ts, mo7, cfg, bull, bear, warmup):
+    """Kern-Simulation fuer MO7: nur fester SL/TP (kein ATR-Modus), optionaler Flip-Exit,
+    Cooldown nach SL. `candles_ts` ist das 6er-Tupel (ts,o,h,l,c,volumes)."""
+    ts, o, h, l, c, v = candles_ts
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    sl_enabled = cfg.get("mo7_sl_enabled", True)
+    tp_enabled = cfg.get("mo7_tp_enabled", True)
+    sl_manual_usd = cfg.get("mo7_sl_manual_usd", 5.0)
+    tp_manual_usd = cfg.get("mo7_tp_manual_usd", 5.0)
+    sl_cooldown_ms = cfg.get("mo7_sl_cooldown_seconds", 30) * 1000
+    direction_mode = cfg.get("mo7_direction_mode", "both")
+    flip_exit_enabled = cfg.get("mo7_flip_exit_enabled", True)
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position.get("sl_price")
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            if hit_sl:
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            else:
+                tp_price = position.get("tp_price")
+                hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+                if hit_tp:
+                    _bt_close_trade(trades, pdir, entry, tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                    position = None
+
+        buy_signal, sell_signal = bull[i], bear[i]
+        if direction_mode == "long_only":
+            sell_signal = False
+        elif direction_mode == "short_only":
+            buy_signal = False
+
+        just_flipped = False
+        if position is not None and flip_exit_enabled:
+            if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MO7-FLIP-EXIT", ts=ts)
+                position = None
+                just_flipped = True
+
+        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and not just_flipped and (buy_signal or sell_signal):
+            direction = "long" if buy_signal else "short"
+            size = (margin * leverage) / price
+            sl_price = tp_price = None
+            if sl_enabled and size > 0:
+                dist_sl = sl_manual_usd / size
+                sl_price = price - dist_sl if direction == "long" else price + dist_sl
+            if tp_enabled and size > 0:
+                dist_tp = tp_manual_usd / size
+                tp_price = price + dist_tp if direction == "long" else price - dist_tp
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
+                        "sl_price": sl_price, "tp_price": tp_price}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_mo7(candles_vol, cfg):
+    ts, o, h, l, c, v = candles_vol
+    mo7 = compute_mo7_series(h, l, c, v, cfg)
+    bull, bear = compute_mo7_signals(mo7, cfg)
+    warmup = 505  # 500er-Normierungsfenster + Puffer fuer RSI/Stoch/WPR/MFI-Anlauf
+    return _simulate_mo7_trades(candles_vol, mo7, cfg, bull, bear, warmup)
+
+
+MO7_SUM_SWEEP_MAX_COMBOS = 2000
+MO7_SUM_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+async def _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type="spot"):
+    """Eigene, einfachere Cache-Variante fuer MO7 (6er-Tupel MIT Volumen statt 5er) - bewusst
+    getrennt von _fetch_cached_backtest_candles, um die dort genutzte 5er-Tupel-Annahme (candles[4]
+    fuer closes) nicht zu gefaehrden."""
+    cache_key = ("mo7", symbol, resolution, market_type)
+    cached = _backtest_cache_get(cache_key)
+    now = time.time()
+    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
+            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
+            and len(cached["candles"][4]) >= 100):
+        ts, o, h, l, c, vol = cached["candles"]
+        cutoff = ts[-1] - days * 24 * 60 * 60 * 1000
+        idx = 0
+        for i, t in enumerate(ts):
+            if t >= cutoff:
+                idx = i
+                break
+        candles = (ts[idx:], o[idx:], h[idx:], l[idx:], c[idx:], vol[idx:])
+        if len(candles[4]) > max_candles:
+            candles = tuple(x[-max_candles:] for x in candles)
+        return candles, None
+    candles, err = await fetch_historical_candles_binance_vol(symbol, resolution, days, max_candles, market_type=market_type)
+    if candles:
+        _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
+    return candles, err
+
+
+async def run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low_step, sum_high_min, sum_high_max, sum_high_step):
+    """'Monte-Carlo'-Parametersweep fuer den 'five_candle_sum'-Einstiegsmodus: testet einen
+    Bereich von mo7_sum_low (Long-Schwelle) und mo7_sum_high (Short-Schwelle) gegeneinander.
+    Der MO7-Score selbst wird NUR EINMAL berechnet (unabhaengig von den Schwellen) und fuer alle
+    Kombinationen wiederverwendet - sonst waere der Sweep bei vielen Kombinationen viel zu
+    langsam."""
+    max_candles = BACKTEST_MAX_CANDLES["mo7_scalp"]
+    resolution = cfg.get("mo7_resolution", "5m")
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 550:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~550 für das 500er-Normierungsfenster nötig)."}
+
+    ts, o, h, l, c, v = candles
+    mo7 = compute_mo7_series(h, l, c, v, cfg)
+    warmup = 505
+
+    sum_lows = sorted(set(round(sum_low_min + i * sum_low_step, 1)
+                           for i in range(int((sum_low_max - sum_low_min) / max(sum_low_step, 1e-9)) + 1)
+                           if sum_low_min + i * sum_low_step <= sum_low_max + 1e-9))
+    sum_highs = sorted(set(round(sum_high_min + i * sum_high_step, 1)
+                            for i in range(int((sum_high_max - sum_high_min) / max(sum_high_step, 1e-9)) + 1)
+                            if sum_high_min + i * sum_high_step <= sum_high_max + 1e-9))
+    sum_lows = [x for x in sum_lows if x > 0]
+    sum_highs = [x for x in sum_highs if x > 0]
+
+    total_combos = len(sum_lows) * len(sum_highs)
+    if total_combos == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
+    if total_combos > MO7_SUM_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {MO7_SUM_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    results = []
+    for sum_low in sum_lows:
+        for sum_high in sum_highs:
+            cfg_copy = dict(cfg)
+            cfg_copy["mo7_entry_mode"] = "five_candle_sum"
+            cfg_copy["mo7_sum_low"] = sum_low
+            cfg_copy["mo7_sum_high"] = sum_high
+            bull, bear = compute_mo7_signals(mo7, cfg_copy)
+            trades = _simulate_mo7_trades(candles, mo7, cfg_copy, bull, bear, warmup)
+            stats = summarize_backtest_trades(trades)
+            results.append({"mo7_sum_low": sum_low, "mo7_sum_high": sum_high, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= MO7_SUM_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(c),
+        "min_reliable_trades": MO7_SUM_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": total_combos,
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
+
+
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000,
     "halftrend": 100_000,
     "diamond_algo": 100_000,
     "elte_smart": 100_000,
     "candle_patterns": 100_000,
+    "mo7_scalp": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -4009,12 +4494,37 @@ BACKTEST_FUNCS = {
     "diamond_algo": backtest_diamond_algo,
     "elte_smart": backtest_elte_smart,
     "candle_patterns": backtest_candle_patterns,
+    # "mo7_scalp" bewusst NICHT hier drin - braucht eine 6er-Tupel-Kerzenquelle MIT Volumen
+    # (MFI-Baustein), deshalb in run_backtest() als Sonderfall behandelt statt ueber diesen
+    # generischen 5er-Tupel-Dispatch.
 }
 
 
 async def run_backtest(symbol, entry_mode, cfg, days):
+    if entry_mode == "mo7_scalp":
+        max_candles = BACKTEST_MAX_CANDLES["mo7_scalp"]
+        resolution = cfg.get("mo7_resolution", "5m")
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        if not candles or len(candles[4]) < 550:
+            return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~550 für das 500er-Normierungsfenster nötig)."}
+        n_candles = len(candles[4])
+        trades = backtest_mo7(candles, cfg)
+        stats = summarize_backtest_trades(trades)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"])
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"])
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
+
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
