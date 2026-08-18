@@ -335,6 +335,24 @@ def default_config():
         "es_tp_manual_usd": float(os.getenv("ES_TP_MANUAL_USD", "5.0")),
         "es_breakeven_pct_enabled": os.getenv("ES_BREAKEVEN_PCT_ENABLED", "false").lower() == "true",
         "es_breakeven_trigger_pct": float(os.getenv("ES_BREAKEVEN_TRIGGER_PCT", "0.1")),
+        "cp_resolution": os.getenv("CP_RESOLUTION", "5m"),
+        "cp_signal_source": os.getenv("CP_SIGNAL_SOURCE", "three_line_strike"),  # "three_line_strike" | "engulfing" | "both"
+        "cp_three_line_strict": os.getenv("CP_THREE_LINE_STRICT", "true").lower() == "true",
+        "cp_engulfing_strict": os.getenv("CP_ENGULFING_STRICT", "true").lower() == "true",
+        "cp_direction_mode": os.getenv("CP_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "cp_flip_exit_enabled": os.getenv("CP_FLIP_EXIT_ENABLED", "true").lower() == "true",
+        "cp_risk_atr_period": int(os.getenv("CP_RISK_ATR_PERIOD", "14")),
+        "cp_risk_mult": float(os.getenv("CP_RISK_MULT", "1.5")),
+        "cp_tp_rr": float(os.getenv("CP_TP_RR", "1.0")),
+        "cp_sl_enabled": os.getenv("CP_SL_ENABLED", "true").lower() == "true",
+        "cp_sl_mode": os.getenv("CP_SL_MODE", "atr"),  # "atr" oder "manual"
+        "cp_sl_manual_usd": float(os.getenv("CP_SL_MANUAL_USD", "5.0")),
+        "cp_tp_enabled": os.getenv("CP_TP_ENABLED", "true").lower() == "true",
+        "cp_tp_mode": os.getenv("CP_TP_MODE", "atr"),  # "atr" oder "manual"
+        "cp_tp_manual_usd": float(os.getenv("CP_TP_MANUAL_USD", "5.0")),
+        "cp_sl_cooldown_seconds": float(os.getenv("CP_SL_COOLDOWN_SECONDS", "30")),
+        "cp_breakeven_enabled": os.getenv("CP_BREAKEVEN_ENABLED", "true").lower() == "true",
+        "cp_breakeven_trigger_mult": float(os.getenv("CP_BREAKEVEN_TRIGGER_MULT", "0.5")),
     }
 
 
@@ -365,6 +383,9 @@ def default_state():
         "es_sensitivity_last": None, "es_risk_atr_last": None, "es_sl_cooldown_until": 0.0,
         "es_sl_price": None, "es_tp1_price": None, "es_tp2_price": None, "es_tp3_price": None,
         "es_tp1_done": False, "es_tp2_done": False, "es_breakeven_pct_done": False,
+        "cp_opens": [], "cp_highs": [], "cp_lows": [], "cp_closes": [], "cp_last_signal": None,
+        "cp_risk_atr_last": None, "cp_sl_cooldown_until": 0.0,
+        "cp_sl_price": None, "cp_tp_price": None, "cp_breakeven_done": False,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -872,6 +893,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="halftrend">HalfTrend (Swing-Hoch/-Tief-Trendwechsel, optional ATR2-basiertes SL+TP, invertierbar)</option>
       <option value="diamond_algo">Diamond Algo (SuperTrend+SMA-Signal, optional 200-EMA-Smart-Filter, ATR-basiertes SL+TP)</option>
       <option value="elte_smart">ELTE Smart (SuperTrend auf ohlc4 mit Auto-Sensitivity, TP1/TP2/TP3 gestufte Teilverkäufe mit nachziehendem SL)</option>
+      <option value="candle_patterns">Candle Patterns (3 Line Strike / Engulfing, SL+TP fest oder ATR-basiert, ATR-Breakeven)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1279,6 +1301,98 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="elte_smart"><label>Prozent-Break-Even Auslöse-Schwelle (%)</label><input type="number" step="0.01" id="es_breakeven_trigger_pct"></div>
+
+  <div data-mode="candle_patterns" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🕯️ Signal kommt aus reinen Candlestick-Mustern (aus dem TMA-Overlay-Pine-Script portiert), kein
+    Trend-Indikator. SL/TP je einzeln ATR-basiert oder fester $-Betrag wählbar, dazu optionaler
+    ATR-Breakeven (Stop wandert auf Einstieg) - wie bei ELTE Smart / "The Phoenix".
+  </div>
+  <div data-mode="candle_patterns"><label>Zeitrahmen</label>
+    <select class="cfg" id="cp_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="cp_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="candle_patterns"><label>Signalquelle</label>
+    <select class="cfg" id="cp_signal_source">
+      <option value="three_line_strike">3 Line Strike</option>
+      <option value="engulfing">Engulfing (Big A$$ Candles)</option>
+      <option value="both">Beide (3 Line Strike ODER Engulfing)</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>3 Line Strike "Strict"-Filter (nur bei Signalquelle 3 Line Strike/Beide)</label>
+    <select class="cfg" id="cp_three_line_strict">
+      <option value="true">An - RSI(14) muss zur Signalrichtung passen (bullisch nur wenn RSI &gt; 50, bearisch nur wenn RSI &lt; 50)</option>
+      <option value="false">Aus - reines Kerzenmuster ohne RSI-Filter</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>Engulfing "Strict"-Filter (nur bei Signalquelle Engulfing/Beide)</label>
+    <select class="cfg" id="cp_engulfing_strict">
+      <option value="true">An - Schlusskurs muss zwischen MA1(21, SMMA) und MA4(200, SMMA) liegen (Original-Default)</option>
+      <option value="false">Aus - reines Kerzenmuster ohne MA-Filter</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>Richtung</label>
+    <select class="cfg" id="cp_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>Bei Gegen-Signal sofort schließen (Flip-Exit)</label>
+    <select class="cfg" id="cp_flip_exit_enabled">
+      <option value="true">An - Gegen-Signal schließt die Position sofort, unabhängig von SL/TP</option>
+      <option value="false">Aus - nur SL/TP entscheiden über den Ausstieg</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>Risiko-ATR-Periode</label><input type="number" step="1" id="cp_risk_atr_period"></div>
+  <div data-mode="candle_patterns"><label>Risiko-Multiplikator (ATR-Modus, Default 1.5 wie "The Phoenix")</label><input type="number" step="0.1" id="cp_risk_mult"></div>
+  <div data-mode="candle_patterns"><label>TP R:R-Multiplikator (TP-Abstand = SL-Abstand × dieser Wert, nur ATR-Modus)</label><input type="number" step="0.1" id="cp_tp_rr"></div>
+  <div data-mode="candle_patterns"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="cp_sl_cooldown_seconds"></div>
+  <div data-mode="candle_patterns"><label>Stop-Loss</label>
+    <select class="cfg" id="cp_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus (nur Gegen-Signal/TP schließt die Position)</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>SL-Modus</label>
+    <select class="cfg" id="cp_sl_mode">
+      <option value="atr">ATR-basiert (Risiko-ATR × Risiko-Multiplikator)</option>
+      <option value="manual">Fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>SL Fester $-Betrag (nur bei SL-Modus "Fest")</label><input type="number" step="0.5" id="cp_sl_manual_usd"></div>
+  <div data-mode="candle_patterns"><label>Take-Profit</label>
+    <select class="cfg" id="cp_tp_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus (nur Gegen-Signal/SL schließt die Position)</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>TP-Modus</label>
+    <select class="cfg" id="cp_tp_mode">
+      <option value="atr">ATR-basiert (SL-Abstand × TP-R:R-Multiplikator)</option>
+      <option value="manual">Fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>TP Fester $-Betrag (nur bei TP-Modus "Fest")</label><input type="number" step="0.5" id="cp_tp_manual_usd"></div>
+  <div data-mode="candle_patterns"><label>ATR-Breakeven (Stop wandert auf Einstieg, sobald Kurs im Gewinn ist - wie "The Phoenix")</label>
+    <select class="cfg" id="cp_breakeven_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="candle_patterns"><label>Breakeven Auslöse-Schwelle (× Risiko-ATR, Default 0.5 wie "The Phoenix")</label><input type="number" step="0.1" id="cp_breakeven_trigger_mult"></div>
 
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
@@ -1913,7 +2027,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -2582,6 +2696,24 @@ async function refresh() {
     document.getElementById('es_breakeven_pct_enabled').value = String(data.config.es_breakeven_pct_enabled);
     document.getElementById('es_breakeven_trigger_pct').value = data.config.es_breakeven_trigger_pct;
     document.getElementById('es_tp_enabled').value = String(data.config.es_tp_enabled);
+    setResolutionField('cp_resolution', data.config.cp_resolution);
+    document.getElementById('cp_signal_source').value = data.config.cp_signal_source;
+    document.getElementById('cp_three_line_strict').value = String(data.config.cp_three_line_strict);
+    document.getElementById('cp_engulfing_strict').value = String(data.config.cp_engulfing_strict);
+    document.getElementById('cp_direction_mode').value = data.config.cp_direction_mode;
+    document.getElementById('cp_flip_exit_enabled').value = String(data.config.cp_flip_exit_enabled);
+    document.getElementById('cp_risk_atr_period').value = data.config.cp_risk_atr_period;
+    document.getElementById('cp_risk_mult').value = data.config.cp_risk_mult;
+    document.getElementById('cp_tp_rr').value = data.config.cp_tp_rr;
+    document.getElementById('cp_sl_cooldown_seconds').value = data.config.cp_sl_cooldown_seconds;
+    document.getElementById('cp_sl_enabled').value = String(data.config.cp_sl_enabled);
+    document.getElementById('cp_sl_mode').value = data.config.cp_sl_mode;
+    document.getElementById('cp_sl_manual_usd').value = data.config.cp_sl_manual_usd;
+    document.getElementById('cp_tp_enabled').value = String(data.config.cp_tp_enabled);
+    document.getElementById('cp_tp_mode').value = data.config.cp_tp_mode;
+    document.getElementById('cp_tp_manual_usd').value = data.config.cp_tp_manual_usd;
+    document.getElementById('cp_breakeven_enabled').value = String(data.config.cp_breakeven_enabled);
+    document.getElementById('cp_breakeven_trigger_mult').value = data.config.cp_breakeven_trigger_mult;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -2865,6 +2997,24 @@ function buildConfigPayload() {
     es_breakeven_pct_enabled: document.getElementById('es_breakeven_pct_enabled').value === 'true',
     es_breakeven_trigger_pct: parseFloat(document.getElementById('es_breakeven_trigger_pct').value),
     es_tp_enabled: document.getElementById('es_tp_enabled').value === 'true',
+    cp_resolution: getResolutionField('cp_resolution'),
+    cp_signal_source: document.getElementById('cp_signal_source').value,
+    cp_three_line_strict: document.getElementById('cp_three_line_strict').value === 'true',
+    cp_engulfing_strict: document.getElementById('cp_engulfing_strict').value === 'true',
+    cp_direction_mode: document.getElementById('cp_direction_mode').value,
+    cp_flip_exit_enabled: document.getElementById('cp_flip_exit_enabled').value === 'true',
+    cp_risk_atr_period: parseInt(document.getElementById('cp_risk_atr_period').value),
+    cp_risk_mult: parseFloat(document.getElementById('cp_risk_mult').value),
+    cp_tp_rr: parseFloat(document.getElementById('cp_tp_rr').value),
+    cp_sl_cooldown_seconds: parseFloat(document.getElementById('cp_sl_cooldown_seconds').value),
+    cp_sl_enabled: document.getElementById('cp_sl_enabled').value === 'true',
+    cp_sl_mode: document.getElementById('cp_sl_mode').value,
+    cp_sl_manual_usd: parseFloat(document.getElementById('cp_sl_manual_usd').value),
+    cp_tp_enabled: document.getElementById('cp_tp_enabled').value === 'true',
+    cp_tp_mode: document.getElementById('cp_tp_mode').value,
+    cp_tp_manual_usd: parseFloat(document.getElementById('cp_tp_manual_usd').value),
+    cp_breakeven_enabled: document.getElementById('cp_breakeven_enabled').value === 'true',
+    cp_breakeven_trigger_mult: parseFloat(document.getElementById('cp_breakeven_trigger_mult').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -2985,6 +3135,8 @@ async def handle_status(request):
         "es_sl_price": st.get("es_sl_price"), "es_tp1_price": st.get("es_tp1_price"),
         "es_tp2_price": st.get("es_tp2_price"), "es_tp3_price": st.get("es_tp3_price"),
         "es_tp1_done": st.get("es_tp1_done"), "es_tp2_done": st.get("es_tp2_done"),
+        "cp_last_signal": st.get("cp_last_signal"), "cp_sl_price": st.get("cp_sl_price"),
+        "cp_tp_price": st.get("cp_tp_price"), "cp_breakeven_done": st.get("cp_breakeven_done"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3035,6 +3187,11 @@ async def handle_config_update(request):
                 "es_tp1_rr", "es_tp2_rr", "es_tp3_rr", "es_sl_cooldown_seconds", "es_reenter_on_flip",
                 "es_sl_enabled", "es_sl_mode", "es_sl_manual_usd", "es_tp_enabled", "es_tp_mode", "es_tp_manual_usd",
                 "es_breakeven_pct_enabled", "es_breakeven_trigger_pct",
+                "cp_resolution", "cp_signal_source", "cp_three_line_strict", "cp_engulfing_strict", "cp_direction_mode",
+                "cp_flip_exit_enabled", "cp_risk_atr_period", "cp_risk_mult", "cp_tp_rr",
+                "cp_sl_cooldown_seconds", "cp_sl_enabled", "cp_sl_mode", "cp_sl_manual_usd",
+                "cp_tp_enabled", "cp_tp_mode", "cp_tp_manual_usd",
+                "cp_breakeven_enabled", "cp_breakeven_trigger_mult",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
