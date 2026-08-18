@@ -1724,6 +1724,57 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="mo7_scalp" style="display:none;">
+<h2 class="section-title">🎲 MO7-Summenschwellen-Sweep ("5-Kerzen-Summe")</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet einen Bereich von Long-Summenschwelle (mo7_sum_low) gegen Short-Summenschwelle
+    (mo7_sum_high) - nur relevant im Einstiegsmodus "5-Kerzen-Summe". Der MO7-Score selbst wird
+    nur einmal berechnet und für alle Kombinationen wiederverwendet, deshalb ist der Sweep trotz
+    vieler Kombinationen relativ schnell. Ergebnisse mit weniger als 5 Trades sind statistisch
+    kaum aussagekräftig und werden nach unten sortiert, aber nicht versteckt.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="mo7-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Long-Schwelle von</label><input type="number" step="1" id="mo7-sweep-sumlow-min" value="20" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="1" id="mo7-sweep-sumlow-max" value="200" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" id="mo7-sweep-sumlow-step" value="20" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Short-Schwelle von</label><input type="number" step="1" id="mo7-sweep-sumhigh-min" value="300" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="1" id="mo7-sweep-sumhigh-max" value="480" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" id="mo7-sweep-sumhigh-step" value="20" style="width:90px;"></div>
+    <button id="btn-mo7-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="mo7-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <table id="mo7-sweep-results-table" style="display:none; margin-top:12px;">
+    <thead><tr>
+      <th class="sortable" data-key="mo7_sum_low">Long-Schwelle ⇅</th>
+      <th class="sortable" data-key="mo7_sum_high">Short-Schwelle ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="mo7-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="mo7-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="mo7_sum_low">Long-Schwelle ⇅</th>
+      <th class="sortable" data-key="mo7_sum_high">Short-Schwelle ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 
 </div>
 
@@ -2135,6 +2186,12 @@ function resetBacktestUI() {
   document.getElementById('es-sweep-worst-title').style.display = 'none';
   window.esSweepResultsData = [];
   window.esSweepWorstData = [];
+  document.getElementById('mo7-sweep-status').innerText = '';
+  document.getElementById('mo7-sweep-results-table').style.display = 'none';
+  document.getElementById('mo7-sweep-worst-table').style.display = 'none';
+  document.getElementById('mo7-sweep-worst-title').style.display = 'none';
+  window.mo7SweepResultsData = [];
+  window.mo7SweepWorstData = [];
 }
 
 document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
@@ -2322,6 +2379,68 @@ const esSweepRowHtml = (r) => `
   </tr>`;
 const renderEsSweepResults = makeSortableTable('es-sweep-results-table', () => window.esSweepResultsData, esSweepRowHtml);
 const renderEsSweepWorst = makeSortableTable('es-sweep-worst-table', () => window.esSweepWorstData, esSweepRowHtml);
+
+document.getElementById('btn-mo7-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-mo7-sweep');
+  const statusEl = document.getElementById('mo7-sweep-status');
+  const tableEl = document.getElementById('mo7-sweep-results-table');
+  const worstTableEl = document.getElementById('mo7-sweep-worst-table');
+  const worstTitleEl = document.getElementById('mo7-sweep-worst-title');
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('mo7-sweep-days').value) || 30,
+    sum_low_min: parseFloat(document.getElementById('mo7-sweep-sumlow-min').value),
+    sum_low_max: parseFloat(document.getElementById('mo7-sweep-sumlow-max').value),
+    sum_low_step: parseFloat(document.getElementById('mo7-sweep-sumlow-step').value),
+    sum_high_min: parseFloat(document.getElementById('mo7-sweep-sumhigh-min').value),
+    sum_high_max: parseFloat(document.getElementById('mo7-sweep-sumhigh-max').value),
+    sum_high_step: parseFloat(document.getElementById('mo7-sweep-sumhigh-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  tableEl.style.display = 'none';
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Schwellen-Kombinationen... kann bei vielen Werten etwas dauern.`;
+  try {
+    const res = await fetch(`/api/mo7_sum_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
+      window.mo7SweepResultsData = data.results || [];
+      window.mo7SweepWorstData = data.worst_results || [];
+      renderMo7SweepResults();
+      renderMo7SweepWorst();
+      tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.mo7SweepResultsData = [];
+window.mo7SweepWorstData = [];
+const mo7SweepRowHtml = (r) => `
+  <tr>
+    <td>${r.mo7_sum_low}</td>
+    <td>${r.mo7_sum_high}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderMo7SweepResults = makeSortableTable('mo7-sweep-results-table', () => window.mo7SweepResultsData, mo7SweepRowHtml);
+const renderMo7SweepWorst = makeSortableTable('mo7-sweep-worst-table', () => window.mo7SweepWorstData, mo7SweepRowHtml);
 
 
 
