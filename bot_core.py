@@ -379,6 +379,9 @@ def default_config():
         "utb_hull_period": int(os.getenv("UTB_HULL_PERIOD", "31")),
         "utb_flip_trigger": os.getenv("UTB_FLIP_TRIGGER", "hull_color"),  # "hull_color" | "hull_and_signal" | "opposite_signal" | "signal_only"
         "utb_direction_mode": os.getenv("UTB_DIRECTION_MODE", "both"),
+        "utb_sl_enabled": os.getenv("UTB_SL_ENABLED", "false").lower() == "true",
+        "utb_sl_manual_usd": float(os.getenv("UTB_SL_MANUAL_USD", "5.0")),
+        "utb_sl_cooldown_seconds": float(os.getenv("UTB_SL_COOLDOWN_SECONDS", "30")),
     }
 
 
@@ -415,6 +418,7 @@ def default_state():
         "mo7_last_value": None, "mo7_sl_cooldown_until": 0.0,
         "mo7_sl_price": None, "mo7_tp_price": None,
         "utb_last_hull_green": None,
+        "utb_sl_price": None, "utb_sl_cooldown_until": 0.0,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -1528,6 +1532,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short (bei Gegen-Flip glattstellen statt drehen)</option>
     </select>
   </div>
+  <div data-mode="ut_bot_hull"><label>Stop-Loss (fester $-Betrag, optional - durchbricht "immer im Markt" nur im SL-Fall)</label>
+    <select class="cfg" id="utb_sl_enabled">
+      <option value="false">Aus (Standard - reines Flip-System ohne SL)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot_hull"><label>SL Fester $-Betrag (nur wenn Stop-Loss An)</label><input type="number" step="0.5" id="utb_sl_manual_usd"></div>
+  <div data-mode="ut_bot_hull"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="utb_sl_cooldown_seconds"></div>
 
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
@@ -3125,6 +3137,9 @@ async function refresh() {
     document.getElementById('utb_hull_period').value = data.config.utb_hull_period;
     document.getElementById('utb_flip_trigger').value = data.config.utb_flip_trigger;
     document.getElementById('utb_direction_mode').value = data.config.utb_direction_mode;
+    document.getElementById('utb_sl_enabled').value = String(data.config.utb_sl_enabled);
+    document.getElementById('utb_sl_manual_usd').value = data.config.utb_sl_manual_usd;
+    document.getElementById('utb_sl_cooldown_seconds').value = data.config.utb_sl_cooldown_seconds;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -3446,6 +3461,9 @@ function buildConfigPayload() {
     utb_hull_period: parseInt(document.getElementById('utb_hull_period').value),
     utb_flip_trigger: document.getElementById('utb_flip_trigger').value,
     utb_direction_mode: document.getElementById('utb_direction_mode').value,
+    utb_sl_enabled: document.getElementById('utb_sl_enabled').value === 'true',
+    utb_sl_manual_usd: parseFloat(document.getElementById('utb_sl_manual_usd').value),
+    utb_sl_cooldown_seconds: parseFloat(document.getElementById('utb_sl_cooldown_seconds').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -3571,6 +3589,7 @@ async def handle_status(request):
         "mo7_last_value": st.get("mo7_last_value"), "mo7_sl_price": st.get("mo7_sl_price"),
         "mo7_tp_price": st.get("mo7_tp_price"),
         "utb_last_hull_green": st.get("utb_last_hull_green"),
+        "utb_sl_price": st.get("utb_sl_price"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3632,6 +3651,7 @@ async def handle_config_update(request):
                 "mo7_sl_cooldown_seconds",
                 "utb_resolution", "utb_atr_period", "utb_sensitivity", "utb_heikin_ashi",
                 "utb_hull_period", "utb_flip_trigger", "utb_direction_mode",
+                "utb_sl_enabled", "utb_sl_manual_usd", "utb_sl_cooldown_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

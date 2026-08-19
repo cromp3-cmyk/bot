@@ -2381,16 +2381,56 @@ def compute_ut_hull_flip_signals(buy, sell, hull_green, cfg):
     return long_flip, short_flip
 
 
+def _uh_set_sl(st, cfg, direction, entry_price):
+    """Setzt den festen SL-Preis (fester $-Betrag, wie bei den anderen Strategien) fuer die
+    gerade eroeffnete Position - oder loescht ihn, falls SL deaktiviert/Positionsgroesse
+    unbekannt ist."""
+    if not cfg.get("utb_sl_enabled", False):
+        st["utb_sl_price"] = None
+        return
+    size = st.get("total_coin_size") or 0
+    if size <= 0:
+        st["utb_sl_price"] = None
+        return
+    dist_sl = cfg.get("utb_sl_manual_usd", 5.0) / size
+    st["utb_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
+
+
+async def check_uh_sl(symbol, price):
+    """Optionaler fester SL (fester $-Betrag, eingebbar). Anders als der Flip-Mechanismus geht
+    die Position bei SL-Treffer erstmal GLATT (nicht direkt in die Gegenrichtung) und wartet -
+    nach einem kurzen Cooldown - auf das naechste gueltige Ersteinstiegs-Signal, genau wie bei
+    Candle Patterns/MO7. Das durchbricht das 'immer im Markt'-Prinzip bewusst nur im
+    SL-Fall - ein Trailing-Loss soll die Position tatsaechlich beenden koennen."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    sl_price = st.get("utb_sl_price")
+    if sl_price is None:
+        return
+    pos = st["position"]
+    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+    if hit_sl:
+        debug_log(f"🚪 [{symbol}] UT-Bot+Hull SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, "SL")
+        st["utb_sl_price"] = None
+        st["utb_sl_cooldown_until"] = time.time() + cfg.get("utb_sl_cooldown_seconds", 30)
+
+
 async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull_green_i, price):
-    """Immer-im-Markt-System (kein SL/TP): beim allerersten Einstieg braucht es ein echtes
-    UT-Bot-Signal PLUS passende Hull-Farbe - AUSSER im Modus 'signal_only', da zaehlt nur das
-    UT-Bot-Signal, Hull wird komplett ignoriert. Danach entscheidet nur noch der gewaehlte
-    Flip-Trigger (compute_ut_hull_flip_signals) ueber den naechsten Richtungswechsel. Bei
-    Long-/Short-only wird bei einem Gegen-Flip nicht auf die andere Seite gedreht, sondern nur
-    glattgestellt (echtes 'immer im Markt' ergibt bei einseitiger Richtung ja keinen Sinn)."""
+    """Immer-im-Markt-System: beim allerersten Einstieg braucht es ein echtes UT-Bot-Signal PLUS
+    passende Hull-Farbe - AUSSER im Modus 'signal_only', da zaehlt nur das UT-Bot-Signal, Hull
+    wird komplett ignoriert. Danach entscheidet nur noch der gewaehlte Flip-Trigger
+    (compute_ut_hull_flip_signals) ueber den naechsten Richtungswechsel. Bei Long-/Short-only
+    wird bei einem Gegen-Flip nicht auf die andere Seite gedreht, sondern nur glattgestellt
+    (echtes 'immer im Markt' ergibt bei einseitiger Richtung ja keinen Sinn). Optionaler fester
+    SL (siehe check_uh_sl) unterbricht 'immer im Markt' nur im SL-Fall."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
+        return
+    if time.time() < st.get("utb_sl_cooldown_until", 0.0):
         return
     direction_mode = cfg.get("utb_direction_mode", "both")
     signal_only = cfg.get("utb_flip_trigger", "hull_color") == "signal_only"
@@ -2401,42 +2441,58 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
             if buy_i and direction_mode != "short_only":
                 debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg (nur Signal): LONG @ {price}")
                 await execute_entry(symbol, "long", price, is_add_on=False)
+                if st["position"] is not None:
+                    _uh_set_sl(st, cfg, "long", price)
             elif sell_i and direction_mode != "long_only":
                 debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg (nur Signal): SHORT @ {price}")
                 await execute_entry(symbol, "short", price, is_add_on=False)
+                if st["position"] is not None:
+                    _uh_set_sl(st, cfg, "short", price)
             return
         if hull_green_i is None:
             return
         if buy_i and hull_green_i and direction_mode != "short_only":
             debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg: LONG @ {price}")
             await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _uh_set_sl(st, cfg, "long", price)
         elif sell_i and not hull_green_i and direction_mode != "long_only":
             debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg: SHORT @ {price}")
             await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _uh_set_sl(st, cfg, "short", price)
         return
 
     if pos == "long" and short_flip_i:
         if direction_mode == "long_only":
             debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit: LONG @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-EXIT")
+            st["utb_sl_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: LONG -> SHORT @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-FLIP")
             await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _uh_set_sl(st, cfg, "short", price)
     elif pos == "short" and long_flip_i:
         if direction_mode == "short_only":
             debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit: SHORT @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-EXIT")
+            st["utb_sl_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: SHORT -> LONG @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-FLIP")
             await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _uh_set_sl(st, cfg, "long", price)
 
 
 async def utb_poll_loop(symbol):
-    """UT Bot Alerts (ATR-Trailing-Stop) + Hull-MA-Filter, immer im Markt, kein SL/TP. Nutzt
-    dieselbe Kerzenquelle/Aufloesungs-Logik wie Candle Patterns (inkl. Sekunden-Aufloesungen und
-    eigene Minuten), da hier - anders als bei MO7 - kein Handelsvolumen gebraucht wird."""
+    """UT Bot Alerts (ATR-Trailing-Stop) + Hull-MA-Filter, immer im Markt (Flip statt Exit),
+    optional mit festem SL (fester $-Betrag, siehe check_uh_sl - unterbricht 'immer im Markt'
+    nur im SL-Fall). Nutzt dieselbe Kerzenquelle/Aufloesungs-Logik wie Candle Patterns (inkl.
+    Sekunden-Aufloesungen und eigene Minuten), da hier - anders als bei MO7 - kein
+    Handelsvolumen gebraucht wird."""
     b = BOTS[symbol]
     last_processed_ts = None
     last_heartbeat = 0.0
@@ -2501,6 +2557,8 @@ async def utb_poll_loop(symbol):
                         price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
                         await check_uh_signal(symbol, buy[idx], sell[idx], long_flip[idx], short_flip[idx], hull_green[idx], price_i)
+
+                    await check_uh_sl(symbol, price)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -4732,38 +4790,72 @@ async def run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low
     }
 
 
+def _uh_bt_set_sl(position, cfg, margin, leverage):
+    """Backtest-Pendant zu _uh_set_sl - setzt sl_price auf der Position (fester $-Betrag)."""
+    if not cfg.get("utb_sl_enabled", False):
+        position["sl_price"] = None
+        return
+    size = position["size"]
+    if size <= 0:
+        position["sl_price"] = None
+        return
+    dist_sl = cfg.get("utb_sl_manual_usd", 5.0) / size
+    entry = position["entry"]
+    position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
+
+
 def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup):
-    """Immer-im-Markt-Simulation fuer UT Bot + Hull Flip - kein SL/TP, siehe check_uh_signal fuer
-    die identische Logik im Live-Betrieb."""
+    """Immer-im-Markt-Simulation fuer UT Bot + Hull Flip (Flip statt Exit), optional mit festem
+    SL (fester $-Betrag) - bei SL-Treffer geht die Position glatt und wartet (nach Cooldown) auf
+    das naechste gueltige Ersteinstiegs-Signal, statt direkt zu drehen. Siehe check_uh_signal/
+    check_uh_sl fuer die identische Logik im Live-Betrieb."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     direction_mode = cfg.get("utb_direction_mode", "both")
     signal_only = cfg.get("utb_flip_trigger", "hull_color") == "signal_only"
+    sl_cooldown_ms = cfg.get("utb_sl_cooldown_seconds", 30) * 1000
 
     position = None
     trades = []
+    sl_cooldown_until_ts = None
 
     for i in range(warmup, n):
         price = c[i]
 
+        if position is not None:
+            sl_price = position.get("sl_price")
+            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            if hit_sl:
+                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+
+        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+
         if position is None:
+            if in_sl_cooldown:
+                continue
             if signal_only:
                 if buy[i] and direction_mode != "short_only":
                     size = (margin * leverage) / price
                     position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+                    _uh_bt_set_sl(position, cfg, margin, leverage)
                 elif sell[i] and direction_mode != "long_only":
                     size = (margin * leverage) / price
                     position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                    _uh_bt_set_sl(position, cfg, margin, leverage)
                 continue
             if hull_green[i] is None:
                 continue
             if buy[i] and hull_green[i] and direction_mode != "short_only":
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+                _uh_bt_set_sl(position, cfg, margin, leverage)
             elif sell[i] and not hull_green[i] and direction_mode != "long_only":
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                _uh_bt_set_sl(position, cfg, margin, leverage)
             continue
 
         if position["dir"] == "long" and short_flip[i]:
@@ -4774,6 +4866,7 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
             else:
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                _uh_bt_set_sl(position, cfg, margin, leverage)
         elif position["dir"] == "short" and long_flip[i]:
             reason = "UTB-HULL-EXIT" if direction_mode == "short_only" else "UTB-HULL-FLIP"
             _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
@@ -4782,6 +4875,7 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
             else:
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+                _uh_bt_set_sl(position, cfg, margin, leverage)
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
