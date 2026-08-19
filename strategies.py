@@ -805,6 +805,9 @@ def compute_ut_bot(opens, highs, lows, closes, atr_period, sensitivity, use_heik
         buy[i] = src[i] > stop[i] and above
         sell[i] = src[i] < stop[i] and below
     return buy, sell, stop
+
+
+def compute_heikin_ashi(opens, highs, lows, closes):
     """Rechnet normale OHLC-Kerzen in Heikin-Ashi-Kerzen um (wie bei TradingView, wenn man den
     Chart-Typ auf 'Heikin Ashi' umstellt). Heikin-Ashi glaettet den Kursverlauf, indem jede Kerze
     den Durchschnitt der vorherigen mit einrechnet - Trends wirken dadurch 'glatter' (weniger
