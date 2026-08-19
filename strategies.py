@@ -4761,23 +4761,69 @@ def backtest_ut_bot_hull(candles, cfg):
     return _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup)
 
 
-UTB_ALL_TIMEFRAMES = ["10s", "15s", "30s", "45s", "1m", "2m", "3m", "5m", "15m", "30m", "1h", "2h", "4h"]
+UTB_SWEEP_MAX_COMBOS = 2000
+UTB_SWEEP_MIN_RELIABLE_TRADES = 5
 
 
-async def run_utb_all_timeframes_backtest(symbol, cfg, days):
-    """Backtest über ALLE Zeitrahmen (wie gewünscht) - nutzt den generischen run_backtest()
-    einfach mehrfach mit ueberschriebener 'utb_resolution', spart dadurch eigene
-    Cache-/Fetch-Logik komplett."""
+async def run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
+                               sensitivity_min, sensitivity_max, sensitivity_step):
+    """'Monte-Carlo'-Parametersweep fuer UT Bot + Hull Flip: testet einen Bereich von ATR-Periode
+    und Sensitivity (die beiden Parameter, die im Original-Pine-Script beide irrefuehrend
+    'Period' heissen) gegeneinander. Die Hull-MA wird nur EINMAL berechnet (unabhaengig von
+    ATR-Periode/Sensitivity) und fuer alle Kombinationen wiederverwendet."""
+    max_candles = BACKTEST_MAX_CANDLES["ut_bot_hull"]
+    resolution = cfg.get("utb_resolution", "5m")
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 150:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    atr_periods = sorted(set(int(round(atr_period_min + i * atr_period_step))
+                              for i in range(int((atr_period_max - atr_period_min) / max(atr_period_step, 1e-9)) + 1)
+                              if atr_period_min + i * atr_period_step <= atr_period_max + 1e-9))
+    sensitivities = sorted(set(round(sensitivity_min + i * sensitivity_step, 4)
+                                for i in range(int((sensitivity_max - sensitivity_min) / max(sensitivity_step, 1e-9)) + 1)
+                                if sensitivity_min + i * sensitivity_step <= sensitivity_max + 1e-9))
+    atr_periods = [a for a in atr_periods if a >= 1]
+    sensitivities = [s for s in sensitivities if s > 0]
+
+    total_combos = len(atr_periods) * len(sensitivities)
+    if total_combos == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
+    if total_combos > UTB_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {UTB_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
+    hull_period = cfg.get("utb_hull_period", 31)
+    hma = compute_hull_ma(c, hull_period)
+    hull_green = [None] * len(c)
+    for i in range(1, len(c)):
+        if hma[i] is not None and hma[i - 1] is not None:
+            hull_green[i] = hma[i] > hma[i - 1]
+
     results = []
-    for res in UTB_ALL_TIMEFRAMES:
-        cfg_copy = dict(cfg)
-        cfg_copy["utb_resolution"] = res
-        r = await run_backtest(symbol, "ut_bot_hull", cfg_copy, days)
-        if "error" in r:
-            results.append({"resolution": res, "error": r["error"]})
-        else:
-            results.append({"resolution": res, **r["stats"]})
-    return {"symbol": symbol, "requested_days": days, "results": results}
+    for atr_p in atr_periods:
+        for sens in sensitivities:
+            buy, sell, stop_line = compute_ut_bot(o, h, l, c, atr_p, sens, cfg.get("utb_heikin_ashi", False))
+            long_flip, short_flip = compute_ut_hull_flip_signals(buy, sell, hull_green, cfg)
+            warmup = max(atr_p, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 2
+            trades = _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup)
+            stats = summarize_backtest_trades(trades)
+            results.append({"utb_atr_period": atr_p, "utb_sensitivity": sens, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= UTB_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(c),
+        "min_reliable_trades": UTB_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": total_combos,
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
 
 
 BACKTEST_MAX_CANDLES = {

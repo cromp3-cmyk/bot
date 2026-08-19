@@ -1831,21 +1831,43 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 
 <div data-mode-section="ut_bot_hull" style="display:none;">
-<h2 class="section-title">🎲 UT-Bot+Hull Backtest über alle Zeitrahmen</h2>
+<h2 class="section-title">🎲 UT-Bot+Hull ATR-Periode/Sensitivity-Sweep</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet dieselbe Einstellung (ATR-Periode, Sensitivity, Hull-Periode, Flip-Trigger, Richtung)
-    auf allen unterstützten Zeitrahmen gleichzeitig (10s bis 4h) und zeigt, welcher am besten
-    abschneidet.
+    Testet einen Bereich von ATR-Periode und Sensitivity gegeneinander (die zwei Parameter, die im
+    Original-Pine-Script beide irreführend "Period" heißen). Die Hull-MA wird nur einmal berechnet
+    und für alle Kombinationen wiederverwendet.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="utb-sweep-days" value="30" style="width:90px;"></div>
-    <button id="btn-utb-sweep" style="padding:12px 24px;">🎲 Alle Zeitrahmen testen</button>
+    <div><label>ATR-Periode von</label><input type="number" step="1" id="utb-sweep-atrp-min" value="1" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="1" id="utb-sweep-atrp-max" value="20" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" id="utb-sweep-atrp-step" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Sensitivity von</label><input type="number" step="0.01" id="utb-sweep-sens-min" value="0.5" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.01" id="utb-sweep-sens-max" value="5.0" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.01" id="utb-sweep-sens-step" value="0.5" style="width:90px;"></div>
+    <button id="btn-utb-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
   </div>
   <div id="utb-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
   <table id="utb-sweep-results-table" style="display:none; margin-top:12px;">
     <thead><tr>
-      <th class="sortable" data-key="resolution">Zeitrahmen ⇅</th>
+      <th class="sortable" data-key="utb_atr_period">ATR-Periode ⇅</th>
+      <th class="sortable" data-key="utb_sensitivity">Sensitivity ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="utb-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="utb-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="utb_atr_period">ATR-Periode ⇅</th>
+      <th class="sortable" data-key="utb_sensitivity">Sensitivity ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -2276,7 +2298,10 @@ function resetBacktestUI() {
   window.mo7SweepWorstData = [];
   document.getElementById('utb-sweep-status').innerText = '';
   document.getElementById('utb-sweep-results-table').style.display = 'none';
+  document.getElementById('utb-sweep-worst-table').style.display = 'none';
+  document.getElementById('utb-sweep-worst-title').style.display = 'none';
   window.utbSweepResultsData = [];
+  window.utbSweepWorstData = [];
 }
 
 document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
@@ -2531,16 +2556,26 @@ document.getElementById('btn-utb-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-utb-sweep');
   const statusEl = document.getElementById('utb-sweep-status');
   const tableEl = document.getElementById('utb-sweep-results-table');
+  const worstTableEl = document.getElementById('utb-sweep-worst-table');
+  const worstTitleEl = document.getElementById('utb-sweep-worst-title');
   const sweepSymbol = currentSymbol;
   const payload = {
     days: parseInt(document.getElementById('utb-sweep-days').value) || 30,
+    atr_period_min: parseInt(document.getElementById('utb-sweep-atrp-min').value),
+    atr_period_max: parseInt(document.getElementById('utb-sweep-atrp-max').value),
+    atr_period_step: parseInt(document.getElementById('utb-sweep-atrp-step').value),
+    sensitivity_min: parseFloat(document.getElementById('utb-sweep-sens-min').value),
+    sensitivity_max: parseFloat(document.getElementById('utb-sweep-sens-max').value),
+    sensitivity_step: parseFloat(document.getElementById('utb-sweep-sens-step').value),
     config: buildConfigPayload(),
   };
   btn.disabled = true;
   tableEl.style.display = 'none';
-  statusEl.innerText = `⏳ Teste alle Zeitrahmen (10s bis 4h)... kann etwas dauern.`;
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Werten etwas dauern.`;
   try {
-    const res = await fetch(`/api/utb_all_timeframes?symbol=${sweepSymbol}`, {
+    const res = await fetch(`/api/utb_param_sweep?symbol=${sweepSymbol}`, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -2548,10 +2583,14 @@ document.getElementById('btn-utb-sweep').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `${data.results.length} Zeitrahmen getestet (${payload.days} Tage).`;
-      window.utbSweepResultsData = (data.results || []).filter(r => !r.error);
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
+      window.utbSweepResultsData = data.results || [];
+      window.utbSweepWorstData = data.worst_results || [];
       renderUtbSweepResults();
+      renderUtbSweepWorst();
       tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
     }
   } catch (e) {
     if (sweepSymbol !== currentSymbol) return;
@@ -2561,9 +2600,11 @@ document.getElementById('btn-utb-sweep').addEventListener('click', async () => {
 });
 
 window.utbSweepResultsData = [];
+window.utbSweepWorstData = [];
 const utbSweepRowHtml = (r) => `
   <tr>
-    <td>${r.resolution}</td>
+    <td>${r.utb_atr_period}</td>
+    <td>${r.utb_sensitivity}</td>
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
@@ -2571,6 +2612,7 @@ const utbSweepRowHtml = (r) => `
     <td>${r.avg_bars_held}</td>
   </tr>`;
 const renderUtbSweepResults = makeSortableTable('utb-sweep-results-table', () => window.utbSweepResultsData, utbSweepRowHtml);
+const renderUtbSweepWorst = makeSortableTable('utb-sweep-worst-table', () => window.utbSweepWorstData, utbSweepRowHtml);
 
 
 
@@ -3730,25 +3772,32 @@ async def handle_mo7_sum_sweep(request):
     return web.json_response(result)
 
 
-async def handle_utb_all_timeframes(request):
-    """Backtest fuer UT Bot + Hull Flip ueber ALLE unterstuetzten Zeitrahmen gleichzeitig (wie
-    gewuenscht) - liefert eine Vergleichstabelle."""
-    from strategies import run_utb_all_timeframes_backtest
+async def handle_utb_param_sweep(request):
+    """'Monte-Carlo'-Parametersweep fuer UT Bot + Hull Flip: testet einen Bereich von ATR-Periode
+    und Sensitivity gegeneinander."""
+    from strategies import run_utb_param_sweep
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()
     if symbol not in BOTS:
         return web.json_response({"error": "unknown symbol"}, status=404)
     body = await request.json()
     try:
         days = max(1, min(365, int(body.get("days", 30))))
+        atr_period_min = max(1, int(body.get("atr_period_min", 1)))
+        atr_period_max = max(atr_period_min, int(body.get("atr_period_max", 20)))
+        atr_period_step = max(1, int(body.get("atr_period_step", 1)))
+        sensitivity_min = max(0.01, float(body.get("sensitivity_min", 0.5)))
+        sensitivity_max = max(sensitivity_min, float(body.get("sensitivity_max", 5.0)))
+        sensitivity_step = max(0.01, float(body.get("sensitivity_step", 0.5)))
     except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültiger Zeitraum."}, status=400)
+        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
 
     cfg = dict(BOTS[symbol]["config"])
     overrides = body.get("config")
     if isinstance(overrides, dict):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
-    result = await run_utb_all_timeframes_backtest(symbol, cfg, days)
+    result = await run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
+                                        sensitivity_min, sensitivity_max, sensitivity_step)
     return web.json_response(result)
 
 
