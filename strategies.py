@@ -4235,7 +4235,8 @@ def summarize_backtest_trades(trades):
     n = len(trades)
     if n == 0:
         return {"trades": 0, "fills": 0, "win_rate_pct": 0, "total_pnl_usd": 0, "avg_win_usd": 0, "avg_loss_usd": 0,
-                "max_drawdown_usd": 0, "avg_bars_held": 0}
+                "max_drawdown_usd": 0, "avg_bars_held": 0, "best_trade_pnl_usd": 0, "worst_trade_pnl_usd": 0,
+                "median_trade_pnl_usd": 0, "total_pnl_excl_best_trade_usd": 0}
 
     total_pnl = sum(t["pnl"] for t in trades)
     equity = peak = max_dd = 0.0
@@ -4261,6 +4262,15 @@ def summarize_backtest_trades(trades):
     losses = [p for p in pos_list if p["pnl"] <= 0]
     n_pos = len(pos_list)
 
+    # Robustheits-Check: wie stark haengt das Ergebnis an EINEM einzelnen Ausreisser-Trade
+    # (z.B. ein grosser Pump/Dump waehrend eines "immer im Markt"-Trades)? Zeigt das PnL ohne
+    # den besten UND ohne den schlechtesten Einzel-Trade.
+    sorted_by_pnl = sorted(pos_list, key=lambda p: p["pnl"])
+    best_trade_pnl = sorted_by_pnl[-1]["pnl"] if pos_list else 0.0
+    worst_trade_pnl = sorted_by_pnl[0]["pnl"] if pos_list else 0.0
+    pnls = sorted(p["pnl"] for p in pos_list)
+    median_pnl = pnls[len(pnls) // 2] if len(pnls) % 2 == 1 else (pnls[len(pnls) // 2 - 1] + pnls[len(pnls) // 2]) / 2 if pnls else 0.0
+
     return {
         "trades": n_pos,
         "fills": n,
@@ -4270,6 +4280,10 @@ def summarize_backtest_trades(trades):
         "avg_loss_usd": round(sum(p["pnl"] for p in losses) / len(losses), 2) if losses else 0,
         "max_drawdown_usd": round(max_dd, 2),
         "avg_bars_held": round(sum(p["bars_held"] for p in pos_list) / n_pos, 1),
+        "best_trade_pnl_usd": round(best_trade_pnl, 2),
+        "worst_trade_pnl_usd": round(worst_trade_pnl, 2),
+        "median_trade_pnl_usd": round(median_pnl, 2),
+        "total_pnl_excl_best_trade_usd": round(total_pnl - best_trade_pnl, 2),
     }
 
 

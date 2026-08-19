@@ -1587,6 +1587,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div><div class="label">Gesamt-PnL $</div><div class="value" id="bt-pnl">-</div></div>
       <div><div class="label">Max Drawdown $</div><div class="value" id="bt-dd">-</div></div>
       <div><div class="label">Ø Gewinn / Ø Verlust $</div><div class="value" id="bt-avg">-</div></div>
+      <div><div class="label">Bester Einzel-Trade $</div><div class="value" id="bt-best-trade">-</div></div>
+      <div><div class="label">PnL OHNE besten Trade $ <span style="font-weight:400;">(Robustheits-Check)</span></div><div class="value" id="bt-pnl-excl-best">-</div></div>
+      <div><div class="label">Median-Trade $</div><div class="value" id="bt-median-trade">-</div></div>
     </div>
     <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:8px; padding-top:12px; border-top:1px solid var(--border);">
       <div>
@@ -2144,6 +2147,11 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
       pnlEl.className = data.stats.total_pnl_usd >= 0 ? 'value green' : 'value red';
       document.getElementById('bt-dd').innerText = data.stats.max_drawdown_usd;
       document.getElementById('bt-avg').innerText = `${data.stats.avg_win_usd} / ${data.stats.avg_loss_usd}`;
+      document.getElementById('bt-best-trade').innerText = data.stats.best_trade_pnl_usd;
+      const pnlExclEl = document.getElementById('bt-pnl-excl-best');
+      pnlExclEl.innerText = data.stats.total_pnl_excl_best_trade_usd;
+      pnlExclEl.className = data.stats.total_pnl_excl_best_trade_usd >= 0 ? 'value green' : 'value red';
+      document.getElementById('bt-median-trade').innerText = data.stats.median_trade_pnl_usd;
       document.getElementById('bt-long-trades').innerText = data.stats_long.trades;
       document.getElementById('bt-long-winrate').innerText = data.stats_long.win_rate_pct + '%';
       const longPnlEl = document.getElementById('bt-long-pnl');
