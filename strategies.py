@@ -4222,7 +4222,7 @@ def backtest_fib_reversal(candles, cfg):
     return trades
 
 
-def summarize_backtest_trades(trades):
+def summarize_backtest_trades(trades, exclude_top_n=1):
     """WICHTIG: 'trades' kann mehrere Zeilen fuer EINE echte Position enthalten (TP1/TP2/TP3
     als separate Teilverkaeufe derselben Position - siehe _bt_close_trade). Trefferquote und
     Ø-Gewinn/-Verlust werden deshalb auf POSITIONS-Ebene berechnet (alle Zeilen mit demselben
@@ -4231,12 +4231,18 @@ def summarize_backtest_trades(trades):
     nur einfach als 'Verlust' - das verzerrt die Trefferquote massiv nach oben (in der Praxis
     beobachtet: 70% pro Teilverkauf-Zeile vs. 52% pro echter Position auf denselben Daten).
     Max-Drawdown bleibt bewusst auf Zeilenebene (echter Zeitreihen-Wert, jeder Teilverkauf
-    veraendert das Konto tatsaechlich genau dann, wenn er passiert)."""
+    veraendert das Konto tatsaechlich genau dann, wenn er passiert).
+
+    `exclude_top_n`: Robustheits-Check - wie viele der besten Einzel-Trades (Positionen) sollen
+    aus 'total_pnl_excl_top_n_usd' herausgerechnet werden? Wichtig bei 'immer im Markt'-Systemen
+    (z.B. UT Bot + Hull Flip), wo ein einzelner grosser Pump/Dump-Trade das Gesamtergebnis
+    dominieren und den Backtest/Sweep unrepraesentativ machen kann."""
     n = len(trades)
     if n == 0:
         return {"trades": 0, "fills": 0, "win_rate_pct": 0, "total_pnl_usd": 0, "avg_win_usd": 0, "avg_loss_usd": 0,
                 "max_drawdown_usd": 0, "avg_bars_held": 0, "best_trade_pnl_usd": 0, "worst_trade_pnl_usd": 0,
-                "median_trade_pnl_usd": 0, "total_pnl_excl_best_trade_usd": 0}
+                "median_trade_pnl_usd": 0, "total_pnl_excl_best_trade_usd": 0,
+                "top_n_excluded_count": 0, "top_n_excluded_sum_usd": 0, "total_pnl_excl_top_n_usd": 0}
 
     total_pnl = sum(t["pnl"] for t in trades)
     equity = peak = max_dd = 0.0
@@ -4262,14 +4268,15 @@ def summarize_backtest_trades(trades):
     losses = [p for p in pos_list if p["pnl"] <= 0]
     n_pos = len(pos_list)
 
-    # Robustheits-Check: wie stark haengt das Ergebnis an EINEM einzelnen Ausreisser-Trade
-    # (z.B. ein grosser Pump/Dump waehrend eines "immer im Markt"-Trades)? Zeigt das PnL ohne
-    # den besten UND ohne den schlechtesten Einzel-Trade.
-    sorted_by_pnl = sorted(pos_list, key=lambda p: p["pnl"])
-    best_trade_pnl = sorted_by_pnl[-1]["pnl"] if pos_list else 0.0
-    worst_trade_pnl = sorted_by_pnl[0]["pnl"] if pos_list else 0.0
-    pnls = sorted(p["pnl"] for p in pos_list)
-    median_pnl = pnls[len(pnls) // 2] if len(pnls) % 2 == 1 else (pnls[len(pnls) // 2 - 1] + pnls[len(pnls) // 2]) / 2 if pnls else 0.0
+    sorted_desc = sorted(pos_list, key=lambda p: p["pnl"], reverse=True)
+    best_trade_pnl = sorted_desc[0]["pnl"] if pos_list else 0.0
+    worst_trade_pnl = sorted_desc[-1]["pnl"] if pos_list else 0.0
+    pnls_sorted = sorted(p["pnl"] for p in pos_list)
+    mid = len(pnls_sorted) // 2
+    median_pnl = pnls_sorted[mid] if len(pnls_sorted) % 2 == 1 else (pnls_sorted[mid - 1] + pnls_sorted[mid]) / 2 if pnls_sorted else 0.0
+
+    n_exclude = max(0, min(int(exclude_top_n), len(sorted_desc)))
+    excluded_sum = sum(p["pnl"] for p in sorted_desc[:n_exclude])
 
     return {
         "trades": n_pos,
@@ -4284,6 +4291,9 @@ def summarize_backtest_trades(trades):
         "worst_trade_pnl_usd": round(worst_trade_pnl, 2),
         "median_trade_pnl_usd": round(median_pnl, 2),
         "total_pnl_excl_best_trade_usd": round(total_pnl - best_trade_pnl, 2),
+        "top_n_excluded_count": n_exclude,
+        "top_n_excluded_sum_usd": round(excluded_sum, 2),
+        "total_pnl_excl_top_n_usd": round(total_pnl - excluded_sum, 2),
     }
 
 
@@ -4651,7 +4661,7 @@ async def _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candl
     return candles, err
 
 
-async def run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low_step, sum_high_min, sum_high_max, sum_high_step):
+async def run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low_step, sum_high_min, sum_high_max, sum_high_step, exclude_top_n=1):
     """'Monte-Carlo'-Parametersweep fuer den 'five_candle_sum'-Einstiegsmodus: testet einen
     Bereich von mo7_sum_low (Long-Schwelle) und mo7_sum_high (Short-Schwelle) gegeneinander.
     Der MO7-Score selbst wird NUR EINMAL berechnet (unabhaengig von den Schwellen) und fuer alle
@@ -4693,7 +4703,7 @@ async def run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low
             cfg_copy["mo7_sum_high"] = sum_high
             bull, bear = compute_mo7_signals(mo7, cfg_copy)
             trades = _simulate_mo7_trades(candles, mo7, cfg_copy, bull, bear, warmup)
-            stats = summarize_backtest_trades(trades)
+            stats = summarize_backtest_trades(trades, exclude_top_n)
             results.append({"mo7_sum_low": sum_low, "mo7_sum_high": sum_high, **stats})
 
     best_sorted = sorted(results, key=lambda r: (r["trades"] >= MO7_SUM_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
@@ -4780,7 +4790,7 @@ UTB_SWEEP_MIN_RELIABLE_TRADES = 5
 
 
 async def run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
-                               sensitivity_min, sensitivity_max, sensitivity_step):
+                               sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n=1):
     """'Monte-Carlo'-Parametersweep fuer UT Bot + Hull Flip: testet einen Bereich von ATR-Periode
     und Sensitivity (die beiden Parameter, die im Original-Pine-Script beide irrefuehrend
     'Period' heissen) gegeneinander. Die Hull-MA wird nur EINMAL berechnet (unabhaengig von
@@ -4823,7 +4833,7 @@ async def run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max,
             long_flip, short_flip = compute_ut_hull_flip_signals(buy, sell, hull_green, cfg)
             warmup = max(atr_p, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 2
             trades = _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup)
-            stats = summarize_backtest_trades(trades)
+            stats = summarize_backtest_trades(trades, exclude_top_n)
             results.append({"utb_atr_period": atr_p, "utb_sensitivity": sens, **stats})
 
     best_sorted = sorted(results, key=lambda r: (r["trades"] >= UTB_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
@@ -4863,7 +4873,7 @@ BACKTEST_FUNCS = {
 }
 
 
-async def run_backtest(symbol, entry_mode, cfg, days):
+async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
     if entry_mode == "mo7_scalp":
         max_candles = BACKTEST_MAX_CANDLES["mo7_scalp"]
         resolution = cfg.get("mo7_resolution", "5m")
@@ -4874,9 +4884,9 @@ async def run_backtest(symbol, entry_mode, cfg, days):
             return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~550 für das 500er-Normierungsfenster nötig)."}
         n_candles = len(candles[4])
         trades = backtest_mo7(candles, cfg)
-        stats = summarize_backtest_trades(trades)
-        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"])
-        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"])
+        stats = summarize_backtest_trades(trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
         actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
         return {
             "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
@@ -4927,9 +4937,9 @@ async def run_backtest(symbol, entry_mode, cfg, days):
     n_candles = len(candles[4])
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
-    stats = summarize_backtest_trades(trades)
-    stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"])
-    stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"])
+    stats = summarize_backtest_trades(trades, exclude_top_n)
+    stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
+    stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
 
     actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
     return {

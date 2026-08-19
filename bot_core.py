@@ -1574,6 +1574,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="backtest-days" value="30" style="width:100px;"></div>
+    <div><label>Robustheits-Check: beste N Trades ausschließen</label><input type="number" step="1" min="0" id="backtest-exclude-top-n" value="1" style="width:100px;"></div>
     <button id="btn-backtest" style="padding:12px 24px;">▶️ Backtest starten</button>
   </div>
   <div id="backtest-status" style="color:var(--text-dim); font-size:13px;"></div>
@@ -1588,7 +1589,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div><div class="label">Max Drawdown $</div><div class="value" id="bt-dd">-</div></div>
       <div><div class="label">Ø Gewinn / Ø Verlust $</div><div class="value" id="bt-avg">-</div></div>
       <div><div class="label">Bester Einzel-Trade $</div><div class="value" id="bt-best-trade">-</div></div>
-      <div><div class="label">PnL OHNE besten Trade $ <span style="font-weight:400;">(Robustheits-Check)</span></div><div class="value" id="bt-pnl-excl-best">-</div></div>
+      <div><div class="label">PnL ohne beste N Trades $ <span style="font-weight:400;">(Robustheits-Check)</span></div><div class="value" id="bt-pnl-excl-best">-</div></div>
       <div><div class="label">Median-Trade $</div><div class="value" id="bt-median-trade">-</div></div>
     </div>
     <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:8px; padding-top:12px; border-top:1px solid var(--border);">
@@ -1794,6 +1795,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="mo7-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="mo7-sweep-exclude-top-n" value="1" style="width:90px;"></div>
     <div><label>Long-Schwelle von</label><input type="number" step="1" id="mo7-sweep-sumlow-min" value="20" style="width:90px;"></div>
     <div><label>bis</label><input type="number" step="1" id="mo7-sweep-sumlow-max" value="200" style="width:90px;"></div>
     <div><label>Schritt</label><input type="number" step="1" id="mo7-sweep-sumlow-step" value="20" style="width:90px;"></div>
@@ -1812,6 +1814,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
     </tr></thead>
@@ -1825,6 +1828,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
     </tr></thead>
@@ -1843,6 +1847,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="utb-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="utb-sweep-exclude-top-n" value="1" style="width:90px;"></div>
     <div><label>ATR-Periode von</label><input type="number" step="1" id="utb-sweep-atrp-min" value="1" style="width:90px;"></div>
     <div><label>bis</label><input type="number" step="1" id="utb-sweep-atrp-max" value="20" style="width:90px;"></div>
     <div><label>Schritt</label><input type="number" step="1" id="utb-sweep-atrp-step" value="1" style="width:90px;"></div>
@@ -1861,6 +1866,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
     </tr></thead>
@@ -1874,6 +1880,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
     </tr></thead>
@@ -2119,6 +2126,7 @@ async function manualTrade(direction) {
 
 document.getElementById('btn-backtest').addEventListener('click', async () => {
   const days = parseInt(document.getElementById('backtest-days').value) || 30;
+  const excludeTopN = parseInt(document.getElementById('backtest-exclude-top-n').value) || 0;
   const btn = document.getElementById('btn-backtest');
   const statusEl = document.getElementById('backtest-status');
   const resultsEl = document.getElementById('backtest-results');
@@ -2128,7 +2136,7 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
   statusEl.innerText = `⏳ Lade Kerzen von Binance und simuliere... kann bei langen Zeiträumen 1-2 Minuten dauern.`;
   try {
     const res = await fetch(`/api/backtest?symbol=${btSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days, config: buildConfigPayload()})
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days, exclude_top_n: excludeTopN, config: buildConfigPayload()})
     });
     const data = await res.json();
     if (btSymbol !== currentSymbol) return;  // Coin wurde gewechselt während der Backtest lief
@@ -2149,8 +2157,8 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
       document.getElementById('bt-avg').innerText = `${data.stats.avg_win_usd} / ${data.stats.avg_loss_usd}`;
       document.getElementById('bt-best-trade').innerText = data.stats.best_trade_pnl_usd;
       const pnlExclEl = document.getElementById('bt-pnl-excl-best');
-      pnlExclEl.innerText = data.stats.total_pnl_excl_best_trade_usd;
-      pnlExclEl.className = data.stats.total_pnl_excl_best_trade_usd >= 0 ? 'value green' : 'value red';
+      pnlExclEl.innerText = `${data.stats.total_pnl_excl_top_n_usd} (ohne ${data.stats.top_n_excluded_count} Trade${data.stats.top_n_excluded_count === 1 ? '' : 's'})`;
+      pnlExclEl.className = data.stats.total_pnl_excl_top_n_usd >= 0 ? 'value green' : 'value red';
       document.getElementById('bt-median-trade').innerText = data.stats.median_trade_pnl_usd;
       document.getElementById('bt-long-trades').innerText = data.stats_long.trades;
       document.getElementById('bt-long-winrate').innerText = data.stats_long.win_rate_pct + '%';
@@ -2513,6 +2521,7 @@ document.getElementById('btn-mo7-sweep').addEventListener('click', async () => {
     sum_high_min: parseFloat(document.getElementById('mo7-sweep-sumhigh-min').value),
     sum_high_max: parseFloat(document.getElementById('mo7-sweep-sumhigh-max').value),
     sum_high_step: parseFloat(document.getElementById('mo7-sweep-sumhigh-step').value),
+    exclude_top_n: parseInt(document.getElementById('mo7-sweep-exclude-top-n').value) || 0,
     config: buildConfigPayload(),
   };
   btn.disabled = true;
@@ -2554,6 +2563,7 @@ const mo7SweepRowHtml = (r) => `
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
   </tr>`;
@@ -2575,6 +2585,7 @@ document.getElementById('btn-utb-sweep').addEventListener('click', async () => {
     sensitivity_min: parseFloat(document.getElementById('utb-sweep-sens-min').value),
     sensitivity_max: parseFloat(document.getElementById('utb-sweep-sens-max').value),
     sensitivity_step: parseFloat(document.getElementById('utb-sweep-sens-step').value),
+    exclude_top_n: parseInt(document.getElementById('utb-sweep-exclude-top-n').value) || 0,
     config: buildConfigPayload(),
   };
   btn.disabled = true;
@@ -2616,6 +2627,7 @@ const utbSweepRowHtml = (r) => `
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
   </tr>`;
@@ -3650,6 +3662,10 @@ async def handle_backtest(request):
         days = max(1, min(365, int(days)))
     except (TypeError, ValueError):
         days = 30
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
     cfg = dict(BOTS[symbol]["config"])  # Kopie - Backtest darf die Live-Config nicht veraendern
     overrides = body.get("config")
     if isinstance(overrides, dict):
@@ -3658,7 +3674,7 @@ async def handle_backtest(request):
         # nicht auf "Speichern" geklickt wurde.
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
     entry_mode = cfg["entry_mode"]
-    result = await run_backtest(symbol, entry_mode, cfg, days)
+    result = await run_backtest(symbol, entry_mode, cfg, days, exclude_top_n)
     return web.json_response(result)
 
 
@@ -3769,6 +3785,10 @@ async def handle_mo7_sum_sweep(request):
         sum_high_step = max(1.0, float(body.get("sum_high_step", 20)))
     except (TypeError, ValueError):
         return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
 
     cfg = dict(BOTS[symbol]["config"])
     overrides = body.get("config")
@@ -3776,7 +3796,7 @@ async def handle_mo7_sum_sweep(request):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
     result = await run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low_step,
-                                      sum_high_min, sum_high_max, sum_high_step)
+                                      sum_high_min, sum_high_max, sum_high_step, exclude_top_n)
     return web.json_response(result)
 
 
@@ -3798,6 +3818,10 @@ async def handle_utb_param_sweep(request):
         sensitivity_step = max(0.01, float(body.get("sensitivity_step", 0.5)))
     except (TypeError, ValueError):
         return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
 
     cfg = dict(BOTS[symbol]["config"])
     overrides = body.get("config")
@@ -3805,7 +3829,7 @@ async def handle_utb_param_sweep(request):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
     result = await run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
-                                        sensitivity_min, sensitivity_max, sensitivity_step)
+                                        sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n)
     return web.json_response(result)
 
 
