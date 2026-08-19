@@ -2355,12 +2355,14 @@ def compute_ut_hull_flip_signals(buy, sell, hull_green, cfg):
       allerersten Einstieg gebraucht, danach entscheidet nur noch Hull).
     - 'hull_and_signal': Hull-Farbe UND UT-Bot-Signal muessen am selben Balken beide da sein.
     - 'opposite_signal': nur das naechste Gegen-Signal von UT-Bot zaehlt, Hull spielt beim Flip
-      keine Rolle mehr (nur beim allerersten Einstieg als Filter)."""
+      keine Rolle mehr (nur beim allerersten Einstieg als Filter).
+    - 'signal_only': NUR UT-Bot Buy/Sell im Wechsel, Hull spielt ueberhaupt keine Rolle - auch
+      nicht beim Ersteinstieg (siehe check_uh_signal/_simulate_uh_trades)."""
     trigger = cfg.get("utb_flip_trigger", "hull_color")
     n = len(buy)
     long_flip = [False] * n
     short_flip = [False] * n
-    if trigger == "opposite_signal":
+    if trigger in ("opposite_signal", "signal_only"):
         for i in range(n):
             long_flip[i] = buy[i]
             short_flip[i] = sell[i]
@@ -2381,7 +2383,8 @@ def compute_ut_hull_flip_signals(buy, sell, hull_green, cfg):
 
 async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull_green_i, price):
     """Immer-im-Markt-System (kein SL/TP): beim allerersten Einstieg braucht es ein echtes
-    UT-Bot-Signal PLUS passende Hull-Farbe. Danach entscheidet nur noch der gewaehlte
+    UT-Bot-Signal PLUS passende Hull-Farbe - AUSSER im Modus 'signal_only', da zaehlt nur das
+    UT-Bot-Signal, Hull wird komplett ignoriert. Danach entscheidet nur noch der gewaehlte
     Flip-Trigger (compute_ut_hull_flip_signals) ueber den naechsten Richtungswechsel. Bei
     Long-/Short-only wird bei einem Gegen-Flip nicht auf die andere Seite gedreht, sondern nur
     glattgestellt (echtes 'immer im Markt' ergibt bei einseitiger Richtung ja keinen Sinn)."""
@@ -2390,9 +2393,18 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
     if not cfg["bot_active"] or price is None:
         return
     direction_mode = cfg.get("utb_direction_mode", "both")
+    signal_only = cfg.get("utb_flip_trigger", "hull_color") == "signal_only"
     pos = st["position"]
 
     if pos is None:
+        if signal_only:
+            if buy_i and direction_mode != "short_only":
+                debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg (nur Signal): LONG @ {price}")
+                await execute_entry(symbol, "long", price, is_add_on=False)
+            elif sell_i and direction_mode != "long_only":
+                debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg (nur Signal): SHORT @ {price}")
+                await execute_entry(symbol, "short", price, is_add_on=False)
+            return
         if hull_green_i is None:
             return
         if buy_i and hull_green_i and direction_mode != "short_only":
@@ -4727,6 +4739,7 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     direction_mode = cfg.get("utb_direction_mode", "both")
+    signal_only = cfg.get("utb_flip_trigger", "hull_color") == "signal_only"
 
     position = None
     trades = []
@@ -4735,6 +4748,14 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
         price = c[i]
 
         if position is None:
+            if signal_only:
+                if buy[i] and direction_mode != "short_only":
+                    size = (margin * leverage) / price
+                    position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+                elif sell[i] and direction_mode != "long_only":
+                    size = (margin * leverage) / price
+                    position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                continue
             if hull_green[i] is None:
                 continue
             if buy[i] and hull_green[i] and direction_mode != "short_only":

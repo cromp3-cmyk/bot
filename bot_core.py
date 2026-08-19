@@ -377,7 +377,7 @@ def default_config():
         "utb_sensitivity": float(os.getenv("UTB_SENSITIVITY", "1.0")),
         "utb_heikin_ashi": os.getenv("UTB_HEIKIN_ASHI", "false").lower() == "true",
         "utb_hull_period": int(os.getenv("UTB_HULL_PERIOD", "31")),
-        "utb_flip_trigger": os.getenv("UTB_FLIP_TRIGGER", "hull_color"),  # "hull_color" | "hull_and_signal" | "opposite_signal"
+        "utb_flip_trigger": os.getenv("UTB_FLIP_TRIGGER", "hull_color"),  # "hull_color" | "hull_and_signal" | "opposite_signal" | "signal_only"
         "utb_direction_mode": os.getenv("UTB_DIRECTION_MODE", "both"),
     }
 
@@ -1518,6 +1518,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="hull_color">Nur Hull-Farbwechsel (UT-Bot-Signal nur für Ersteinstieg)</option>
       <option value="hull_and_signal">Hull-Farbwechsel UND UT-Bot-Gegensignal gleichzeitig</option>
       <option value="opposite_signal">Nur UT-Bot-Gegensignal (Hull nur für Ersteinstieg)</option>
+      <option value="signal_only">Nur UT-Bot Buy/Sell im Wechsel (Hull komplett ignoriert, auch beim Ersteinstieg)</option>
     </select>
   </div>
   <div data-mode="ut_bot_hull"><label>Richtung</label>
