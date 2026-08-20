@@ -413,6 +413,7 @@ def default_config():
         "pk_tp_manual_usd": float(os.getenv("PK_TP_MANUAL_USD", "10.0")),
         "pk_sl_cooldown_seconds": float(os.getenv("PK_SL_COOLDOWN_SECONDS", "30")),
         "pk_mtf_filter_enabled": os.getenv("PK_MTF_FILTER_ENABLED", "false").lower() == "true",
+        "pk_mtf_resolution": os.getenv("PK_MTF_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"/"4h"
         "pk_mtf_fast_len": int(os.getenv("PK_MTF_FAST_LEN", "5")),
         "pk_mtf_slow_len": int(os.getenv("PK_MTF_SLOW_LEN", "9")),
         "pk_mtf_atr_len": int(os.getenv("PK_MTF_ATR_LEN", "14")),
@@ -1725,6 +1726,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - Short nur unter Short-Schwelle, Long nur über Long-Schwelle</option>
     </select>
   </div>
+  <div data-mode="pieki_algo"><label>Trend% Zeiteinheit</label>
+    <select class="cfg" id="pk_mtf_resolution">
+      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="pk_mtf_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
+  </div>
   <div data-mode="pieki_algo"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="pk_mtf_long_threshold"></div>
   <div data-mode="pieki_algo"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="pk_mtf_short_threshold"></div>
   <div data-mode="pieki_algo"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="pk_mtf_fast_len"></div>
@@ -2533,7 +2548,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3483,6 +3498,7 @@ async function refresh() {
     document.getElementById('pk_tp_manual_usd').value = data.config.pk_tp_manual_usd;
     document.getElementById('pk_sl_cooldown_seconds').value = data.config.pk_sl_cooldown_seconds;
     document.getElementById('pk_mtf_filter_enabled').value = String(data.config.pk_mtf_filter_enabled);
+    setResolutionField('pk_mtf_resolution', data.config.pk_mtf_resolution);
     document.getElementById('pk_mtf_long_threshold').value = data.config.pk_mtf_long_threshold;
     document.getElementById('pk_mtf_short_threshold').value = data.config.pk_mtf_short_threshold;
     document.getElementById('pk_mtf_fast_len').value = data.config.pk_mtf_fast_len;
@@ -3843,6 +3859,7 @@ function buildConfigPayload() {
     pk_tp_manual_usd: parseFloat(document.getElementById('pk_tp_manual_usd').value),
     pk_sl_cooldown_seconds: parseFloat(document.getElementById('pk_sl_cooldown_seconds').value),
     pk_mtf_filter_enabled: document.getElementById('pk_mtf_filter_enabled').value === 'true',
+    pk_mtf_resolution: getResolutionField('pk_mtf_resolution'),
     pk_mtf_long_threshold: parseFloat(document.getElementById('pk_mtf_long_threshold').value),
     pk_mtf_short_threshold: parseFloat(document.getElementById('pk_mtf_short_threshold').value),
     pk_mtf_fast_len: parseInt(document.getElementById('pk_mtf_fast_len').value),
@@ -4049,7 +4066,7 @@ async def handle_config_update(request):
                 "wtc_sl_manual_usd", "wtc_tp_enabled", "wtc_tp_manual_usd", "wtc_sl_cooldown_seconds",
                 "pk_resolution", "pk_sensitivity", "pk_atr_period", "pk_sma_period", "pk_direction_mode",
                 "pk_exit_mode", "pk_sl_enabled", "pk_sl_manual_usd", "pk_tp_enabled", "pk_tp_manual_usd",
-                "pk_sl_cooldown_seconds", "pk_mtf_filter_enabled", "pk_mtf_fast_len", "pk_mtf_slow_len",
+                "pk_sl_cooldown_seconds", "pk_mtf_filter_enabled", "pk_mtf_resolution", "pk_mtf_fast_len", "pk_mtf_slow_len",
                 "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
                 "quad_stoch_resolution"]:
         if key in body:
