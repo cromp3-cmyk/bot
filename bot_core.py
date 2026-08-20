@@ -412,6 +412,9 @@ def default_config():
         "pk_tp_enabled": os.getenv("PK_TP_ENABLED", "true").lower() == "true",
         "pk_tp_manual_usd": float(os.getenv("PK_TP_MANUAL_USD", "10.0")),
         "pk_sl_cooldown_seconds": float(os.getenv("PK_SL_COOLDOWN_SECONDS", "30")),
+        "pk_trailing_enabled": os.getenv("PK_TRAILING_ENABLED", "false").lower() == "true",
+        "pk_trailing_activation_pct": float(os.getenv("PK_TRAILING_ACTIVATION_PCT", "0.2")),  # Trade muss um X% im Profit sein, bevor Trailing aktiviert (SL -> Breakeven)
+        "pk_trailing_step_pct": float(os.getenv("PK_TRAILING_STEP_PCT", "0.2")),  # danach wird der SL im Abstand von X% zum bisherigen Best-Preis nachgezogen
         "pk_mtf_filter_enabled": os.getenv("PK_MTF_FILTER_ENABLED", "false").lower() == "true",
         "pk_mtf_tf1": os.getenv("PK_MTF_TF1", "1m"),  # bis zu 3 Zeiteinheiten, wie "Block 1" im Original (avgB1 = Durchschnitt aus 3 TFs)
         "pk_mtf_tf2": os.getenv("PK_MTF_TF2", "2m"),
@@ -461,6 +464,7 @@ def default_state():
         "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
         "wtc_sl_price": None, "wtc_tp_price": None,
         "pk_sl_price": None, "pk_tp_price": None, "pk_sl_cooldown_until": 0.0,
+        "pk_trail_active": False, "pk_trail_best_price": None,
         "pk_trend_pct_last": None,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
@@ -1722,6 +1726,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="pieki_algo"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="pk_tp_manual_usd"></div>
   <div data-mode="pieki_algo"><label>Cooldown nach SL (Sek., nur bei Exit-Modus "Fester SL/TP")</label><input type="number" step="1" id="pk_sl_cooldown_seconds"></div>
+  <div data-mode="pieki_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Trailing-Stop (nur bei Exit-Modus "Fester SL/TP" relevant): sobald der Trade um die
+    Aktivierungs-Schwelle im Profit ist, springt der SL auf Breakeven (Einstiegspreis) und wird
+    danach immer im gewählten Prozent-Abstand zum bisherigen besten Preis nachgezogen (nie
+    zurück, nur in die profitable Richtung). Überschreibt den festen SL, sobald aktiv.
+  </div>
+  <div data-mode="pieki_algo"><label>Trailing-Stop</label>
+    <select class="cfg" id="pk_trailing_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="pieki_algo"><label>Aktivierung ab Profit (%)</label><input type="number" step="0.01" id="pk_trailing_activation_pct"></div>
+  <div data-mode="pieki_algo"><label>Nachzieh-Abstand (%)</label><input type="number" step="0.01" id="pk_trailing_step_pct"></div>
   <div data-mode="pieki_algo"><label>MTF-Trend%-Filter</label>
     <select class="cfg" id="pk_mtf_filter_enabled">
       <option value="false">Aus</option>
@@ -3538,6 +3556,9 @@ async function refresh() {
     document.getElementById('pk_tp_enabled').value = String(data.config.pk_tp_enabled);
     document.getElementById('pk_tp_manual_usd').value = data.config.pk_tp_manual_usd;
     document.getElementById('pk_sl_cooldown_seconds').value = data.config.pk_sl_cooldown_seconds;
+    document.getElementById('pk_trailing_enabled').value = String(data.config.pk_trailing_enabled);
+    document.getElementById('pk_trailing_activation_pct').value = data.config.pk_trailing_activation_pct;
+    document.getElementById('pk_trailing_step_pct').value = data.config.pk_trailing_step_pct;
     document.getElementById('pk_mtf_filter_enabled').value = String(data.config.pk_mtf_filter_enabled);
     setResolutionField('pk_mtf_tf1', data.config.pk_mtf_tf1);
     setResolutionField('pk_mtf_tf2', data.config.pk_mtf_tf2);
@@ -3901,6 +3922,9 @@ function buildConfigPayload() {
     pk_tp_enabled: document.getElementById('pk_tp_enabled').value === 'true',
     pk_tp_manual_usd: parseFloat(document.getElementById('pk_tp_manual_usd').value),
     pk_sl_cooldown_seconds: parseFloat(document.getElementById('pk_sl_cooldown_seconds').value),
+    pk_trailing_enabled: document.getElementById('pk_trailing_enabled').value === 'true',
+    pk_trailing_activation_pct: parseFloat(document.getElementById('pk_trailing_activation_pct').value),
+    pk_trailing_step_pct: parseFloat(document.getElementById('pk_trailing_step_pct').value),
     pk_mtf_filter_enabled: document.getElementById('pk_mtf_filter_enabled').value === 'true',
     pk_mtf_tf1: getResolutionField('pk_mtf_tf1'),
     pk_mtf_tf2: getResolutionField('pk_mtf_tf2'),
@@ -4041,6 +4065,7 @@ async def handle_status(request):
         "wtc_last_wt1": st.get("wtc_last_wt1"), "wtc_last_wt2": st.get("wtc_last_wt2"),
         "wtc_sl_price": st.get("wtc_sl_price"), "wtc_tp_price": st.get("wtc_tp_price"),
         "pk_sl_price": st.get("pk_sl_price"), "pk_tp_price": st.get("pk_tp_price"),
+        "pk_trail_active": st.get("pk_trail_active"), "pk_trail_best_price": st.get("pk_trail_best_price"),
         "pk_trend_pct_last": st.get("pk_trend_pct_last"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
@@ -4111,7 +4136,8 @@ async def handle_config_update(request):
                 "wtc_sl_manual_usd", "wtc_tp_enabled", "wtc_tp_manual_usd", "wtc_sl_cooldown_seconds",
                 "pk_resolution", "pk_sensitivity", "pk_atr_period", "pk_sma_period", "pk_direction_mode",
                 "pk_exit_mode", "pk_sl_enabled", "pk_sl_manual_usd", "pk_tp_enabled", "pk_tp_manual_usd",
-                "pk_sl_cooldown_seconds", "pk_mtf_filter_enabled", "pk_mtf_tf1", "pk_mtf_tf2", "pk_mtf_tf3", "pk_mtf_fast_len", "pk_mtf_slow_len",
+                "pk_sl_cooldown_seconds", "pk_trailing_enabled", "pk_trailing_activation_pct", "pk_trailing_step_pct",
+                "pk_mtf_filter_enabled", "pk_mtf_tf1", "pk_mtf_tf2", "pk_mtf_tf3", "pk_mtf_fast_len", "pk_mtf_slow_len",
                 "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
                 "quad_stoch_resolution"]:
         if key in body:

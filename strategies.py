@@ -2870,6 +2870,8 @@ def compute_pk_signals(highs, lows, closes, sensitivity, atr_period, sma_period)
 def _pk_reset_state(st):
     st["pk_sl_price"] = None
     st["pk_tp_price"] = None
+    st["pk_trail_active"] = False
+    st["pk_trail_best_price"] = None
 
 
 def _pk_set_sl_tp(st, cfg, direction, entry_price):
@@ -2887,6 +2889,44 @@ def _pk_set_sl_tp(st, cfg, direction, entry_price):
         st["pk_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
     else:
         st["pk_tp_price"] = None
+    st["pk_trail_active"] = False
+    st["pk_trail_best_price"] = entry_price
+
+
+def _pk_apply_trailing(st, cfg, direction, entry_price, price):
+    """Trailing-Stop auf Prozent-Basis (relativ zum Einstiegspreis, NICHT zum aktuellen Preis -
+    wie ueblich bei Trailing-Stops): sobald der Trade um pk_trailing_activation_pct % im Profit
+    war, springt der SL einmalig auf Breakeven (Einstiegspreis) und wird danach im Abstand von
+    pk_trailing_step_pct % zum bisher besten erreichten Preis nachgezogen. Verbessert den SL nur,
+    verschlechtert ihn nie (weder beim Aktivieren noch beim Nachziehen)."""
+    if not cfg.get("pk_trailing_enabled", False):
+        return
+    best = st.get("pk_trail_best_price")
+    if best is None:
+        best = entry_price
+    best = max(best, price) if direction == "long" else min(best, price)
+    st["pk_trail_best_price"] = best
+
+    activation_pct = cfg.get("pk_trailing_activation_pct", 0.2)
+    step_pct = cfg.get("pk_trailing_step_pct", 0.2)
+    profit_pct = ((best - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - best) / entry_price * 100)
+
+    if not st.get("pk_trail_active") and profit_pct >= activation_pct:
+        st["pk_trail_active"] = True
+        current_sl = st.get("pk_sl_price")
+        breakeven = entry_price
+        if direction == "long":
+            st["pk_sl_price"] = breakeven if current_sl is None else max(current_sl, breakeven)
+        else:
+            st["pk_sl_price"] = breakeven if current_sl is None else min(current_sl, breakeven)
+
+    if st.get("pk_trail_active"):
+        trail_sl = best * (1 - step_pct / 100) if direction == "long" else best * (1 + step_pct / 100)
+        current_sl = st.get("pk_sl_price")
+        if direction == "long":
+            st["pk_sl_price"] = trail_sl if current_sl is None else max(current_sl, trail_sl)
+        else:
+            st["pk_sl_price"] = trail_sl if current_sl is None else min(current_sl, trail_sl)
 
 
 async def check_pk_sl_tp(symbol, price):
@@ -2895,6 +2935,9 @@ async def check_pk_sl_tp(symbol, price):
     if st["position"] is None or price is None:
         return
     pos = st["position"]
+    entry_price = st.get("avg_entry_price")
+    if entry_price is not None:
+        _pk_apply_trailing(st, cfg, pos, entry_price, price)
     sl_price = st.get("pk_sl_price")
     tp_price = st.get("pk_tp_price")
     if sl_price is None and tp_price is None:
@@ -2902,8 +2945,9 @@ async def check_pk_sl_tp(symbol, price):
     hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
     hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
     if hit_sl:
-        debug_log(f"🚪 [{symbol}] Pieki-Algo SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
+        reason = "TRAIL-SL" if st.get("pk_trail_active") else "SL"
+        debug_log(f"🚪 [{symbol}] Pieki-Algo {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, reason)
         st["pk_sl_cooldown_until"] = time.time() + cfg.get("pk_sl_cooldown_seconds", 30)
         _pk_reset_state(st)
     elif hit_tp:
@@ -5604,12 +5648,45 @@ def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
     sl_usd = cfg.get("pk_sl_manual_usd", 5.0)
     tp_usd = cfg.get("pk_tp_manual_usd", 10.0)
     sl_cooldown_ms = cfg.get("pk_sl_cooldown_seconds", 30) * 1000
+    trailing_enabled = cfg.get("pk_trailing_enabled", False)
+    trailing_activation_pct = cfg.get("pk_trailing_activation_pct", 0.2)
+    trailing_step_pct = cfg.get("pk_trailing_step_pct", 0.2)
 
     def long_ok(tp):
         return direction_mode != "short_only" and (not mtf_enabled or tp is None or tp > long_thr)
 
     def short_ok(tp):
         return direction_mode != "long_only" and (not mtf_enabled or tp is None or tp < short_thr)
+
+    def apply_trailing(position, bar_high, bar_low):
+        """Backtest-Pendant zu _pk_apply_trailing - nutzt das Hoch/Tief der Kerze (statt nur des
+        Schlusskurses) als bestmoeglich erreichten Preis innerhalb der Kerze, wie bei den
+        SL/TP-Treffer-Checks ueberall sonst im Backtest auch."""
+        if not trailing_enabled:
+            return
+        direction = position["dir"]
+        entry = position["entry"]
+        extreme = bar_high if direction == "long" else bar_low
+        best = position.get("trail_best")
+        best = extreme if best is None else (max(best, extreme) if direction == "long" else min(best, extreme))
+        position["trail_best"] = best
+        profit_pct = ((best - entry) / entry * 100) if direction == "long" else ((entry - best) / entry * 100)
+
+        if not position.get("trail_active") and profit_pct >= trailing_activation_pct:
+            position["trail_active"] = True
+            current_sl = position.get("sl_price")
+            if direction == "long":
+                position["sl_price"] = entry if current_sl is None else max(current_sl, entry)
+            else:
+                position["sl_price"] = entry if current_sl is None else min(current_sl, entry)
+
+        if position.get("trail_active"):
+            trail_sl = best * (1 - trailing_step_pct / 100) if direction == "long" else best * (1 + trailing_step_pct / 100)
+            current_sl = position.get("sl_price")
+            if direction == "long":
+                position["sl_price"] = trail_sl if current_sl is None else max(current_sl, trail_sl)
+            else:
+                position["sl_price"] = trail_sl if current_sl is None else min(current_sl, trail_sl)
 
     position = None
     trades = []
@@ -5620,12 +5697,14 @@ def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
         tpct = trend_pct[i]
 
         if position is not None and exit_mode == "fixed_tp_sl":
+            apply_trailing(position, h[i], l[i])
             sl_price = position.get("sl_price")
             tp_price = position.get("tp_price")
             hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
             hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
             if hit_sl:
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                reason = "TRAIL-SL" if position.get("trail_active") else "SL"
+                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
             elif hit_tp:
@@ -5639,7 +5718,7 @@ def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
                 continue
             if bull[i] and long_ok(tpct):
                 size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "trail_active": False, "trail_best": price}
                 if exit_mode == "fixed_tp_sl":
                     if sl_enabled:
                         position["sl_price"] = price - sl_usd / size
@@ -5647,7 +5726,7 @@ def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
                         position["tp_price"] = price + tp_usd / size
             elif bear[i] and short_ok(tpct):
                 size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "trail_active": False, "trail_best": price}
                 if exit_mode == "fixed_tp_sl":
                     if sl_enabled:
                         position["sl_price"] = price + sl_usd / size
