@@ -952,20 +952,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
   <div data-mode="obi_scalp"><label>OBI Modus</label>
     <select class="cfg" id="obi_mode">
-      <option value="momentum">Momentum (mit dem Ungleichgewicht)</option>
+      <option value="momentum">Momentum (mit dem Ungleichgewicht - empfohlen)</option>
       <option value="mean_reversion">Mean-Reversion (dagegen, wie RSI)</option>
       <option value="reversal">Reversal (separater Long/Short-Einstieg bei Umkehr aus Extremzone)</option>
       <option value="reversal_instant">Reversal-Sofort (getrennte Long/Short-Schwellen, sofort bei Durchbruch, ohne Rückprall-Wartezeit)</option>
     </select>
   </div>
+  <div data-mode="obi_scalp"><label>OBI-Fenster (Sek.)</label><input type="number" step="1" id="obi_window_fast_seconds"></div>
+  <div data-mode="obi_scalp"><label>Orderbuch-Level (Empfehlung: oberste 5-10)</label><input type="number" step="1" id="obi_levels"></div>
+  <div data-mode="obi_scalp"><label>TP (%)</label><input type="number" step="any" id="obi_tp_pct"></div>
+  <div data-mode="obi_scalp"><label>SL (%)</label><input type="number" step="any" id="obi_sl_pct"></div>
+  <div data-mode="obi_scalp"><label>Cooldown (Sek.)</label><input type="number" step="1" id="obi_cooldown_seconds"></div>
+  <div data-mode="obi_scalp" style="grid-column:1/-1;">
+    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:400;">
+      <input type="checkbox" id="obi-advanced-toggle" style="width:auto;">
+      ⚙️ Erweiterte OBI-Einstellungen anzeigen (Reversal-Feinjustierung, Filter, Breakeven - für die meisten nicht nötig)
+    </label>
+  </div>
+  <div id="obi-advanced-fields" style="display:none; grid-column:1/-1; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap:14px; align-items:end;">
   <div data-mode="obi_scalp"><label>Reversal OBI-Wert Long (überverkauft, negativ)</label><input type="number" step="0.01" id="obi_long_threshold"></div>
   <div data-mode="obi_scalp"><label>Reversal OBI-Wert Short (überkauft, positiv)</label><input type="number" step="0.01" id="obi_short_threshold"></div>
   <div data-mode="obi_scalp"><label>Reversal Rückprall-Schwelle</label><input type="number" step="0.01" id="obi_reversal_min_bounce"></div>
   <div data-mode="obi_scalp"><label>Reversal-Sofort: Reset-Verhältnis (Anteil der Schwelle, z.B. 0.5 = 50%)</label><input type="number" step="0.05" id="obi_instant_reset_ratio"></div>
-  <div data-mode="obi_scalp"><label>OBI schnell (Sek.)</label><input type="number" step="1" id="obi_window_fast_seconds"></div>
   <div data-mode="obi_scalp"><label>OBI mittel (Sek.)</label><input type="number" step="1" id="obi_window_medium_seconds"></div>
   <div data-mode="obi_scalp"><label>OBI langsam (Sek.)</label><input type="number" step="1" id="obi_window_slow_seconds"></div>
-  <div data-mode="obi_scalp"><label>OBI Orderbuch-Level</label><input type="number" step="1" id="obi_levels"></div>
   <div data-mode="obi_scalp"><label>Tiefen-Gewichtung (nahe Level zählen mehr)</label>
     <select class="cfg" id="obi_depth_weighting_enabled">
       <option value="false">Aus</option>
@@ -994,11 +1004,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="usd">Fester $-Betrag</option>
     </select>
   </div>
-  <div data-mode="obi_scalp"><label>TP (%)</label><input type="number" step="any" id="obi_tp_pct"></div>
-  <div data-mode="obi_scalp"><label>SL (%)</label><input type="number" step="any" id="obi_sl_pct"></div>
   <div data-mode="obi_scalp"><label>TP ($)</label><input type="number" step="any" id="obi_tp_usd"></div>
   <div data-mode="obi_scalp"><label>SL ($)</label><input type="number" step="any" id="obi_sl_usd"></div>
-  <div data-mode="obi_scalp"><label>Cooldown (Sek.)</label><input type="number" step="1" id="obi_cooldown_seconds"></div>
   <div data-mode="obi_scalp"><label>Trendfilter (EMA)</label>
     <select class="cfg" id="obi_trend_filter">
       <option value="false">Aus</option>
@@ -1022,6 +1029,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="obi_scalp"><label>Volatilitäts-Fenster (Sek.)</label><input type="number" step="1" id="obi_vol_window_seconds"></div>
   <div data-mode="obi_scalp"><label>Min. Volatilität (% Hoch-Tief-Spanne, darunter = zu ruhig)</label><input type="number" step="0.0001" id="obi_vol_min_pct"></div>
   <div data-mode="obi_scalp"><label>Max. Volatilität (% Hoch-Tief-Spanne, darüber = zu wild)</label><input type="number" step="0.0001" id="obi_vol_max_pct"></div>
+  </div>
 
   <div data-mode="oms_scalp" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📡 <b>Einstieg</b> nur wenn Orderbuch (OBI) UND echte Trades (CVD) übereinstimmend in dieselbe Richtung zeigen.
@@ -2175,6 +2183,9 @@ function updateOmsExitModeFields() {
 document.getElementById('entry_mode').addEventListener('change', () => {
   window.formTouched = true;
   updateModeFields();
+});
+document.getElementById('obi-advanced-toggle').addEventListener('change', (e) => {
+  document.getElementById('obi-advanced-fields').style.display = e.target.checked ? 'grid' : 'none';
 });
 document.getElementById('oms_exit_mode').addEventListener('change', () => {
   window.formTouched = true;
