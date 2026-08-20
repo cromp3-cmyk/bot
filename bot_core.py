@@ -382,6 +382,21 @@ def default_config():
         "utb_sl_enabled": os.getenv("UTB_SL_ENABLED", "false").lower() == "true",
         "utb_sl_manual_usd": float(os.getenv("UTB_SL_MANUAL_USD", "5.0")),
         "utb_sl_cooldown_seconds": float(os.getenv("UTB_SL_COOLDOWN_SECONDS", "30")),
+        "wtc_resolution": os.getenv("WTC_RESOLUTION", "5m"),
+        "wtc_channel_len": int(os.getenv("WTC_CHANNEL_LEN", "9")),
+        "wtc_average_len": int(os.getenv("WTC_AVERAGE_LEN", "12")),
+        "wtc_ma_len": int(os.getenv("WTC_MA_LEN", "3")),
+        "wtc_os_level": float(os.getenv("WTC_OS_LEVEL", "-53")),
+        "wtc_ob_level": float(os.getenv("WTC_OB_LEVEL", "53")),
+        "wtc_require_zone": os.getenv("WTC_REQUIRE_ZONE", "true").lower() == "true",
+        "wtc_direction_mode": os.getenv("WTC_DIRECTION_MODE", "both"),
+        "wtc_always_in_market": os.getenv("WTC_ALWAYS_IN_MARKET", "false").lower() == "true",
+        "wtc_flip_exit_enabled": os.getenv("WTC_FLIP_EXIT_ENABLED", "true").lower() == "true",
+        "wtc_sl_enabled": os.getenv("WTC_SL_ENABLED", "true").lower() == "true",
+        "wtc_sl_manual_usd": float(os.getenv("WTC_SL_MANUAL_USD", "5.0")),
+        "wtc_tp_enabled": os.getenv("WTC_TP_ENABLED", "true").lower() == "true",
+        "wtc_tp_manual_usd": float(os.getenv("WTC_TP_MANUAL_USD", "5.0")),
+        "wtc_sl_cooldown_seconds": float(os.getenv("WTC_SL_COOLDOWN_SECONDS", "30")),
     }
 
 
@@ -419,6 +434,8 @@ def default_state():
         "mo7_sl_price": None, "mo7_tp_price": None,
         "utb_last_hull_green": None,
         "utb_sl_price": None, "utb_sl_cooldown_until": 0.0,
+        "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
+        "wtc_sl_price": None, "wtc_tp_price": None,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -929,6 +946,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="candle_patterns">Candle Patterns (3 Line Strike / Engulfing, SL+TP fest oder ATR-basiert, ATR-Breakeven)</option>
       <option value="mo7_scalp">MO7 Scalp (Composite-Oszillator aus 7 Indikatoren, Schwellenwert-Cross oder 5-Kerzen-Summe, fester SL+TP)</option>
       <option value="ut_bot_hull">UT Bot + Hull Flip (ATR-Trailing-Stop, immer im Markt, Flip-Trigger wählbar, kein SL/TP)</option>
+      <option value="wavetrend_cross">WaveTrend Cross (Cipher-B-Kernsignal, Zonenfilter wählbar, immer im Markt oder normal, fester SL+TP)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1540,6 +1558,75 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="ut_bot_hull"><label>SL Fester $-Betrag (nur wenn Stop-Loss An)</label><input type="number" step="0.5" id="utb_sl_manual_usd"></div>
   <div data-mode="ut_bot_hull"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="utb_sl_cooldown_seconds"></div>
+
+  <div data-mode="wavetrend_cross" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌊 WaveTrend Cross (Kernsignal aus "Cipher B"): wt1 kreuzt wt2 - das sind die grünen/roten
+    Punkte im Oszillator. Zonenfilter wählbar (nur in Überkauft/Überverkauft), Richtung "immer im
+    Markt" (dreht direkt) oder normal (SL/TP/optional Gegen-Signal beendet die Position). Nur
+    fester SL/TP (kein ATR-Modus).
+  </div>
+  <div data-mode="wavetrend_cross"><label>Zeitrahmen</label>
+    <select class="cfg" id="wtc_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="wtc_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="wavetrend_cross"><label>WT Channel-Länge</label><input type="number" step="1" id="wtc_channel_len"></div>
+  <div data-mode="wavetrend_cross"><label>WT Average-Länge</label><input type="number" step="1" id="wtc_average_len"></div>
+  <div data-mode="wavetrend_cross"><label>WT MA-Länge</label><input type="number" step="1" id="wtc_ma_len"></div>
+  <div data-mode="wavetrend_cross"><label>Zonenfilter (nur in Überkauft/Überverkauft signalisieren)</label>
+    <select class="cfg" id="wtc_require_zone">
+      <option value="true">An (Original-Verhalten)</option>
+      <option value="false">Aus - jeder Cross zählt</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Überverkauft-Schwelle (nur bei Zonenfilter An)</label><input type="number" step="1" id="wtc_os_level"></div>
+  <div data-mode="wavetrend_cross"><label>Überkauft-Schwelle (nur bei Zonenfilter An)</label><input type="number" step="1" id="wtc_ob_level"></div>
+  <div data-mode="wavetrend_cross"><label>Richtung</label>
+    <select class="cfg" id="wtc_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Immer im Markt (Buy/Sell im direkten Wechsel, wie UT Bot + Hull)</label>
+    <select class="cfg" id="wtc_always_in_market">
+      <option value="false">Aus (Standard) - normaler Ein-/Ausstieg, geht zwischendurch flach</option>
+      <option value="true">An - dreht direkt bei Gegen-Signal, nie flach außer bei SL/TP</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Bei Gegen-Signal sofort schließen (nur relevant wenn "Immer im Markt" Aus)</label>
+    <select class="cfg" id="wtc_flip_exit_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus - nur SL/TP entscheiden</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>Stop-Loss</label>
+    <select class="cfg" id="wtc_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="wtc_sl_manual_usd"></div>
+  <div data-mode="wavetrend_cross"><label>Take-Profit</label>
+    <select class="cfg" id="wtc_tp_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="wavetrend_cross"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="wtc_tp_manual_usd"></div>
+  <div data-mode="wavetrend_cross"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="wtc_sl_cooldown_seconds"></div>
 
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
@@ -2290,7 +2377,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3140,6 +3227,21 @@ async function refresh() {
     document.getElementById('utb_sl_enabled').value = String(data.config.utb_sl_enabled);
     document.getElementById('utb_sl_manual_usd').value = data.config.utb_sl_manual_usd;
     document.getElementById('utb_sl_cooldown_seconds').value = data.config.utb_sl_cooldown_seconds;
+    setResolutionField('wtc_resolution', data.config.wtc_resolution);
+    document.getElementById('wtc_channel_len').value = data.config.wtc_channel_len;
+    document.getElementById('wtc_average_len').value = data.config.wtc_average_len;
+    document.getElementById('wtc_ma_len').value = data.config.wtc_ma_len;
+    document.getElementById('wtc_require_zone').value = String(data.config.wtc_require_zone);
+    document.getElementById('wtc_os_level').value = data.config.wtc_os_level;
+    document.getElementById('wtc_ob_level').value = data.config.wtc_ob_level;
+    document.getElementById('wtc_direction_mode').value = data.config.wtc_direction_mode;
+    document.getElementById('wtc_always_in_market').value = String(data.config.wtc_always_in_market);
+    document.getElementById('wtc_flip_exit_enabled').value = String(data.config.wtc_flip_exit_enabled);
+    document.getElementById('wtc_sl_enabled').value = String(data.config.wtc_sl_enabled);
+    document.getElementById('wtc_sl_manual_usd').value = data.config.wtc_sl_manual_usd;
+    document.getElementById('wtc_tp_enabled').value = String(data.config.wtc_tp_enabled);
+    document.getElementById('wtc_tp_manual_usd').value = data.config.wtc_tp_manual_usd;
+    document.getElementById('wtc_sl_cooldown_seconds').value = data.config.wtc_sl_cooldown_seconds;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -3464,6 +3566,21 @@ function buildConfigPayload() {
     utb_sl_enabled: document.getElementById('utb_sl_enabled').value === 'true',
     utb_sl_manual_usd: parseFloat(document.getElementById('utb_sl_manual_usd').value),
     utb_sl_cooldown_seconds: parseFloat(document.getElementById('utb_sl_cooldown_seconds').value),
+    wtc_resolution: getResolutionField('wtc_resolution'),
+    wtc_channel_len: parseInt(document.getElementById('wtc_channel_len').value),
+    wtc_average_len: parseInt(document.getElementById('wtc_average_len').value),
+    wtc_ma_len: parseInt(document.getElementById('wtc_ma_len').value),
+    wtc_require_zone: document.getElementById('wtc_require_zone').value === 'true',
+    wtc_os_level: parseFloat(document.getElementById('wtc_os_level').value),
+    wtc_ob_level: parseFloat(document.getElementById('wtc_ob_level').value),
+    wtc_direction_mode: document.getElementById('wtc_direction_mode').value,
+    wtc_always_in_market: document.getElementById('wtc_always_in_market').value === 'true',
+    wtc_flip_exit_enabled: document.getElementById('wtc_flip_exit_enabled').value === 'true',
+    wtc_sl_enabled: document.getElementById('wtc_sl_enabled').value === 'true',
+    wtc_sl_manual_usd: parseFloat(document.getElementById('wtc_sl_manual_usd').value),
+    wtc_tp_enabled: document.getElementById('wtc_tp_enabled').value === 'true',
+    wtc_tp_manual_usd: parseFloat(document.getElementById('wtc_tp_manual_usd').value),
+    wtc_sl_cooldown_seconds: parseFloat(document.getElementById('wtc_sl_cooldown_seconds').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -3590,6 +3707,8 @@ async def handle_status(request):
         "mo7_tp_price": st.get("mo7_tp_price"),
         "utb_last_hull_green": st.get("utb_last_hull_green"),
         "utb_sl_price": st.get("utb_sl_price"),
+        "wtc_last_wt1": st.get("wtc_last_wt1"), "wtc_last_wt2": st.get("wtc_last_wt2"),
+        "wtc_sl_price": st.get("wtc_sl_price"), "wtc_tp_price": st.get("wtc_tp_price"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3652,6 +3771,10 @@ async def handle_config_update(request):
                 "utb_resolution", "utb_atr_period", "utb_sensitivity", "utb_heikin_ashi",
                 "utb_hull_period", "utb_flip_trigger", "utb_direction_mode",
                 "utb_sl_enabled", "utb_sl_manual_usd", "utb_sl_cooldown_seconds",
+                "wtc_resolution", "wtc_channel_len", "wtc_average_len", "wtc_ma_len",
+                "wtc_require_zone", "wtc_os_level", "wtc_ob_level", "wtc_direction_mode",
+                "wtc_always_in_market", "wtc_flip_exit_enabled", "wtc_sl_enabled",
+                "wtc_sl_manual_usd", "wtc_tp_enabled", "wtc_tp_manual_usd", "wtc_sl_cooldown_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

@@ -2571,6 +2571,230 @@ async def utb_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+def compute_wavetrend(highs, lows, closes, chlen=9, avg=12, malen=3):
+    """WaveTrend-Oszillator (Kernbaustein von 'Cipher B'): esa=EMA(hlc3, chlen), de=EMA(|hlc3-esa|,
+    chlen), ci=(hlc3-esa)/(0.015*de), wt1=EMA(ci, avg), wt2=SMA(wt1, malen). Gibt (wt1, wt2)
+    zurueck (beide ungefaehr im Bereich -100..100, Nulllinien-Cross = Momentum-Wechsel)."""
+    n = len(closes)
+    hlc3 = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n)]
+    esa = _ema_series(hlc3, chlen)
+    de = _ema_series([abs(hlc3[i] - esa[i]) for i in range(n)], chlen)
+    ci = [(hlc3[i] - esa[i]) / (0.015 * de[i]) if de[i] else 0.0 for i in range(n)]
+    wt1 = _ema_series(ci, avg)
+    wt2 = _sma_series(wt1, malen)
+    return wt1, wt2
+
+
+def compute_wtc_signals(highs, lows, closes, cfg):
+    """WaveTrend-Cross-Signal (die gruenen/roten Punkte aus 'Cipher B'): wt1 kreuzt wt2. Im
+    Zonen-Modus (wtc_require_zone, Standard An) zaehlt der Cross nur, wenn er im
+    ueberverkauften (bullisch) bzw. ueberkauften (bearisch) Bereich passiert - wie im
+    Original-Script (buySignal/sellSignal). Ohne Zonen-Filter zaehlt jeder Cross."""
+    chlen = cfg.get("wtc_channel_len", 9)
+    avg = cfg.get("wtc_average_len", 12)
+    malen = cfg.get("wtc_ma_len", 3)
+    os_level = cfg.get("wtc_os_level", -53)
+    ob_level = cfg.get("wtc_ob_level", 53)
+    require_zone = cfg.get("wtc_require_zone", True)
+
+    wt1, wt2 = compute_wavetrend(highs, lows, closes, chlen, avg, malen)
+    n = len(closes)
+    bull = [False] * n
+    bear = [False] * n
+    for i in range(1, n):
+        diff_now = wt1[i] - wt2[i]
+        diff_prev = wt1[i - 1] - wt2[i - 1]
+        crossed = (diff_prev <= 0 and diff_now > 0) or (diff_prev >= 0 and diff_now < 0)
+        if not crossed:
+            continue
+        cross_up = diff_now > 0
+        if require_zone:
+            bull[i] = cross_up and wt2[i] <= os_level
+            bear[i] = (not cross_up) and wt2[i] >= ob_level
+        else:
+            bull[i] = cross_up
+            bear[i] = not cross_up
+    return bull, bear, wt1, wt2
+
+
+def _wtc_reset_state(st):
+    st["wtc_sl_price"] = None
+    st["wtc_tp_price"] = None
+
+
+def _wtc_set_sl_tp(st, cfg, direction, entry_price):
+    size = st.get("total_coin_size") or 0
+    if cfg.get("wtc_sl_enabled", True) and size > 0:
+        dist_sl = cfg.get("wtc_sl_manual_usd", 5.0) / size
+        st["wtc_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
+    else:
+        st["wtc_sl_price"] = None
+    if cfg.get("wtc_tp_enabled", True) and size > 0:
+        dist_tp = cfg.get("wtc_tp_manual_usd", 5.0) / size
+        st["wtc_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
+    else:
+        st["wtc_tp_price"] = None
+
+
+async def check_wtc_sl_tp(symbol, price):
+    """Fester SL/TP (fester $-Betrag, kein ATR-Modus - wie gewuenscht). Bei SL geht die Position
+    glatt + Cooldown, bei TP ebenso (auch im 'immer im Markt'-Modus - ein SL/TP-Treffer soll die
+    Position wirklich beenden koennen, genau wie beim optionalen SL bei UT Bot + Hull)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    sl_price = st.get("wtc_sl_price")
+    tp_price = st.get("wtc_tp_price")
+    if sl_price is None and tp_price is None:
+        return
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
+    if hit_sl:
+        debug_log(f"🚪 [{symbol}] WaveTrend-Cross SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, "SL")
+        st["wtc_sl_cooldown_until"] = time.time() + cfg.get("wtc_sl_cooldown_seconds", 30)
+        _wtc_reset_state(st)
+    elif hit_tp:
+        debug_log(f"🚪 [{symbol}] WaveTrend-Cross TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP")
+        _wtc_reset_state(st)
+
+
+async def check_wtc_signal(symbol, buy_i, sell_i, price):
+    """Zwei waehlbare Betriebsarten (wtc_always_in_market):
+    - Aus (Standard): normaler Einstieg nur wenn flach, Ausstieg via festem SL/TP, optional
+      zusaetzlich sofort bei Gegen-Signal (wtc_flip_exit_enabled) - danach wieder flach, wartet
+      auf das naechste frische Signal (wie bei Candle Patterns).
+    - An: immer im Markt (wie bei UT Bot + Hull) - Buy/Sell wechseln sich ab, dreht direkt bei
+      Gegen-Signal, SL/TP unterbricht 'immer im Markt' nur im Treffer-Fall."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    if time.time() < st.get("wtc_sl_cooldown_until", 0.0):
+        return
+    direction_mode = cfg.get("wtc_direction_mode", "both")
+    always_in_market = cfg.get("wtc_always_in_market", False)
+    if direction_mode == "long_only":
+        sell_i = False
+    elif direction_mode == "short_only":
+        buy_i = False
+    pos = st["position"]
+
+    if pos is None:
+        if not (buy_i or sell_i):
+            return
+        direction = "long" if buy_i else "short"
+        debug_log(f"📡 [{symbol}] WaveTrend-Cross Signal: {direction.upper()} @ {price}")
+        await execute_entry(symbol, direction, price, is_add_on=False)
+        if st["position"] is not None:
+            _wtc_reset_state(st)
+            _wtc_set_sl_tp(st, cfg, direction, price)
+        return
+
+    if always_in_market:
+        if pos == "long" and sell_i:
+            debug_log(f"🔄 [{symbol}] WaveTrend-Cross Flip: LONG -> SHORT @ {price}")
+            await execute_exit(symbol, price, "WTC-FLIP")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _wtc_reset_state(st)
+                _wtc_set_sl_tp(st, cfg, "short", price)
+        elif pos == "short" and buy_i:
+            debug_log(f"🔄 [{symbol}] WaveTrend-Cross Flip: SHORT -> LONG @ {price}")
+            await execute_exit(symbol, price, "WTC-FLIP")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _wtc_reset_state(st)
+                _wtc_set_sl_tp(st, cfg, "long", price)
+    else:
+        if not cfg.get("wtc_flip_exit_enabled", True):
+            return
+        if (pos == "long" and sell_i) or (pos == "short" and buy_i):
+            debug_log(f"🚪 [{symbol}] WaveTrend-Cross Exit: {pos.upper()} @ {price} (Gegen-Signal)")
+            await execute_exit(symbol, price, "WTC-FLIP-EXIT")
+            _wtc_reset_state(st)
+
+
+async def wtc_poll_loop(symbol):
+    """WaveTrend-Cross ('Cipher B'-Kernsignal): wt1/wt2-Cross, optional nur in Ueberkauft-/
+    Ueberverkauft-Zone (wtc_require_zone), optional 'immer im Markt' mit direktem Flip
+    (wtc_always_in_market) statt normalem Einstieg/Ausstieg. Fester SL/TP (fester $-Betrag)."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "wavetrend_cross" and cfg["bot_active"]:
+                resolution = cfg.get("wtc_resolution", "5m")
+                chlen = cfg.get("wtc_channel_len", 9)
+                avg = cfg.get("wtc_average_len", 12)
+                min_needed = max(chlen, avg, 20) + 10
+                needed_bars = min(1000, max(min_needed * 2, 220))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    bull, bear, wt1, wt2 = compute_wtc_signals(closed_h, closed_l, closed_c, cfg)
+
+                    st["wtc_last_wt1"] = wt1[-1]
+                    st["wtc_last_wt2"] = wt2[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] WaveTrend-Cross aktiv: Preis={closed_c[-1]}, wt1={round(wt1[-1],2)}, wt2={round(wt2[-1],2)}, "
+                                  f"Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 2:
+                            continue
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        await check_wtc_signal(symbol, bull[idx], bear[idx], price_i)
+
+                    await check_wtc_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] WaveTrend-Cross wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] WaveTrend-Cross wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] WaveTrend-Cross-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
 async def oms_rsi_poll_loop(symbol):
     """Separater, traeger laufender Poll-Loop nur fuer den optionalen RSI-Regime-Filter von
     OBI-Momentum-Scalp (RSI < Mittellinie -> nur Short erlaubt, RSI > Mittellinie -> nur Long
@@ -4965,6 +5189,90 @@ async def run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max,
     }
 
 
+def _simulate_wtc_trades(candles, cfg, bull, bear, warmup):
+    """Backtest-Pendant zu check_wtc_signal/check_wtc_sl_tp - beide Betriebsarten
+    (wtc_always_in_market An/Aus) identisch nachgebildet."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    direction_mode = cfg.get("wtc_direction_mode", "both")
+    always_in_market = cfg.get("wtc_always_in_market", False)
+    flip_exit_enabled = cfg.get("wtc_flip_exit_enabled", True)
+    sl_enabled = cfg.get("wtc_sl_enabled", True)
+    tp_enabled = cfg.get("wtc_tp_enabled", True)
+    sl_manual_usd = cfg.get("wtc_sl_manual_usd", 5.0)
+    tp_manual_usd = cfg.get("wtc_tp_manual_usd", 5.0)
+    sl_cooldown_ms = cfg.get("wtc_sl_cooldown_seconds", 30) * 1000
+
+    def make_position(direction, price, i):
+        size = (margin * leverage) / price
+        pos = {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
+        if sl_enabled and size > 0:
+            dist_sl = sl_manual_usd / size
+            pos["sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
+        if tp_enabled and size > 0:
+            dist_tp = tp_manual_usd / size
+            pos["tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
+        return pos
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+        buy_i, sell_i = bull[i], bear[i]
+        if direction_mode == "long_only":
+            sell_i = False
+        elif direction_mode == "short_only":
+            buy_i = False
+
+        if position is not None:
+            sl_price = position.get("sl_price")
+            tp_price = position.get("tp_price")
+            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        if position is not None:
+            if always_in_market:
+                if position["dir"] == "long" and sell_i:
+                    _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "WTC-FLIP", ts=ts)
+                    position = make_position("short", price, i)
+                elif position["dir"] == "short" and buy_i:
+                    _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "WTC-FLIP", ts=ts)
+                    position = make_position("long", price, i)
+            elif flip_exit_enabled:
+                if (position["dir"] == "long" and sell_i) or (position["dir"] == "short" and buy_i):
+                    _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "WTC-FLIP-EXIT", ts=ts)
+                    position = None
+
+        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and (buy_i or sell_i):
+            direction = "long" if buy_i else "short"
+            position = make_position(direction, price, i)
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_wavetrend_cross(candles, cfg):
+    ts, o, h, l, c = candles
+    bull, bear, wt1, wt2 = compute_wtc_signals(h, l, c, cfg)
+    chlen = cfg.get("wtc_channel_len", 9)
+    avg = cfg.get("wtc_average_len", 12)
+    warmup = max(chlen, avg, 20) + 10
+    return _simulate_wtc_trades(candles, cfg, bull, bear, warmup)
+
+
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000,
     "halftrend": 100_000,
@@ -4973,6 +5281,7 @@ BACKTEST_MAX_CANDLES = {
     "candle_patterns": 100_000,
     "mo7_scalp": 100_000,
     "ut_bot_hull": 100_000,
+    "wavetrend_cross": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -4982,6 +5291,7 @@ BACKTEST_FUNCS = {
     "elte_smart": backtest_elte_smart,
     "candle_patterns": backtest_candle_patterns,
     "ut_bot_hull": backtest_ut_bot_hull,
+    "wavetrend_cross": backtest_wavetrend_cross,
     # "mo7_scalp" bewusst NICHT hier drin - braucht eine 6er-Tupel-Kerzenquelle MIT Volumen
     # (MFI-Baustein), deshalb in run_backtest() als Sonderfall behandelt statt ueber diesen
     # generischen 5er-Tupel-Dispatch.
@@ -5012,11 +5322,11 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         }
 
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution"}[entry_mode]
+    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
