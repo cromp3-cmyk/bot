@@ -1727,10 +1727,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="pieki_algo"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="pk_tp_manual_usd"></div>
   <div data-mode="pieki_algo"><label>Cooldown nach SL (Sek., nur bei Exit-Modus "Fester SL/TP")</label><input type="number" step="1" id="pk_sl_cooldown_seconds"></div>
   <div data-mode="pieki_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Trailing-Stop (nur bei Exit-Modus "Fester SL/TP" relevant): sobald der Trade um die
-    Aktivierungs-Schwelle im Profit ist, springt der SL auf Breakeven (Einstiegspreis) und wird
-    danach immer im gewählten Prozent-Abstand zum bisherigen besten Preis nachgezogen (nie
-    zurück, nur in die profitable Richtung). Überschreibt den festen SL, sobald aktiv.
+    Trailing-Stop funktioniert in BEIDEN Exit-Modi: sobald der Trade um die Aktivierungs-Schwelle
+    im Profit ist, springt der SL auf Breakeven (Einstiegspreis) und wird danach immer im
+    gewählten Prozent-Abstand zum bisherigen besten Preis nachgezogen (nie zurück, nur in die
+    profitable Richtung). Bei "Fester SL/TP" überschreibt es den festen SL, sobald aktiv. Bei
+    "Wechsel" (immer im Markt) unterbricht ein Trailing-Treffer das Prinzip NUR in diesem einen
+    Fall - die Position geht dann glatt (inkl. Cooldown) statt auf ein Gegen-Signal zu warten.
   </div>
   <div data-mode="pieki_algo"><label>Trailing-Stop</label>
     <select class="cfg" id="pk_trailing_enabled">

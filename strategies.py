@@ -5696,7 +5696,11 @@ def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
         price = c[i]
         tpct = trend_pct[i]
 
-        if position is not None and exit_mode == "fixed_tp_sl":
+        if position is not None:
+            # Trailing greift IMMER (wenn aktiviert), unabhaengig vom Exit-Modus - im Modus
+            # "Wechsel" unterbricht ein Trailing-Treffer das "immer im Markt"-Prinzip NUR in
+            # diesem Fall (genau wie der optionale SL bei UT-Bot + Hull das dort auch tut).
+            # Im Modus "fixed_tp_sl" kommt zusaetzlich noch der normale feste SL/TP dazu.
             apply_trailing(position, h[i], l[i])
             sl_price = position.get("sl_price")
             tp_price = position.get("tp_price")
