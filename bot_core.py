@@ -2421,11 +2421,26 @@ async function loadSymbols() {
   sel.innerHTML = allSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
   currentSymbol = allSymbols[0];
   sel.value = currentSymbol;
-  sel.addEventListener('change', () => { currentSymbol = sel.value; window.formTouched = false; resetBacktestUI(); refresh(); });
+  sel.addEventListener('change', () => {
+    if (window.formTouched && !confirm(`Ungespeicherte Änderungen für ${currentSymbol} gehen verloren, wenn du jetzt wechselst. Trotzdem wechseln (ohne zu speichern)?`)) {
+      sel.value = currentSymbol;  // Auswahl zurücksetzen, Wechsel abgebrochen
+      return;
+    }
+    currentSymbol = sel.value;
+    window.formTouched = false;
+    resetBacktestUI();
+    refresh();
+  });
 }
 
 document.getElementById('btn-start').addEventListener('click', async () => {
+  // Erst die aktuellen Formular-Einstellungen speichern (Backtest speichert NICHT dauerhaft,
+  // nur bot_active zu setzen wuerde sonst mit der zuletzt GESPEICHERTEN Config starten statt
+  // mit dem, was gerade im Formular steht - genau das fuehrte zu "startet mit alter Strategie").
+  await fetch(`/api/config?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildConfigPayload()) });
+  window.formTouched = false;
   await fetch(`/api/control?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_active:true}) });
+  showToast(`Gespeichert & gestartet für ${currentSymbol}!`);
 });
 document.getElementById('btn-stop').addEventListener('click', async () => {
   await fetch(`/api/control?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_active:false}) });
