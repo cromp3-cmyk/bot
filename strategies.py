@@ -3021,32 +3021,41 @@ async def pk_poll_loop(symbol):
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
                     bull, bear, st_line, sma = compute_pk_signals(closed_h, closed_l, closed_c, cfg.get("pk_sensitivity", 3.0), atr_period, sma_period)
 
-                    mtf_resolution = cfg.get("pk_mtf_resolution", "same")
                     mtf_fast = cfg.get("pk_mtf_fast_len", 5)
-                    if mtf_resolution in (None, "", "same") or mtf_resolution == resolution:
-                        trend_pct = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow_len, mtf_atr_len)
-                    else:
-                        mtf_needed = min(500, max(mtf_slow_len, mtf_atr_len, 5) * 3 + 20)
-                        if mtf_resolution in SUB_MINUTE_RESOLUTIONS:
-                            mtf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[mtf_resolution], mtf_needed)
-                            mtf_h = mtf_local[2] if mtf_local else None
-                            mtf_l = mtf_local[3] if mtf_local else None
-                            mtf_c = mtf_local[4] if mtf_local else None
+                    active_tfs = [cfg.get(f"pk_mtf_tf{i}", "off") for i in (1, 2, 3)]
+                    active_tfs = [tf for tf in active_tfs if tf not in (None, "", "off")]
+                    tf_values = []  # letzter Trend%-Wert je aktiver Zeiteinheit - am Ende gemittelt (wie "Block 1" im Original: avgB1 = Durchschnitt aus 3 TFs)
+                    for tf in active_tfs:
+                        if tf == resolution:
+                            tf_h, tf_l, tf_c = closed_h, closed_l, closed_c
                         else:
-                            mtf_data = await fetch_candles_binance_multi(symbol, mtf_resolution, count_back=mtf_needed, market_type=cfg.get("binance_market_type", "spot"))
-                            if mtf_data:
-                                _, _, mtf_h, mtf_l, mtf_c = mtf_data
-                                mtf_h, mtf_l, mtf_c = mtf_h[:-1], mtf_l[:-1], mtf_c[:-1]
+                            mtf_needed = min(500, max(mtf_slow_len, mtf_atr_len, 5) * 3 + 20)
+                            if tf in SUB_MINUTE_RESOLUTIONS:
+                                mtf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf], mtf_needed)
+                                tf_h = mtf_local[2] if mtf_local else None
+                                tf_l = mtf_local[3] if mtf_local else None
+                                tf_c = mtf_local[4] if mtf_local else None
                             else:
-                                mtf_h = mtf_l = mtf_c = None
-                        if mtf_c and len(mtf_c) > max(mtf_slow_len, mtf_atr_len):
-                            trend_pct = compute_pk_trend_percent(mtf_h, mtf_l, mtf_c, mtf_fast, mtf_slow_len, mtf_atr_len)
-                        else:
-                            # Fallback, falls die MTF-Kerzen (noch) nicht da sind - nicht blockieren,
-                            # lieber vorerst auf der eigenen Aufloesung rechnen als das Signal auszusetzen.
-                            trend_pct = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow_len, mtf_atr_len)
+                                mtf_data = await fetch_candles_binance_multi(symbol, tf, count_back=mtf_needed, market_type=cfg.get("binance_market_type", "spot"))
+                                if mtf_data:
+                                    _, _, tf_h, tf_l, tf_c = mtf_data
+                                    tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
+                                else:
+                                    tf_h = tf_l = tf_c = None
+                        if tf_c and len(tf_c) > max(mtf_slow_len, mtf_atr_len):
+                            tf_trend = compute_pk_trend_percent(tf_h, tf_l, tf_c, mtf_fast, mtf_slow_len, mtf_atr_len)
+                            tf_values.append(tf_trend[-1])
+                        # fehlende/zu kurze TF-Kerzen werden einfach ausgelassen statt das Signal zu blockieren
 
-                    st["pk_trend_pct_last"] = trend_pct[-1]
+                    if tf_values:
+                        trend_now = sum(tf_values) / len(tf_values)
+                    else:
+                        # keine aktive TF konfiguriert (oder alle grad nicht verfuegbar) - Fallback auf
+                        # den eigenen Handels-Zeitrahmen, damit der Filter nie hart blockiert
+                        trend_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow_len, mtf_atr_len)[-1]
+                    trend_pct = [trend_now] * len(closed_c)  # konstant fuer diesen Durchlauf - siehe trend_pct_now unten
+
+                    st["pk_trend_pct_last"] = trend_now
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -5672,24 +5681,55 @@ def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
     return trades
 
 
+async def _pk_build_mtf_trend_pct(symbol, cfg, days, base_ts, base_h, base_l, base_c, primary_resolution):
+    """Baut den Trend%-Filter-Wert aus bis zu 3 waehlbaren Zeiteinheiten (pk_mtf_tf1/2/3) - wie
+    'Block 1' im Original-Pine-Indikator (avgB1 = Durchschnitt aus 3 TFs). Inaktive TFs ("off")
+    werden ausgelassen, sind ALLE aus wird auf den eigenen Handels-Zeitrahmen zurueckgefallen.
+    Jede aktive TF-Serie wird per Forward-Fill (siehe _align_htf_series) auf die Zeitstempel der
+    Einstiegs-Kerzen (base_ts) abgebildet, dann elementweise gemittelt. Gibt (trend_pct, error)
+    zurueck."""
+    mtf_fast = cfg.get("pk_mtf_fast_len", 5)
+    mtf_slow = cfg.get("pk_mtf_slow_len", 9)
+    mtf_atr = cfg.get("pk_mtf_atr_len", 14)
+    tf_list = [cfg.get(f"pk_mtf_tf{i}", "off") for i in (1, 2, 3)]
+    active_tfs = [tf for tf in tf_list if tf not in (None, "", "off")]
+    if not active_tfs:
+        return compute_pk_trend_percent(base_h, base_l, base_c, mtf_fast, mtf_slow, mtf_atr), None
+
+    aligned_series = []
+    for tf in active_tfs:
+        if tf == primary_resolution:
+            aligned_series.append(compute_pk_trend_percent(base_h, base_l, base_c, mtf_fast, mtf_slow, mtf_atr))
+            continue
+        tf_candles, err, _ = await _fetch_cached_backtest_candles(symbol, tf, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return None, f"MTF-Zeiteinheit ({tf}): {err}"
+        if not tf_candles or len(tf_candles[4]) < 20:
+            return None, f"Zu wenig historische Kerzen für die MTF-Zeiteinheit ({tf}) erhalten."
+        t_ts, t_o, t_h, t_l, t_c = tf_candles
+        trend_htf = compute_pk_trend_percent(t_h, t_l, t_c, mtf_fast, mtf_slow, mtf_atr)
+        aligned_series.append(_align_htf_series(base_ts, t_ts, trend_htf))
+
+    n = len(base_ts)
+    trend_pct = [sum(s[i] for s in aligned_series) / len(aligned_series) for i in range(n)]
+    return trend_pct, None
+
+
 def backtest_peki_algo(candles, cfg):
     ts, o, h, l, c = candles
     sensitivity = cfg.get("pk_sensitivity", 3.0)
     atr_period = cfg.get("pk_atr_period", 11)
     sma_period = cfg.get("pk_sma_period", 13)
-    mtf_fast = cfg.get("pk_mtf_fast_len", 5)
-    mtf_slow = cfg.get("pk_mtf_slow_len", 9)
-    mtf_atr = cfg.get("pk_mtf_atr_len", 14)
     bull, bear, st_line, sma = compute_pk_signals(h, l, c, sensitivity, atr_period, sma_period)
-    mtf_candles = cfg.get("_pk_mtf_candles")  # von run_backtest vorab async geladen (siehe dort),
-    # da diese Funktion selbst NICHT async ist (einheitliche BACKTEST_FUNCS-Signatur (candles, cfg))
-    if mtf_candles is not None:
-        m_ts, m_o, m_h, m_l, m_c = mtf_candles
-        trend_pct_htf = compute_pk_trend_percent(m_h, m_l, m_c, mtf_fast, mtf_slow, mtf_atr)
-        trend_pct = _align_htf_series(ts, m_ts, trend_pct_htf)
-    else:
+    trend_pct = cfg.get("_pk_trend_pct_precomputed")  # von run_backtest vorab async berechnet
+    # (siehe _pk_build_mtf_trend_pct) - diese Funktion selbst ist NICHT async (einheitliche
+    # BACKTEST_FUNCS-Signatur (candles, cfg))
+    if trend_pct is None:
+        mtf_fast = cfg.get("pk_mtf_fast_len", 5)
+        mtf_slow = cfg.get("pk_mtf_slow_len", 9)
+        mtf_atr = cfg.get("pk_mtf_atr_len", 14)
         trend_pct = compute_pk_trend_percent(h, l, c, mtf_fast, mtf_slow, mtf_atr)
-    warmup = max(atr_period, sma_period, mtf_slow, mtf_atr, 5) + 2
+    warmup = max(atr_period, sma_period, cfg.get("pk_mtf_slow_len", 9), cfg.get("pk_mtf_atr_len", 14), 5) + 2
     return _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup)
 
 
@@ -5700,7 +5740,8 @@ PK_SWEEP_MIN_RELIABLE_TRADES = 5
 async def run_pk_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step):
     """'Monte-Carlo'-Parametersweep fuer Pieki Algo, NUR ueber die Sensitivity (2 Nachkommastellen,
     Schritt 0.01 wie im Original-Pine-Script). trend_pct haengt nicht von der Sensitivity ab und
-    wird deshalb nur EINMAL berechnet und fuer alle Sensitivity-Werte wiederverwendet."""
+    wird deshalb nur EINMAL berechnet (ueber bis zu 3 gemittelte Zeiteinheiten, siehe
+    _pk_build_mtf_trend_pct) und fuer alle Sensitivity-Werte wiederverwendet."""
     max_candles = BACKTEST_MAX_CANDLES["pieki_algo"]
     resolution = cfg.get("pk_resolution", "5m")
     candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
@@ -5722,21 +5763,11 @@ async def run_pk_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_s
     o, h, l, c = candles[1], candles[2], candles[3], candles[4]
     atr_period = cfg.get("pk_atr_period", 11)
     sma_period = cfg.get("pk_sma_period", 13)
-    mtf_fast = cfg.get("pk_mtf_fast_len", 5)
     mtf_slow = cfg.get("pk_mtf_slow_len", 9)
     mtf_atr = cfg.get("pk_mtf_atr_len", 14)
-    mtf_resolution = cfg.get("pk_mtf_resolution", "same")
-    if mtf_resolution not in (None, "", "same") and mtf_resolution != resolution:
-        mtf_candles, mtf_err, _ = await _fetch_cached_backtest_candles(symbol, mtf_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-        if mtf_err:
-            return {"error": f"MTF-Zeitrahmen ({mtf_resolution}): {mtf_err}"}
-        if not mtf_candles or len(mtf_candles[4]) < 20:
-            return {"error": f"Zu wenig historische Kerzen für den MTF-Trend%-Zeitrahmen ({mtf_resolution}) erhalten."}
-        m_ts, m_o, m_h, m_l, m_c = mtf_candles
-        trend_pct_htf = compute_pk_trend_percent(m_h, m_l, m_c, mtf_fast, mtf_slow, mtf_atr)
-        trend_pct = _align_htf_series(candles[0], m_ts, trend_pct_htf)
-    else:
-        trend_pct = compute_pk_trend_percent(h, l, c, mtf_fast, mtf_slow, mtf_atr)
+    trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], h, l, c, resolution)
+    if mtf_err:
+        return {"error": mtf_err}
     warmup = max(atr_period, sma_period, mtf_slow, mtf_atr, 5) + 2
 
     results = []
@@ -5748,6 +5779,7 @@ async def run_pk_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_s
 
     best_sorted = sorted(results, key=lambda r: (r["trades"] >= PK_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
     worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
 
     actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
     return {
@@ -5813,18 +5845,6 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
     if entry_mode not in BACKTEST_FUNCS:
         return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
-    if entry_mode == "pieki_algo":
-        mtf_resolution = cfg.get("pk_mtf_resolution", "same")
-        primary_resolution = cfg.get("pk_resolution", "5m")
-        if mtf_resolution not in (None, "", "same") and mtf_resolution != primary_resolution:
-            mtf_candles, mtf_err, _ = await _fetch_cached_backtest_candles(symbol, mtf_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-            if mtf_err:
-                return {"error": f"MTF-Zeitrahmen ({mtf_resolution}): {mtf_err}"}
-            if not mtf_candles or len(mtf_candles[4]) < 20:
-                return {"error": f"Zu wenig historische Kerzen für den MTF-Trend%-Zeitrahmen ({mtf_resolution}) erhalten."}
-            cfg = dict(cfg)  # eigene Kopie - der private Cache-Key darf nicht in die Aufrufer-Config
-            cfg["_pk_mtf_candles"] = mtf_candles  # von backtest_peki_algo gelesen (nicht async, siehe dort)
-
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
     resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution"}[entry_mode]
@@ -5861,6 +5881,12 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
 
     n_candles = len(candles[4])
+    if entry_mode == "pieki_algo":
+        trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution)
+        if mtf_err:
+            return {"error": mtf_err}
+        cfg = dict(cfg)  # eigene Kopie - der private Cache-Key darf nicht in die Aufrufer-Config
+        cfg["_pk_trend_pct_precomputed"] = trend_pct  # von backtest_peki_algo gelesen (nicht async, siehe dort)
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades, exclude_top_n)
