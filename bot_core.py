@@ -2941,8 +2941,15 @@ function renderOmsChart(history, markers, pos) {
 
 async function refresh() {
   if (!currentSymbol) return;
-  const res = await fetch(`/api/status?symbol=${currentSymbol}`);
+  const requestedSymbol = currentSymbol;
+  const res = await fetch(`/api/status?symbol=${requestedSymbol}`);
   const data = await res.json();
+  // Race-Condition-Schutz: waehrend die Antwort unterwegs war, koennte der Nutzer schon auf
+  // einen anderen Coin gewechselt haben (z.B. schnell BTC -> ETH -> BTC). Ohne diese Pruefung
+  // wuerde die verspaetete Antwort fuer den ALTEN Coin die Formularfelder des inzwischen
+  // angezeigten Coins ueberschreiben - genau das fuehrte zu falsch angezeigten Werten
+  // (z.B. entry_mode) nach schnellem Hin- und Herwechseln.
+  if (requestedSymbol !== currentSymbol) return;
 
   // Uebersichts-Pills fuer alle Coins
   const overviewRes = await fetch('/api/overview');
