@@ -3888,6 +3888,20 @@ async def on_price_update(symbol, price):
     if cfg["entry_mode"] != "grid":
         return
 
+    # Fester SL (fester $-Betrag, optional) - schliesst die GESAMTE Grid-Position (ueber alle
+    # Nachkaeufe hinweg) sofort, wenn der unrealisierte Verlust den eingegebenen Betrag
+    # erreicht. Anders als TP/Nachkauf ist das ein reiner Notausstieg, kein Teil des normalen
+    # Grid-Zyklus - er greift unabhaengig davon, ob noch weitere Nachkauf-Stufen frei waeren.
+    if cfg.get("grid_sl_enabled", False) and st.get("avg_entry_price") is not None and st.get("total_coin_size"):
+        avg_entry = st["avg_entry_price"]
+        size = st["total_coin_size"]
+        unrealized_pnl = (price - avg_entry) * size if st["position"] == "long" else (avg_entry - price) * size
+        sl_usd = cfg.get("grid_sl_manual_usd", 20.0)
+        if unrealized_pnl <= -sl_usd:
+            debug_log(f"🚪 [{symbol}] Grid SL: {st['position'].upper()} @ {price} (unrealisierter Verlust {round(unrealized_pnl, 2)} $ erreicht -{sl_usd} $)")
+            await execute_exit(symbol, price, "SL")
+            return
+
     tp_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "tp")
     # Nachkauf-Abstand wird vom LETZTEN Kaufpreis gemessen, nicht vom laufenden
     # Durchschnitt - sonst schrumpft der Abstand zwischen Nachkaeufen immer weiter.

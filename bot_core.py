@@ -182,6 +182,8 @@ def default_config():
         "grid_step_usd": float(os.getenv("GRID_STEP_USD", "150")),
         "tp_step_usd": float(os.getenv("TP_STEP_USD", "150")),
         "max_nachkauf": int(os.getenv("MAX_NACHKAUF", "5")),
+        "grid_sl_enabled": os.getenv("GRID_SL_ENABLED", "false").lower() == "true",
+        "grid_sl_manual_usd": float(os.getenv("GRID_SL_MANUAL_USD", "20.0")),
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
@@ -1647,6 +1649,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid"><label>Grid-Stufe ($)</label><input type="number" step="any" id="grid_step_usd"></div>
   <div data-mode="grid"><label>TP-Stufe ($)</label><input type="number" step="any" id="tp_step_usd"></div>
   <div data-mode="grid"><label>Max. Nachkauf</label><input type="number" step="1" id="max_nachkauf"></div>
+  <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
+    <select class="cfg" id="grid_sl_enabled">
+      <option value="false">Aus (Standard)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="grid"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="grid_sl_manual_usd"></div>
   <div data-mode="grid"><label>Nach TP sofort drehen</label>
     <select class="cfg" id="auto_reverse">
       <option value="true">Ja - sofort Gegenposition</option>
@@ -3266,6 +3275,8 @@ async function refresh() {
     document.getElementById('grid_step_usd').value = data.config.grid_step_usd;
     document.getElementById('tp_step_usd').value = data.config.tp_step_usd;
     document.getElementById('max_nachkauf').value = data.config.max_nachkauf;
+    document.getElementById('grid_sl_enabled').value = String(data.config.grid_sl_enabled);
+    document.getElementById('grid_sl_manual_usd').value = data.config.grid_sl_manual_usd;
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('binance_market_type').value = data.config.binance_market_type;
     document.getElementById('auto_reverse').value = String(data.config.auto_reverse);
@@ -3605,6 +3616,8 @@ function buildConfigPayload() {
     grid_step_usd: parseFloat(document.getElementById('grid_step_usd').value),
     tp_step_usd: parseFloat(document.getElementById('tp_step_usd').value),
     max_nachkauf: parseInt(document.getElementById('max_nachkauf').value),
+    grid_sl_enabled: document.getElementById('grid_sl_enabled').value === 'true',
+    grid_sl_manual_usd: parseFloat(document.getElementById('grid_sl_manual_usd').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
     auto_reverse: document.getElementById('auto_reverse').value === 'true',
@@ -3748,7 +3761,7 @@ async def handle_config_update(request):
     body = await request.json()
     cfg = BOTS[symbol]["config"]
     for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_step_pct", "tp_step_pct",
-                "grid_step_usd", "tp_step_usd", "max_nachkauf", "dry_run", "auto_reverse", "binance_market_type",
+                "grid_step_usd", "tp_step_usd", "max_nachkauf", "grid_sl_enabled", "grid_sl_manual_usd", "dry_run", "auto_reverse", "binance_market_type",
                 "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_instant_reset_ratio", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_depth_weighting_enabled", "obi_use_median", "obi_min_liquidity", "obi_breakeven_enabled", "obi_breakeven_trigger_ratio", "obi_breakeven_lock_usd", "obi_breakeven_lock_pct", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
                 "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length",
                 "obi_spread_filter_enabled", "obi_max_spread_pct",
