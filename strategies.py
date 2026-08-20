@@ -2809,6 +2809,236 @@ async def wtc_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+def compute_pk_trend_percent(highs, lows, closes, fast_len, slow_len, atr_len):
+    """Vereinfachte, EIN-Zeitrahmen-Version des Trend%-Werts aus dem 'MTF EMA Spread'-Dashboard-
+    Indikator: (EMA_fast - EMA_slow) / ATR * 100, auf ±100 begrenzt. Das Original-Pine-Script
+    mittelt diesen Wert ueber 9 verschiedene Zeitrahmen (3 Bloecke a 3 TFs) - hier bewusst nur auf
+    dem eigenen Handels-Zeitrahmen der Strategie berechnet, um nicht fuer jeden Tick zusaetzliche
+    Anfragen auf 9 Aufloesungen zu brauchen. Dient nur als optionaler Richtungsfilter
+    (pk_mtf_filter_enabled), nicht als eigenstaendiges Signal."""
+    n = len(closes)
+    fast_ema = _ema_series(closes, fast_len)
+    slow_ema = _ema_series(closes, slow_len)
+    atr = compute_atr(highs, lows, closes, atr_len)
+    trend = [0.0] * n
+    for i in range(n):
+        a = atr[i]
+        raw = ((fast_ema[i] - slow_ema[i]) / a * 100) if a else 0.0
+        trend[i] = max(min(raw, 100), -100)
+    return trend
+
+
+def compute_pk_signals(highs, lows, closes, sensitivity, atr_period, sma_period):
+    """Portiert aus 'Pieki Algo | Signals & Overlays' (Pine v5): Standard-SuperTrend (Faktor =
+    Sensitivity*2, wie im Original 'supertrend(close, sigsensiviti*2, 11)') + SMA-Bestaetigung.
+    bull = Kurs kreuzt SuperTrend von unten nach oben UND Kurs >= SMA. bear = umgekehrt. Nutzt
+    denselben SuperTrend-Kernbaustein wie Diamond Algo (compute_diamond_supertrend), da beide
+    Pine-Scripts exakt dieselbe SuperTrend-Formel verwenden."""
+    n = len(closes)
+    factor = sensitivity * 2
+    st_line, st_dir = compute_diamond_supertrend(highs, lows, closes, factor, atr_period)
+    sma = _sma_series(closes, sma_period)
+    bull = [False] * n
+    bear = [False] * n
+    for i in range(1, n):
+        crossover = closes[i - 1] <= st_line[i - 1] and closes[i] > st_line[i]
+        crossunder = closes[i - 1] >= st_line[i - 1] and closes[i] < st_line[i]
+        bull[i] = crossover and closes[i] >= sma[i]
+        bear[i] = crossunder and closes[i] <= sma[i]
+    return bull, bear, st_line, sma
+
+
+def _pk_reset_state(st):
+    st["pk_sl_price"] = None
+    st["pk_tp_price"] = None
+
+
+def _pk_set_sl_tp(st, cfg, direction, entry_price):
+    """Fester SL/TP (fester $-Betrag) - wird NUR im Exit-Modus 'fixed_tp_sl' aufgerufen. Im
+    Exit-Modus 'flip' bleiben pk_sl_price/pk_tp_price immer None, check_pk_sl_tp greift dann
+    also nie ein."""
+    size = st.get("total_coin_size") or 0
+    if cfg.get("pk_sl_enabled", True) and size > 0:
+        dist_sl = cfg.get("pk_sl_manual_usd", 5.0) / size
+        st["pk_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
+    else:
+        st["pk_sl_price"] = None
+    if cfg.get("pk_tp_enabled", True) and size > 0:
+        dist_tp = cfg.get("pk_tp_manual_usd", 10.0) / size
+        st["pk_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
+    else:
+        st["pk_tp_price"] = None
+
+
+async def check_pk_sl_tp(symbol, price):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    sl_price = st.get("pk_sl_price")
+    tp_price = st.get("pk_tp_price")
+    if sl_price is None and tp_price is None:
+        return
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
+    if hit_sl:
+        debug_log(f"🚪 [{symbol}] Pieki-Algo SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, "SL")
+        st["pk_sl_cooldown_until"] = time.time() + cfg.get("pk_sl_cooldown_seconds", 30)
+        _pk_reset_state(st)
+    elif hit_tp:
+        debug_log(f"🚪 [{symbol}] Pieki-Algo TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP")
+        _pk_reset_state(st)
+
+
+async def check_pk_signal(symbol, buy_i, sell_i, price, trend_pct):
+    """Exit-Modus waehlbar (pk_exit_mode):
+    - 'flip': immer im Markt, dreht direkt bei Gegen-Signal (wie UT Bot + Hull / WaveTrend-Cross
+      'immer im Markt'). Bei Long-/Short-only wird bei Gegen-Signal nur glattgestellt.
+    - 'fixed_tp_sl': normaler Ein-/Ausstieg, verlaesst die Position NUR ueber check_pk_sl_tp -
+      ein Gegen-Signal waehrend einer offenen Position wird ignoriert (wartet auf SL/TP).
+    Optionaler MTF-Trend%-Filter (pk_mtf_filter_enabled): Long nur wenn trend_pct > Long-Schwelle,
+    Short nur wenn trend_pct < Short-Schwelle - gilt fuer JEDEN Einstieg, auch beim Flip in die
+    Gegenrichtung."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    if time.time() < st.get("pk_sl_cooldown_until", 0.0):
+        return
+    direction_mode = cfg.get("pk_direction_mode", "both")
+    exit_mode = cfg.get("pk_exit_mode", "flip")
+    mtf_enabled = cfg.get("pk_mtf_filter_enabled", False)
+    long_thr = cfg.get("pk_mtf_long_threshold", 0.5)
+    short_thr = cfg.get("pk_mtf_short_threshold", -0.5)
+    long_ok = direction_mode != "short_only" and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
+    short_ok = direction_mode != "long_only" and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
+    pos = st["position"]
+
+    if pos is None:
+        if buy_i and long_ok:
+            debug_log(f"📡 [{symbol}] Pieki-Algo Signal: LONG @ {price}" + (f" (Trend%={round(trend_pct,2)})" if trend_pct is not None else ""))
+            await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _pk_reset_state(st)
+                if exit_mode == "fixed_tp_sl":
+                    _pk_set_sl_tp(st, cfg, "long", price)
+        elif sell_i and short_ok:
+            debug_log(f"📡 [{symbol}] Pieki-Algo Signal: SHORT @ {price}" + (f" (Trend%={round(trend_pct,2)})" if trend_pct is not None else ""))
+            await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _pk_reset_state(st)
+                if exit_mode == "fixed_tp_sl":
+                    _pk_set_sl_tp(st, cfg, "short", price)
+        return
+
+    if exit_mode != "flip":
+        return  # 'fixed_tp_sl': Gegen-Signal wird ignoriert, nur check_pk_sl_tp darf schliessen
+
+    if pos == "long" and sell_i:
+        if direction_mode == "long_only" or not short_ok:
+            debug_log(f"🚪 [{symbol}] Pieki-Algo Exit: LONG @ {price}")
+            await execute_exit(symbol, price, "PK-EXIT")
+            _pk_reset_state(st)
+        else:
+            debug_log(f"🔄 [{symbol}] Pieki-Algo Flip: LONG -> SHORT @ {price}")
+            await execute_exit(symbol, price, "PK-FLIP")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _pk_reset_state(st)
+    elif pos == "short" and buy_i:
+        if direction_mode == "short_only" or not long_ok:
+            debug_log(f"🚪 [{symbol}] Pieki-Algo Exit: SHORT @ {price}")
+            await execute_exit(symbol, price, "PK-EXIT")
+            _pk_reset_state(st)
+        else:
+            debug_log(f"🔄 [{symbol}] Pieki-Algo Flip: SHORT -> LONG @ {price}")
+            await execute_exit(symbol, price, "PK-FLIP")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _pk_reset_state(st)
+
+
+async def pk_poll_loop(symbol):
+    """Pieki Algo: SuperTrend+SMA9-Signal (siehe compute_pk_signals), Exit-Modus waehlbar
+    (Flip/Fest-SL-TP), optionaler MTF-Trend%-Filter (siehe compute_pk_trend_percent)."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "pieki_algo" and cfg["bot_active"]:
+                resolution = cfg.get("pk_resolution", "5m")
+                atr_period = cfg.get("pk_atr_period", 11)
+                sma_period = cfg.get("pk_sma_period", 13)
+                mtf_slow_len = cfg.get("pk_mtf_slow_len", 9)
+                mtf_atr_len = cfg.get("pk_mtf_atr_len", 14)
+                min_needed = max(atr_period, sma_period, mtf_slow_len, mtf_atr_len, 5) + 5
+                needed_bars = min(1000, max(min_needed * 2, 220))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    bull, bear, st_line, sma = compute_pk_signals(closed_h, closed_l, closed_c, cfg.get("pk_sensitivity", 3.0), atr_period, sma_period)
+                    trend_pct = compute_pk_trend_percent(closed_h, closed_l, closed_c, cfg.get("pk_mtf_fast_len", 5), mtf_slow_len, mtf_atr_len)
+
+                    st["pk_trend_pct_last"] = trend_pct[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] Pieki-Algo aktiv: Preis={closed_c[-1]}, Trend%={round(trend_pct[-1],2)}, "
+                                  f"Exit-Modus={cfg.get('pk_exit_mode')}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 2:
+                            continue
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        await check_pk_signal(symbol, bull[idx], bear[idx], price_i, trend_pct[idx])
+
+                    await check_pk_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Pieki-Algo wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Pieki-Algo wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Pieki-Algo-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
 async def oms_rsi_poll_loop(symbol):
     """Separater, traeger laufender Poll-Loop nur fuer den optionalen RSI-Regime-Filter von
     OBI-Momentum-Scalp (RSI < Mittellinie -> nur Short erlaubt, RSI > Mittellinie -> nur Long
@@ -5301,6 +5531,170 @@ def backtest_wavetrend_cross(candles, cfg):
     return _simulate_wtc_trades(candles, cfg, bull, bear, warmup)
 
 
+def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
+    """Backtest-Pendant zu check_pk_signal/check_pk_sl_tp - siehe dort fuer die identische Logik
+    im Live-Betrieb. trend_pct wird UNABHAENGIG von Sensitivity berechnet und beim Sweep nur
+    einmal fuer alle Sensitivity-Werte wiederverwendet (wie hull_green beim UT-Bot-Sweep)."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    direction_mode = cfg.get("pk_direction_mode", "both")
+    exit_mode = cfg.get("pk_exit_mode", "flip")
+    mtf_enabled = cfg.get("pk_mtf_filter_enabled", False)
+    long_thr = cfg.get("pk_mtf_long_threshold", 0.5)
+    short_thr = cfg.get("pk_mtf_short_threshold", -0.5)
+    sl_enabled = cfg.get("pk_sl_enabled", True)
+    tp_enabled = cfg.get("pk_tp_enabled", True)
+    sl_usd = cfg.get("pk_sl_manual_usd", 5.0)
+    tp_usd = cfg.get("pk_tp_manual_usd", 10.0)
+    sl_cooldown_ms = cfg.get("pk_sl_cooldown_seconds", 30) * 1000
+
+    def long_ok(tp):
+        return direction_mode != "short_only" and (not mtf_enabled or tp is None or tp > long_thr)
+
+    def short_ok(tp):
+        return direction_mode != "long_only" and (not mtf_enabled or tp is None or tp < short_thr)
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+        tpct = trend_pct[i]
+
+        if position is not None and exit_mode == "fixed_tp_sl":
+            sl_price = position.get("sl_price")
+            tp_price = position.get("tp_price")
+            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        in_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+
+        if position is None:
+            if in_cooldown:
+                continue
+            if bull[i] and long_ok(tpct):
+                size = (margin * leverage) / price
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
+                if exit_mode == "fixed_tp_sl":
+                    if sl_enabled:
+                        position["sl_price"] = price - sl_usd / size
+                    if tp_enabled:
+                        position["tp_price"] = price + tp_usd / size
+            elif bear[i] and short_ok(tpct):
+                size = (margin * leverage) / price
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
+                if exit_mode == "fixed_tp_sl":
+                    if sl_enabled:
+                        position["sl_price"] = price + sl_usd / size
+                    if tp_enabled:
+                        position["tp_price"] = price - tp_usd / size
+            continue
+
+        if exit_mode != "flip":
+            continue  # 'fixed_tp_sl': nur der Block oben (SL/TP) darf schliessen
+
+        if position["dir"] == "long" and bear[i]:
+            if direction_mode == "long_only" or not short_ok(tpct):
+                _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "PK-EXIT", ts=ts)
+                position = None
+            else:
+                _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "PK-FLIP", ts=ts)
+                size = (margin * leverage) / price
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
+        elif position["dir"] == "short" and bull[i]:
+            if direction_mode == "short_only" or not long_ok(tpct):
+                _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "PK-EXIT", ts=ts)
+                position = None
+            else:
+                _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "PK-FLIP", ts=ts)
+                size = (margin * leverage) / price
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_peki_algo(candles, cfg):
+    ts, o, h, l, c = candles
+    sensitivity = cfg.get("pk_sensitivity", 3.0)
+    atr_period = cfg.get("pk_atr_period", 11)
+    sma_period = cfg.get("pk_sma_period", 13)
+    mtf_fast = cfg.get("pk_mtf_fast_len", 5)
+    mtf_slow = cfg.get("pk_mtf_slow_len", 9)
+    mtf_atr = cfg.get("pk_mtf_atr_len", 14)
+    bull, bear, st_line, sma = compute_pk_signals(h, l, c, sensitivity, atr_period, sma_period)
+    trend_pct = compute_pk_trend_percent(h, l, c, mtf_fast, mtf_slow, mtf_atr)
+    warmup = max(atr_period, sma_period, mtf_slow, mtf_atr, 5) + 2
+    return _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup)
+
+
+PK_SWEEP_MAX_COMBOS = 2000
+PK_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+async def run_pk_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step):
+    """'Monte-Carlo'-Parametersweep fuer Pieki Algo, NUR ueber die Sensitivity (2 Nachkommastellen,
+    Schritt 0.01 wie im Original-Pine-Script). trend_pct haengt nicht von der Sensitivity ab und
+    wird deshalb nur EINMAL berechnet und fuer alle Sensitivity-Werte wiederverwendet."""
+    max_candles = BACKTEST_MAX_CANDLES["pieki_algo"]
+    resolution = cfg.get("pk_resolution", "5m")
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 150:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    steps = int(round((sens_max - sens_min) / max(sens_step, 1e-9)))
+    sens_values = sorted(set(round(sens_min + i * sens_step, 2) for i in range(steps + 1)
+                              if sens_min + i * sens_step <= sens_max + 1e-9))
+    sens_values = [v for v in sens_values if v > 0]
+
+    if len(sens_values) == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Werte."}
+    if len(sens_values) > PK_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Werte ({len(sens_values)}, Limit {PK_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
+    atr_period = cfg.get("pk_atr_period", 11)
+    sma_period = cfg.get("pk_sma_period", 13)
+    mtf_fast = cfg.get("pk_mtf_fast_len", 5)
+    mtf_slow = cfg.get("pk_mtf_slow_len", 9)
+    mtf_atr = cfg.get("pk_mtf_atr_len", 14)
+    trend_pct = compute_pk_trend_percent(h, l, c, mtf_fast, mtf_slow, mtf_atr)
+    warmup = max(atr_period, sma_period, mtf_slow, mtf_atr, 5) + 2
+
+    results = []
+    for sens in sens_values:
+        bull, bear, st_line, sma = compute_pk_signals(h, l, c, sens, atr_period, sma_period)
+        trades = _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup)
+        stats = summarize_backtest_trades(trades)
+        results.append({"pk_sensitivity": sens, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= PK_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(c),
+        "min_reliable_trades": PK_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": len(sens_values),
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
+
+
 BACKTEST_MAX_CANDLES = {
     "fib_reversal": 100_000,
     "halftrend": 100_000,
@@ -5310,6 +5704,7 @@ BACKTEST_MAX_CANDLES = {
     "mo7_scalp": 100_000,
     "ut_bot_hull": 100_000,
     "wavetrend_cross": 100_000,
+    "pieki_algo": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -5320,6 +5715,7 @@ BACKTEST_FUNCS = {
     "candle_patterns": backtest_candle_patterns,
     "ut_bot_hull": backtest_ut_bot_hull,
     "wavetrend_cross": backtest_wavetrend_cross,
+    "pieki_algo": backtest_peki_algo,
     # "mo7_scalp" bewusst NICHT hier drin - braucht eine 6er-Tupel-Kerzenquelle MIT Volumen
     # (MFI-Baustein), deshalb in run_backtest() als Sonderfall behandelt statt ueber diesen
     # generischen 5er-Tupel-Dispatch.
@@ -5350,11 +5746,11 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         }
 
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution"}[entry_mode]
+    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -

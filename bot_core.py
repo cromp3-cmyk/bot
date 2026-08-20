@@ -401,6 +401,23 @@ def default_config():
         "wtc_tp_enabled": os.getenv("WTC_TP_ENABLED", "true").lower() == "true",
         "wtc_tp_manual_usd": float(os.getenv("WTC_TP_MANUAL_USD", "5.0")),
         "wtc_sl_cooldown_seconds": float(os.getenv("WTC_SL_COOLDOWN_SECONDS", "30")),
+        "pk_resolution": os.getenv("PK_RESOLUTION", "5m"),
+        "pk_sensitivity": float(os.getenv("PK_SENSITIVITY", "3.0")),  # Original-Pine-Default "Sensivity" (Faktor = sensitivity*2)
+        "pk_atr_period": int(os.getenv("PK_ATR_PERIOD", "11")),  # Original fest auf 11 verdrahtet, hier einstellbar
+        "pk_sma_period": int(os.getenv("PK_SMA_PERIOD", "13")),  # sma9 im Original (13-Perioden-SMA trotz des Namens)
+        "pk_direction_mode": os.getenv("PK_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "pk_exit_mode": os.getenv("PK_EXIT_MODE", "flip"),  # "flip" (immer im Markt, Wechsel bei Gegen-Signal) | "fixed_tp_sl"
+        "pk_sl_enabled": os.getenv("PK_SL_ENABLED", "true").lower() == "true",
+        "pk_sl_manual_usd": float(os.getenv("PK_SL_MANUAL_USD", "5.0")),
+        "pk_tp_enabled": os.getenv("PK_TP_ENABLED", "true").lower() == "true",
+        "pk_tp_manual_usd": float(os.getenv("PK_TP_MANUAL_USD", "10.0")),
+        "pk_sl_cooldown_seconds": float(os.getenv("PK_SL_COOLDOWN_SECONDS", "30")),
+        "pk_mtf_filter_enabled": os.getenv("PK_MTF_FILTER_ENABLED", "false").lower() == "true",
+        "pk_mtf_fast_len": int(os.getenv("PK_MTF_FAST_LEN", "5")),
+        "pk_mtf_slow_len": int(os.getenv("PK_MTF_SLOW_LEN", "9")),
+        "pk_mtf_atr_len": int(os.getenv("PK_MTF_ATR_LEN", "14")),
+        "pk_mtf_long_threshold": float(os.getenv("PK_MTF_LONG_THRESHOLD", "0.5")),
+        "pk_mtf_short_threshold": float(os.getenv("PK_MTF_SHORT_THRESHOLD", "-0.5")),
     }
 
 
@@ -440,6 +457,8 @@ def default_state():
         "utb_sl_price": None, "utb_sl_cooldown_until": 0.0,
         "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
         "wtc_sl_price": None, "wtc_tp_price": None,
+        "pk_sl_price": None, "pk_tp_price": None, "pk_sl_cooldown_until": 0.0,
+        "pk_trend_pct_last": None,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
         "oms_obi_history": [],
         "oms_tp1_done": False, "oms_trail_price": None,
@@ -951,6 +970,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="mo7_scalp">MO7 Scalp (Composite-Oszillator aus 7 Indikatoren, Schwellenwert-Cross oder 5-Kerzen-Summe, fester SL+TP)</option>
       <option value="ut_bot_hull">UT Bot + Hull Flip (ATR-Trailing-Stop, immer im Markt, Flip-Trigger wählbar, kein SL/TP)</option>
       <option value="wavetrend_cross">WaveTrend Cross (Cipher-B-Kernsignal, Zonenfilter wählbar, immer im Markt oder normal, fester SL+TP)</option>
+      <option value="pieki_algo">Pieki Algo (SuperTrend+SMA9-Signal, Flip oder fester SL+TP, optionaler MTF-Trend%-Filter)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1643,6 +1663,74 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wavetrend_cross"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="wtc_tp_manual_usd"></div>
   <div data-mode="wavetrend_cross"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="wtc_sl_cooldown_seconds"></div>
 
+  <div data-mode="pieki_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🎯 Pieki Algo (portiert aus "Pieki Algo | Signals &amp; Overlays"): SuperTrend (ATR-Periode × Sensitivity,
+    Faktor = Sensitivity×2, wie im Original) kreuzt den Kurs UND SMA9 bestätigt gleichzeitig - erst dann
+    zählt das Signal. Exit wählbar: Flip (immer im Markt, dreht direkt) oder fester SL/TP. Optionaler
+    MTF-Trend%-Filter: Short nur erlaubt wenn Trend% unter der Short-Schwelle, Long nur wenn über der
+    Long-Schwelle (vereinfachte Version des EMA-Spread-Trend% aus deinem MTF-Dashboard-Indikator - hier auf
+    EINEM Zeitrahmen berechnet, nicht auf den vollen 9 Timeframes des Original-Scripts).
+  </div>
+  <div data-mode="pieki_algo"><label>Zeitrahmen</label>
+    <select class="cfg" id="pk_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="pk_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="pieki_algo"><label>Sensitivity (0.01-Schritte, Original-Default 3)</label><input type="number" step="0.01" id="pk_sensitivity"></div>
+  <div data-mode="pieki_algo"><label>ATR-Periode (SuperTrend, Original fest 11)</label><input type="number" step="1" id="pk_atr_period"></div>
+  <div data-mode="pieki_algo"><label>SMA-Periode (Bestätigungsfilter, Original sma9 = 13)</label><input type="number" step="1" id="pk_sma_period"></div>
+  <div data-mode="pieki_algo"><label>Richtung</label>
+    <select class="cfg" id="pk_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="pieki_algo"><label>Exit-Modus</label>
+    <select class="cfg" id="pk_exit_mode">
+      <option value="flip">Wechsel (immer im Markt, Flip beim Gegen-Signal)</option>
+      <option value="fixed_tp_sl">Fester SL/TP (geht bei Treffer flach, wartet auf nächstes Ersteinstiegs-Signal)</option>
+    </select>
+  </div>
+  <div data-mode="pieki_algo"><label>Stop-Loss (nur bei Exit-Modus "Fester SL/TP")</label>
+    <select class="cfg" id="pk_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="pieki_algo"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="pk_sl_manual_usd"></div>
+  <div data-mode="pieki_algo"><label>Take-Profit (nur bei Exit-Modus "Fester SL/TP")</label>
+    <select class="cfg" id="pk_tp_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="pieki_algo"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="pk_tp_manual_usd"></div>
+  <div data-mode="pieki_algo"><label>Cooldown nach SL (Sek., nur bei Exit-Modus "Fester SL/TP")</label><input type="number" step="1" id="pk_sl_cooldown_seconds"></div>
+  <div data-mode="pieki_algo"><label>MTF-Trend%-Filter</label>
+    <select class="cfg" id="pk_mtf_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Short nur unter Short-Schwelle, Long nur über Long-Schwelle</option>
+    </select>
+  </div>
+  <div data-mode="pieki_algo"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="pk_mtf_long_threshold"></div>
+  <div data-mode="pieki_algo"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="pk_mtf_short_threshold"></div>
+  <div data-mode="pieki_algo"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="pk_mtf_fast_len"></div>
+  <div data-mode="pieki_algo"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="pk_mtf_slow_len"></div>
+  <div data-mode="pieki_algo"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="pk_mtf_atr_len"></div>
+
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -1894,6 +1982,49 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <table id="es-sweep-worst-table" style="display:none; margin-top:8px;">
     <thead><tr>
       <th class="sortable" data-key="es_sensitivity">Sensitivity ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<div data-mode-section="pieki_algo" style="display:none;">
+<h2 class="section-title">🎲 Pieki-Algo-Sensitivity-Sweep</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet nur die Sensitivity über einen Wertebereich - mit 2 Nachkommastellen wie im Original-
+    Pine-Script (Schritt 0,01). Alle anderen Einstellungen (ATR-Periode, SMA-Periode, Exit-Modus,
+    SL/TP, MTF-Filter) bleiben auf den aktuell gespeicherten Werten. Ergebnisse mit weniger als 5
+    Trades sind statistisch kaum aussagekräftig und werden nach unten sortiert, aber nicht versteckt.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="pk-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Sensitivity von</label><input type="number" step="0.01" id="pk-sweep-sens-min" value="0.50" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.01" id="pk-sweep-sens-max" value="8.00" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.01" id="pk-sweep-sens-step" value="0.01" style="width:90px;"></div>
+    <button id="btn-pk-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="pk-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <table id="pk-sweep-results-table" style="display:none; margin-top:12px;">
+    <thead><tr>
+      <th class="sortable" data-key="pk_sensitivity">Sensitivity ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="pk-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="pk-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="pk_sensitivity">Sensitivity ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -2402,7 +2533,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -2431,6 +2562,12 @@ function resetBacktestUI() {
   document.getElementById('es-sweep-worst-title').style.display = 'none';
   window.esSweepResultsData = [];
   window.esSweepWorstData = [];
+  document.getElementById('pk-sweep-status').innerText = '';
+  document.getElementById('pk-sweep-results-table').style.display = 'none';
+  document.getElementById('pk-sweep-worst-table').style.display = 'none';
+  document.getElementById('pk-sweep-worst-title').style.display = 'none';
+  window.pkSweepResultsData = [];
+  window.pkSweepWorstData = [];
   document.getElementById('mo7-sweep-status').innerText = '';
   document.getElementById('mo7-sweep-results-table').style.display = 'none';
   document.getElementById('mo7-sweep-worst-table').style.display = 'none';
@@ -2630,6 +2767,64 @@ const esSweepRowHtml = (r) => `
   </tr>`;
 const renderEsSweepResults = makeSortableTable('es-sweep-results-table', () => window.esSweepResultsData, esSweepRowHtml);
 const renderEsSweepWorst = makeSortableTable('es-sweep-worst-table', () => window.esSweepWorstData, esSweepRowHtml);
+
+document.getElementById('btn-pk-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-pk-sweep');
+  const statusEl = document.getElementById('pk-sweep-status');
+  const tableEl = document.getElementById('pk-sweep-results-table');
+  const worstTableEl = document.getElementById('pk-sweep-worst-table');
+  const worstTitleEl = document.getElementById('pk-sweep-worst-title');
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('pk-sweep-days').value) || 30,
+    sens_min: parseFloat(document.getElementById('pk-sweep-sens-min').value),
+    sens_max: parseFloat(document.getElementById('pk-sweep-sens-max').value),
+    sens_step: parseFloat(document.getElementById('pk-sweep-sens-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  tableEl.style.display = 'none';
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Sensitivity-Werte... kann bei vielen Werten etwas dauern.`;
+  try {
+    const res = await fetch(`/api/pk_sensitivity_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Sensitivity-Werte getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
+      window.pkSweepResultsData = data.results || [];
+      window.pkSweepWorstData = data.worst_results || [];
+      renderPkSweepResults();
+      renderPkSweepWorst();
+      tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.pkSweepResultsData = [];
+window.pkSweepWorstData = [];
+const pkSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.pk_sensitivity.toFixed(2)}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderPkSweepResults = makeSortableTable('pk-sweep-results-table', () => window.pkSweepResultsData, pkSweepRowHtml);
+const renderPkSweepWorst = makeSortableTable('pk-sweep-worst-table', () => window.pkSweepWorstData, pkSweepRowHtml);
 
 document.getElementById('btn-mo7-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-mo7-sweep');
@@ -3276,6 +3471,23 @@ async function refresh() {
     document.getElementById('wtc_tp_enabled').value = String(data.config.wtc_tp_enabled);
     document.getElementById('wtc_tp_manual_usd').value = data.config.wtc_tp_manual_usd;
     document.getElementById('wtc_sl_cooldown_seconds').value = data.config.wtc_sl_cooldown_seconds;
+    setResolutionField('pk_resolution', data.config.pk_resolution);
+    document.getElementById('pk_sensitivity').value = data.config.pk_sensitivity;
+    document.getElementById('pk_atr_period').value = data.config.pk_atr_period;
+    document.getElementById('pk_sma_period').value = data.config.pk_sma_period;
+    document.getElementById('pk_direction_mode').value = data.config.pk_direction_mode;
+    document.getElementById('pk_exit_mode').value = data.config.pk_exit_mode;
+    document.getElementById('pk_sl_enabled').value = String(data.config.pk_sl_enabled);
+    document.getElementById('pk_sl_manual_usd').value = data.config.pk_sl_manual_usd;
+    document.getElementById('pk_tp_enabled').value = String(data.config.pk_tp_enabled);
+    document.getElementById('pk_tp_manual_usd').value = data.config.pk_tp_manual_usd;
+    document.getElementById('pk_sl_cooldown_seconds').value = data.config.pk_sl_cooldown_seconds;
+    document.getElementById('pk_mtf_filter_enabled').value = String(data.config.pk_mtf_filter_enabled);
+    document.getElementById('pk_mtf_long_threshold').value = data.config.pk_mtf_long_threshold;
+    document.getElementById('pk_mtf_short_threshold').value = data.config.pk_mtf_short_threshold;
+    document.getElementById('pk_mtf_fast_len').value = data.config.pk_mtf_fast_len;
+    document.getElementById('pk_mtf_slow_len').value = data.config.pk_mtf_slow_len;
+    document.getElementById('pk_mtf_atr_len').value = data.config.pk_mtf_atr_len;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -3619,6 +3831,23 @@ function buildConfigPayload() {
     wtc_tp_enabled: document.getElementById('wtc_tp_enabled').value === 'true',
     wtc_tp_manual_usd: parseFloat(document.getElementById('wtc_tp_manual_usd').value),
     wtc_sl_cooldown_seconds: parseFloat(document.getElementById('wtc_sl_cooldown_seconds').value),
+    pk_resolution: getResolutionField('pk_resolution'),
+    pk_sensitivity: parseFloat(document.getElementById('pk_sensitivity').value),
+    pk_atr_period: parseInt(document.getElementById('pk_atr_period').value),
+    pk_sma_period: parseInt(document.getElementById('pk_sma_period').value),
+    pk_direction_mode: document.getElementById('pk_direction_mode').value,
+    pk_exit_mode: document.getElementById('pk_exit_mode').value,
+    pk_sl_enabled: document.getElementById('pk_sl_enabled').value === 'true',
+    pk_sl_manual_usd: parseFloat(document.getElementById('pk_sl_manual_usd').value),
+    pk_tp_enabled: document.getElementById('pk_tp_enabled').value === 'true',
+    pk_tp_manual_usd: parseFloat(document.getElementById('pk_tp_manual_usd').value),
+    pk_sl_cooldown_seconds: parseFloat(document.getElementById('pk_sl_cooldown_seconds').value),
+    pk_mtf_filter_enabled: document.getElementById('pk_mtf_filter_enabled').value === 'true',
+    pk_mtf_long_threshold: parseFloat(document.getElementById('pk_mtf_long_threshold').value),
+    pk_mtf_short_threshold: parseFloat(document.getElementById('pk_mtf_short_threshold').value),
+    pk_mtf_fast_len: parseInt(document.getElementById('pk_mtf_fast_len').value),
+    pk_mtf_slow_len: parseInt(document.getElementById('pk_mtf_slow_len').value),
+    pk_mtf_atr_len: parseInt(document.getElementById('pk_mtf_atr_len').value),
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -3749,6 +3978,8 @@ async def handle_status(request):
         "utb_sl_price": st.get("utb_sl_price"),
         "wtc_last_wt1": st.get("wtc_last_wt1"), "wtc_last_wt2": st.get("wtc_last_wt2"),
         "wtc_sl_price": st.get("wtc_sl_price"), "wtc_tp_price": st.get("wtc_tp_price"),
+        "pk_sl_price": st.get("pk_sl_price"), "pk_tp_price": st.get("pk_tp_price"),
+        "pk_trend_pct_last": st.get("pk_trend_pct_last"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3816,6 +4047,10 @@ async def handle_config_update(request):
                 "wtc_require_zone", "wtc_os_level", "wtc_ob_level", "wtc_direction_mode",
                 "wtc_always_in_market", "wtc_flip_exit_enabled", "wtc_sl_enabled",
                 "wtc_sl_manual_usd", "wtc_tp_enabled", "wtc_tp_manual_usd", "wtc_sl_cooldown_seconds",
+                "pk_resolution", "pk_sensitivity", "pk_atr_period", "pk_sma_period", "pk_direction_mode",
+                "pk_exit_mode", "pk_sl_enabled", "pk_sl_manual_usd", "pk_tp_enabled", "pk_tp_manual_usd",
+                "pk_sl_cooldown_seconds", "pk_mtf_filter_enabled", "pk_mtf_fast_len", "pk_mtf_slow_len",
+                "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
@@ -3948,6 +4183,31 @@ async def handle_es_sensitivity_sweep(request):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
     result = await run_es_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step)
+    return web.json_response(result)
+
+
+async def handle_pk_sensitivity_sweep(request):
+    """'Monte-Carlo'-Parametersweep fuer Pieki Algo, NUR ueber die Sensitivity (2 Nachkommastellen
+    wie im Original-Pine-Script, Schritt 0.01)."""
+    from strategies import run_pk_sensitivity_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        sens_min = max(0.01, round(float(body.get("sens_min", 0.5)), 2))
+        sens_max = max(sens_min, round(float(body.get("sens_max", 8.0)), 2))
+        sens_step = max(0.01, round(float(body.get("sens_step", 0.01)), 2))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_pk_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step)
     return web.json_response(result)
 
 
