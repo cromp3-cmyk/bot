@@ -2179,12 +2179,20 @@ def compute_mo7_series(highs, lows, closes, volumes, cfg):
 
 
 def compute_mo7_signals(mo7, cfg):
-    """Zwei waehlbare Einstiegsmodi (mo7_entry_mode):
+    """Drei waehlbare Einstiegsmodi (mo7_entry_mode):
     - 'threshold_cross': Einstieg nur beim UEBERSCHREITEN der Schwelle (wie das Alert-Cooldown im
       Original), nicht bei jeder Kerze innerhalb der Zone -> BUY wenn MO7 gerade unter
       mo7_buy_threshold faellt, SELL wenn gerade ueber mo7_sell_threshold steigt.
     - 'five_candle_sum': eigene Idee - Summe der letzten 5 MO7-Werte < mo7_sum_low (stark
-      ueberverkauft ueber mehrere Kerzen hinweg) -> Long, > mo7_sum_high (stark ueberkauft) -> Short."""
+      ueberverkauft ueber mehrere Kerzen hinweg) -> Long, > mo7_sum_high (stark ueberkauft) -> Short.
+    - 'trend_state': eigene Idee - MO7 als durchgehender Trend-Regime-Zustand statt Einzelsignal:
+      ueber der Schwelle (Default 55) = Uptrend-Zustand -> Long, darunter = Downtrend-Zustand ->
+      Short. Anders als bei den anderen Modi ist das NICHT nur ein Momentan-Ereignis, sondern gilt
+      fuer JEDE Kerze in der jeweiligen Zone - der Bot bleibt dadurch quasi immer entsprechend dem
+      aktuellen Regime positioniert (Flip erfolgt mit ~1 Kerze Verzoegerung: Exit auf dieser Kerze,
+      Wiedereinstieg auf der naechsten, weil check_mo7_exit/check_mo7_entry im selben Tick nicht
+      beides gleichzeitig ausloesen). Optionale Totzone (mo7_trend_deadband) um die Schwelle herum
+      reduziert Hin-und-Her bei Werten, die genau um die Schwelle pendeln."""
     n = len(mo7)
     bull = [False] * n
     bear = [False] * n
@@ -2196,6 +2204,12 @@ def compute_mo7_signals(mo7, cfg):
             window_sum = sum(mo7[i - 4:i + 1])
             bull[i] = window_sum < sum_low
             bear[i] = window_sum > sum_high
+    elif mode == "trend_state":
+        threshold = cfg.get("mo7_trend_threshold", 55.0)
+        deadband = cfg.get("mo7_trend_deadband", 0.0)
+        for i in range(n):
+            bull[i] = mo7[i] > threshold + deadband
+            bear[i] = mo7[i] < threshold - deadband
     else:
         buy_th = cfg.get("mo7_buy_threshold", 20.0)
         sell_th = cfg.get("mo7_sell_threshold", 85.0)

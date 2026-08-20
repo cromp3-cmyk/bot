@@ -367,6 +367,8 @@ def default_config():
         "mo7_sell_threshold": float(os.getenv("MO7_SELL_THRESHOLD", "85")),
         "mo7_sum_low": float(os.getenv("MO7_SUM_LOW", "100")),
         "mo7_sum_high": float(os.getenv("MO7_SUM_HIGH", "400")),
+        "mo7_trend_threshold": float(os.getenv("MO7_TREND_THRESHOLD", "55")),
+        "mo7_trend_deadband": float(os.getenv("MO7_TREND_DEADBAND", "0")),
         "mo7_direction_mode": os.getenv("MO7_DIRECTION_MODE", "both"),
         "mo7_flip_exit_enabled": os.getenv("MO7_FLIP_EXIT_ENABLED", "true").lower() == "true",
         "mo7_sl_enabled": os.getenv("MO7_SL_ENABLED", "true").lower() == "true",
@@ -1479,8 +1481,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="mo7_entry_mode">
       <option value="threshold_cross">Schwellenwert-Cross (BUY beim Unterschreiten der Buy-Schwelle, SELL beim Überschreiten der Sell-Schwelle)</option>
       <option value="five_candle_sum">5-Kerzen-Summe (Summe der letzten 5 MO7-Werte unter/über eigener Schwelle)</option>
+      <option value="trend_state">Trend-Zustand (MO7 über Schwelle = Uptrend/Long, darunter = Downtrend/Short - Bot bleibt immer entsprechend positioniert)</option>
     </select>
   </div>
+  <div data-mode="mo7_scalp"><label>Trend-Schwelle (nur bei Trend-Zustand)</label><input type="number" step="1" id="mo7_trend_threshold"></div>
+  <div data-mode="mo7_scalp"><label>Trend-Totzone (± um die Schwelle, reduziert Hin-und-Her bei Werten nahe der Schwelle)</label><input type="number" step="1" id="mo7_trend_deadband"></div>
   <div data-mode="mo7_scalp"><label>Buy-Schwelle (nur Schwellenwert-Cross, MO7 &lt; Wert)</label><input type="number" step="1" id="mo7_buy_threshold"></div>
   <div data-mode="mo7_scalp"><label>Sell-Schwelle (nur Schwellenwert-Cross, MO7 &gt; Wert)</label><input type="number" step="1" id="mo7_sell_threshold"></div>
   <div data-mode="mo7_scalp"><label>5-Kerzen-Summe Long-Schwelle (nur 5-Kerzen-Summe, Summe &lt; Wert)</label><input type="number" step="1" id="mo7_sum_low"></div>
@@ -3237,6 +3242,8 @@ async function refresh() {
     document.getElementById('mo7_sell_threshold').value = data.config.mo7_sell_threshold;
     document.getElementById('mo7_sum_low').value = data.config.mo7_sum_low;
     document.getElementById('mo7_sum_high').value = data.config.mo7_sum_high;
+    document.getElementById('mo7_trend_threshold').value = data.config.mo7_trend_threshold;
+    document.getElementById('mo7_trend_deadband').value = data.config.mo7_trend_deadband;
     document.getElementById('mo7_direction_mode').value = data.config.mo7_direction_mode;
     document.getElementById('mo7_flip_exit_enabled').value = String(data.config.mo7_flip_exit_enabled);
     document.getElementById('mo7_sl_enabled').value = String(data.config.mo7_sl_enabled);
@@ -3578,6 +3585,8 @@ function buildConfigPayload() {
     mo7_sell_threshold: parseFloat(document.getElementById('mo7_sell_threshold').value),
     mo7_sum_low: parseFloat(document.getElementById('mo7_sum_low').value),
     mo7_sum_high: parseFloat(document.getElementById('mo7_sum_high').value),
+    mo7_trend_threshold: parseFloat(document.getElementById('mo7_trend_threshold').value),
+    mo7_trend_deadband: parseFloat(document.getElementById('mo7_trend_deadband').value),
     mo7_direction_mode: document.getElementById('mo7_direction_mode').value,
     mo7_flip_exit_enabled: document.getElementById('mo7_flip_exit_enabled').value === 'true',
     mo7_sl_enabled: document.getElementById('mo7_sl_enabled').value === 'true',
@@ -3796,7 +3805,8 @@ async def handle_config_update(request):
                 "cp_tp_enabled", "cp_tp_mode", "cp_tp_manual_usd",
                 "cp_breakeven_enabled", "cp_breakeven_trigger_mult",
                 "mo7_resolution", "mo7_entry_mode", "mo7_buy_threshold", "mo7_sell_threshold",
-                "mo7_sum_low", "mo7_sum_high", "mo7_direction_mode", "mo7_flip_exit_enabled",
+                "mo7_sum_low", "mo7_sum_high", "mo7_trend_threshold", "mo7_trend_deadband",
+                "mo7_direction_mode", "mo7_flip_exit_enabled",
                 "mo7_sl_enabled", "mo7_sl_manual_usd", "mo7_tp_enabled", "mo7_tp_manual_usd",
                 "mo7_sl_cooldown_seconds",
                 "utb_resolution", "utb_atr_period", "utb_sensitivity", "utb_heikin_ashi",
