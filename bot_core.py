@@ -2437,10 +2437,23 @@ document.getElementById('btn-start').addEventListener('click', async () => {
   // Erst die aktuellen Formular-Einstellungen speichern (Backtest speichert NICHT dauerhaft,
   // nur bot_active zu setzen wuerde sonst mit der zuletzt GESPEICHERTEN Config starten statt
   // mit dem, was gerade im Formular steht - genau das fuehrte zu "startet mit alter Strategie").
-  await fetch(`/api/config?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildConfigPayload()) });
-  window.formTouched = false;
-  await fetch(`/api/control?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_active:true}) });
-  showToast(`Gespeichert & gestartet für ${currentSymbol}!`);
+  try {
+    const cfgRes = await fetch(`/api/config?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(buildConfigPayload()) });
+    const cfgData = await cfgRes.json().catch(() => null);
+    if (!cfgRes.ok || !cfgData || cfgData.success !== true) {
+      showToast(`❌ Speichern fehlgeschlagen (${cfgRes.status}): ${cfgData?.error || 'unbekannter Fehler'} - Bot NICHT gestartet.`);
+      return;
+    }
+    window.formTouched = false;
+    const ctrlRes = await fetch(`/api/control?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_active:true}) });
+    if (!ctrlRes.ok) {
+      showToast(`❌ Gespeichert, aber Start fehlgeschlagen (${ctrlRes.status}).`);
+      return;
+    }
+    showToast(`✅ Gespeichert & gestartet für ${currentSymbol} (${cfgData.config.entry_mode})!`);
+  } catch (e) {
+    showToast(`❌ Netzwerkfehler beim Speichern/Starten: ${e}`);
+  }
 });
 document.getElementById('btn-stop').addEventListener('click', async () => {
   await fetch(`/api/control?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_active:false}) });
@@ -3968,9 +3981,18 @@ function buildConfigPayload() {
 document.getElementById('config-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const payload = buildConfigPayload();
-  await fetch(`/api/config?symbol=${currentSymbol}`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-  window.formTouched = false;
-  showToast(`Gespeichert für ${currentSymbol}!`);
+  try {
+    const res = await fetch(`/api/config?symbol=${currentSymbol}`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || data.success !== true) {
+      showToast(`❌ Speichern fehlgeschlagen (${res.status}): ${data?.error || 'unbekannter Fehler'}`);
+      return;
+    }
+    window.formTouched = false;
+    showToast(`✅ Gespeichert für ${currentSymbol} (${data.config.entry_mode})!`);
+  } catch (e) {
+    showToast(`❌ Netzwerkfehler beim Speichern: ${e}`);
+  }
 });
 
 function showToast(msg) {
@@ -4173,6 +4195,7 @@ async def handle_control(request):
     if "bot_active" in body:
         cfg["bot_active"] = bool(body["bot_active"])
         debug_log(f"{'▶️' if cfg['bot_active'] else '⏸️'} [{symbol}] Bot {'gestartet' if cfg['bot_active'] else 'gestoppt'}")
+        await save_bot_configs()  # sonst geht bot_active bei Neustart/Redeploy verloren
     return web.json_response({"success": True, "bot_active": cfg["bot_active"]})
 
 
