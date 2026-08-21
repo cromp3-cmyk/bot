@@ -960,7 +960,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <h2 class="section-title">Einstellungen (nur für den ausgewählten Coin)</h2>
 <div class="panel-card">
-<form id="config-form">
+<form id="config-form" novalidate>
   <div><label>Margin (USDC)</label><input type="number" step="any" id="margin"></div>
 
   <div><label>Hebel</label><input type="number" step="1" id="leverage"></div>
