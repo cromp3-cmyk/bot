@@ -3134,9 +3134,9 @@ function renderOmsLiqGauge(liqRatio, minRatio, liqCount) {
 }
 
 function renderScalpBoard(board) {
-  const tfs = [['30s','30s'], ['45s','45s'], ['60s','60s']];
+  const tfs = [['10s','10s'], ['30s','30s'], ['45s','45s'], ['60s','60s']];
   if (!board || tfs.every(([k]) => !board[k])) {
-    return '<div style="padding:14px; color:var(--text-dim); font-size:13px;">Sammelt noch Daten... (60 Sek. sollte binnen weniger Sekunden erscheinen, egal ob der Bot aktiv ist - 30/45 Sek. brauchen zusätzlich den Bot einmal im aktiven Zustand, damit der Sekunden-Kerzen-Puffer gefüllt wird)</div>';
+    return '<div style="padding:14px; color:var(--text-dim); font-size:13px;">Sammelt noch Daten... (60 Sek. sollte binnen weniger Sekunden erscheinen, egal ob der Bot aktiv ist - 10/30/45 Sek. brauchen zusätzlich den Bot einmal im aktiven Zustand, damit der Sekunden-Kerzen-Puffer gefüllt wird)</div>';
   }
   const rsiCell = v => {
     if (v == null) return '<td>-</td>';
@@ -3157,17 +3157,33 @@ function renderScalpBoard(board) {
     const color = v >= 0.15 ? 'green' : v <= -0.15 ? 'red' : '';
     return `<td class="${color}">${v}</td>`;
   };
+  const mo7Cell = v => {
+    if (v == null) return '<td>-</td>';
+    const color = v <= 20 ? 'green' : v >= 80 ? 'red' : '';
+    return `<td class="${color}">${v}</td>`;
+  };
+  const obiCell = v => {
+    if (v == null) return '<td>-</td>';
+    const color = v >= 0.15 ? 'green' : v <= -0.15 ? 'red' : '';
+    return `<td class="${color}">${v}</td>`;
+  };
   const row = (label, cells) => `<tr><td style="color:var(--text-dim); text-align:left;">${label}</td>${cells}</tr>`;
+  const obi = board.obi || {};
   return `<div style="padding:4px 10px;">
-    <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">Rein manuell zur Entscheidungshilfe - RSI(8) rot ≥70/grün ≤30 · Stochastic(5,3,3) K/D rot ≥80/grün ≤20 · MACD-Histogramm(5,13,3) grün=positiv · CVD grün/rot ab ±0.15</div>
+    <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">Rein manuell zur Entscheidungshilfe - RSI(8) rot ≥70/grün ≤30 · Stochastic(5,3,3) K/D rot ≥80/grün ≤20 · MACD-Histogramm(5,13,3) grün=positiv · MO7 (ohne Volumen-Anteil) grün ≤20/rot ≥80 · CVD/OBI grün/rot ab ±0.15</div>
     <table style="width:100%; text-align:center;">
-      <thead><tr><th style="text-align:left;"></th><th>30 Sek.</th><th>45 Sek.</th><th>60 Sek.</th></tr></thead>
+      <thead><tr><th style="text-align:left;"></th><th>10 Sek.</th><th>30 Sek.</th><th>45 Sek.</th><th>60 Sek.</th></tr></thead>
       <tbody>
         ${row('RSI(8)', tfs.map(([k]) => rsiCell(board[k]?.rsi)).join(''))}
         ${row('Stochastic %K/%D', tfs.map(([k]) => stochCell(board[k])).join(''))}
         ${row('MACD-Hist', tfs.map(([k]) => macdCell(board[k]?.macd_hist)).join(''))}
+        ${row('MO7', tfs.map(([k]) => mo7Cell(board[k]?.mo7)).join(''))}
         ${row('CVD', tfs.map(([k]) => cvdCell(board[k]?.cvd)).join(''))}
       </tbody>
+    </table>
+    <table style="width:100%; text-align:center; margin-top:10px;">
+      <thead><tr><th style="text-align:left;"></th><th>OBI schnell</th><th>OBI mittel</th><th>OBI langsam</th></tr></thead>
+      <tbody>${row('Orderbuch', [obiCell(obi.fast), obiCell(obi.medium), obiCell(obi.slow)].join(''))}</tbody>
     </table>
   </div>`;
 }

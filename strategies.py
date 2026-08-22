@@ -2154,6 +2154,28 @@ def _rolling_min_max(values, window):
     return mins, maxs
 
 
+def compute_mo7_series_novolume(highs, lows, closes, cfg):
+    """Wie compute_mo7_series, aber OHNE den MFI-Bestandteil (Mittel aus 6 statt 7 Komponenten) -
+    fuer die Sekunden-Zeitrahmen im Scalp-Board, deren Kerzen-Puffer (siehe get_seconds_candles/
+    binance_1s_poll_loop) kein Volumen mitfuehrt. Leicht ungenauer als das Original, aber fuer die
+    rein manuelle Entscheidungshilfe im Scalp-Board ausreichend."""
+    n = len(closes)
+    rsi = compute_rsi(closes, cfg.get("mo7_rsi_len", 14))
+    stoch_k, _ = compute_stochastic(highs, lows, closes, cfg.get("mo7_stoch_len", 14), 1, 1)
+    wpr_raw = compute_wpr(highs, lows, closes, cfg.get("mo7_wpr_len", 14))
+    wpr_val = [100 + w for w in wpr_raw]
+    macd_line, _ = compute_macd_line_and_signal(closes, cfg.get("mo7_macd_fast", 12), cfg.get("mo7_macd_slow", 26), 9)
+    macd_mins, macd_maxs = _rolling_min_max(macd_line, 500)
+    macd_norm = [50.0 if macd_maxs[i] == macd_mins[i] else (macd_line[i] - macd_mins[i]) / (macd_maxs[i] - macd_mins[i]) * 100 for i in range(n)]
+    roc = [0.0] * n
+    for i in range(1, n):
+        roc[i] = (closes[i] - closes[i - 1]) / closes[i - 1] * 100 if closes[i - 1] != 0 else 0.0
+    roc_mins, roc_maxs = _rolling_min_max(roc, 500)
+    roc_norm = [50.0 if roc_maxs[i] == roc_mins[i] else (roc[i] - roc_mins[i]) / (roc_maxs[i] - roc_mins[i]) * 100 for i in range(n)]
+    pr = compute_percentrank(closes, 100)
+    return [(rsi[i] + stoch_k[i] + wpr_val[i] + macd_norm[i] + roc_norm[i] + pr[i]) / 6 for i in range(n)]
+
+
 def compute_mo7_series(highs, lows, closes, volumes, cfg):
     """MO7-Composite-Score (portiert aus dem 'MO7 Buy/Sell Signal'-Pine-Script): Mittelwert aus
     RSI, Stochastic %K, Williams %R (normiert 0-100), MFI, MACD-Linie (normiert 0-100 ueber ein
@@ -3170,17 +3192,19 @@ async def oms_rsi_poll_loop(symbol):
         await asyncio.sleep(10)
 
 
-SCALP_BOARD_TIMEFRAMES = [("30s", 30), ("45s", 45), ("60s", 60)]
+SCALP_BOARD_TIMEFRAMES = [("10s", 10), ("30s", 30), ("45s", 45), ("60s", 60)]
 
 
 async def scalp_board_poll_loop(symbol):
-    """Manuelles Scalp-Board: RSI (kurze Periode), Stochastic und MACD auf 30s/45s/60s
-    PARALLEL berechnet, plus CVD ueber dieselben drei Fenster (aus dem sowieso schon global
-    gepflegten Trade-Puffer, siehe _cvd_ratio_over). Bewusst UNABHAENGIG vom aktuellen
-    entry_mode - das ist ein reines Beobachtungs-/Handwerkszeug fuer manuelles Scalping, egal
-    welche automatische Strategie gerade laeuft. Laeuft nur, solange der Bot fuer den Coin
-    aktiv ist (bot_active), da die 30s/45s-Kerzen aus demselben 1s-Puffer stammen, der aus
-    Kostengruenden nur bei aktivem Bot gefuellt wird (siehe binance_1s_poll_loop)."""
+    """Manuelles Scalp-Board: RSI (kurze Periode), Stochastic, MACD und MO7 (ohne Volumen-Anteil,
+    siehe compute_mo7_series_novolume) auf 10s/30s/45s/60s PARALLEL berechnet, plus CVD ueber
+    dieselben vier Fenster (aus dem sowieso schon global gepflegten Trade-Puffer, siehe
+    _cvd_ratio_over) und OBI (schnell/mittel/langsam, direkt aus dem Live-Orderbuch-State, siehe
+    update_obi_windows). Bewusst UNABHAENGIG vom aktuellen entry_mode - das ist ein reines
+    Beobachtungs-/Handwerkszeug fuer manuelles Scalping, egal welche automatische Strategie gerade
+    laeuft. Laeuft nur, solange der Bot fuer den Coin aktiv ist (bot_active), da die
+    10s/30s/45s-Kerzen aus demselben 1s-Puffer stammen, der aus Kostengruenden nur bei aktivem Bot
+    gefuellt wird (siehe binance_1s_poll_loop)."""
     b = BOTS[symbol]
     while True:
         try:
@@ -3207,14 +3231,19 @@ async def scalp_board_poll_loop(symbol):
                     rsi_series = compute_rsi(c, 8)
                     k, d = compute_stochastic(h, l, c, 5, 3, 3)
                     macd, macd_sig = compute_macd_line_and_signal(c, 5, 13, 3)
+                    mo7_series = compute_mo7_series_novolume(h, l, c, cfg)
                     board[label] = {
                         "rsi": round(rsi_series[-1], 1),
                         "stoch_k": round(k[-1], 1), "stoch_d": round(d[-1], 1),
                         "macd_hist": round(macd[-1] - macd_sig[-1], 5),
                         "cvd": _cvd_ratio_over(st, seconds),
+                        "mo7": round(mo7_series[-1], 1),
                     }
                 else:
                     board[label] = None
+            board["obi"] = {
+                "fast": st.get("obi_fast"), "medium": st.get("obi_medium"), "slow": st.get("obi_slow"),
+            }
             st["scalp_board"] = board
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Scalp-Board-Berechnung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
