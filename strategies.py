@@ -2481,30 +2481,49 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
     pos = st["position"]
 
     if pos is None:
-        if signal_only:
-            if buy_i and long_ok:
-                debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg (nur Signal): LONG @ {price}")
-                await execute_entry(symbol, "long", price, is_add_on=False)
-                if st["position"] is not None:
-                    _uh_set_sl(st, cfg, "long", price)
-            elif sell_i and short_ok:
-                debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg (nur Signal): SHORT @ {price}")
-                await execute_entry(symbol, "short", price, is_add_on=False)
-                if st["position"] is not None:
-                    _uh_set_sl(st, cfg, "short", price)
-            return
-        if hull_green_i is None:
-            return
-        if buy_i and hull_green_i and long_ok:
-            debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg: LONG @ {price}")
-            await execute_entry(symbol, "long", price, is_add_on=False)
+        pending_enabled = mtf_enabled and cfg.get("utb_mtf_pending_enabled", False)
+        max_pending = cfg.get("utb_mtf_pending_max_seconds", 300)
+        now_ts = time.time()
+
+        if st.get("utb_pending_dir") == "long" and sell_i:
+            st["utb_pending_dir"] = None
+        if st.get("utb_pending_dir") == "short" and buy_i:
+            st["utb_pending_dir"] = None
+        if st.get("utb_pending_dir") and (now_ts - st.get("utb_pending_since", now_ts)) > max_pending:
+            st["utb_pending_dir"] = None
+
+        raw_long_signal = buy_i if signal_only else (buy_i and bool(hull_green_i))
+        raw_short_signal = sell_i if signal_only else (sell_i and hull_green_i is not None and not hull_green_i)
+
+        if raw_long_signal and not long_ok and pending_enabled:
+            st["utb_pending_dir"] = "long"
+            st["utb_pending_since"] = now_ts
+        elif raw_short_signal and not short_ok and pending_enabled:
+            st["utb_pending_dir"] = "short"
+            st["utb_pending_since"] = now_ts
+
+        pending_dir = st.get("utb_pending_dir")
+        entry_dir = None
+        pending_executed = False
+        if raw_long_signal and long_ok:
+            entry_dir = "long"
+        elif raw_short_signal and short_ok:
+            entry_dir = "short"
+        elif pending_dir == "long" and long_ok:
+            entry_dir = "long"
+            pending_executed = True
+        elif pending_dir == "short" and short_ok:
+            entry_dir = "short"
+            pending_executed = True
+
+        if entry_dir is not None:
+            tag = " (PENDING nachgeholt)" if pending_executed else ""
+            label = "Ersteinstieg (nur Signal)" if signal_only else "Ersteinstieg"
+            debug_log(f"📡 [{symbol}] UT-Bot+Hull {label}{tag}: {entry_dir.upper()} @ {price}")
+            await execute_entry(symbol, entry_dir, price, is_add_on=False)
             if st["position"] is not None:
-                _uh_set_sl(st, cfg, "long", price)
-        elif sell_i and not hull_green_i and short_ok:
-            debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg: SHORT @ {price}")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _uh_set_sl(st, cfg, "short", price)
+                st["utb_pending_dir"] = None
+                _uh_set_sl(st, cfg, entry_dir, price)
         return
 
     if pos == "long" and short_flip_i:
@@ -3026,7 +3045,11 @@ async def check_pk_signal(symbol, buy_i, sell_i, price, trend_pct):
       ein Gegen-Signal waehrend einer offenen Position wird ignoriert (wartet auf SL/TP).
     Optionaler MTF-Trend%-Filter (pk_mtf_filter_enabled): Long nur wenn trend_pct > Long-Schwelle,
     Short nur wenn trend_pct < Short-Schwelle - gilt fuer JEDEN Einstieg, auch beim Flip in die
-    Gegenrichtung."""
+    Gegenrichtung. Optionales Pending-Signal (pk_mtf_pending_enabled, siehe _pk_check_pending):
+    ein vom Filter blockierter ERSTEINSTIEG wird gemerkt statt verworfen und nachtraeglich
+    ausgefuehrt, sobald der Filter zustimmt - solange kein Gegen-Signal kommt und das Zeitfenster
+    (pk_mtf_pending_max_seconds) nicht abgelaufen ist. Gilt NUR fuer den Ersteinstieg (pos is
+    None), nicht fuer Flip-Entscheidungen waehrend einer offenen Position."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -3043,20 +3066,47 @@ async def check_pk_signal(symbol, buy_i, sell_i, price, trend_pct):
     pos = st["position"]
 
     if pos is None:
+        pending_enabled = mtf_enabled and cfg.get("pk_mtf_pending_enabled", False)
+        max_pending = cfg.get("pk_mtf_pending_max_seconds", 300)
+        now_ts = time.time()
+
+        if st.get("pk_pending_dir") == "long" and sell_i:
+            st["pk_pending_dir"] = None
+        if st.get("pk_pending_dir") == "short" and buy_i:
+            st["pk_pending_dir"] = None
+        if st.get("pk_pending_dir") and (now_ts - st.get("pk_pending_since", now_ts)) > max_pending:
+            st["pk_pending_dir"] = None
+
+        if buy_i and not long_ok and pending_enabled:
+            st["pk_pending_dir"] = "long"
+            st["pk_pending_since"] = now_ts
+        elif sell_i and not short_ok and pending_enabled:
+            st["pk_pending_dir"] = "short"
+            st["pk_pending_since"] = now_ts
+
+        pending_dir = st.get("pk_pending_dir")
+        entry_dir = None
+        pending_executed = False
         if buy_i and long_ok:
-            debug_log(f"📡 [{symbol}] Pieki-Algo Signal: LONG @ {price}" + (f" (Trend%={round(trend_pct,2)})" if trend_pct is not None else ""))
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _pk_reset_state(st)
-                if exit_mode == "fixed_tp_sl":
-                    _pk_set_sl_tp(st, cfg, "long", price)
+            entry_dir = "long"
         elif sell_i and short_ok:
-            debug_log(f"📡 [{symbol}] Pieki-Algo Signal: SHORT @ {price}" + (f" (Trend%={round(trend_pct,2)})" if trend_pct is not None else ""))
-            await execute_entry(symbol, "short", price, is_add_on=False)
+            entry_dir = "short"
+        elif pending_dir == "long" and long_ok:
+            entry_dir = "long"
+            pending_executed = True
+        elif pending_dir == "short" and short_ok:
+            entry_dir = "short"
+            pending_executed = True
+
+        if entry_dir is not None:
+            tag = " (PENDING nachgeholt)" if pending_executed else ""
+            debug_log(f"📡 [{symbol}] Pieki-Algo Signal: {entry_dir.upper()}{tag} @ {price}" + (f" (Trend%={round(trend_pct,2)})" if trend_pct is not None else ""))
+            await execute_entry(symbol, entry_dir, price, is_add_on=False)
             if st["position"] is not None:
+                st["pk_pending_dir"] = None
                 _pk_reset_state(st)
                 if exit_mode == "fixed_tp_sl":
-                    _pk_set_sl_tp(st, cfg, "short", price)
+                    _pk_set_sl_tp(st, cfg, entry_dir, price)
         return
 
     if exit_mode != "flip":
@@ -5486,6 +5536,10 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
     position = None
     trades = []
     sl_cooldown_until_ts = None
+    pending_dir = None
+    pending_since_ts = None
+    pending_enabled = mtf_enabled and cfg.get("utb_mtf_pending_enabled", False)
+    pending_max_ms = cfg.get("utb_mtf_pending_max_seconds", 300) * 1000
 
     for i in range(warmup, n):
         price = c[i]
@@ -5503,25 +5557,38 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
         if position is None:
             if in_sl_cooldown:
                 continue
-            if signal_only:
-                if buy[i] and long_ok(i):
-                    size = (margin * leverage) / price
-                    position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                    _uh_bt_set_sl(position, cfg, margin, leverage)
-                elif sell[i] and short_ok(i):
-                    size = (margin * leverage) / price
-                    position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
-                    _uh_bt_set_sl(position, cfg, margin, leverage)
-                continue
-            if hull_green[i] is None:
-                continue
-            if buy[i] and hull_green[i] and long_ok(i):
+
+            raw_long_signal = buy[i] if signal_only else (buy[i] and bool(hull_green[i]))
+            raw_short_signal = sell[i] if signal_only else (sell[i] and hull_green[i] is not None and not hull_green[i])
+
+            if pending_dir == "long" and sell[i]:
+                pending_dir = None
+            if pending_dir == "short" and buy[i]:
+                pending_dir = None
+            if pending_dir is not None and (ts[i] - pending_since_ts) > pending_max_ms:
+                pending_dir = None
+
+            if raw_long_signal and not long_ok(i) and pending_enabled:
+                pending_dir = "long"
+                pending_since_ts = ts[i]
+            elif raw_short_signal and not short_ok(i) and pending_enabled:
+                pending_dir = "short"
+                pending_since_ts = ts[i]
+
+            entry_dir = None
+            if raw_long_signal and long_ok(i):
+                entry_dir = "long"
+            elif raw_short_signal and short_ok(i):
+                entry_dir = "short"
+            elif pending_dir == "long" and long_ok(i):
+                entry_dir = "long"
+            elif pending_dir == "short" and short_ok(i):
+                entry_dir = "short"
+
+            if entry_dir is not None:
+                pending_dir = None
                 size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                _uh_bt_set_sl(position, cfg, margin, leverage)
-            elif sell[i] and not hull_green[i] and short_ok(i):
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                position = {"dir": entry_dir, "entry": price, "size": size, "entry_i": i}
                 _uh_bt_set_sl(position, cfg, margin, leverage)
             continue
 
@@ -5823,6 +5890,10 @@ def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
     position = None
     trades = []
     sl_cooldown_until_ts = None
+    pending_dir = None
+    pending_since_ts = None
+    pending_enabled = mtf_enabled and cfg.get("pk_mtf_pending_enabled", False)
+    pending_max_ms = cfg.get("pk_mtf_pending_max_seconds", 300) * 1000
 
     for i in range(warmup, n):
         price = c[i]
@@ -5852,22 +5923,40 @@ def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
         if position is None:
             if in_cooldown:
                 continue
+
+            if pending_dir == "long" and bear[i]:
+                pending_dir = None
+            if pending_dir == "short" and bull[i]:
+                pending_dir = None
+            if pending_dir is not None and (ts[i] - pending_since_ts) > pending_max_ms:
+                pending_dir = None
+
+            if bull[i] and not long_ok(tpct) and pending_enabled:
+                pending_dir = "long"
+                pending_since_ts = ts[i]
+            elif bear[i] and not short_ok(tpct) and pending_enabled:
+                pending_dir = "short"
+                pending_since_ts = ts[i]
+
+            entry_dir = None
             if bull[i] and long_ok(tpct):
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "trail_active": False, "trail_best": price}
-                if exit_mode == "fixed_tp_sl":
-                    if sl_enabled:
-                        position["sl_price"] = price - sl_usd / size
-                    if tp_enabled:
-                        position["tp_price"] = price + tp_usd / size
+                entry_dir = "long"
             elif bear[i] and short_ok(tpct):
+                entry_dir = "short"
+            elif pending_dir == "long" and long_ok(tpct):
+                entry_dir = "long"
+            elif pending_dir == "short" and short_ok(tpct):
+                entry_dir = "short"
+
+            if entry_dir is not None:
+                pending_dir = None
                 size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "trail_active": False, "trail_best": price}
+                position = {"dir": entry_dir, "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "trail_active": False, "trail_best": price}
                 if exit_mode == "fixed_tp_sl":
                     if sl_enabled:
-                        position["sl_price"] = price + sl_usd / size
+                        position["sl_price"] = price - sl_usd / size if entry_dir == "long" else price + sl_usd / size
                     if tp_enabled:
-                        position["tp_price"] = price - tp_usd / size
+                        position["tp_price"] = price + tp_usd / size if entry_dir == "long" else price - tp_usd / size
             continue
 
         if exit_mode != "flip":
