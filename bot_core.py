@@ -521,6 +521,54 @@ async def save_bot_configs():
         debug_log("⚠️ Speichern der Grid-Bot-Configs fehlgeschlagen", {"error": str(e)})
 
 
+# Globale Schalter, unabhaengig von einzelnen Coins - z.B. um bei knappen Server-Ressourcen
+# (siehe Render Memory/CPU-Limit) Last komplett abzuschalten, ohne jeden Coin einzeln umzustellen.
+GLOBAL_SETTINGS = {
+    "scalp_board_enabled": True,   # Scalp-Board-Berechnung (RSI/Stoch/MACD/MO7/OBI auf 10-60s) fuer ALLE Coins
+    "copytrading_enabled": True,   # Copytrading vom Hyperliquid-Leaderboard komplett an/aus
+}
+
+
+async def save_global_settings():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        await r.set("gridbot:global_settings", json.dumps(GLOBAL_SETTINGS))
+    except Exception as e:
+        debug_log("⚠️ Speichern der globalen Einstellungen fehlgeschlagen", {"error": str(e)})
+
+
+async def load_global_settings():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        raw = await r.get("gridbot:global_settings")
+        if raw:
+            GLOBAL_SETTINGS.update(json.loads(raw))
+            debug_log("✅ Globale Einstellungen aus Redis geladen", GLOBAL_SETTINGS)
+    except Exception as e:
+        debug_log("⚠️ Laden der globalen Einstellungen fehlgeschlagen", {"error": str(e)})
+
+
+async def handle_global_settings_get(request):
+    return web.json_response(GLOBAL_SETTINGS)
+
+
+async def handle_global_settings_update(request):
+    body = await request.json()
+    changed = False
+    for key in ("scalp_board_enabled", "copytrading_enabled"):
+        if key in body:
+            GLOBAL_SETTINGS[key] = bool(body[key])
+            changed = True
+    if changed:
+        await save_global_settings()
+        debug_log("⚙️ Globale Einstellungen geändert", GLOBAL_SETTINGS)
+    return web.json_response({"success": True, **GLOBAL_SETTINGS})
+
+
 VALID_RESOLUTIONS = {"1m", "5m", "15m", "30m", "1h", "4h"}
 
 
@@ -928,7 +976,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
 <div class="topbar">
   <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select></div>
-  <div class="topbar-right"><a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><span id="mode-badge"></span><span id="active-badge"></span></div>
+  <div class="topbar-right">
+    <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Scalp-Board-Berechnung (RSI/Stoch/MACD/MO7/OBI) für ALLE Coins global an/aus - spart CPU/RAM, wenn du gerade nicht manuell scalpst">
+      <input type="checkbox" id="toggle-scalp-board-global" style="cursor:pointer;"> ⚡ Scalp-Details
+    </label>
+    <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
+      <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
+    </label>
+    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><span id="mode-badge"></span><span id="active-badge"></span>
+  </div>
 </div>
 <div class="container">
 
@@ -4043,10 +4099,30 @@ document.querySelectorAll('select.cfg, input[id]').forEach(el => {
   el.addEventListener('change', markTouched);
 });
 
+async function loadGlobalSettings() {
+  try {
+    const res = await fetch('/api/global_settings');
+    const data = await res.json();
+    document.getElementById('toggle-scalp-board-global').checked = !!data.scalp_board_enabled;
+    document.getElementById('toggle-copytrading-global').checked = !!data.copytrading_enabled;
+  } catch (e) {
+    console.error('Globale Einstellungen konnten nicht geladen werden:', e);
+  }
+}
+document.getElementById('toggle-scalp-board-global').addEventListener('change', async (e) => {
+  await fetch('/api/global_settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({scalp_board_enabled: e.target.checked}) });
+  showToast(e.target.checked ? '✅ Scalp-Details global AN' : '⏸️ Scalp-Details global AUS (spart Ressourcen)');
+});
+document.getElementById('toggle-copytrading-global').addEventListener('change', async (e) => {
+  await fetch('/api/global_settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({copytrading_enabled: e.target.checked}) });
+  showToast(e.target.checked ? '✅ Copytrading global AN' : '⏸️ Copytrading global AUS');
+});
+
 (async () => {
   await loadSymbols();
+  await loadGlobalSettings();
   refresh();
-  setInterval(refresh, 3000);
+  setInterval(refresh, 6000);
 })();
 </script>
 </body>
@@ -4093,14 +4169,14 @@ async def handle_status(request):
         "oms_oi_ok": st.get("oms_oi_ok"), "oms_oi_score": st.get("oms_oi_score"), "oms_open_interest": st.get("oms_open_interest"),
         "oms_liq_ok": st.get("oms_liq_ok"), "oms_liq_ratio": st.get("oms_liq_ratio"), "oms_liq_count": st.get("oms_liq_count"),
         "scalp_board": st.get("scalp_board", {}),
-        "quad_stoch_history": st.get("quad_stoch_history", [])[-300:],
+        "quad_stoch_history": st.get("quad_stoch_history", [])[-100:],
         "oms_cvd_ratio": st.get("oms_cvd_ratio"), "oms_funding_rate": st.get("oms_funding_rate"),
         "oms_tp1_done": st.get("oms_tp1_done"), "oms_trail_price": st.get("oms_trail_price"),
         "oms_dca_count": st.get("oms_dca_count"),
-        "oms_price_history": [[round(ts, 1), price] for ts, price in st.get("oms_price_history", [])[-200:]],
+        "oms_price_history": [[round(ts, 1), price] for ts, price in st.get("oms_price_history", [])[-100:]],
         "oms_markers": st.get("oms_markers", [])[-30:],
-        "oms_obi_history": st.get("oms_obi_history", [])[-300:],
-        "obi_history": st.get("obi_history", [])[-300:],
+        "oms_obi_history": st.get("oms_obi_history", [])[-100:],
+        "obi_history": st.get("obi_history", [])[-100:],
         "obi_spread_pct": st.get("obi_spread_pct"), "obi_recent_vol_pct": st.get("obi_recent_vol_pct"),
         "fib": st.get("fib"),
         "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"),
@@ -4131,7 +4207,7 @@ async def handle_status(request):
         "config": cfg,
         "stats": {"trades": stats["trades"], "win_rate_pct": win_rate, "total_pnl_usd": round(stats["total_pnl_usd"], 3)},
         "trade_log": st["trade_log"][-20:],
-        "price_history": st["price_history"][-200:],
+        "price_history": st["price_history"][-100:],
     }
     return web.json_response(payload)
 

@@ -10,6 +10,7 @@ from aiohttp import web
 
 from bot_core import (
     debug_log, PORT, SYMBOLS, BOTS, load_bot_configs, load_bot_state, state_persist_loop,
+    load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reset,
     handle_manual_trade, handle_backtest, handle_ht_sweep, handle_da_sweep, handle_es_sensitivity_sweep,
@@ -48,6 +49,8 @@ async def start_web_server():
     app.router.add_post("/api/mo7_sum_sweep", handle_mo7_sum_sweep)
     app.router.add_post("/api/utb_param_sweep", handle_utb_param_sweep)
     app.router.add_post("/api/pk_sensitivity_sweep", handle_pk_sensitivity_sweep)
+    app.router.add_get("/api/global_settings", handle_global_settings_get)
+    app.router.add_post("/api/global_settings", handle_global_settings_update)
     app.router.add_post("/api/reset", handle_reset)
     app.router.add_get("/copytrading", handle_ct_index)
     app.router.add_get("/api/ct/status", handle_ct_status)
@@ -86,6 +89,7 @@ async def main():
 
     await load_bot_configs()
     await load_bot_state()
+    await load_global_settings()
     await load_ct_watched()
     await start_web_server()
     await asyncio.gather(

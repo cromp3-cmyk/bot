@@ -16,7 +16,7 @@ from collections import deque
 
 from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
-    BOTS, execute_entry, execute_exit, execute_partial_exit, compute_step_abs,
+    BOTS, execute_entry, execute_exit, execute_partial_exit, compute_step_abs, GLOBAL_SETTINGS,
 )
 
 BINANCE_SYMBOL_MAP = {
@@ -3210,6 +3210,12 @@ async def scalp_board_poll_loop(symbol):
         try:
             cfg = b["config"]
             st = b["state"]
+            if not GLOBAL_SETTINGS.get("scalp_board_enabled", True) or not cfg["bot_active"]:
+                # Globaler Schalter aus, ODER dieser Coin ist gerade gar nicht aktiv - keine
+                # Berechnung, spart CPU/RAM (siehe Render-Ressourcenlimit). Board-Anzeige zeigt
+                # dann einfach "sammelt noch Daten" im Dashboard, bis wieder aktiviert.
+                await asyncio.sleep(5)
+                continue
             board = {}
             for label, seconds in SCALP_BOARD_TIMEFRAMES:
                 if seconds == 60:

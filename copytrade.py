@@ -14,7 +14,7 @@ from aiohttp import web
 
 from bot_core import (
     debug_log, get_lighter_client, place_market_order, get_precision,
-    get_price_decimals, get_min_base_amount, MARKET_INDICES, get_redis,
+    get_price_decimals, get_min_base_amount, MARKET_INDICES, get_redis, GLOBAL_SETTINGS,
 )
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
@@ -248,6 +248,11 @@ def extract_ct_positions(user_state):
 async def ct_leaderboard_refresh_loop():
     async with aiohttp.ClientSession() as session:
         while True:
+            if not GLOBAL_SETTINGS.get("copytrading_enabled", True):
+                # Komplett pausiert (siehe globaler Schalter im Dashboard) - kein Leaderboard-Abruf,
+                # spart Last, wenn Copytrading gerade nicht genutzt wird.
+                await asyncio.sleep(30)
+                continue
             debug_log("📡 [CopyTrading] Aktualisiere Hyperliquid-Leaderboard...")
             rows = await fetch_leaderboard(session)
             if rows:
@@ -290,6 +295,11 @@ async def ct_watch_loop():
 
     async with aiohttp.ClientSession() as session:
         while True:
+            if not GLOBAL_SETTINGS.get("copytrading_enabled", True):
+                # Komplett pausiert - keine userState/userFills-Anfragen an Hyperliquid, egal
+                # wie viele Trader gerade beobachtet/kopiert wuerden.
+                await asyncio.sleep(30)
+                continue
             for address, info in list(CT_STATE["watched"].items()):
                 # Nur Trader abfragen, die der Nutzer aktiv beobachtet ODER kopiert - alle
                 # anderen bleiben im Leaderboard sichtbar (Adresse+PnL), aber ohne staendige
