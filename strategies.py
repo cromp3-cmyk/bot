@@ -5582,12 +5582,17 @@ UTB_SWEEP_MIN_RELIABLE_TRADES = 5
 
 
 async def run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
-                               sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n=1):
+                               sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n=1,
+                               long_threshold_min=None, long_threshold_max=None, long_threshold_step=0.5,
+                               short_threshold_min=None, short_threshold_max=None, short_threshold_step=0.5):
     """'Monte-Carlo'-Parametersweep fuer UT Bot + Hull Flip: testet einen Bereich von ATR-Periode
     und Sensitivity (die beiden Parameter, die im Original-Pine-Script beide irrefuehrend
-    'Period' heissen) gegeneinander. Die Hull-MA UND der optionale MTF-Trend%-Filter werden nur
-    EINMAL berechnet (unabhaengig von ATR-Periode/Sensitivity) und fuer alle Kombinationen
-    wiederverwendet."""
+    'Period' heissen) gegeneinander - optional zusaetzlich noch die MTF-Trend%-Long-/Short-
+    Schwelle (nur wirksam, wenn utb_mtf_filter_enabled an ist; Min==Max bedeutet einfach 1
+    fester Wert, keine zusaetzlichen Kombinationen - das ist auch der Default, wenn die
+    Schwellen-Parameter weggelassen werden). Die Hull-MA UND der optionale MTF-Trend%-Filter
+    werden nur EINMAL berechnet (unabhaengig von allen gesweepten Parametern) und fuer alle
+    Kombinationen wiederverwendet."""
     max_candles = BACKTEST_MAX_CANDLES["ut_bot_hull"]
     resolution = cfg.get("utb_resolution", "5m")
     candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
@@ -5605,7 +5610,26 @@ async def run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max,
     atr_periods = [a for a in atr_periods if a >= 1]
     sensitivities = [s for s in sensitivities if s > 0]
 
-    total_combos = len(atr_periods) * len(sensitivities)
+    if long_threshold_min is None:
+        long_threshold_min = cfg.get("utb_mtf_long_threshold", 0.5)
+    if long_threshold_max is None:
+        long_threshold_max = long_threshold_min
+    if short_threshold_min is None:
+        short_threshold_min = cfg.get("utb_mtf_short_threshold", -0.5)
+    if short_threshold_max is None:
+        short_threshold_max = short_threshold_min
+    long_thresholds = sorted(set(round(long_threshold_min + i * long_threshold_step, 4)
+                                  for i in range(int((long_threshold_max - long_threshold_min) / max(long_threshold_step, 1e-9)) + 1)
+                                  if long_threshold_min + i * long_threshold_step <= long_threshold_max + 1e-9))
+    short_thresholds = sorted(set(round(short_threshold_min + i * short_threshold_step, 4)
+                                   for i in range(int((short_threshold_max - short_threshold_min) / max(short_threshold_step, 1e-9)) + 1)
+                                   if short_threshold_min + i * short_threshold_step <= short_threshold_max + 1e-9))
+    if not long_thresholds:
+        long_thresholds = [long_threshold_min]
+    if not short_thresholds:
+        short_thresholds = [short_threshold_min]
+
+    total_combos = len(atr_periods) * len(sensitivities) * len(long_thresholds) * len(short_thresholds)
     if total_combos == 0:
         return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
     if total_combos > UTB_SWEEP_MAX_COMBOS:
@@ -5631,9 +5655,15 @@ async def run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max,
             buy, sell, stop_line = compute_ut_bot(o, h, l, c, atr_p, sens, cfg.get("utb_heikin_ashi", False))
             long_flip, short_flip = compute_ut_hull_flip_signals(buy, sell, hull_green, cfg)
             warmup = max(atr_p, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 2
-            trades = _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct)
-            stats = summarize_backtest_trades(trades, exclude_top_n)
-            results.append({"utb_atr_period": atr_p, "utb_sensitivity": sens, **stats})
+            for long_thr in long_thresholds:
+                for short_thr in short_thresholds:
+                    cfg_combo = dict(cfg)
+                    cfg_combo["utb_mtf_long_threshold"] = long_thr
+                    cfg_combo["utb_mtf_short_threshold"] = short_thr
+                    trades = _simulate_uh_trades(candles, cfg_combo, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct)
+                    stats = summarize_backtest_trades(trades, exclude_top_n)
+                    results.append({"utb_atr_period": atr_p, "utb_sensitivity": sens,
+                                     "utb_mtf_long_threshold": long_thr, "utb_mtf_short_threshold": short_thr, **stats})
 
     best_sorted = sorted(results, key=lambda r: (r["trades"] >= UTB_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
     worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])

@@ -2315,6 +2315,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div><label>Sensitivity von</label><input type="number" step="0.01" id="utb-sweep-sens-min" value="0.5" style="width:90px;"></div>
     <div><label>bis</label><input type="number" step="0.01" id="utb-sweep-sens-max" value="5.0" style="width:90px;"></div>
     <div><label>Schritt</label><input type="number" step="0.01" id="utb-sweep-sens-step" value="0.5" style="width:90px;"></div>
+  </div>
+  <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">
+    Optional: MTF-Trend%-Schwellen mit sweepen (nur wirksam wenn "MTF-Trend%-Filter" oben auf "An" steht). Von=Bis lässt die Schwelle einfach fest wie eingestellt, keine zusätzlichen Kombinationen.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Long-Schwelle von</label><input type="number" step="0.1" id="utb-sweep-long-min" value="0.5" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" id="utb-sweep-long-max" value="0.5" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.1" id="utb-sweep-long-step" value="0.5" style="width:90px;"></div>
+    <div><label>Short-Schwelle von</label><input type="number" step="0.1" id="utb-sweep-short-min" value="-0.5" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" id="utb-sweep-short-max" value="-0.5" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.1" id="utb-sweep-short-step" value="0.5" style="width:90px;"></div>
     <button id="btn-utb-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
   </div>
   <div id="utb-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
@@ -2322,6 +2333,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <thead><tr>
       <th class="sortable" data-key="utb_atr_period">ATR-Periode ⇅</th>
       <th class="sortable" data-key="utb_sensitivity">Sensitivity ⇅</th>
+      <th class="sortable" data-key="utb_mtf_long_threshold">Long-Schwelle ⇅</th>
+      <th class="sortable" data-key="utb_mtf_short_threshold">Short-Schwelle ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -2336,6 +2349,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <thead><tr>
       <th class="sortable" data-key="utb_atr_period">ATR-Periode ⇅</th>
       <th class="sortable" data-key="utb_sensitivity">Sensitivity ⇅</th>
+      <th class="sortable" data-key="utb_mtf_long_threshold">Long-Schwelle ⇅</th>
+      <th class="sortable" data-key="utb_mtf_short_threshold">Short-Schwelle ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -3139,6 +3154,12 @@ document.getElementById('btn-utb-sweep').addEventListener('click', async () => {
     sensitivity_min: parseFloat(document.getElementById('utb-sweep-sens-min').value),
     sensitivity_max: parseFloat(document.getElementById('utb-sweep-sens-max').value),
     sensitivity_step: parseFloat(document.getElementById('utb-sweep-sens-step').value),
+    long_threshold_min: parseFloat(document.getElementById('utb-sweep-long-min').value),
+    long_threshold_max: parseFloat(document.getElementById('utb-sweep-long-max').value),
+    long_threshold_step: parseFloat(document.getElementById('utb-sweep-long-step').value),
+    short_threshold_min: parseFloat(document.getElementById('utb-sweep-short-min').value),
+    short_threshold_max: parseFloat(document.getElementById('utb-sweep-short-max').value),
+    short_threshold_step: parseFloat(document.getElementById('utb-sweep-short-step').value),
     exclude_top_n: parseInt(document.getElementById('utb-sweep-exclude-top-n').value) || 0,
     config: buildConfigPayload(),
   };
@@ -3178,6 +3199,8 @@ const utbSweepRowHtml = (r) => `
   <tr>
     <td>${r.utb_atr_period}</td>
     <td>${r.utb_sensitivity}</td>
+    <td>${r.utb_mtf_long_threshold}</td>
+    <td>${r.utb_mtf_short_threshold}</td>
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
@@ -4577,6 +4600,12 @@ async def handle_utb_param_sweep(request):
         sensitivity_min = max(0.01, float(body.get("sensitivity_min", 0.5)))
         sensitivity_max = max(sensitivity_min, float(body.get("sensitivity_max", 5.0)))
         sensitivity_step = max(0.01, float(body.get("sensitivity_step", 0.5)))
+        long_threshold_min = float(body.get("long_threshold_min", 0.5))
+        long_threshold_max = max(long_threshold_min, float(body.get("long_threshold_max", 0.5)))
+        long_threshold_step = max(0.01, float(body.get("long_threshold_step", 0.5)))
+        short_threshold_min = float(body.get("short_threshold_min", -0.5))
+        short_threshold_max = max(short_threshold_min, float(body.get("short_threshold_max", -0.5)))
+        short_threshold_step = max(0.01, float(body.get("short_threshold_step", 0.5)))
     except (TypeError, ValueError):
         return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
     try:
@@ -4590,7 +4619,9 @@ async def handle_utb_param_sweep(request):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
     result = await run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
-                                        sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n)
+                                        sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n,
+                                        long_threshold_min, long_threshold_max, long_threshold_step,
+                                        short_threshold_min, short_threshold_max, short_threshold_step)
     return web.json_response(result)
 
 
