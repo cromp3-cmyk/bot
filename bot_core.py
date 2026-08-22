@@ -395,8 +395,6 @@ def default_config():
         "utb_mtf_atr_len": int(os.getenv("UTB_MTF_ATR_LEN", "14")),
         "utb_mtf_long_threshold": float(os.getenv("UTB_MTF_LONG_THRESHOLD", "0.5")),
         "utb_mtf_short_threshold": float(os.getenv("UTB_MTF_SHORT_THRESHOLD", "-0.5")),
-        "utb_mtf_pending_enabled": os.getenv("UTB_MTF_PENDING_ENABLED", "false").lower() == "true",
-        "utb_mtf_pending_max_seconds": float(os.getenv("UTB_MTF_PENDING_MAX_SECONDS", "300")),
         "wtc_resolution": os.getenv("WTC_RESOLUTION", "5m"),
         "wtc_channel_len": int(os.getenv("WTC_CHANNEL_LEN", "9")),
         "wtc_average_len": int(os.getenv("WTC_AVERAGE_LEN", "12")),
@@ -435,8 +433,6 @@ def default_config():
         "pk_mtf_atr_len": int(os.getenv("PK_MTF_ATR_LEN", "14")),
         "pk_mtf_long_threshold": float(os.getenv("PK_MTF_LONG_THRESHOLD", "0.5")),
         "pk_mtf_short_threshold": float(os.getenv("PK_MTF_SHORT_THRESHOLD", "-0.5")),
-        "pk_mtf_pending_enabled": os.getenv("PK_MTF_PENDING_ENABLED", "false").lower() == "true",
-        "pk_mtf_pending_max_seconds": float(os.getenv("PK_MTF_PENDING_MAX_SECONDS", "300")),
     }
 
 
@@ -474,12 +470,10 @@ def default_state():
         "mo7_sl_price": None, "mo7_tp_price": None,
         "utb_last_hull_green": None,
         "utb_sl_price": None, "utb_sl_cooldown_until": 0.0,
-        "utb_pending_dir": None, "utb_pending_since": None,
         "utb_trend_pct_last": None,
         "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
         "wtc_sl_price": None, "wtc_tp_price": None,
         "pk_sl_price": None, "pk_tp_price": None, "pk_sl_cooldown_until": 0.0,
-        "pk_pending_dir": None, "pk_pending_since": None,
         "pk_trail_active": False, "pk_trail_best_price": None,
         "pk_trend_pct_last": None,
         "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
@@ -1733,13 +1727,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="ut_bot_hull"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="utb_mtf_long_threshold"></div>
   <div data-mode="ut_bot_hull"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="utb_mtf_short_threshold"></div>
-  <div data-mode="ut_bot_hull"><label>Pending-Signal (Signal wird bei Filter-Block gemerkt statt verworfen)</label>
-    <select class="cfg" id="utb_mtf_pending_enabled">
-      <option value="false">Aus - blockiertes Signal wird verworfen</option>
-      <option value="true">An - wird nachgeholt, sobald der Filter zustimmt (außer Gegen-Signal kommt zuerst)</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull"><label>Pending-Fenster (Sek., danach verfällt das gemerkte Signal)</label><input type="number" step="10" id="utb_mtf_pending_max_seconds"></div>
   <div data-mode="ut_bot_hull"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="utb_mtf_fast_len"></div>
   <div data-mode="ut_bot_hull"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="utb_mtf_slow_len"></div>
   <div data-mode="ut_bot_hull"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="utb_mtf_atr_len"></div>
@@ -1946,13 +1933,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="pieki_algo"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="pk_mtf_long_threshold"></div>
   <div data-mode="pieki_algo"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="pk_mtf_short_threshold"></div>
-  <div data-mode="pieki_algo"><label>Pending-Signal (Signal wird bei Filter-Block gemerkt statt verworfen)</label>
-    <select class="cfg" id="pk_mtf_pending_enabled">
-      <option value="false">Aus - blockiertes Signal wird verworfen</option>
-      <option value="true">An - wird nachgeholt, sobald der Filter zustimmt (außer Gegen-Signal kommt zuerst)</option>
-    </select>
-  </div>
-  <div data-mode="pieki_algo"><label>Pending-Fenster (Sek., danach verfällt das gemerkte Signal)</label><input type="number" step="10" id="pk_mtf_pending_max_seconds"></div>
   <div data-mode="pieki_algo"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="pk_mtf_fast_len"></div>
   <div data-mode="pieki_algo"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="pk_mtf_slow_len"></div>
   <div data-mode="pieki_algo"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="pk_mtf_atr_len"></div>
@@ -3755,8 +3735,6 @@ async function refresh() {
     setResolutionField('utb_mtf_tf3', data.config.utb_mtf_tf3);
     document.getElementById('utb_mtf_long_threshold').value = data.config.utb_mtf_long_threshold;
     document.getElementById('utb_mtf_short_threshold').value = data.config.utb_mtf_short_threshold;
-    document.getElementById('utb_mtf_pending_enabled').value = String(data.config.utb_mtf_pending_enabled);
-    document.getElementById('utb_mtf_pending_max_seconds').value = data.config.utb_mtf_pending_max_seconds;
     document.getElementById('utb_mtf_fast_len').value = data.config.utb_mtf_fast_len;
     document.getElementById('utb_mtf_slow_len').value = data.config.utb_mtf_slow_len;
     document.getElementById('utb_mtf_atr_len').value = data.config.utb_mtf_atr_len;
@@ -3795,8 +3773,6 @@ async function refresh() {
     setResolutionField('pk_mtf_tf3', data.config.pk_mtf_tf3);
     document.getElementById('pk_mtf_long_threshold').value = data.config.pk_mtf_long_threshold;
     document.getElementById('pk_mtf_short_threshold').value = data.config.pk_mtf_short_threshold;
-    document.getElementById('pk_mtf_pending_enabled').value = String(data.config.pk_mtf_pending_enabled);
-    document.getElementById('pk_mtf_pending_max_seconds').value = data.config.pk_mtf_pending_max_seconds;
     document.getElementById('pk_mtf_fast_len').value = data.config.pk_mtf_fast_len;
     document.getElementById('pk_mtf_slow_len').value = data.config.pk_mtf_slow_len;
     document.getElementById('pk_mtf_atr_len').value = data.config.pk_mtf_atr_len;
@@ -4134,8 +4110,6 @@ function buildConfigPayload() {
     utb_mtf_tf3: getResolutionField('utb_mtf_tf3'),
     utb_mtf_long_threshold: parseFloat(document.getElementById('utb_mtf_long_threshold').value),
     utb_mtf_short_threshold: parseFloat(document.getElementById('utb_mtf_short_threshold').value),
-    utb_mtf_pending_enabled: document.getElementById('utb_mtf_pending_enabled').value === 'true',
-    utb_mtf_pending_max_seconds: parseFloat(document.getElementById('utb_mtf_pending_max_seconds').value),
     utb_mtf_fast_len: parseInt(document.getElementById('utb_mtf_fast_len').value),
     utb_mtf_slow_len: parseInt(document.getElementById('utb_mtf_slow_len').value),
     utb_mtf_atr_len: parseInt(document.getElementById('utb_mtf_atr_len').value),
@@ -4174,8 +4148,6 @@ function buildConfigPayload() {
     pk_mtf_tf3: getResolutionField('pk_mtf_tf3'),
     pk_mtf_long_threshold: parseFloat(document.getElementById('pk_mtf_long_threshold').value),
     pk_mtf_short_threshold: parseFloat(document.getElementById('pk_mtf_short_threshold').value),
-    pk_mtf_pending_enabled: document.getElementById('pk_mtf_pending_enabled').value === 'true',
-    pk_mtf_pending_max_seconds: parseFloat(document.getElementById('pk_mtf_pending_max_seconds').value),
     pk_mtf_fast_len: parseInt(document.getElementById('pk_mtf_fast_len').value),
     pk_mtf_slow_len: parseInt(document.getElementById('pk_mtf_slow_len').value),
     pk_mtf_atr_len: parseInt(document.getElementById('pk_mtf_atr_len').value),
@@ -4408,7 +4380,6 @@ async def handle_config_update(request):
                 "utb_mtf_filter_enabled", "utb_mtf_tf1", "utb_mtf_tf2", "utb_mtf_tf3",
                 "utb_mtf_fast_len", "utb_mtf_slow_len", "utb_mtf_atr_len",
                 "utb_mtf_long_threshold", "utb_mtf_short_threshold",
-                "utb_mtf_pending_enabled", "utb_mtf_pending_max_seconds",
                 "wtc_resolution", "wtc_channel_len", "wtc_average_len", "wtc_ma_len",
                 "wtc_require_zone", "wtc_os_level", "wtc_ob_level", "wtc_direction_mode",
                 "wtc_always_in_market", "wtc_flip_exit_enabled", "wtc_sl_enabled",
@@ -4418,7 +4389,6 @@ async def handle_config_update(request):
                 "pk_sl_cooldown_seconds", "pk_trailing_enabled", "pk_trailing_activation_pct", "pk_trailing_step_pct",
                 "pk_mtf_filter_enabled", "pk_mtf_tf1", "pk_mtf_tf2", "pk_mtf_tf3", "pk_mtf_fast_len", "pk_mtf_slow_len",
                 "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
-                "pk_mtf_pending_enabled", "pk_mtf_pending_max_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
