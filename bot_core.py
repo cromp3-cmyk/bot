@@ -386,6 +386,15 @@ def default_config():
         "utb_sl_enabled": os.getenv("UTB_SL_ENABLED", "false").lower() == "true",
         "utb_sl_manual_usd": float(os.getenv("UTB_SL_MANUAL_USD", "5.0")),
         "utb_sl_cooldown_seconds": float(os.getenv("UTB_SL_COOLDOWN_SECONDS", "30")),
+        "utb_mtf_filter_enabled": os.getenv("UTB_MTF_FILTER_ENABLED", "false").lower() == "true",
+        "utb_mtf_tf1": os.getenv("UTB_MTF_TF1", "1m"),  # wie bei Pieki Algo: bis zu 3 Zeiteinheiten gemittelt
+        "utb_mtf_tf2": os.getenv("UTB_MTF_TF2", "2m"),
+        "utb_mtf_tf3": os.getenv("UTB_MTF_TF3", "3m"),  # "off" = diese TF nicht mit einbeziehen
+        "utb_mtf_fast_len": int(os.getenv("UTB_MTF_FAST_LEN", "5")),
+        "utb_mtf_slow_len": int(os.getenv("UTB_MTF_SLOW_LEN", "9")),
+        "utb_mtf_atr_len": int(os.getenv("UTB_MTF_ATR_LEN", "14")),
+        "utb_mtf_long_threshold": float(os.getenv("UTB_MTF_LONG_THRESHOLD", "0.5")),
+        "utb_mtf_short_threshold": float(os.getenv("UTB_MTF_SHORT_THRESHOLD", "-0.5")),
         "wtc_resolution": os.getenv("WTC_RESOLUTION", "5m"),
         "wtc_channel_len": int(os.getenv("WTC_CHANNEL_LEN", "9")),
         "wtc_average_len": int(os.getenv("WTC_AVERAGE_LEN", "12")),
@@ -461,6 +470,7 @@ def default_state():
         "mo7_sl_price": None, "mo7_tp_price": None,
         "utb_last_hull_green": None,
         "utb_sl_price": None, "utb_sl_cooldown_until": 0.0,
+        "utb_trend_pct_last": None,
         "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
         "wtc_sl_price": None, "wtc_tp_price": None,
         "pk_sl_price": None, "pk_tp_price": None, "pk_sl_cooldown_until": 0.0,
@@ -1656,6 +1666,70 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="ut_bot_hull"><label>SL Fester $-Betrag (nur wenn Stop-Loss An)</label><input type="number" step="0.5" id="utb_sl_manual_usd"></div>
   <div data-mode="ut_bot_hull"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="utb_sl_cooldown_seconds"></div>
+  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    MTF-Trend%-Filter (wie bei Pieki Algo): Trend% wird als Durchschnitt aus bis zu 3
+    Zeiteinheiten berechnet. Gilt für JEDEN Einstieg, auch beim Flip in die Gegenrichtung -
+    Short nur wenn Trend% unter der Short-Schwelle, Long nur wenn über der Long-Schwelle.
+  </div>
+  <div data-mode="ut_bot_hull"><label>MTF-Trend%-Filter</label>
+    <select class="cfg" id="utb_mtf_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Short nur unter Short-Schwelle, Long nur über Long-Schwelle</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot_hull"><label>Trend% Zeiteinheit 1</label>
+    <select class="cfg" id="utb_mtf_tf1">
+      <option value="off">Aus</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="utb_mtf_tf1_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="ut_bot_hull"><label>Trend% Zeiteinheit 2</label>
+    <select class="cfg" id="utb_mtf_tf2">
+      <option value="off">Aus</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="utb_mtf_tf2_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="ut_bot_hull"><label>Trend% Zeiteinheit 3</label>
+    <select class="cfg" id="utb_mtf_tf3">
+      <option value="off">Aus</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="utb_mtf_tf3_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="ut_bot_hull"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="utb_mtf_long_threshold"></div>
+  <div data-mode="ut_bot_hull"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="utb_mtf_short_threshold"></div>
+  <div data-mode="ut_bot_hull"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="utb_mtf_fast_len"></div>
+  <div data-mode="ut_bot_hull"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="utb_mtf_slow_len"></div>
+  <div data-mode="ut_bot_hull"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="utb_mtf_atr_len"></div>
 
   <div data-mode="wavetrend_cross" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🌊 WaveTrend Cross (Kernsignal aus "Cipher B"): wt1 kreuzt wt2 - das sind die grünen/roten
@@ -2693,7 +2767,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3632,6 +3706,15 @@ async function refresh() {
     document.getElementById('utb_sl_enabled').value = String(data.config.utb_sl_enabled);
     document.getElementById('utb_sl_manual_usd').value = data.config.utb_sl_manual_usd;
     document.getElementById('utb_sl_cooldown_seconds').value = data.config.utb_sl_cooldown_seconds;
+    document.getElementById('utb_mtf_filter_enabled').value = String(data.config.utb_mtf_filter_enabled);
+    setResolutionField('utb_mtf_tf1', data.config.utb_mtf_tf1);
+    setResolutionField('utb_mtf_tf2', data.config.utb_mtf_tf2);
+    setResolutionField('utb_mtf_tf3', data.config.utb_mtf_tf3);
+    document.getElementById('utb_mtf_long_threshold').value = data.config.utb_mtf_long_threshold;
+    document.getElementById('utb_mtf_short_threshold').value = data.config.utb_mtf_short_threshold;
+    document.getElementById('utb_mtf_fast_len').value = data.config.utb_mtf_fast_len;
+    document.getElementById('utb_mtf_slow_len').value = data.config.utb_mtf_slow_len;
+    document.getElementById('utb_mtf_atr_len').value = data.config.utb_mtf_atr_len;
     setResolutionField('wtc_resolution', data.config.wtc_resolution);
     document.getElementById('wtc_channel_len').value = data.config.wtc_channel_len;
     document.getElementById('wtc_average_len').value = data.config.wtc_average_len;
@@ -3998,6 +4081,15 @@ function buildConfigPayload() {
     utb_sl_enabled: document.getElementById('utb_sl_enabled').value === 'true',
     utb_sl_manual_usd: parseFloat(document.getElementById('utb_sl_manual_usd').value),
     utb_sl_cooldown_seconds: parseFloat(document.getElementById('utb_sl_cooldown_seconds').value),
+    utb_mtf_filter_enabled: document.getElementById('utb_mtf_filter_enabled').value === 'true',
+    utb_mtf_tf1: getResolutionField('utb_mtf_tf1'),
+    utb_mtf_tf2: getResolutionField('utb_mtf_tf2'),
+    utb_mtf_tf3: getResolutionField('utb_mtf_tf3'),
+    utb_mtf_long_threshold: parseFloat(document.getElementById('utb_mtf_long_threshold').value),
+    utb_mtf_short_threshold: parseFloat(document.getElementById('utb_mtf_short_threshold').value),
+    utb_mtf_fast_len: parseInt(document.getElementById('utb_mtf_fast_len').value),
+    utb_mtf_slow_len: parseInt(document.getElementById('utb_mtf_slow_len').value),
+    utb_mtf_atr_len: parseInt(document.getElementById('utb_mtf_atr_len').value),
     wtc_resolution: getResolutionField('wtc_resolution'),
     wtc_channel_len: parseInt(document.getElementById('wtc_channel_len').value),
     wtc_average_len: parseInt(document.getElementById('wtc_average_len').value),
@@ -4193,6 +4285,7 @@ async def handle_status(request):
         "mo7_tp_price": st.get("mo7_tp_price"),
         "utb_last_hull_green": st.get("utb_last_hull_green"),
         "utb_sl_price": st.get("utb_sl_price"),
+        "utb_trend_pct_last": st.get("utb_trend_pct_last"),
         "wtc_last_wt1": st.get("wtc_last_wt1"), "wtc_last_wt2": st.get("wtc_last_wt2"),
         "wtc_sl_price": st.get("wtc_sl_price"), "wtc_tp_price": st.get("wtc_tp_price"),
         "pk_sl_price": st.get("pk_sl_price"), "pk_tp_price": st.get("pk_tp_price"),
@@ -4261,6 +4354,9 @@ async def handle_config_update(request):
                 "utb_resolution", "utb_atr_period", "utb_sensitivity", "utb_heikin_ashi",
                 "utb_hull_period", "utb_flip_trigger", "utb_direction_mode",
                 "utb_sl_enabled", "utb_sl_manual_usd", "utb_sl_cooldown_seconds",
+                "utb_mtf_filter_enabled", "utb_mtf_tf1", "utb_mtf_tf2", "utb_mtf_tf3",
+                "utb_mtf_fast_len", "utb_mtf_slow_len", "utb_mtf_atr_len",
+                "utb_mtf_long_threshold", "utb_mtf_short_threshold",
                 "wtc_resolution", "wtc_channel_len", "wtc_average_len", "wtc_ma_len",
                 "wtc_require_zone", "wtc_os_level", "wtc_ob_level", "wtc_direction_mode",
                 "wtc_always_in_market", "wtc_flip_exit_enabled", "wtc_sl_enabled",
