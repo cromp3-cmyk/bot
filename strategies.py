@@ -529,18 +529,26 @@ async def binance_1s_poll_loop(symbol):
         try:
             cfg = b["config"]
             if cfg["bot_active"]:
-                data = await fetch_candles_binance(symbol, "1s", count_back=1000)
+                # count_back klein halten (nicht mehr 1000!) - wir brauchen bei einem 5-Sekunden-
+                # Poll-Intervall nur eine kleine Ueberlappung zurueck, um bereits gespeicherte,
+                # aber von Binance zwischenzeitlich noch nachtraeglich stabilisierte/korrigierte
+                # juengste 1s-Kerzen zu UEBERSCHREIBEN statt sie fuer immer im alten (moeglicherweise
+                # unvollstaendigen) Zustand haengen zu lassen. Frueher wurden hier 1000 Kerzen pro
+                # Abfrage geholt, aber praktisch nur die paar neuesten benutzt - der Rest wurde
+                # verworfen und hat nur unnoetig Bandbreite gekostet (siehe Render-Bandbreitenlimit).
+                # 20 Sekunden Ueberlappung reichen bei 5s-Poll-Abstand mit deutlichem Sicherheitspuffer.
+                data = await fetch_candles_binance(symbol, "1s", count_back=20)
                 if data:
                     timestamps, opens, highs, lows, closes = data
                     buffer = st.get("binance_1s_buffer", [])
-                    # Nur neue Kerzen anhaengen statt jedes Mal den kompletten Puffer zu
-                    # deduplizieren+sortieren (war bei vielen Coins gleichzeitig ein spuerbarer
-                    # Speicher-/CPU-Fresser). Binance liefert die Kerzen bereits aufsteigend
-                    # sortiert, daher reicht ein einfacher Vergleich mit dem letzten Timestamp.
-                    last_ts = buffer[-1]["ts"] if buffer else -1
+                    by_ts = {c["ts"]: idx for idx, c in enumerate(buffer[-25:])}  # nur die Ueberlappungszone durchsuchen, nicht den ganzen Puffer
+                    offset = len(buffer) - len(buffer[-25:])
                     for i in range(len(timestamps)):
-                        if timestamps[i] > last_ts:
-                            buffer.append({"ts": timestamps[i], "o": opens[i], "h": highs[i], "l": lows[i], "c": closes[i]})
+                        new_candle = {"ts": timestamps[i], "o": opens[i], "h": highs[i], "l": lows[i], "c": closes[i]}
+                        if timestamps[i] in by_ts:
+                            buffer[offset + by_ts[timestamps[i]]] = new_candle  # bereits vorhanden -> mit frischem Wert ueberschreiben
+                        else:
+                            buffer.append(new_candle)  # wirklich neu -> anhaengen
                     if len(buffer) > 10000:  # ~2.75 Stunden 1s-Historie (reduziert wegen Speicherlimit)
                         buffer = buffer[-10000:]
                     st["binance_1s_buffer"] = buffer
@@ -2616,6 +2624,7 @@ async def utb_poll_loop(symbol):
                     if due_heartbeat:
                         last_heartbeat = now
                         debug_log(f"💓 [{symbol}] UT-Bot+Hull aktiv: Preis={closed_c[-1]}, Hull-grün={hull_green[-1]}, "
+                                  f"buy_i={buy[-1]}, sell_i={sell[-1]}, "
                                   f"Trigger={cfg.get('utb_flip_trigger')}, Trend%={round(trend_now,2)}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
                     if last_processed_ts is None:
