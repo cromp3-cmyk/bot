@@ -2516,9 +2516,13 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
         return
 
     if pos == "long" and short_flip_i:
-        if direction_mode == "long_only" or not short_ok:
-            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit: LONG @ {price}")
-            await execute_exit(symbol, price, "UTB-HULL-EXIT")
+        if direction_mode == "long_only":
+            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (Richtung=Nur Long): LONG @ {price}")
+            await execute_exit(symbol, price, "UTB-HULL-EXIT-DIR")
+            st["utb_sl_price"] = None
+        elif not short_ok:
+            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (MTF-Filter blockiert Short, Trend%={round(trend_pct,2) if trend_pct is not None else '?'}): LONG @ {price}")
+            await execute_exit(symbol, price, "UTB-HULL-EXIT-MTF")
             st["utb_sl_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: LONG -> SHORT @ {price}")
@@ -2527,9 +2531,13 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
             if st["position"] is not None:
                 _uh_set_sl(st, cfg, "short", price)
     elif pos == "short" and long_flip_i:
-        if direction_mode == "short_only" or not long_ok:
-            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit: SHORT @ {price}")
-            await execute_exit(symbol, price, "UTB-HULL-EXIT")
+        if direction_mode == "short_only":
+            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (Richtung=Nur Short): SHORT @ {price}")
+            await execute_exit(symbol, price, "UTB-HULL-EXIT-DIR")
+            st["utb_sl_price"] = None
+        elif not long_ok:
+            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (MTF-Filter blockiert Long, Trend%={round(trend_pct,2) if trend_pct is not None else '?'}): SHORT @ {price}")
+            await execute_exit(symbol, price, "UTB-HULL-EXIT-MTF")
             st["utb_sl_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: SHORT -> LONG @ {price}")
@@ -5536,7 +5544,12 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
 
         if position["dir"] == "long" and short_flip[i]:
             can_flip = direction_mode != "long_only" and short_ok(i)
-            reason = "UTB-HULL-FLIP" if can_flip else "UTB-HULL-EXIT"
+            if can_flip:
+                reason = "UTB-HULL-FLIP"
+            elif direction_mode == "long_only":
+                reason = "UTB-HULL-EXIT-DIR"
+            else:
+                reason = "UTB-HULL-EXIT-MTF"
             _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
             if not can_flip:
                 position = None
@@ -5546,7 +5559,12 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
                 _uh_bt_set_sl(position, cfg, margin, leverage)
         elif position["dir"] == "short" and long_flip[i]:
             can_flip = direction_mode != "short_only" and long_ok(i)
-            reason = "UTB-HULL-FLIP" if can_flip else "UTB-HULL-EXIT"
+            if can_flip:
+                reason = "UTB-HULL-FLIP"
+            elif direction_mode == "short_only":
+                reason = "UTB-HULL-EXIT-DIR"
+            else:
+                reason = "UTB-HULL-EXIT-MTF"
             _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
             if not can_flip:
                 position = None
