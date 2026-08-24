@@ -433,6 +433,9 @@ def default_config():
         "pk_mtf_atr_len": int(os.getenv("PK_MTF_ATR_LEN", "14")),
         "pk_mtf_long_threshold": float(os.getenv("PK_MTF_LONG_THRESHOLD", "0.5")),
         "pk_mtf_short_threshold": float(os.getenv("PK_MTF_SHORT_THRESHOLD", "-0.5")),
+        "fr_resolution": os.getenv("FR_RESOLUTION", "5m"),
+        "fr_periods": int(os.getenv("FR_PERIODS", "2")),  # "n" im Original-Pine-Script (Kerzen links+rechts fuer die Fraktal-Bestaetigung)
+        "fr_direction_mode": os.getenv("FR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
     }
 
 
@@ -1044,6 +1047,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="ut_bot_hull">UT Bot + Hull Flip (ATR-Trailing-Stop, immer im Markt, Flip-Trigger wählbar, kein SL/TP)</option>
       <option value="wavetrend_cross">WaveTrend Cross (Cipher-B-Kernsignal, Zonenfilter wählbar, immer im Markt oder normal, fester SL+TP)</option>
       <option value="pieki_algo">Pieki Algo (SuperTrend+SMA9-Signal, Flip oder fester SL+TP, optionaler MTF-Trend%-Filter)</option>
+      <option value="fractals_flip">Williams Fractals (Swing-High/Low-Umkehrpunkte, immer im Markt, nur Buy/Sell-Wechsel)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1937,6 +1941,41 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="pieki_algo"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="pk_mtf_slow_len"></div>
   <div data-mode="pieki_algo"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="pk_mtf_atr_len"></div>
 
+  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🔺 Williams Fractals: eine Kerze ist ein "Hoch-Fraktal", wenn sie hoeher ist als die
+    "Perioden" Kerzen davor UND danach (analog fuer "Tief-Fraktal" beim Tief) - wie im
+    Original-Pine-Script, aber vereinfacht (ohne die Gleichstand-Sonderfaelle des Originals,
+    die bei fast identischen Hochs/Tiefs noch mehr Fraktale zulassen). Ein Fraktal wird erst
+    "Perioden" Kerzen im Nachhinein bestaetigt, kein Echtzeit-Signal. Tief-Fraktal = Kauf-Signal,
+    Hoch-Fraktal = Verkauf-Signal. Immer im Markt: dreht direkt beim jeweils naechsten
+    Gegen-Signal, keine Filter, kein SL/TP - reiner Buy/Sell-Wechsel.
+  </div>
+  <div data-mode="fractals_flip"><label>Zeitrahmen</label>
+    <select class="cfg" id="fr_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="fr_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="fractals_flip"><label>Perioden (links+rechts für die Fraktal-Bestätigung)</label><input type="number" step="1" id="fr_periods"></div>
+  <div data-mode="fractals_flip"><label>Richtung</label>
+    <select class="cfg" id="fr_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -2782,7 +2821,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3776,6 +3815,9 @@ async function refresh() {
     document.getElementById('pk_mtf_fast_len').value = data.config.pk_mtf_fast_len;
     document.getElementById('pk_mtf_slow_len').value = data.config.pk_mtf_slow_len;
     document.getElementById('pk_mtf_atr_len').value = data.config.pk_mtf_atr_len;
+    setResolutionField('fr_resolution', data.config.fr_resolution);
+    document.getElementById('fr_periods').value = data.config.fr_periods;
+    document.getElementById('fr_direction_mode').value = data.config.fr_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -4151,6 +4193,9 @@ function buildConfigPayload() {
     pk_mtf_fast_len: parseInt(document.getElementById('pk_mtf_fast_len').value),
     pk_mtf_slow_len: parseInt(document.getElementById('pk_mtf_slow_len').value),
     pk_mtf_atr_len: parseInt(document.getElementById('pk_mtf_atr_len').value),
+    fr_resolution: getResolutionField('fr_resolution'),
+    fr_periods: parseInt(document.getElementById('fr_periods').value),
+    fr_direction_mode: document.getElementById('fr_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -4389,6 +4434,7 @@ async def handle_config_update(request):
                 "pk_sl_cooldown_seconds", "pk_trailing_enabled", "pk_trailing_activation_pct", "pk_trailing_step_pct",
                 "pk_mtf_filter_enabled", "pk_mtf_tf1", "pk_mtf_tf2", "pk_mtf_tf3", "pk_mtf_fast_len", "pk_mtf_slow_len",
                 "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
+                "fr_resolution", "fr_periods", "fr_direction_mode",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

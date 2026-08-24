@@ -3218,6 +3218,136 @@ async def pk_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+def compute_fractals(highs, lows, n):
+    """Williams Fractals, portiert aus 'Williams Fractals' (Pine v6) - VEREINFACHT: das Original
+    hat zusaetzliche Gleichstand-Sonderfaelle (upflagUpFrontier1-4/downflagUpFrontier1-4), die bei
+    fast identischen Hoch-/Tiefwerten noch mehr Fraktale zulassen. Hier stattdessen die strengere
+    Standard-Definition: Pivot muss ECHT hoeher/tiefer sein als alle n Kerzen links UND rechts,
+    keine Gleichstaende erlaubt. Gibt (up_fractal, down_fractal) zurueck - beide als Bool-Listen,
+    wobei up_fractal[i]/down_fractal[i] bedeutet: die Kerze bei Index (i-n) wurde bei Index i als
+    Fraktal BESTAETIGT (man braucht ja die n Kerzen danach, um es zu wissen - kein Echtzeit-Signal,
+    immer n Kerzen im Nachhinein)."""
+    total = len(highs)
+    up_fractal = [False] * total
+    down_fractal = [False] * total
+    for i in range(2 * n, total):
+        pivot = i - n
+        if highs[pivot] > max(highs[pivot - n:pivot]) and highs[pivot] > max(highs[pivot + 1:pivot + n + 1]):
+            up_fractal[i] = True
+        if lows[pivot] < min(lows[pivot - n:pivot]) and lows[pivot] < min(lows[pivot + 1:pivot + n + 1]):
+            down_fractal[i] = True
+    return up_fractal, down_fractal
+
+
+async def check_fr_signal(symbol, buy_i, sell_i, price):
+    """Immer im Markt, reiner Buy/Sell-Wechsel: Tief-Fraktal (down_fractal) = Kauf-Signal,
+    Hoch-Fraktal (up_fractal) = Verkauf-Signal. Kein Filter, kein SL/TP - dreht beim jeweils
+    naechsten Gegen-Signal direkt. Bei Long-/Short-only wird bei Gegen-Signal nur glattgestellt."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    direction_mode = cfg.get("fr_direction_mode", "both")
+    long_ok = direction_mode != "short_only"
+    short_ok = direction_mode != "long_only"
+    pos = st["position"]
+
+    if pos is None:
+        if buy_i and long_ok:
+            debug_log(f"📡 [{symbol}] Fractals Ersteinstieg: LONG @ {price}")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+        elif sell_i and short_ok:
+            debug_log(f"📡 [{symbol}] Fractals Ersteinstieg: SHORT @ {price}")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+        return
+
+    if pos == "long" and sell_i:
+        if direction_mode == "long_only":
+            debug_log(f"🚪 [{symbol}] Fractals Exit (Richtung=Nur Long): LONG @ {price}")
+            await execute_exit(symbol, price, "FR-EXIT-DIR")
+        else:
+            debug_log(f"🔄 [{symbol}] Fractals Flip: LONG -> SHORT @ {price}")
+            await execute_exit(symbol, price, "FR-FLIP")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+    elif pos == "short" and buy_i:
+        if direction_mode == "short_only":
+            debug_log(f"🚪 [{symbol}] Fractals Exit (Richtung=Nur Short): SHORT @ {price}")
+            await execute_exit(symbol, price, "FR-EXIT-DIR")
+        else:
+            debug_log(f"🔄 [{symbol}] Fractals Flip: SHORT -> LONG @ {price}")
+            await execute_exit(symbol, price, "FR-FLIP")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+
+
+async def fr_poll_loop(symbol):
+    """Williams Fractals: Tief-Fraktal = Kauf, Hoch-Fraktal = Verkauf, immer im Markt, reiner
+    Buy/Sell-Wechsel (siehe check_fr_signal/compute_fractals)."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "fractals_flip" and cfg["bot_active"]:
+                resolution = cfg.get("fr_resolution", "5m")
+                n = cfg.get("fr_periods", 2)
+                min_needed = 2 * n + 5
+                needed_bars = min(1000, max(min_needed * 2, 220))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    up_fractal, down_fractal = compute_fractals(closed_h, closed_l, n)
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] Fractals aktiv: Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 2 * n:
+                            continue
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        await check_fr_signal(symbol, down_fractal[idx], up_fractal[idx], price_i)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Fractals wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Fractals wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Fractals-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
 async def oms_rsi_poll_loop(symbol):
     """Separater, traeger laufender Poll-Loop nur fuer den optionalen RSI-Regime-Filter von
     OBI-Momentum-Scalp (RSI < Mittellinie -> nur Short erlaubt, RSI > Mittellinie -> nur Long
@@ -5790,6 +5920,64 @@ def backtest_wavetrend_cross(candles, cfg):
     return _simulate_wtc_trades(candles, cfg, bull, bear, warmup)
 
 
+def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup):
+    """Backtest-Pendant zu check_fr_signal - immer im Markt, reiner Buy/Sell-Wechsel ohne
+    Filter/SL/TP. Tief-Fraktal = Kauf, Hoch-Fraktal = Verkauf."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    direction_mode = cfg.get("fr_direction_mode", "both")
+    long_ok = direction_mode != "short_only"
+    short_ok = direction_mode != "long_only"
+
+    position = None
+    trades = []
+
+    for i in range(warmup, n):
+        price = c[i]
+        buy_i = down_fractal[i]
+        sell_i = up_fractal[i]
+
+        if position is None:
+            if buy_i and long_ok:
+                size = (margin * leverage) / price
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+            elif sell_i and short_ok:
+                size = (margin * leverage) / price
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+            continue
+
+        if position["dir"] == "long" and sell_i:
+            reason = "FR-EXIT-DIR" if direction_mode == "long_only" else "FR-FLIP"
+            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
+            if direction_mode == "long_only":
+                position = None
+            else:
+                size = (margin * leverage) / price
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+        elif position["dir"] == "short" and buy_i:
+            reason = "FR-EXIT-DIR" if direction_mode == "short_only" else "FR-FLIP"
+            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
+            if direction_mode == "short_only":
+                position = None
+            else:
+                size = (margin * leverage) / price
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_fractals_flip(candles, cfg):
+    ts, o, h, l, c = candles
+    n_periods = cfg.get("fr_periods", 2)
+    up_fractal, down_fractal = compute_fractals(h, l, n_periods)
+    warmup = 2 * n_periods + 5
+    return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup)
+
+
 def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
     """Backtest-Pendant zu check_pk_signal/check_pk_sl_tp - siehe dort fuer die identische Logik
     im Live-Betrieb. trend_pct wird UNABHAENGIG von Sensitivity berechnet und beim Sweep nur
@@ -6045,6 +6233,7 @@ BACKTEST_MAX_CANDLES = {
     "ut_bot_hull": 100_000,
     "wavetrend_cross": 100_000,
     "pieki_algo": 100_000,
+    "fractals_flip": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -6056,6 +6245,7 @@ BACKTEST_FUNCS = {
     "ut_bot_hull": backtest_ut_bot_hull,
     "wavetrend_cross": backtest_wavetrend_cross,
     "pieki_algo": backtest_peki_algo,
+    "fractals_flip": backtest_fractals_flip,
     # "mo7_scalp" bewusst NICHT hier drin - braucht eine 6er-Tupel-Kerzenquelle MIT Volumen
     # (MFI-Baustein), deshalb in run_backtest() als Sonderfall behandelt statt ueber diesen
     # generischen 5er-Tupel-Dispatch.
@@ -6086,11 +6276,11 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         }
 
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution"}[entry_mode]
+    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution", "fractals_flip": "fr_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
