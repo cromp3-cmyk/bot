@@ -177,6 +177,7 @@ def default_config():
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
         "grid_mode": os.getenv("GRID_MODE", "pct"),  # "pct" oder "usd"
+        "grid_direction_mode": os.getenv("GRID_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
         "grid_step_pct": float(os.getenv("GRID_STEP_PCT", "0.25")),
         "tp_step_pct": float(os.getenv("TP_STEP_PCT", "0.25")),
         "grid_step_usd": float(os.getenv("GRID_STEP_USD", "150")),
@@ -436,6 +437,7 @@ def default_config():
         "fr_resolution": os.getenv("FR_RESOLUTION", "5m"),
         "fr_periods": int(os.getenv("FR_PERIODS", "2")),  # "n" im Original-Pine-Script (Kerzen links+rechts fuer die Fraktal-Bestaetigung)
         "fr_direction_mode": os.getenv("FR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "fr_invert_direction": os.getenv("FR_INVERT_DIRECTION", "false").lower() == "true",  # Tief-Fraktal=Verkauf, Hoch-Fraktal=Kauf statt umgekehrt
     }
 
 
@@ -886,7 +888,11 @@ async def execute_exit(symbol, price, reason):
 
     if cfg.get("auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid":
         opposite = "short" if closing_side == "long" else "long"
-        await execute_entry(symbol, opposite, price, is_add_on=False)
+        direction_mode = cfg.get("grid_direction_mode", "both")
+        if direction_mode == "both" or (direction_mode == "long_only" and opposite == "long") or (direction_mode == "short_only" and opposite == "short"):
+            await execute_entry(symbol, opposite, price, is_add_on=False)
+        # sonst (Richtung erlaubt die Gegenrichtung nicht): bleibt flach, wartet auf das naechste
+        # Grid-Level in der erlaubten Richtung (siehe on_price_update)
 
 
 
@@ -1975,7 +1981,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short</option>
     </select>
   </div>
+  <div data-mode="fractals_flip"><label>Invertiert-Modus</label>
+    <select class="cfg" id="fr_invert_direction">
+      <option value="false">Aus - Tief-Fraktal=Kauf, Hoch-Fraktal=Verkauf</option>
+      <option value="true">An - Tief-Fraktal=Verkauf, Hoch-Fraktal=Kauf</option>
+    </select>
+  </div>
 
+  <div data-mode="grid"><label>Richtung</label>
+    <select class="cfg" id="grid_direction_mode">
+      <option value="both">Beide (Long unter Anker, Short über Anker)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
   <div data-mode="grid"><label>Grid-Modus</label>
     <select class="cfg" id="grid_mode">
       <option value="pct">Prozent (%)</option>
@@ -3818,6 +3837,8 @@ async function refresh() {
     setResolutionField('fr_resolution', data.config.fr_resolution);
     document.getElementById('fr_periods').value = data.config.fr_periods;
     document.getElementById('fr_direction_mode').value = data.config.fr_direction_mode;
+    document.getElementById('fr_invert_direction').value = String(data.config.fr_invert_direction);
+    document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
     document.getElementById('tp_step_pct').value = data.config.tp_step_pct;
@@ -4196,6 +4217,8 @@ function buildConfigPayload() {
     fr_resolution: getResolutionField('fr_resolution'),
     fr_periods: parseInt(document.getElementById('fr_periods').value),
     fr_direction_mode: document.getElementById('fr_direction_mode').value,
+    fr_invert_direction: document.getElementById('fr_invert_direction').value === 'true',
+    grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
     tp_step_pct: parseFloat(document.getElementById('tp_step_pct').value),
@@ -4379,7 +4402,7 @@ async def handle_config_update(request):
         return web.json_response({"error": "unknown symbol"}, status=404)
     body = await request.json()
     cfg = BOTS[symbol]["config"]
-    for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_step_pct", "tp_step_pct",
+    for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_direction_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "grid_sl_enabled", "grid_sl_manual_usd", "dry_run", "auto_reverse", "binance_market_type",
                 "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_instant_reset_ratio", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_depth_weighting_enabled", "obi_use_median", "obi_min_liquidity", "obi_breakeven_enabled", "obi_breakeven_trigger_ratio", "obi_breakeven_lock_usd", "obi_breakeven_lock_pct", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
                 "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length",
@@ -4434,7 +4457,7 @@ async def handle_config_update(request):
                 "pk_sl_cooldown_seconds", "pk_trailing_enabled", "pk_trailing_activation_pct", "pk_trailing_step_pct",
                 "pk_mtf_filter_enabled", "pk_mtf_tf1", "pk_mtf_tf2", "pk_mtf_tf3", "pk_mtf_fast_len", "pk_mtf_slow_len",
                 "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
-                "fr_resolution", "fr_periods", "fr_direction_mode",
+                "fr_resolution", "fr_periods", "fr_direction_mode", "fr_invert_direction",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

@@ -3241,8 +3241,10 @@ def compute_fractals(highs, lows, n):
 
 async def check_fr_signal(symbol, buy_i, sell_i, price):
     """Immer im Markt, reiner Buy/Sell-Wechsel: Tief-Fraktal (down_fractal) = Kauf-Signal,
-    Hoch-Fraktal (up_fractal) = Verkauf-Signal. Kein Filter, kein SL/TP - dreht beim jeweils
-    naechsten Gegen-Signal direkt. Bei Long-/Short-only wird bei Gegen-Signal nur glattgestellt."""
+    Hoch-Fraktal (up_fractal) = Verkauf-Signal - oder umgekehrt, wenn fr_invert_direction an ist
+    (buy_i/sell_i kommen von fr_poll_loop bereits entsprechend vertauscht, siehe dort). Kein
+    Filter, kein SL/TP - dreht beim jeweils naechsten Gegen-Signal direkt. Bei Long-/Short-only
+    wird bei Gegen-Signal nur glattgestellt."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -3316,6 +3318,7 @@ async def fr_poll_loop(symbol):
                 if closed_ts and len(closed_c) > min_needed:
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
                     up_fractal, down_fractal = compute_fractals(closed_h, closed_l, n)
+                    buy_signal, sell_signal = (up_fractal, down_fractal) if cfg.get("fr_invert_direction", False) else (down_fractal, up_fractal)
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -3335,7 +3338,7 @@ async def fr_poll_loop(symbol):
                             continue
                         price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
-                        await check_fr_signal(symbol, down_fractal[idx], up_fractal[idx], price_i)
+                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -4444,10 +4447,11 @@ async def on_price_update(symbol, price):
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
+        direction_mode = cfg.get("grid_direction_mode", "both")
         grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
-        if price <= st["anchor_price"] - grid_step_abs:
+        if price <= st["anchor_price"] - grid_step_abs and direction_mode != "short_only":
             await execute_entry(symbol, "long", price, is_add_on=False)
-        elif price >= st["anchor_price"] + grid_step_abs:
+        elif price >= st["anchor_price"] + grid_step_abs and direction_mode != "long_only":
             await execute_entry(symbol, "short", price, is_add_on=False)
         return
 
@@ -5974,6 +5978,8 @@ def backtest_fractals_flip(candles, cfg):
     ts, o, h, l, c = candles
     n_periods = cfg.get("fr_periods", 2)
     up_fractal, down_fractal = compute_fractals(h, l, n_periods)
+    if cfg.get("fr_invert_direction", False):
+        up_fractal, down_fractal = down_fractal, up_fractal
     warmup = 2 * n_periods + 5
     return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup)
 
