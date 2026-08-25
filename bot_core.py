@@ -442,6 +442,9 @@ def default_config():
         "fr_zscore_resolution": os.getenv("FR_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
         "fr_zscore_lookback": int(os.getenv("FR_ZSCORE_LOOKBACK", "20")),
         "fr_zscore_smooth": int(os.getenv("FR_ZSCORE_SMOOTH", "3")),
+        "fr_sl_enabled": os.getenv("FR_SL_ENABLED", "false").lower() == "true",
+        "fr_sl_manual_usd": float(os.getenv("FR_SL_MANUAL_USD", "5.0")),
+        "fr_sl_cooldown_seconds": float(os.getenv("FR_SL_COOLDOWN_SECONDS", "30")),
         "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
         "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
@@ -450,6 +453,9 @@ def default_config():
         "cd_zscore_resolution": os.getenv("CD_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
         "cd_zscore_lookback": int(os.getenv("CD_ZSCORE_LOOKBACK", "20")),
         "cd_zscore_smooth": int(os.getenv("CD_ZSCORE_SMOOTH", "3")),
+        "cd_sl_enabled": os.getenv("CD_SL_ENABLED", "false").lower() == "true",
+        "cd_sl_manual_usd": float(os.getenv("CD_SL_MANUAL_USD", "5.0")),
+        "cd_sl_cooldown_seconds": float(os.getenv("CD_SL_COOLDOWN_SECONDS", "30")),
     }
 
 
@@ -487,6 +493,8 @@ def default_state():
         "mo7_sl_price": None, "mo7_tp_price": None,
         "utb_last_hull_green": None,
         "utb_sl_price": None, "utb_sl_cooldown_until": 0.0,
+        "fr_sl_price": None, "fr_sl_cooldown_until": 0.0,
+        "cd_sl_price": None, "cd_sl_cooldown_until": 0.0,
         "utb_trend_pct_last": None,
         "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
         "wtc_sl_price": None, "wtc_tp_price": None,
@@ -2027,6 +2035,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="fractals_flip"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="fr_zscore_lookback"></div>
   <div data-mode="fractals_flip"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="fr_zscore_smooth"></div>
+  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler fester Stop-Loss (fester $-Betrag, wie bei UT-Bot+Hull): durchbricht "immer im
+    Markt" NUR im SL-Fall - die Position geht dann glatt (statt zu drehen) und wartet nach einem
+    Cooldown auf das nächste gültige Ersteinstiegs-Signal.
+  </div>
+  <div data-mode="fractals_flip"><label>Stop-Loss</label>
+    <select class="cfg" id="fr_sl_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="fractals_flip"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="fr_sl_manual_usd"></div>
+  <div data-mode="fractals_flip"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="fr_sl_cooldown_seconds"></div>
 
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧬 Kerzen-DNA (eigene Entwicklung, kein Port eines bestehenden Scripts): jede Kerze bekommt
@@ -2090,6 +2111,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="candle_dna"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="cd_zscore_lookback"></div>
   <div data-mode="candle_dna"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="cd_zscore_smooth"></div>
+  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler fester Stop-Loss (fester $-Betrag, wie bei UT-Bot+Hull): durchbricht "immer im
+    Markt" NUR im SL-Fall - die Position geht dann glatt (statt zu drehen) und wartet nach einem
+    Cooldown auf das nächste gültige Ersteinstiegs-Signal.
+  </div>
+  <div data-mode="candle_dna"><label>Stop-Loss</label>
+    <select class="cfg" id="cd_sl_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="candle_dna"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="cd_sl_manual_usd"></div>
+  <div data-mode="candle_dna"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="cd_sl_cooldown_seconds"></div>
 
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
@@ -3945,6 +3979,9 @@ async function refresh() {
     setResolutionField('fr_zscore_resolution', data.config.fr_zscore_resolution);
     document.getElementById('fr_zscore_lookback').value = data.config.fr_zscore_lookback;
     document.getElementById('fr_zscore_smooth').value = data.config.fr_zscore_smooth;
+    document.getElementById('fr_sl_enabled').value = String(data.config.fr_sl_enabled);
+    document.getElementById('fr_sl_manual_usd').value = data.config.fr_sl_manual_usd;
+    document.getElementById('fr_sl_cooldown_seconds').value = data.config.fr_sl_cooldown_seconds;
     setResolutionField('cd_resolution', data.config.cd_resolution);
     document.getElementById('cd_threshold').value = data.config.cd_threshold;
     document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
@@ -3953,6 +3990,9 @@ async function refresh() {
     setResolutionField('cd_zscore_resolution', data.config.cd_zscore_resolution);
     document.getElementById('cd_zscore_lookback').value = data.config.cd_zscore_lookback;
     document.getElementById('cd_zscore_smooth').value = data.config.cd_zscore_smooth;
+    document.getElementById('cd_sl_enabled').value = String(data.config.cd_sl_enabled);
+    document.getElementById('cd_sl_manual_usd').value = data.config.cd_sl_manual_usd;
+    document.getElementById('cd_sl_cooldown_seconds').value = data.config.cd_sl_cooldown_seconds;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -4337,6 +4377,9 @@ function buildConfigPayload() {
     fr_zscore_resolution: getResolutionField('fr_zscore_resolution'),
     fr_zscore_lookback: parseInt(document.getElementById('fr_zscore_lookback').value),
     fr_zscore_smooth: parseInt(document.getElementById('fr_zscore_smooth').value),
+    fr_sl_enabled: document.getElementById('fr_sl_enabled').value === 'true',
+    fr_sl_manual_usd: parseFloat(document.getElementById('fr_sl_manual_usd').value),
+    fr_sl_cooldown_seconds: parseFloat(document.getElementById('fr_sl_cooldown_seconds').value),
     cd_resolution: getResolutionField('cd_resolution'),
     cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
     cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
@@ -4345,6 +4388,9 @@ function buildConfigPayload() {
     cd_zscore_resolution: getResolutionField('cd_zscore_resolution'),
     cd_zscore_lookback: parseInt(document.getElementById('cd_zscore_lookback').value),
     cd_zscore_smooth: parseInt(document.getElementById('cd_zscore_smooth').value),
+    cd_sl_enabled: document.getElementById('cd_sl_enabled').value === 'true',
+    cd_sl_manual_usd: parseFloat(document.getElementById('cd_sl_manual_usd').value),
+    cd_sl_cooldown_seconds: parseFloat(document.getElementById('cd_sl_cooldown_seconds').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -4503,6 +4549,8 @@ async def handle_status(request):
         "mo7_tp_price": st.get("mo7_tp_price"),
         "utb_last_hull_green": st.get("utb_last_hull_green"),
         "utb_sl_price": st.get("utb_sl_price"),
+        "fr_sl_price": st.get("fr_sl_price"),
+        "cd_sl_price": st.get("cd_sl_price"),
         "utb_trend_pct_last": st.get("utb_trend_pct_last"),
         "wtc_last_wt1": st.get("wtc_last_wt1"), "wtc_last_wt2": st.get("wtc_last_wt2"),
         "wtc_sl_price": st.get("wtc_sl_price"), "wtc_tp_price": st.get("wtc_tp_price"),
@@ -4586,8 +4634,10 @@ async def handle_config_update(request):
                 "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
                 "fr_resolution", "fr_periods", "fr_direction_mode", "fr_invert_direction",
                 "fr_zscore_filter_enabled", "fr_zscore_resolution", "fr_zscore_lookback", "fr_zscore_smooth",
+                "fr_sl_enabled", "fr_sl_manual_usd", "fr_sl_cooldown_seconds",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode",
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
+                "cd_sl_enabled", "cd_sl_manual_usd", "cd_sl_cooldown_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
