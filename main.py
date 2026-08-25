@@ -30,6 +30,7 @@ from copytrade import (
     handle_ct_copy_all_coins_toggle,
     handle_ct_set_coin_setting, handle_ct_remove_coin_setting, handle_ct_set_trader_defaults,
 )
+from binance_ws import binance_ws_cache_loop
 
 
 async def start_web_server():
@@ -112,6 +113,7 @@ async def main():
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),
+        binance_ws_cache_loop(),
     )
 
 

@@ -18,6 +18,8 @@ from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
     BOTS, execute_entry, execute_exit, execute_partial_exit, compute_step_abs, GLOBAL_SETTINGS,
 )
+import binance_ws  # WebSocket-Kerzen-Cache - reduziert REST-Traffic gegen Binance drastisch,
+# siehe fetch_candles_binance()/fetch_candles_binance_vol() weiter unten
 
 BINANCE_SYMBOL_MAP = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "DOGE": "DOGEUSDT", "XRP": "XRPUSDT",
@@ -121,6 +123,17 @@ async def fetch_candles_binance(symbol, resolution, count_back=150, market_type=
             effective_market_type = "futures"  # XAU/XAG gibt's nur als Future, kein Spot-Paar
         else:
             effective_market_type = market_type
+
+        # NEU: zuerst den WebSocket-Cache versuchen - liefert er etwas, entfaellt die
+        # komplette REST-Anfrage darunter. ensure_subscribed() merkt den Stream fuer den
+        # WS-Manager vor (no-op, falls schon bekannt); solange der Stream noch nicht warm
+        # ist, liefert get_cached_candles() None und der bisherige REST-Weg greift wie vorher.
+        binance_ws.ensure_subscribed(effective_market_type, pair, resolution)
+        cached = binance_ws.get_cached_candles(effective_market_type, pair, resolution, count_back)
+        if cached is not None:
+            ts, o, h, l, c, _v = cached
+            if ts:
+                return ts, o, h, l, c
 
         if _binance_is_banned(effective_market_type):
             return None  # aktiver Bann - keine Anfrage stellen, das wuerde ihn nur verlaengern
@@ -362,6 +375,14 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
     pair = BINANCE_SYMBOL_MAP.get(symbol)
     if not pair:
         return None
+
+    binance_ws.ensure_subscribed("spot", pair, resolution)
+    cached = binance_ws.get_cached_candles("spot", pair, resolution, count_back)
+    if cached is not None:
+        ts, o, h, l, c, v = cached
+        if ts:
+            return ts, o, h, l, c, v
+
     if _binance_is_banned("spot"):
         return None  # aktiver Bann - keine Anfrage stellen, das wuerde ihn nur verlaengern
     try:
