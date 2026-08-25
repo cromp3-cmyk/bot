@@ -453,6 +453,9 @@ def default_config():
         "cd_zscore_resolution": os.getenv("CD_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
         "cd_zscore_lookback": int(os.getenv("CD_ZSCORE_LOOKBACK", "20")),
         "cd_zscore_smooth": int(os.getenv("CD_ZSCORE_SMOOTH", "3")),
+        "cd_rsi_filter_enabled": os.getenv("CD_RSI_FILTER_ENABLED", "false").lower() == "true",  # RSI-Regime-Filter: RSI > Mittellinie -> nur Long, RSI < Mittellinie -> nur Short (auf demselben Zeitrahmen wie das Kerzen-DNA-Signal)
+        "cd_rsi_length": int(os.getenv("CD_RSI_LENGTH", "14")),
+        "cd_rsi_midline": float(os.getenv("CD_RSI_MIDLINE", "50")),
         "cd_sl_enabled": os.getenv("CD_SL_ENABLED", "false").lower() == "true",
         "cd_sl_manual_usd": float(os.getenv("CD_SL_MANUAL_USD", "5.0")),
         "cd_sl_cooldown_seconds": float(os.getenv("CD_SL_COOLDOWN_SECONDS", "30")),
@@ -2112,6 +2115,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="candle_dna"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="cd_zscore_lookback"></div>
   <div data-mode="candle_dna"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="cd_zscore_smooth"></div>
+  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler RSI-Regime-Filter, unabhängig vom Z-Score-Filter kombinierbar (beide können
+    gleichzeitig an sein - dann müssen beide zustimmen): RSI über der Mittellinie -> nur Long
+    erlaubt, RSI unter der Mittellinie -> nur Short erlaubt. Läuft auf demselben Zeitrahmen wie
+    das Kerzen-DNA-Signal selbst.
+  </div>
+  <div data-mode="candle_dna"><label>RSI-Filter</label>
+    <select class="cfg" id="cd_rsi_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Long nur über Mittellinie, Short nur darunter</option>
+    </select>
+  </div>
+  <div data-mode="candle_dna"><label>RSI-Länge</label><input type="number" step="1" min="2" id="cd_rsi_length"></div>
+  <div data-mode="candle_dna"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="cd_rsi_midline"></div>
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Optionaler fester Stop-Loss (fester $-Betrag, wie bei UT-Bot+Hull): durchbricht "immer im
     Markt" NUR im SL-Fall - die Position geht dann glatt (statt zu drehen) und wartet nach einem
@@ -3997,6 +4014,9 @@ async function refresh() {
     setResolutionField('cd_zscore_resolution', data.config.cd_zscore_resolution);
     document.getElementById('cd_zscore_lookback').value = data.config.cd_zscore_lookback;
     document.getElementById('cd_zscore_smooth').value = data.config.cd_zscore_smooth;
+    document.getElementById('cd_rsi_filter_enabled').value = String(data.config.cd_rsi_filter_enabled);
+    document.getElementById('cd_rsi_length').value = data.config.cd_rsi_length;
+    document.getElementById('cd_rsi_midline').value = data.config.cd_rsi_midline;
     document.getElementById('cd_sl_enabled').value = String(data.config.cd_sl_enabled);
     document.getElementById('cd_sl_manual_usd').value = data.config.cd_sl_manual_usd;
     document.getElementById('cd_sl_cooldown_seconds').value = data.config.cd_sl_cooldown_seconds;
@@ -4396,6 +4416,9 @@ function buildConfigPayload() {
     cd_zscore_resolution: getResolutionField('cd_zscore_resolution'),
     cd_zscore_lookback: parseInt(document.getElementById('cd_zscore_lookback').value),
     cd_zscore_smooth: parseInt(document.getElementById('cd_zscore_smooth').value),
+    cd_rsi_filter_enabled: document.getElementById('cd_rsi_filter_enabled').value === 'true',
+    cd_rsi_length: parseInt(document.getElementById('cd_rsi_length').value),
+    cd_rsi_midline: parseFloat(document.getElementById('cd_rsi_midline').value),
     cd_sl_enabled: document.getElementById('cd_sl_enabled').value === 'true',
     cd_sl_manual_usd: parseFloat(document.getElementById('cd_sl_manual_usd').value),
     cd_sl_cooldown_seconds: parseFloat(document.getElementById('cd_sl_cooldown_seconds').value),
@@ -4646,6 +4669,7 @@ async def handle_config_update(request):
                 "fr_sl_enabled", "fr_sl_manual_usd", "fr_sl_cooldown_seconds",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode",
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
+                "cd_rsi_filter_enabled", "cd_rsi_length", "cd_rsi_midline",
                 "cd_sl_enabled", "cd_sl_manual_usd", "cd_sl_cooldown_seconds", "cd_use_heikin_ashi",
                 "quad_stoch_resolution"]:
         if key in body:

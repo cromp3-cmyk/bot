@@ -3546,10 +3546,12 @@ async def check_cd_sl(symbol, price):
         st["cd_sl_cooldown_until"] = time.time() + cfg.get("cd_sl_cooldown_seconds", 30)
 
 
-async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None):
+async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None):
     """Immer im Markt, reiner Buy/Sell-Wechsel - siehe check_fr_signal, identisches Muster
-    inkl. optionalem Z-Score-Filter (cd_zscore_filter_enabled) und optionalem festem SL
-    (cd_sl_enabled, siehe check_cd_sl)."""
+    inkl. optionalem Z-Score-Filter (cd_zscore_filter_enabled), optionalem RSI-Regime-Filter
+    (cd_rsi_filter_enabled - RSI ueber Mittellinie -> nur Long, darunter -> nur Short) und
+    optionalem festem SL (cd_sl_enabled, siehe check_cd_sl). Z-Score- und RSI-Filter sind
+    unabhaengig voneinander kombinierbar - sind beide an, muessen beide zustimmen."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -3558,8 +3560,14 @@ async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None):
         return
     direction_mode = cfg.get("cd_direction_mode", "both")
     zscore_enabled = cfg.get("cd_zscore_filter_enabled", False)
-    long_ok = direction_mode != "short_only" and (not zscore_enabled or zscore is None or zscore > 0)
-    short_ok = direction_mode != "long_only" and (not zscore_enabled or zscore is None or zscore < 0)
+    rsi_enabled = cfg.get("cd_rsi_filter_enabled", False)
+    rsi_midline = cfg.get("cd_rsi_midline", 50)
+    long_ok = (direction_mode != "short_only"
+               and (not zscore_enabled or zscore is None or zscore > 0)
+               and (not rsi_enabled or rsi is None or rsi > rsi_midline))
+    short_ok = (direction_mode != "long_only"
+                and (not zscore_enabled or zscore is None or zscore < 0)
+                and (not rsi_enabled or rsi is None or rsi < rsi_midline))
     pos = st["position"]
 
     if pos is None:
@@ -3577,8 +3585,10 @@ async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None):
 
     if pos == "long" and sell_i:
         if direction_mode == "long_only" or not short_ok:
+            reason = "CD-EXIT-DIR" if direction_mode == "long_only" else (
+                "CD-EXIT-RSI" if rsi_enabled and not (rsi is None or rsi < rsi_midline) else "CD-EXIT-ZSCORE")
             debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: LONG @ {price}")
-            await execute_exit(symbol, price, "CD-EXIT-DIR" if direction_mode == "long_only" else "CD-EXIT-ZSCORE")
+            await execute_exit(symbol, price, reason)
             st["cd_sl_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] Kerzen-DNA Flip: LONG -> SHORT @ {price}")
@@ -3588,8 +3598,10 @@ async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None):
                 _cd_set_sl(st, cfg, "short", price)
     elif pos == "short" and buy_i:
         if direction_mode == "short_only" or not long_ok:
+            reason = "CD-EXIT-DIR" if direction_mode == "short_only" else (
+                "CD-EXIT-RSI" if rsi_enabled and not (rsi is None or rsi > rsi_midline) else "CD-EXIT-ZSCORE")
             debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: SHORT @ {price}")
-            await execute_exit(symbol, price, "CD-EXIT-DIR" if direction_mode == "short_only" else "CD-EXIT-ZSCORE")
+            await execute_exit(symbol, price, reason)
             st["cd_sl_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] Kerzen-DNA Flip: SHORT -> LONG @ {price}")
@@ -3662,9 +3674,16 @@ async def cd_poll_loop(symbol):
                             zscore_now = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)[-1]
                         zscore_series = [zscore_now] * len(closed_c)
 
+                    rsi_enabled = cfg.get("cd_rsi_filter_enabled", False)
+                    if rsi_enabled:
+                        rsi_series = compute_rsi(closed_c, cfg.get("cd_rsi_length", 14))
+                    else:
+                        rsi_series = None
+
                     if due_heartbeat:
                         last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] Kerzen-DNA aktiv: Preis={closed_c[-1]}, Score={round(score[-1],1)}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                        rsi_log = f", RSI={round(rsi_series[-1],1)}" if rsi_series else ""
+                        debug_log(f"💓 [{symbol}] Kerzen-DNA aktiv: Preis={closed_c[-1]}, Score={round(score[-1],1)}{rsi_log}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
                     if last_processed_ts is None:
                         new_indices = [len(closed_ts) - 1]
@@ -3680,7 +3699,8 @@ async def cd_poll_loop(symbol):
                             continue
                         price_i = closed_c[idx]
                         last_processed_ts = closed_ts[idx]
-                        await check_cd_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx])
+                        rsi_i = rsi_series[idx] if rsi_series else None
+                        await check_cd_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], rsi_i)
 
                     await check_cd_sl(symbol, price)
                 elif due_heartbeat:
@@ -6388,22 +6408,29 @@ def _cd_bt_set_sl(position, cfg, margin, leverage):
     position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
 
 
-def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=None):
+def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=None, rsi=None):
     """Backtest-Pendant zu check_cd_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
-    mit Z-Score-Filter (siehe compute_rolling_zscore) und optionalem festem SL (siehe
-    _cd_bt_set_sl)."""
+    mit Z-Score-Filter (siehe compute_rolling_zscore), optionalem RSI-Regime-Filter (RSI ueber
+    Mittellinie -> nur Long, darunter -> nur Short) und optionalem festem SL (siehe
+    _cd_bt_set_sl). Z-Score- und RSI-Filter sind unabhaengig kombinierbar."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     direction_mode = cfg.get("cd_direction_mode", "both")
     zscore_enabled = cfg.get("cd_zscore_filter_enabled", False)
+    rsi_enabled = cfg.get("cd_rsi_filter_enabled", False)
+    rsi_midline = cfg.get("cd_rsi_midline", 50)
     sl_cooldown_ms = cfg.get("cd_sl_cooldown_seconds", 30) * 1000
 
     def long_ok(i):
-        return direction_mode != "short_only" and (not zscore_enabled or zscore is None or zscore[i] > 0)
+        return (direction_mode != "short_only"
+                and (not zscore_enabled or zscore is None or zscore[i] > 0)
+                and (not rsi_enabled or rsi is None or rsi[i] > rsi_midline))
 
     def short_ok(i):
-        return direction_mode != "long_only" and (not zscore_enabled or zscore is None or zscore[i] < 0)
+        return (direction_mode != "long_only"
+                and (not zscore_enabled or zscore is None or zscore[i] < 0)
+                and (not rsi_enabled or rsi is None or rsi[i] < rsi_midline))
 
     position = None
     trades = []
@@ -6439,7 +6466,14 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=No
 
         if position["dir"] == "long" and sell_i:
             can_flip = direction_mode != "long_only" and short_ok(i)
-            reason = "CD-FLIP" if can_flip else ("CD-EXIT-DIR" if direction_mode == "long_only" else "CD-EXIT-ZSCORE")
+            if can_flip:
+                reason = "CD-FLIP"
+            elif direction_mode == "long_only":
+                reason = "CD-EXIT-DIR"
+            elif rsi_enabled and not (rsi is None or rsi[i] < rsi_midline):
+                reason = "CD-EXIT-RSI"
+            else:
+                reason = "CD-EXIT-ZSCORE"
             _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
             if not can_flip:
                 position = None
@@ -6449,7 +6483,14 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=No
                 _cd_bt_set_sl(position, cfg, margin, leverage)
         elif position["dir"] == "short" and buy_i:
             can_flip = direction_mode != "short_only" and long_ok(i)
-            reason = "CD-FLIP" if can_flip else ("CD-EXIT-DIR" if direction_mode == "short_only" else "CD-EXIT-ZSCORE")
+            if can_flip:
+                reason = "CD-FLIP"
+            elif direction_mode == "short_only":
+                reason = "CD-EXIT-DIR"
+            elif rsi_enabled and not (rsi is None or rsi[i] > rsi_midline):
+                reason = "CD-EXIT-RSI"
+            else:
+                reason = "CD-EXIT-ZSCORE"
             _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
             if not can_flip:
                 position = None
@@ -6476,7 +6517,10 @@ def backtest_candle_dna(candles, cfg):
     zscore = cfg.get("_cd_zscore_precomputed")
     if zscore is None and cfg.get("cd_zscore_filter_enabled", False):
         zscore = compute_rolling_zscore(c, cfg.get("cd_zscore_lookback", 20), cfg.get("cd_zscore_smooth", 3))
-    return _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup=1, zscore=zscore)
+    rsi = None
+    if cfg.get("cd_rsi_filter_enabled", False):
+        rsi = compute_rsi(c, cfg.get("cd_rsi_length", 14))
+    return _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup=1, zscore=zscore, rsi=rsi)
 
 
 def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
