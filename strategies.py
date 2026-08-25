@@ -710,6 +710,29 @@ def _sma_series(values, length):
     return out
 
 
+def compute_rolling_zscore(closes, lookback, smooth):
+    """Portiert aus 'Rolling Z-Score Trend [QuantAlgo]' (Pine v6): misst, wie viele
+    Standardabweichungen der aktuelle Kurs vom gleitenden Durchschnitt der letzten 'lookback'
+    Kerzen entfernt ist (SMA + STDEV), danach leicht geglaettet (EMA 'smooth'). Wird hier als
+    generischer, wiederverwendbarer Baustein fuer den optionalen Long/Short-Filter bei mehreren
+    Strategien genutzt (>0 = Long erlaubt, <0 = Short erlaubt)."""
+    n = len(closes)
+    mean = _sma_series(closes, lookback)
+    z_raw = [0.0] * n
+    for i in range(n):
+        start = max(0, i - lookback + 1)
+        window = closes[start:i + 1]
+        m = len(window)
+        if m > 1:
+            avg = sum(window) / m
+            variance = sum((x - avg) ** 2 for x in window) / m
+            stdev = variance ** 0.5
+        else:
+            stdev = 0.0
+        z_raw[i] = (closes[i] - mean[i]) / stdev if stdev > 0 else 0.0
+    return _ema_series(z_raw, smooth)
+
+
 def compute_diamond_supertrend(highs, lows, closes, factor, atr_period):
     """Portiert aus 'Diamond Algo' (Pine v5) - der SuperTrend-Kernbaustein (Standard-SuperTrend-
     Algorithmus). factor = Sensitivity * 2 (siehe Original: supertrend(close, nsensitivity*2, 11)).
@@ -3239,19 +3262,22 @@ def compute_fractals(highs, lows, n):
     return up_fractal, down_fractal
 
 
-async def check_fr_signal(symbol, buy_i, sell_i, price):
+async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None):
     """Immer im Markt, reiner Buy/Sell-Wechsel: Tief-Fraktal (down_fractal) = Kauf-Signal,
     Hoch-Fraktal (up_fractal) = Verkauf-Signal - oder umgekehrt, wenn fr_invert_direction an ist
-    (buy_i/sell_i kommen von fr_poll_loop bereits entsprechend vertauscht, siehe dort). Kein
-    Filter, kein SL/TP - dreht beim jeweils naechsten Gegen-Signal direkt. Bei Long-/Short-only
-    wird bei Gegen-Signal nur glattgestellt."""
+    (buy_i/sell_i kommen von fr_poll_loop bereits entsprechend vertauscht, siehe dort). Optionaler
+    Z-Score-Filter (fr_zscore_filter_enabled, siehe compute_rolling_zscore): Long nur wenn
+    zscore > 0, Short nur wenn zscore < 0 - gilt fuer jeden Einstieg, auch beim Flip. Kein SL/TP -
+    dreht beim jeweils naechsten (erlaubten) Gegen-Signal direkt. Bei Long-/Short-only bzw. vom
+    Filter blockiertem Flip wird nur glattgestellt."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
         return
     direction_mode = cfg.get("fr_direction_mode", "both")
-    long_ok = direction_mode != "short_only"
-    short_ok = direction_mode != "long_only"
+    zscore_enabled = cfg.get("fr_zscore_filter_enabled", False)
+    long_ok = direction_mode != "short_only" and (not zscore_enabled or zscore is None or zscore > 0)
+    short_ok = direction_mode != "long_only" and (not zscore_enabled or zscore is None or zscore < 0)
     pos = st["position"]
 
     if pos is None:
@@ -3264,17 +3290,17 @@ async def check_fr_signal(symbol, buy_i, sell_i, price):
         return
 
     if pos == "long" and sell_i:
-        if direction_mode == "long_only":
-            debug_log(f"🚪 [{symbol}] Fractals Exit (Richtung=Nur Long): LONG @ {price}")
-            await execute_exit(symbol, price, "FR-EXIT-DIR")
+        if direction_mode == "long_only" or not short_ok:
+            debug_log(f"🚪 [{symbol}] Fractals Exit: LONG @ {price}")
+            await execute_exit(symbol, price, "FR-EXIT-DIR" if direction_mode == "long_only" else "FR-EXIT-ZSCORE")
         else:
             debug_log(f"🔄 [{symbol}] Fractals Flip: LONG -> SHORT @ {price}")
             await execute_exit(symbol, price, "FR-FLIP")
             await execute_entry(symbol, "short", price, is_add_on=False)
     elif pos == "short" and buy_i:
-        if direction_mode == "short_only":
-            debug_log(f"🚪 [{symbol}] Fractals Exit (Richtung=Nur Short): SHORT @ {price}")
-            await execute_exit(symbol, price, "FR-EXIT-DIR")
+        if direction_mode == "short_only" or not long_ok:
+            debug_log(f"🚪 [{symbol}] Fractals Exit: SHORT @ {price}")
+            await execute_exit(symbol, price, "FR-EXIT-DIR" if direction_mode == "short_only" else "FR-EXIT-ZSCORE")
         else:
             debug_log(f"🔄 [{symbol}] Fractals Flip: SHORT -> LONG @ {price}")
             await execute_exit(symbol, price, "FR-FLIP")
@@ -3319,6 +3345,7 @@ async def fr_poll_loop(symbol):
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
                     up_fractal, down_fractal = compute_fractals(closed_h, closed_l, n)
                     buy_signal, sell_signal = (up_fractal, down_fractal) if cfg.get("fr_invert_direction", False) else (down_fractal, up_fractal)
+                    zscore_series = compute_rolling_zscore(closed_c, cfg.get("fr_zscore_lookback", 20), cfg.get("fr_zscore_smooth", 3))
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -3343,7 +3370,7 @@ async def fr_poll_loop(symbol):
                         # nach dem eigentlichen Schluss).
                         price_i = closed_c[idx]
                         last_processed_ts = closed_ts[idx]
-                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i)
+                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx])
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -3399,15 +3426,17 @@ def compute_cd_signals(opens, highs, lows, closes, rejection_mult, threshold):
     return buy_i, sell_i, score
 
 
-async def check_cd_signal(symbol, buy_i, sell_i, price):
-    """Immer im Markt, reiner Buy/Sell-Wechsel - siehe check_fr_signal, identisches Muster."""
+async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None):
+    """Immer im Markt, reiner Buy/Sell-Wechsel - siehe check_fr_signal, identisches Muster
+    inkl. optionalem Z-Score-Filter (cd_zscore_filter_enabled)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
         return
     direction_mode = cfg.get("cd_direction_mode", "both")
-    long_ok = direction_mode != "short_only"
-    short_ok = direction_mode != "long_only"
+    zscore_enabled = cfg.get("cd_zscore_filter_enabled", False)
+    long_ok = direction_mode != "short_only" and (not zscore_enabled or zscore is None or zscore > 0)
+    short_ok = direction_mode != "long_only" and (not zscore_enabled or zscore is None or zscore < 0)
     pos = st["position"]
 
     if pos is None:
@@ -3420,17 +3449,17 @@ async def check_cd_signal(symbol, buy_i, sell_i, price):
         return
 
     if pos == "long" and sell_i:
-        if direction_mode == "long_only":
-            debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit (Richtung=Nur Long): LONG @ {price}")
-            await execute_exit(symbol, price, "CD-EXIT-DIR")
+        if direction_mode == "long_only" or not short_ok:
+            debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: LONG @ {price}")
+            await execute_exit(symbol, price, "CD-EXIT-DIR" if direction_mode == "long_only" else "CD-EXIT-ZSCORE")
         else:
             debug_log(f"🔄 [{symbol}] Kerzen-DNA Flip: LONG -> SHORT @ {price}")
             await execute_exit(symbol, price, "CD-FLIP")
             await execute_entry(symbol, "short", price, is_add_on=False)
     elif pos == "short" and buy_i:
-        if direction_mode == "short_only":
-            debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit (Richtung=Nur Short): SHORT @ {price}")
-            await execute_exit(symbol, price, "CD-EXIT-DIR")
+        if direction_mode == "short_only" or not long_ok:
+            debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: SHORT @ {price}")
+            await execute_exit(symbol, price, "CD-EXIT-DIR" if direction_mode == "short_only" else "CD-EXIT-ZSCORE")
         else:
             debug_log(f"🔄 [{symbol}] Kerzen-DNA Flip: SHORT -> LONG @ {price}")
             await execute_exit(symbol, price, "CD-FLIP")
@@ -3476,6 +3505,7 @@ async def cd_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     buy_signal, sell_signal, score = compute_cd_signals(closed_o, closed_h, closed_l, closed_c, rejection_mult, threshold)
+                    zscore_series = compute_rolling_zscore(closed_c, cfg.get("cd_zscore_lookback", 20), cfg.get("cd_zscore_smooth", 3))
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -3495,7 +3525,7 @@ async def cd_poll_loop(symbol):
                             continue
                         price_i = closed_c[idx]
                         last_processed_ts = closed_ts[idx]
-                        await check_cd_signal(symbol, buy_signal[idx], sell_signal[idx], price_i)
+                        await check_cd_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx])
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -6081,15 +6111,21 @@ def backtest_wavetrend_cross(candles, cfg):
     return _simulate_wtc_trades(candles, cfg, bull, bear, warmup)
 
 
-def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup):
-    """Backtest-Pendant zu check_fr_signal - immer im Markt, reiner Buy/Sell-Wechsel ohne
-    Filter/SL/TP. Tief-Fraktal = Kauf, Hoch-Fraktal = Verkauf."""
+def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=None):
+    """Backtest-Pendant zu check_fr_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
+    mit Z-Score-Filter (siehe compute_rolling_zscore). Tief-Fraktal = Kauf, Hoch-Fraktal =
+    Verkauf."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     direction_mode = cfg.get("fr_direction_mode", "both")
-    long_ok = direction_mode != "short_only"
-    short_ok = direction_mode != "long_only"
+    zscore_enabled = cfg.get("fr_zscore_filter_enabled", False)
+
+    def long_ok(i):
+        return direction_mode != "short_only" and (not zscore_enabled or zscore is None or zscore[i] > 0)
+
+    def short_ok(i):
+        return direction_mode != "long_only" and (not zscore_enabled or zscore is None or zscore[i] < 0)
 
     position = None
     trades = []
@@ -6100,26 +6136,28 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup):
         sell_i = up_fractal[i]
 
         if position is None:
-            if buy_i and long_ok:
+            if buy_i and long_ok(i):
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-            elif sell_i and short_ok:
+            elif sell_i and short_ok(i):
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
             continue
 
         if position["dir"] == "long" and sell_i:
-            reason = "FR-EXIT-DIR" if direction_mode == "long_only" else "FR-FLIP"
+            can_flip = direction_mode != "long_only" and short_ok(i)
+            reason = "FR-FLIP" if can_flip else ("FR-EXIT-DIR" if direction_mode == "long_only" else "FR-EXIT-ZSCORE")
             _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if direction_mode == "long_only":
+            if not can_flip:
                 position = None
             else:
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
         elif position["dir"] == "short" and buy_i:
-            reason = "FR-EXIT-DIR" if direction_mode == "short_only" else "FR-FLIP"
+            can_flip = direction_mode != "short_only" and long_ok(i)
+            reason = "FR-FLIP" if can_flip else ("FR-EXIT-DIR" if direction_mode == "short_only" else "FR-EXIT-ZSCORE")
             _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if direction_mode == "short_only":
+            if not can_flip:
                 position = None
             else:
                 size = (margin * leverage) / price
@@ -6137,17 +6175,25 @@ def backtest_fractals_flip(candles, cfg):
     up_fractal, down_fractal = compute_fractals(h, l, n_periods)
     if cfg.get("fr_invert_direction", False):
         up_fractal, down_fractal = down_fractal, up_fractal
+    zscore = compute_rolling_zscore(c, cfg.get("fr_zscore_lookback", 20), cfg.get("fr_zscore_smooth", 3)) if cfg.get("fr_zscore_filter_enabled", False) else None
     warmup = 2 * n_periods + 5
-    return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup)
+    return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore)
 
 
-def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup):
-    """Backtest-Pendant zu check_cd_signal - immer im Markt, reiner Buy/Sell-Wechsel ohne
-    Filter/SL/TP."""
+def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=None):
+    """Backtest-Pendant zu check_cd_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
+    mit Z-Score-Filter (siehe compute_rolling_zscore)."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     direction_mode = cfg.get("cd_direction_mode", "both")
+    zscore_enabled = cfg.get("cd_zscore_filter_enabled", False)
+
+    def long_ok(i):
+        return direction_mode != "short_only" and (not zscore_enabled or zscore is None or zscore[i] > 0)
+
+    def short_ok(i):
+        return direction_mode != "long_only" and (not zscore_enabled or zscore is None or zscore[i] < 0)
 
     position = None
     trades = []
@@ -6158,26 +6204,28 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup):
         sell_i = sell_signal[i]
 
         if position is None:
-            if buy_i and direction_mode != "short_only":
+            if buy_i and long_ok(i):
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-            elif sell_i and direction_mode != "long_only":
+            elif sell_i and short_ok(i):
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
             continue
 
         if position["dir"] == "long" and sell_i:
-            reason = "CD-EXIT-DIR" if direction_mode == "long_only" else "CD-FLIP"
+            can_flip = direction_mode != "long_only" and short_ok(i)
+            reason = "CD-FLIP" if can_flip else ("CD-EXIT-DIR" if direction_mode == "long_only" else "CD-EXIT-ZSCORE")
             _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if direction_mode == "long_only":
+            if not can_flip:
                 position = None
             else:
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
         elif position["dir"] == "short" and buy_i:
-            reason = "CD-EXIT-DIR" if direction_mode == "short_only" else "CD-FLIP"
+            can_flip = direction_mode != "short_only" and long_ok(i)
+            reason = "CD-FLIP" if can_flip else ("CD-EXIT-DIR" if direction_mode == "short_only" else "CD-EXIT-ZSCORE")
             _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if direction_mode == "short_only":
+            if not can_flip:
                 position = None
             else:
                 size = (margin * leverage) / price
@@ -6194,7 +6242,8 @@ def backtest_candle_dna(candles, cfg):
     threshold = cfg.get("cd_threshold", 50)
     rejection_mult = cfg.get("cd_rejection_mult", 1.5)
     buy_signal, sell_signal, score = compute_cd_signals(o, h, l, c, rejection_mult, threshold)
-    return _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup=1)
+    zscore = compute_rolling_zscore(c, cfg.get("cd_zscore_lookback", 20), cfg.get("cd_zscore_smooth", 3)) if cfg.get("cd_zscore_filter_enabled", False) else None
+    return _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup=1, zscore=zscore)
 
 
 def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):

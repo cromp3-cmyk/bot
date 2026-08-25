@@ -438,10 +438,16 @@ def default_config():
         "fr_periods": int(os.getenv("FR_PERIODS", "2")),  # "n" im Original-Pine-Script (Kerzen links+rechts fuer die Fraktal-Bestaetigung)
         "fr_direction_mode": os.getenv("FR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
         "fr_invert_direction": os.getenv("FR_INVERT_DIRECTION", "false").lower() == "true",  # Tief-Fraktal=Verkauf, Hoch-Fraktal=Kauf statt umgekehrt
+        "fr_zscore_filter_enabled": os.getenv("FR_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
+        "fr_zscore_lookback": int(os.getenv("FR_ZSCORE_LOOKBACK", "20")),
+        "fr_zscore_smooth": int(os.getenv("FR_ZSCORE_SMOOTH", "3")),
         "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
         "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
         "cd_direction_mode": os.getenv("CD_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "cd_zscore_filter_enabled": os.getenv("CD_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
+        "cd_zscore_lookback": int(os.getenv("CD_ZSCORE_LOOKBACK", "20")),
+        "cd_zscore_smooth": int(os.getenv("CD_ZSCORE_SMOOTH", "3")),
     }
 
 
@@ -1992,6 +1998,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - Tief-Fraktal=Verkauf, Hoch-Fraktal=Kauf</option>
     </select>
   </div>
+  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler Z-Score-Filter (portiert aus "Rolling Z-Score Trend [QuantAlgo]"): misst, wie
+    viele Standardabweichungen der Kurs vom gleitenden Durchschnitt entfernt ist. Über 0 = nur
+    Long erlaubt, unter 0 = nur Short erlaubt - gilt für jeden Einstieg, auch beim Flip.
+  </div>
+  <div data-mode="fractals_flip"><label>Z-Score-Filter</label>
+    <select class="cfg" id="fr_zscore_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Long nur über 0, Short nur unter 0</option>
+    </select>
+  </div>
+  <div data-mode="fractals_flip"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="fr_zscore_lookback"></div>
+  <div data-mode="fractals_flip"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="fr_zscore_smooth"></div>
 
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧬 Kerzen-DNA (eigene Entwicklung, kein Port eines bestehenden Scripts): jede Kerze bekommt
@@ -2028,6 +2047,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short</option>
     </select>
   </div>
+  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler Z-Score-Filter (portiert aus "Rolling Z-Score Trend [QuantAlgo]"): misst, wie
+    viele Standardabweichungen der Kurs vom gleitenden Durchschnitt entfernt ist. Über 0 = nur
+    Long erlaubt, unter 0 = nur Short erlaubt - gilt für jeden Einstieg, auch beim Flip.
+  </div>
+  <div data-mode="candle_dna"><label>Z-Score-Filter</label>
+    <select class="cfg" id="cd_zscore_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Long nur über 0, Short nur unter 0</option>
+    </select>
+  </div>
+  <div data-mode="candle_dna"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="cd_zscore_lookback"></div>
+  <div data-mode="candle_dna"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="cd_zscore_smooth"></div>
 
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
@@ -3879,10 +3911,16 @@ async function refresh() {
     document.getElementById('fr_periods').value = data.config.fr_periods;
     document.getElementById('fr_direction_mode').value = data.config.fr_direction_mode;
     document.getElementById('fr_invert_direction').value = String(data.config.fr_invert_direction);
+    document.getElementById('fr_zscore_filter_enabled').value = String(data.config.fr_zscore_filter_enabled);
+    document.getElementById('fr_zscore_lookback').value = data.config.fr_zscore_lookback;
+    document.getElementById('fr_zscore_smooth').value = data.config.fr_zscore_smooth;
     setResolutionField('cd_resolution', data.config.cd_resolution);
     document.getElementById('cd_threshold').value = data.config.cd_threshold;
     document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
     document.getElementById('cd_direction_mode').value = data.config.cd_direction_mode;
+    document.getElementById('cd_zscore_filter_enabled').value = String(data.config.cd_zscore_filter_enabled);
+    document.getElementById('cd_zscore_lookback').value = data.config.cd_zscore_lookback;
+    document.getElementById('cd_zscore_smooth').value = data.config.cd_zscore_smooth;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -4263,10 +4301,16 @@ function buildConfigPayload() {
     fr_periods: parseInt(document.getElementById('fr_periods').value),
     fr_direction_mode: document.getElementById('fr_direction_mode').value,
     fr_invert_direction: document.getElementById('fr_invert_direction').value === 'true',
+    fr_zscore_filter_enabled: document.getElementById('fr_zscore_filter_enabled').value === 'true',
+    fr_zscore_lookback: parseInt(document.getElementById('fr_zscore_lookback').value),
+    fr_zscore_smooth: parseInt(document.getElementById('fr_zscore_smooth').value),
     cd_resolution: getResolutionField('cd_resolution'),
     cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
     cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
     cd_direction_mode: document.getElementById('cd_direction_mode').value,
+    cd_zscore_filter_enabled: document.getElementById('cd_zscore_filter_enabled').value === 'true',
+    cd_zscore_lookback: parseInt(document.getElementById('cd_zscore_lookback').value),
+    cd_zscore_smooth: parseInt(document.getElementById('cd_zscore_smooth').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -4507,7 +4551,9 @@ async def handle_config_update(request):
                 "pk_mtf_filter_enabled", "pk_mtf_tf1", "pk_mtf_tf2", "pk_mtf_tf3", "pk_mtf_fast_len", "pk_mtf_slow_len",
                 "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
                 "fr_resolution", "fr_periods", "fr_direction_mode", "fr_invert_direction",
+                "fr_zscore_filter_enabled", "fr_zscore_lookback", "fr_zscore_smooth",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode",
+                "cd_zscore_filter_enabled", "cd_zscore_lookback", "cd_zscore_smooth",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
