@@ -456,6 +456,7 @@ def default_config():
         "cd_sl_enabled": os.getenv("CD_SL_ENABLED", "false").lower() == "true",
         "cd_sl_manual_usd": float(os.getenv("CD_SL_MANUAL_USD", "5.0")),
         "cd_sl_cooldown_seconds": float(os.getenv("CD_SL_COOLDOWN_SECONDS", "30")),
+        "cd_use_heikin_ashi": os.getenv("CD_USE_HEIKIN_ASHI", "false").lower() == "true",  # Score wird auf HA-Kerzen berechnet, Ein-/Ausstieg trotzdem immer zum echten Kurs
     }
 
 
@@ -2124,6 +2125,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="candle_dna"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="cd_sl_manual_usd"></div>
   <div data-mode="candle_dna"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="cd_sl_cooldown_seconds"></div>
+  <div data-mode="candle_dna"><label>Heikin-Ashi für Score-Berechnung</label>
+    <select class="cfg" id="cd_use_heikin_ashi">
+      <option value="false">Aus - normale Kerzen</option>
+      <option value="true">An - Score wird auf geglätteten HA-Kerzen berechnet (Ein-/Ausstieg trotzdem immer zum echten Kurs)</option>
+    </select>
+  </div>
 
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
@@ -3993,6 +4000,7 @@ async function refresh() {
     document.getElementById('cd_sl_enabled').value = String(data.config.cd_sl_enabled);
     document.getElementById('cd_sl_manual_usd').value = data.config.cd_sl_manual_usd;
     document.getElementById('cd_sl_cooldown_seconds').value = data.config.cd_sl_cooldown_seconds;
+    document.getElementById('cd_use_heikin_ashi').value = String(data.config.cd_use_heikin_ashi);
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -4391,6 +4399,7 @@ function buildConfigPayload() {
     cd_sl_enabled: document.getElementById('cd_sl_enabled').value === 'true',
     cd_sl_manual_usd: parseFloat(document.getElementById('cd_sl_manual_usd').value),
     cd_sl_cooldown_seconds: parseFloat(document.getElementById('cd_sl_cooldown_seconds').value),
+    cd_use_heikin_ashi: document.getElementById('cd_use_heikin_ashi').value === 'true',
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -4637,7 +4646,7 @@ async def handle_config_update(request):
                 "fr_sl_enabled", "fr_sl_manual_usd", "fr_sl_cooldown_seconds",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode",
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
-                "cd_sl_enabled", "cd_sl_manual_usd", "cd_sl_cooldown_seconds",
+                "cd_sl_enabled", "cd_sl_manual_usd", "cd_sl_cooldown_seconds", "cd_use_heikin_ashi",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

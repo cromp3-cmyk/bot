@@ -3617,7 +3617,11 @@ async def cd_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    buy_signal, sell_signal, score = compute_cd_signals(closed_o, closed_h, closed_l, closed_c, rejection_mult, threshold)
+                    if cfg.get("cd_use_heikin_ashi", False):
+                        sig_o, sig_h, sig_l, sig_c = compute_heikin_ashi(closed_o, closed_h, closed_l, closed_c)
+                    else:
+                        sig_o, sig_h, sig_l, sig_c = closed_o, closed_h, closed_l, closed_c
+                    buy_signal, sell_signal, score = compute_cd_signals(sig_o, sig_h, sig_l, sig_c, rejection_mult, threshold)
                     zs_lookback = cfg.get("cd_zscore_lookback", 20)
                     zs_smooth = cfg.get("cd_zscore_smooth", 3)
                     zscore_resolution = cfg.get("cd_zscore_resolution", "same")
@@ -6443,7 +6447,11 @@ def backtest_candle_dna(candles, cfg):
     ts, o, h, l, c = candles
     threshold = cfg.get("cd_threshold", 50)
     rejection_mult = cfg.get("cd_rejection_mult", 1.5)
-    buy_signal, sell_signal, score = compute_cd_signals(o, h, l, c, rejection_mult, threshold)
+    if cfg.get("cd_use_heikin_ashi", False):
+        sig_o, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
+    else:
+        sig_o, sig_h, sig_l, sig_c = o, h, l, c
+    buy_signal, sell_signal, score = compute_cd_signals(sig_o, sig_h, sig_l, sig_c, rejection_mult, threshold)
     zscore = cfg.get("_cd_zscore_precomputed")
     if zscore is None and cfg.get("cd_zscore_filter_enabled", False):
         zscore = compute_rolling_zscore(c, cfg.get("cd_zscore_lookback", 20), cfg.get("cd_zscore_smooth", 3))
