@@ -439,6 +439,7 @@ def default_config():
         "fr_direction_mode": os.getenv("FR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
         "fr_invert_direction": os.getenv("FR_INVERT_DIRECTION", "false").lower() == "true",  # Tief-Fraktal=Verkauf, Hoch-Fraktal=Kauf statt umgekehrt
         "fr_zscore_filter_enabled": os.getenv("FR_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
+        "fr_zscore_resolution": os.getenv("FR_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
         "fr_zscore_lookback": int(os.getenv("FR_ZSCORE_LOOKBACK", "20")),
         "fr_zscore_smooth": int(os.getenv("FR_ZSCORE_SMOOTH", "3")),
         "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
@@ -446,6 +447,7 @@ def default_config():
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
         "cd_direction_mode": os.getenv("CD_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
         "cd_zscore_filter_enabled": os.getenv("CD_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
+        "cd_zscore_resolution": os.getenv("CD_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
         "cd_zscore_lookback": int(os.getenv("CD_ZSCORE_LOOKBACK", "20")),
         "cd_zscore_smooth": int(os.getenv("CD_ZSCORE_SMOOTH", "3")),
     }
@@ -2009,6 +2011,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - Long nur über 0, Short nur unter 0</option>
     </select>
   </div>
+  <div data-mode="fractals_flip"><label>Z-Score Zeiteinheit</label>
+    <select class="cfg" id="fr_zscore_resolution">
+      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="fr_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
+  </div>
   <div data-mode="fractals_flip"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="fr_zscore_lookback"></div>
   <div data-mode="fractals_flip"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="fr_zscore_smooth"></div>
 
@@ -2057,6 +2073,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="false">Aus</option>
       <option value="true">An - Long nur über 0, Short nur unter 0</option>
     </select>
+  </div>
+  <div data-mode="candle_dna"><label>Z-Score Zeiteinheit</label>
+    <select class="cfg" id="cd_zscore_resolution">
+      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="cd_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="candle_dna"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="cd_zscore_lookback"></div>
   <div data-mode="candle_dna"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="cd_zscore_smooth"></div>
@@ -2913,7 +2943,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3912,6 +3942,7 @@ async function refresh() {
     document.getElementById('fr_direction_mode').value = data.config.fr_direction_mode;
     document.getElementById('fr_invert_direction').value = String(data.config.fr_invert_direction);
     document.getElementById('fr_zscore_filter_enabled').value = String(data.config.fr_zscore_filter_enabled);
+    setResolutionField('fr_zscore_resolution', data.config.fr_zscore_resolution);
     document.getElementById('fr_zscore_lookback').value = data.config.fr_zscore_lookback;
     document.getElementById('fr_zscore_smooth').value = data.config.fr_zscore_smooth;
     setResolutionField('cd_resolution', data.config.cd_resolution);
@@ -3919,6 +3950,7 @@ async function refresh() {
     document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
     document.getElementById('cd_direction_mode').value = data.config.cd_direction_mode;
     document.getElementById('cd_zscore_filter_enabled').value = String(data.config.cd_zscore_filter_enabled);
+    setResolutionField('cd_zscore_resolution', data.config.cd_zscore_resolution);
     document.getElementById('cd_zscore_lookback').value = data.config.cd_zscore_lookback;
     document.getElementById('cd_zscore_smooth').value = data.config.cd_zscore_smooth;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
@@ -4302,6 +4334,7 @@ function buildConfigPayload() {
     fr_direction_mode: document.getElementById('fr_direction_mode').value,
     fr_invert_direction: document.getElementById('fr_invert_direction').value === 'true',
     fr_zscore_filter_enabled: document.getElementById('fr_zscore_filter_enabled').value === 'true',
+    fr_zscore_resolution: getResolutionField('fr_zscore_resolution'),
     fr_zscore_lookback: parseInt(document.getElementById('fr_zscore_lookback').value),
     fr_zscore_smooth: parseInt(document.getElementById('fr_zscore_smooth').value),
     cd_resolution: getResolutionField('cd_resolution'),
@@ -4309,6 +4342,7 @@ function buildConfigPayload() {
     cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
     cd_direction_mode: document.getElementById('cd_direction_mode').value,
     cd_zscore_filter_enabled: document.getElementById('cd_zscore_filter_enabled').value === 'true',
+    cd_zscore_resolution: getResolutionField('cd_zscore_resolution'),
     cd_zscore_lookback: parseInt(document.getElementById('cd_zscore_lookback').value),
     cd_zscore_smooth: parseInt(document.getElementById('cd_zscore_smooth').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
@@ -4551,9 +4585,9 @@ async def handle_config_update(request):
                 "pk_mtf_filter_enabled", "pk_mtf_tf1", "pk_mtf_tf2", "pk_mtf_tf3", "pk_mtf_fast_len", "pk_mtf_slow_len",
                 "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
                 "fr_resolution", "fr_periods", "fr_direction_mode", "fr_invert_direction",
-                "fr_zscore_filter_enabled", "fr_zscore_lookback", "fr_zscore_smooth",
+                "fr_zscore_filter_enabled", "fr_zscore_resolution", "fr_zscore_lookback", "fr_zscore_smooth",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode",
-                "cd_zscore_filter_enabled", "cd_zscore_lookback", "cd_zscore_smooth",
+                "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

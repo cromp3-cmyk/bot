@@ -3345,7 +3345,25 @@ async def fr_poll_loop(symbol):
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
                     up_fractal, down_fractal = compute_fractals(closed_h, closed_l, n)
                     buy_signal, sell_signal = (up_fractal, down_fractal) if cfg.get("fr_invert_direction", False) else (down_fractal, up_fractal)
-                    zscore_series = compute_rolling_zscore(closed_c, cfg.get("fr_zscore_lookback", 20), cfg.get("fr_zscore_smooth", 3))
+
+                    zs_lookback = cfg.get("fr_zscore_lookback", 20)
+                    zs_smooth = cfg.get("fr_zscore_smooth", 3)
+                    zscore_resolution = cfg.get("fr_zscore_resolution", "same")
+                    if zscore_resolution in (None, "", "same") or zscore_resolution == resolution:
+                        zscore_series = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)
+                    else:
+                        zs_needed = min(500, max(zs_lookback, zs_smooth, 5) * 3 + 20)
+                        if zscore_resolution in SUB_MINUTE_RESOLUTIONS:
+                            zs_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[zscore_resolution], zs_needed)
+                            zs_c = zs_local[4] if zs_local else None
+                        else:
+                            zs_data = await fetch_candles_binance_multi(symbol, zscore_resolution, count_back=zs_needed, market_type=cfg.get("binance_market_type", "spot"))
+                            zs_c = zs_data[4][:-1] if zs_data else None
+                        if zs_c and len(zs_c) > max(zs_lookback, zs_smooth):
+                            zscore_now = compute_rolling_zscore(zs_c, zs_lookback, zs_smooth)[-1]
+                        else:
+                            zscore_now = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)[-1]  # Fallback, falls (noch) keine Daten
+                        zscore_series = [zscore_now] * len(closed_c)  # abweichende Zeiteinheit: nur der aktuellste Wert zaehlt live (siehe unten)
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -3505,7 +3523,24 @@ async def cd_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     buy_signal, sell_signal, score = compute_cd_signals(closed_o, closed_h, closed_l, closed_c, rejection_mult, threshold)
-                    zscore_series = compute_rolling_zscore(closed_c, cfg.get("cd_zscore_lookback", 20), cfg.get("cd_zscore_smooth", 3))
+                    zs_lookback = cfg.get("cd_zscore_lookback", 20)
+                    zs_smooth = cfg.get("cd_zscore_smooth", 3)
+                    zscore_resolution = cfg.get("cd_zscore_resolution", "same")
+                    if zscore_resolution in (None, "", "same") or zscore_resolution == resolution:
+                        zscore_series = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)
+                    else:
+                        zs_needed = min(500, max(zs_lookback, zs_smooth, 5) * 3 + 20)
+                        if zscore_resolution in SUB_MINUTE_RESOLUTIONS:
+                            zs_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[zscore_resolution], zs_needed)
+                            zs_c = zs_local[4] if zs_local else None
+                        else:
+                            zs_data = await fetch_candles_binance_multi(symbol, zscore_resolution, count_back=zs_needed, market_type=cfg.get("binance_market_type", "spot"))
+                            zs_c = zs_data[4][:-1] if zs_data else None
+                        if zs_c and len(zs_c) > max(zs_lookback, zs_smooth):
+                            zscore_now = compute_rolling_zscore(zs_c, zs_lookback, zs_smooth)[-1]
+                        else:
+                            zscore_now = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)[-1]
+                        zscore_series = [zscore_now] * len(closed_c)
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -6175,7 +6210,11 @@ def backtest_fractals_flip(candles, cfg):
     up_fractal, down_fractal = compute_fractals(h, l, n_periods)
     if cfg.get("fr_invert_direction", False):
         up_fractal, down_fractal = down_fractal, up_fractal
-    zscore = compute_rolling_zscore(c, cfg.get("fr_zscore_lookback", 20), cfg.get("fr_zscore_smooth", 3)) if cfg.get("fr_zscore_filter_enabled", False) else None
+    zscore = cfg.get("_fr_zscore_precomputed")  # von run_backtest vorab async berechnet, falls
+    # eine abweichende Zeiteinheit gewaehlt ist (siehe _build_zscore_series_for_backtest) - diese
+    # Funktion selbst ist NICHT async (einheitliche BACKTEST_FUNCS-Signatur (candles, cfg))
+    if zscore is None and cfg.get("fr_zscore_filter_enabled", False):
+        zscore = compute_rolling_zscore(c, cfg.get("fr_zscore_lookback", 20), cfg.get("fr_zscore_smooth", 3))
     warmup = 2 * n_periods + 5
     return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore)
 
@@ -6242,7 +6281,9 @@ def backtest_candle_dna(candles, cfg):
     threshold = cfg.get("cd_threshold", 50)
     rejection_mult = cfg.get("cd_rejection_mult", 1.5)
     buy_signal, sell_signal, score = compute_cd_signals(o, h, l, c, rejection_mult, threshold)
-    zscore = compute_rolling_zscore(c, cfg.get("cd_zscore_lookback", 20), cfg.get("cd_zscore_smooth", 3)) if cfg.get("cd_zscore_filter_enabled", False) else None
+    zscore = cfg.get("_cd_zscore_precomputed")
+    if zscore is None and cfg.get("cd_zscore_filter_enabled", False):
+        zscore = compute_rolling_zscore(c, cfg.get("cd_zscore_lookback", 20), cfg.get("cd_zscore_smooth", 3))
     return _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup=1, zscore=zscore)
 
 
@@ -6377,6 +6418,27 @@ def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
 
     return trades
+
+
+async def _build_zscore_series_for_backtest(symbol, cfg, days, base_ts, base_c, primary_resolution, prefix):
+    """Baut den Z-Score-Filter-Wert fuer eine ABWEICHENDE Zeiteinheit (<prefix>_zscore_resolution)
+    fuer den Backtest: holt die historischen Kerzen dieser Zeiteinheit, berechnet den Z-Score
+    darauf, bildet ihn per Forward-Fill (siehe _align_htf_series) auf die Zeitstempel der
+    Einstiegs-Kerzen ab - kein Blick in die Zukunft. Bei 'same'/eigenem Handels-Zeitrahmen wird
+    einfach direkt auf den eigenen Kerzen gerechnet. Gibt (zscore, error) zurueck."""
+    resolution = cfg.get(f"{prefix}_zscore_resolution", "same")
+    lookback = cfg.get(f"{prefix}_zscore_lookback", 20)
+    smooth = cfg.get(f"{prefix}_zscore_smooth", 3)
+    if resolution in (None, "", "same") or resolution == primary_resolution:
+        return compute_rolling_zscore(base_c, lookback, smooth), None
+    tf_candles, err, _ = await _fetch_cached_backtest_candles(symbol, resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return None, f"Z-Score-Zeiteinheit ({resolution}): {err}"
+    if not tf_candles or len(tf_candles[4]) < 20:
+        return None, f"Zu wenig historische Kerzen für die Z-Score-Zeiteinheit ({resolution}) erhalten."
+    t_ts, t_o, t_h, t_l, t_c = tf_candles
+    zscore_htf = compute_rolling_zscore(t_c, lookback, smooth)
+    return _align_htf_series(base_ts, t_ts, zscore_htf), None
 
 
 async def _pk_build_mtf_trend_pct(symbol, cfg, days, base_ts, base_h, base_l, base_c, primary_resolution, prefix="pk"):
@@ -6596,6 +6658,18 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             return {"error": mtf_err}
         cfg = dict(cfg)
         cfg["_utb_trend_pct_precomputed"] = trend_pct  # von backtest_ut_bot_hull gelesen (nicht async, siehe dort)
+    elif entry_mode == "fractals_flip" and cfg.get("fr_zscore_filter_enabled", False):
+        zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "fr")
+        if zs_err:
+            return {"error": zs_err}
+        cfg = dict(cfg)
+        cfg["_fr_zscore_precomputed"] = zscore  # von backtest_fractals_flip gelesen (nicht async, siehe dort)
+    elif entry_mode == "candle_dna" and cfg.get("cd_zscore_filter_enabled", False):
+        zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "cd")
+        if zs_err:
+            return {"error": zs_err}
+        cfg = dict(cfg)
+        cfg["_cd_zscore_precomputed"] = zscore  # von backtest_candle_dna gelesen (nicht async, siehe dort)
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades, exclude_top_n)
