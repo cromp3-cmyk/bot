@@ -3616,6 +3616,7 @@ async def cd_poll_loop(symbol):
                 due_heartbeat = now - last_heartbeat > 300
 
                 if closed_ts and len(closed_c) > min_needed:
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
                     buy_signal, sell_signal, score = compute_cd_signals(closed_o, closed_h, closed_l, closed_c, rejection_mult, threshold)
                     zs_lookback = cfg.get("cd_zscore_lookback", 20)
                     zs_smooth = cfg.get("cd_zscore_smooth", 3)
