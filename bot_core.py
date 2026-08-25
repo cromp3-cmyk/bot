@@ -438,6 +438,10 @@ def default_config():
         "fr_periods": int(os.getenv("FR_PERIODS", "2")),  # "n" im Original-Pine-Script (Kerzen links+rechts fuer die Fraktal-Bestaetigung)
         "fr_direction_mode": os.getenv("FR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
         "fr_invert_direction": os.getenv("FR_INVERT_DIRECTION", "false").lower() == "true",  # Tief-Fraktal=Verkauf, Hoch-Fraktal=Kauf statt umgekehrt
+        "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
+        "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
+        "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
+        "cd_direction_mode": os.getenv("CD_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
     }
 
 
@@ -1054,6 +1058,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="wavetrend_cross">WaveTrend Cross (Cipher-B-Kernsignal, Zonenfilter wählbar, immer im Markt oder normal, fester SL+TP)</option>
       <option value="pieki_algo">Pieki Algo (SuperTrend+SMA9-Signal, Flip oder fester SL+TP, optionaler MTF-Trend%-Filter)</option>
       <option value="fractals_flip">Williams Fractals (Swing-High/Low-Umkehrpunkte, immer im Markt, nur Buy/Sell-Wechsel)</option>
+      <option value="candle_dna">Kerzen-DNA (eigener Konviktions-Score aus Körper+Docht je Kerze, immer im Markt, nur Buy/Sell-Wechsel)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1988,6 +1993,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
 
+  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🧬 Kerzen-DNA (eigene Entwicklung, kein Port eines bestehenden Scripts): jede Kerze bekommt
+    einen Konviktions-Score von -100 (voll bearisch) bis +100 (voll bullisch) - Basis ist, wie
+    groß der Kerzenkörper im Verhältnis zur gesamten Hoch-Tief-Spanne ist (Marubozu-artige Kerzen
+    = nah an ±100, Doji-artige Kerzen = nah an 0), plus ein Bonus/Abzug, wenn ein langer Docht auf
+    der Gegenseite eine Ablehnung zeigt (Hammer/Shooting-Star). Kreuzt der Score die Schwelle nach
+    oben → Kauf, nach unten → Verkauf. Immer im Markt, reiner Buy/Sell-Wechsel - kein Filter, kein
+    SL/TP.
+  </div>
+  <div data-mode="candle_dna"><label>Zeitrahmen</label>
+    <select class="cfg" id="cd_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="cd_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="candle_dna"><label>Konviktions-Schwelle (0-100)</label><input type="number" step="1" id="cd_threshold"></div>
+  <div data-mode="candle_dna"><label>Docht-Ablehnung-Faktor (Docht muss X-mal so lang wie der Körper sein)</label><input type="number" step="0.1" id="cd_rejection_mult"></div>
+  <div data-mode="candle_dna"><label>Richtung</label>
+    <select class="cfg" id="cd_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
       <option value="both">Beide (Long unter Anker, Short über Anker)</option>
@@ -2840,7 +2881,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3838,6 +3879,10 @@ async function refresh() {
     document.getElementById('fr_periods').value = data.config.fr_periods;
     document.getElementById('fr_direction_mode').value = data.config.fr_direction_mode;
     document.getElementById('fr_invert_direction').value = String(data.config.fr_invert_direction);
+    setResolutionField('cd_resolution', data.config.cd_resolution);
+    document.getElementById('cd_threshold').value = data.config.cd_threshold;
+    document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
+    document.getElementById('cd_direction_mode').value = data.config.cd_direction_mode;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -4218,6 +4263,10 @@ function buildConfigPayload() {
     fr_periods: parseInt(document.getElementById('fr_periods').value),
     fr_direction_mode: document.getElementById('fr_direction_mode').value,
     fr_invert_direction: document.getElementById('fr_invert_direction').value === 'true',
+    cd_resolution: getResolutionField('cd_resolution'),
+    cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
+    cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
+    cd_direction_mode: document.getElementById('cd_direction_mode').value,
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -4458,6 +4507,7 @@ async def handle_config_update(request):
                 "pk_mtf_filter_enabled", "pk_mtf_tf1", "pk_mtf_tf2", "pk_mtf_tf3", "pk_mtf_fast_len", "pk_mtf_slow_len",
                 "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
                 "fr_resolution", "fr_periods", "fr_direction_mode", "fr_invert_direction",
+                "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
