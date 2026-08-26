@@ -52,13 +52,28 @@ BINANCE_BASE_URLS = {
     "futures": "https://fapi.binance.com/fapi/v1/klines",
 }
 
+# Sekunden je Intervall - Basis fuer die Veraltungsgrenze (siehe STALENESS_MULTIPLIER unten).
+INTERVAL_SECONDS = {
+    "1s": 1, "1m": 60, "3m": 180, "5m": 300,
+    "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400,
+}
+
+# Kommt seit mehr als (Intervall-Dauer * Multiplikator + Puffer) kein WS-Update mehr an,
+# gilt der Stream als eingefroren/nicht mehr vertrauenswuerdig - get_cached_candles() liefert
+# dann None (Aufrufer faellt automatisch auf REST zurueck), UND der Stream wird zur
+# Neu-Subscription vorgemerkt. Verhindert, dass eine lautlos abgebrochene WS-Verbindung
+# fuer immer denselben eingefrorenen Preis/Score ausliefert.
+STALENESS_MULTIPLIER = 3
+STALENESS_BUFFER_SECONDS = 30
+
 
 class _StreamState:
-    __slots__ = ("candles", "ready")
+    __slots__ = ("candles", "ready", "last_update_ts")
 
     def __init__(self):
         self.candles = deque(maxlen=MAX_CANDLES_PER_STREAM)  # Dicts: ts,o,h,l,c,v
         self.ready = False  # True, sobald der einmalige REST-Seed durch ist
+        self.last_update_ts = 0.0  # time.time() der letzten WS-Aktualisierung (oder des Seeds)
 
 
 # market_type -> {"BTCUSDT|1m": _StreamState}
@@ -88,10 +103,22 @@ def ensure_subscribed(market_type, pair, interval):
 
 def get_cached_candles(market_type, pair, interval, count_back):
     """Gibt (timestamps, opens, highs, lows, closes, volumes) zurueck, wenn der Stream
-    bereits warm ist - sonst None (Aufrufer soll auf REST zurueckfallen)."""
+    bereits warm UND frisch genug ist - sonst None (Aufrufer soll auf REST zurueckfallen).
+    Ein Stream, der laenger als die Veraltungsgrenze kein WS-Update mehr bekommen hat, gilt
+    als eingefroren: er wird hier zurueckgewiesen UND zur Neu-Subscription vorgemerkt, damit
+    sich eine lautlos abgebrochene WS-Verbindung von selbst erholt, statt fuer immer denselben
+    alten Preis/Score auszuliefern."""
     st = _streams.get(market_type, {}).get(_key(pair, interval))
     if st is None or not st.ready or not st.candles:
         return None
+
+    max_staleness = INTERVAL_SECONDS.get(interval, 60) * STALENESS_MULTIPLIER + STALENESS_BUFFER_SECONDS
+    if time.time() - st.last_update_ts > max_staleness:
+        st.ready = False  # bis zum naechsten erfolgreichen Seed faellt der Aufrufer auf REST zurueck
+        _pending_subscribe[market_type].add(_key(pair, interval))
+        debug_log(f"⚠️ [WS-Cache] {pair} {interval} ({market_type}) eingefroren erkannt - falle auf REST zurueck und abonniere neu")
+        return None
+
     candles = list(st.candles)[-count_back:]
     if not candles:
         return None
@@ -149,6 +176,7 @@ async def _seed_stream_history(market_type, pair, interval):
             "l": float(k[3]), "c": float(k[4]), "v": float(k[5]),
         })
     st.ready = True
+    st.last_update_ts = time.time()
     debug_log(f"✅ [WS-Cache] {pair} {interval} ({market_type}) bereit", {"kerzen": len(st.candles)})
 
 
@@ -171,7 +199,9 @@ def _apply_kline_event(market_type, payload):
         st.candles[-1] = candle  # laufende (noch nicht geschlossene) Kerze aktualisieren
     elif not st.candles or ts > st.candles[-1]["ts"]:
         st.candles.append(candle)  # neue, geschlossene Kerze angehaengt
-    # aeltere/doppelte Zeitstempel (Nachzuegler) werden ignoriert
+    else:
+        return  # aeltere/doppelte Zeitstempel (Nachzuegler) werden ignoriert - kein Update-Zeitstempel
+    st.last_update_ts = time.time()
 
 
 async def _websocket_loop(market_type):
