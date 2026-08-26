@@ -721,6 +721,53 @@ def compute_atr(highs, lows, closes, period):
     return atr
 
 
+def compute_adx(highs, lows, closes, period=14):
+    """Klassischer Wilder-ADX/DMI (wie Pine's ta.dmi), Wilder-RMA-Glaettung wie compute_atr.
+    Gibt (adx, plus_di, minus_di) zurueck - Standardnutzung als Trendfilter: ADX > Schwelle
+    (z.B. 20) heisst 'genug Trendstaerke vorhanden', +DI > -DI heisst 'Richtung ist bullisch',
+    -DI > +DI heisst 'Richtung ist bearisch'. Wird hier als optionaler Long/Short-Filter fuer
+    Kerzen-DNA genutzt (siehe cd_adx_filter_enabled)."""
+    n = len(closes)
+    if n < 2:
+        return [0.0] * n, [0.0] * n, [0.0] * n
+
+    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+    for i in range(1, n):
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
+        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
+
+    def _wilder_smooth(values):
+        out = [values[0]] * n
+        for i in range(1, n):
+            if i < period:
+                out[i] = sum(values[:i + 1]) / (i + 1)
+            else:
+                out[i] = out[i - 1] - (out[i - 1] / period) + values[i]
+        return out
+
+    tr_smooth = _wilder_smooth(tr)
+    plus_dm_smooth = _wilder_smooth(plus_dm)
+    minus_dm_smooth = _wilder_smooth(minus_dm)
+
+    plus_di = [100 * plus_dm_smooth[i] / tr_smooth[i] if tr_smooth[i] > 0 else 0.0 for i in range(n)]
+    minus_di = [100 * minus_dm_smooth[i] / tr_smooth[i] if tr_smooth[i] > 0 else 0.0 for i in range(n)]
+    dx = [100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) > 0 else 0.0 for i in range(n)]
+
+    adx = [dx[0]] * n
+    for i in range(1, n):
+        if i < period:
+            adx[i] = sum(dx[:i + 1]) / (i + 1)
+        else:
+            adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+
+    return adx, plus_di, minus_di
+
+
 def _sma_series(values, length):
     n = len(values)
     out = [0.0] * n
@@ -3546,12 +3593,15 @@ async def check_cd_sl(symbol, price):
         st["cd_sl_cooldown_until"] = time.time() + cfg.get("cd_sl_cooldown_seconds", 30)
 
 
-async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None):
+async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
     """Immer im Markt, reiner Buy/Sell-Wechsel - siehe check_fr_signal, identisches Muster
     inkl. optionalem Z-Score-Filter (cd_zscore_filter_enabled), optionalem RSI-Regime-Filter
-    (cd_rsi_filter_enabled - RSI ueber Mittellinie -> nur Long, darunter -> nur Short) und
-    optionalem festem SL (cd_sl_enabled, siehe check_cd_sl). Z-Score- und RSI-Filter sind
-    unabhaengig voneinander kombinierbar - sind beide an, muessen beide zustimmen."""
+    (cd_rsi_filter_enabled - RSI ueber Mittellinie -> nur Long, darunter -> nur Short), optionalem
+    ADX/DI-Trendfilter (cd_adx_filter_enabled - ADX ueber Schwelle UND +DI>-DI -> nur Long, ADX
+    ueber Schwelle UND -DI>+DI -> nur Short; unter der Schwelle gilt der Markt als trendlos und
+    BEIDE Richtungen werden gesperrt) und optionalem festem SL (cd_sl_enabled, siehe check_cd_sl).
+    Alle drei Filter sind unabhaengig voneinander kombinierbar - sind mehrere an, muessen alle
+    zustimmen."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -3562,12 +3612,19 @@ async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None):
     zscore_enabled = cfg.get("cd_zscore_filter_enabled", False)
     rsi_enabled = cfg.get("cd_rsi_filter_enabled", False)
     rsi_midline = cfg.get("cd_rsi_midline", 50)
+    adx_enabled = cfg.get("cd_adx_filter_enabled", False)
+    adx_threshold = cfg.get("cd_adx_threshold", 20)
+    adx_missing = adx is None or plus_di is None or minus_di is None
+    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
+    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
     long_ok = (direction_mode != "short_only"
                and (not zscore_enabled or zscore is None or zscore > 0)
-               and (not rsi_enabled or rsi is None or rsi > rsi_midline))
+               and (not rsi_enabled or rsi is None or rsi > rsi_midline)
+               and adx_long_ok)
     short_ok = (direction_mode != "long_only"
                 and (not zscore_enabled or zscore is None or zscore < 0)
-                and (not rsi_enabled or rsi is None or rsi < rsi_midline))
+                and (not rsi_enabled or rsi is None or rsi < rsi_midline)
+                and adx_short_ok)
     pos = st["position"]
 
     if pos is None:
@@ -3585,8 +3642,14 @@ async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None):
 
     if pos == "long" and sell_i:
         if direction_mode == "long_only" or not short_ok:
-            reason = "CD-EXIT-DIR" if direction_mode == "long_only" else (
-                "CD-EXIT-RSI" if rsi_enabled and not (rsi is None or rsi < rsi_midline) else "CD-EXIT-ZSCORE")
+            if direction_mode == "long_only":
+                reason = "CD-EXIT-DIR"
+            elif rsi_enabled and not (rsi is None or rsi < rsi_midline):
+                reason = "CD-EXIT-RSI"
+            elif adx_enabled and not adx_short_ok:
+                reason = "CD-EXIT-ADX"
+            else:
+                reason = "CD-EXIT-ZSCORE"
             debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: LONG @ {price}")
             await execute_exit(symbol, price, reason)
             st["cd_sl_price"] = None
@@ -3598,8 +3661,14 @@ async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None):
                 _cd_set_sl(st, cfg, "short", price)
     elif pos == "short" and buy_i:
         if direction_mode == "short_only" or not long_ok:
-            reason = "CD-EXIT-DIR" if direction_mode == "short_only" else (
-                "CD-EXIT-RSI" if rsi_enabled and not (rsi is None or rsi > rsi_midline) else "CD-EXIT-ZSCORE")
+            if direction_mode == "short_only":
+                reason = "CD-EXIT-DIR"
+            elif rsi_enabled and not (rsi is None or rsi > rsi_midline):
+                reason = "CD-EXIT-RSI"
+            elif adx_enabled and not adx_long_ok:
+                reason = "CD-EXIT-ADX"
+            else:
+                reason = "CD-EXIT-ZSCORE"
             debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: SHORT @ {price}")
             await execute_exit(symbol, price, reason)
             st["cd_sl_price"] = None
@@ -3680,10 +3749,17 @@ async def cd_poll_loop(symbol):
                     else:
                         rsi_series = None
 
+                    adx_enabled = cfg.get("cd_adx_filter_enabled", False)
+                    if adx_enabled:
+                        adx_series, plus_di_series, minus_di_series = compute_adx(sig_h, sig_l, sig_c, cfg.get("cd_adx_length", 14))
+                    else:
+                        adx_series, plus_di_series, minus_di_series = None, None, None
+
                     if due_heartbeat:
                         last_heartbeat = now
                         rsi_log = f", RSI={round(rsi_series[-1],1)}" if rsi_series else ""
-                        debug_log(f"💓 [{symbol}] Kerzen-DNA aktiv: Preis={closed_c[-1]}, Score={round(score[-1],1)}{rsi_log}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                        adx_log = f", ADX={round(adx_series[-1],1)} (+DI={round(plus_di_series[-1],1)}/-DI={round(minus_di_series[-1],1)})" if adx_series else ""
+                        debug_log(f"💓 [{symbol}] Kerzen-DNA aktiv: Preis={closed_c[-1]}, Score={round(score[-1],1)}{rsi_log}{adx_log}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
                     if last_processed_ts is None:
                         new_indices = [len(closed_ts) - 1]
@@ -3700,7 +3776,10 @@ async def cd_poll_loop(symbol):
                         price_i = closed_c[idx]
                         last_processed_ts = closed_ts[idx]
                         rsi_i = rsi_series[idx] if rsi_series else None
-                        await check_cd_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], rsi_i)
+                        adx_i = adx_series[idx] if adx_series else None
+                        plus_di_i = plus_di_series[idx] if plus_di_series else None
+                        minus_di_i = minus_di_series[idx] if minus_di_series else None
+                        await check_cd_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], rsi_i, adx_i, plus_di_i, minus_di_i)
 
                     await check_cd_sl(symbol, price)
                 elif due_heartbeat:
@@ -6428,11 +6507,12 @@ def _cd_bt_set_sl(position, cfg, margin, leverage):
     position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
 
 
-def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=None, rsi=None):
+def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
     """Backtest-Pendant zu check_cd_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
     mit Z-Score-Filter (siehe compute_rolling_zscore), optionalem RSI-Regime-Filter (RSI ueber
-    Mittellinie -> nur Long, darunter -> nur Short) und optionalem festem SL (siehe
-    _cd_bt_set_sl). Z-Score- und RSI-Filter sind unabhaengig kombinierbar."""
+    Mittellinie -> nur Long, darunter -> nur Short), optionalem ADX/DI-Trendfilter (ADX ueber
+    Schwelle UND +DI>-DI -> nur Long, ADX ueber Schwelle UND -DI>+DI -> nur Short) und optionalem
+    festem SL (siehe _cd_bt_set_sl). Alle drei Filter sind unabhaengig kombinierbar."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
@@ -6440,17 +6520,27 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=No
     zscore_enabled = cfg.get("cd_zscore_filter_enabled", False)
     rsi_enabled = cfg.get("cd_rsi_filter_enabled", False)
     rsi_midline = cfg.get("cd_rsi_midline", 50)
+    adx_enabled = cfg.get("cd_adx_filter_enabled", False)
+    adx_threshold = cfg.get("cd_adx_threshold", 20)
     sl_cooldown_ms = cfg.get("cd_sl_cooldown_seconds", 30) * 1000
+
+    def adx_long_ok(i):
+        return not adx_enabled or adx is None or (adx[i] > adx_threshold and plus_di[i] > minus_di[i])
+
+    def adx_short_ok(i):
+        return not adx_enabled or adx is None or (adx[i] > adx_threshold and minus_di[i] > plus_di[i])
 
     def long_ok(i):
         return (direction_mode != "short_only"
                 and (not zscore_enabled or zscore is None or zscore[i] > 0)
-                and (not rsi_enabled or rsi is None or rsi[i] > rsi_midline))
+                and (not rsi_enabled or rsi is None or rsi[i] > rsi_midline)
+                and adx_long_ok(i))
 
     def short_ok(i):
         return (direction_mode != "long_only"
                 and (not zscore_enabled or zscore is None or zscore[i] < 0)
-                and (not rsi_enabled or rsi is None or rsi[i] < rsi_midline))
+                and (not rsi_enabled or rsi is None or rsi[i] < rsi_midline)
+                and adx_short_ok(i))
 
     position = None
     trades = []
@@ -6492,6 +6582,8 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=No
                 reason = "CD-EXIT-DIR"
             elif rsi_enabled and not (rsi is None or rsi[i] < rsi_midline):
                 reason = "CD-EXIT-RSI"
+            elif adx_enabled and not adx_short_ok(i):
+                reason = "CD-EXIT-ADX"
             else:
                 reason = "CD-EXIT-ZSCORE"
             _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
@@ -6509,6 +6601,8 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=No
                 reason = "CD-EXIT-DIR"
             elif rsi_enabled and not (rsi is None or rsi[i] > rsi_midline):
                 reason = "CD-EXIT-RSI"
+            elif adx_enabled and not adx_long_ok(i):
+                reason = "CD-EXIT-ADX"
             else:
                 reason = "CD-EXIT-ZSCORE"
             _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
@@ -6540,7 +6634,10 @@ def backtest_candle_dna(candles, cfg):
     rsi = None
     if cfg.get("cd_rsi_filter_enabled", False):
         rsi = compute_rsi(c, cfg.get("cd_rsi_length", 14))
-    return _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup=1, zscore=zscore, rsi=rsi)
+    adx = plus_di = minus_di = None
+    if cfg.get("cd_adx_filter_enabled", False):
+        adx, plus_di, minus_di = compute_adx(sig_h, sig_l, sig_c, cfg.get("cd_adx_length", 14))
+    return _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup=1, zscore=zscore, rsi=rsi, adx=adx, plus_di=plus_di, minus_di=minus_di)
 
 
 def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
