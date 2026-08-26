@@ -3760,6 +3760,8 @@ async def cd_poll_loop(symbol):
                     else:
                         sig_o, sig_h, sig_l, sig_c = closed_o, closed_h, closed_l, closed_c
                     buy_signal, sell_signal, score = compute_cd_signals(sig_o, sig_h, sig_l, sig_c, rejection_mult, threshold)
+                    if cfg.get("cd_invert_direction", False):
+                        buy_signal, sell_signal = sell_signal, buy_signal
                     zs_lookback = cfg.get("cd_zscore_lookback", 20)
                     zs_smooth = cfg.get("cd_zscore_smooth", 3)
                     zscore_resolution = cfg.get("cd_zscore_resolution", "same")
@@ -6687,6 +6689,8 @@ def backtest_candle_dna(candles, cfg):
     else:
         sig_o, sig_h, sig_l, sig_c = o, h, l, c
     buy_signal, sell_signal, score = compute_cd_signals(sig_o, sig_h, sig_l, sig_c, rejection_mult, threshold)
+    if cfg.get("cd_invert_direction", False):
+        buy_signal, sell_signal = sell_signal, buy_signal
     zscore = cfg.get("_cd_zscore_precomputed")
     if zscore is None and cfg.get("cd_zscore_filter_enabled", False):
         zscore = compute_rolling_zscore(c, cfg.get("cd_zscore_lookback", 20), cfg.get("cd_zscore_smooth", 3))

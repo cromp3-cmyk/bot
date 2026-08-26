@@ -451,6 +451,7 @@ def default_config():
         "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
         "cd_direction_mode": os.getenv("CD_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "cd_invert_direction": os.getenv("CD_INVERT_DIRECTION", "false").lower() == "true",  # Kontra-Modus wie bei ELTE Smart: vertauscht buy_signal/sell_signal komplett (bullische Kerze -> Short, bearische Kerze -> Long)
         "cd_zscore_filter_enabled": os.getenv("CD_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
         "cd_zscore_resolution": os.getenv("CD_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
         "cd_zscore_lookback": int(os.getenv("CD_ZSCORE_LOOKBACK", "20")),
@@ -2094,6 +2095,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="long_only">Nur Long</option>
       <option value="short_only">Nur Short</option>
     </select>
+  </div>
+  <div data-mode="candle_dna"><label>Richtung invertieren (Kontra-Modus)</label>
+    <select class="cfg" id="cd_invert_direction">
+      <option value="false">Aus (normal)</option>
+      <option value="true">An (invertiert)</option>
+    </select>
+  </div>
+  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Wie bei ELTE Smart: vertauscht Long/Short komplett. Normal löst eine bullische Extrem-Kerze
+    (Score über der Schwelle) einen Long-Impuls aus und eine bearische einen Short-Impuls. Im
+    Kontra-Modus ist es umgekehrt - eine bullische Kerze wird als Short-Signal gewertet und eine
+    bearische als Long-Signal. Alle anderen Einstellungen (Richtungssperre, Filter, SL/TP)
+    wirken unverändert auf die (dann vertauschten) Signale.
   </div>
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Optionaler Z-Score-Filter (portiert aus "Rolling Z-Score Trend [QuantAlgo]"): misst, wie
@@ -4060,6 +4074,7 @@ async function refresh() {
     document.getElementById('cd_threshold').value = data.config.cd_threshold;
     document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
     document.getElementById('cd_direction_mode').value = data.config.cd_direction_mode;
+    document.getElementById('cd_invert_direction').value = String(data.config.cd_invert_direction);
     document.getElementById('cd_zscore_filter_enabled').value = String(data.config.cd_zscore_filter_enabled);
     setResolutionField('cd_zscore_resolution', data.config.cd_zscore_resolution);
     document.getElementById('cd_zscore_lookback').value = data.config.cd_zscore_lookback;
@@ -4469,6 +4484,7 @@ function buildConfigPayload() {
     cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
     cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
     cd_direction_mode: document.getElementById('cd_direction_mode').value,
+    cd_invert_direction: document.getElementById('cd_invert_direction').value === 'true',
     cd_zscore_filter_enabled: document.getElementById('cd_zscore_filter_enabled').value === 'true',
     cd_zscore_resolution: getResolutionField('cd_zscore_resolution'),
     cd_zscore_lookback: parseInt(document.getElementById('cd_zscore_lookback').value),
@@ -4732,7 +4748,7 @@ async def handle_config_update(request):
                 "fr_resolution", "fr_periods", "fr_direction_mode", "fr_invert_direction",
                 "fr_zscore_filter_enabled", "fr_zscore_resolution", "fr_zscore_lookback", "fr_zscore_smooth",
                 "fr_sl_enabled", "fr_sl_manual_usd", "fr_sl_cooldown_seconds",
-                "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode",
+                "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode", "cd_invert_direction",
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
                 "cd_rsi_filter_enabled", "cd_rsi_length", "cd_rsi_midline",
                 "cd_adx_filter_enabled", "cd_adx_length", "cd_adx_threshold",
