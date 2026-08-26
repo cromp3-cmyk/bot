@@ -3575,21 +3575,51 @@ def _cd_set_sl(st, cfg, direction, entry_price):
     st["cd_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
 
 
-async def check_cd_sl(symbol, price):
-    """Optionaler fester SL - siehe check_fr_sl/check_uh_sl, identisches Muster."""
+def _cd_set_tp(st, cfg, direction, entry_price):
+    """Setzt den festen TP-Preis (fester $-Betrag), identisches Muster zu _cd_set_sl. Ohne TP
+    ist der einzige Ausstieg bei Kerzen-DNA die naechste GEGENSAETZLICHE Extrem-Kerze - ein
+    bereits profitabler Trade kann so komplett wieder zurücklaufen, bevor ueberhaupt ein
+    Gegensignal kommt. Der TP realisiert Gewinne, sobald das Ziel erreicht ist, unabhaengig
+    davon, ob/wann ein Flip-Signal folgt."""
+    if not cfg.get("cd_tp_enabled", False):
+        st["cd_tp_price"] = None
+        return
+    size = st.get("total_coin_size") or 0
+    if size <= 0:
+        st["cd_tp_price"] = None
+        return
+    dist_tp = cfg.get("cd_tp_manual_usd", 10.0) / size
+    st["cd_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
+
+
+async def check_cd_sl_tp(symbol, price):
+    """Optionaler fester SL UND optionaler fester TP - siehe _cd_set_sl/_cd_set_tp. Beide
+    unabhaengig voneinander an/abschaltbar."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if st["position"] is None or price is None:
         return
+    pos = st["position"]
+
+    tp_price = st.get("cd_tp_price")
+    if tp_price is not None:
+        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
+        if hit_tp:
+            debug_log(f"🎯 [{symbol}] Kerzen-DNA TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+            await execute_exit(symbol, price, "TP")
+            st["cd_sl_price"] = None
+            st["cd_tp_price"] = None
+            return
+
     sl_price = st.get("cd_sl_price")
     if sl_price is None:
         return
-    pos = st["position"]
     hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
     if hit_sl:
         debug_log(f"🚪 [{symbol}] Kerzen-DNA SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
         await execute_exit(symbol, price, "SL")
         st["cd_sl_price"] = None
+        st["cd_tp_price"] = None
         st["cd_sl_cooldown_until"] = time.time() + cfg.get("cd_sl_cooldown_seconds", 30)
 
 
@@ -3633,11 +3663,13 @@ async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None, a
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
                 _cd_set_sl(st, cfg, "long", price)
+                _cd_set_tp(st, cfg, "long", price)
         elif sell_i and short_ok:
             debug_log(f"📡 [{symbol}] Kerzen-DNA Ersteinstieg: SHORT @ {price}")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
                 _cd_set_sl(st, cfg, "short", price)
+                _cd_set_tp(st, cfg, "short", price)
         return
 
     if pos == "long" and sell_i:
@@ -3653,12 +3685,14 @@ async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None, a
             debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: LONG @ {price}")
             await execute_exit(symbol, price, reason)
             st["cd_sl_price"] = None
+            st["cd_tp_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] Kerzen-DNA Flip: LONG -> SHORT @ {price}")
             await execute_exit(symbol, price, "CD-FLIP")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
                 _cd_set_sl(st, cfg, "short", price)
+                _cd_set_tp(st, cfg, "short", price)
     elif pos == "short" and buy_i:
         if direction_mode == "short_only" or not long_ok:
             if direction_mode == "short_only":
@@ -3672,12 +3706,14 @@ async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None, a
             debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: SHORT @ {price}")
             await execute_exit(symbol, price, reason)
             st["cd_sl_price"] = None
+            st["cd_tp_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] Kerzen-DNA Flip: SHORT -> LONG @ {price}")
             await execute_exit(symbol, price, "CD-FLIP")
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
                 _cd_set_sl(st, cfg, "long", price)
+                _cd_set_tp(st, cfg, "long", price)
 
 
 async def cd_poll_loop(symbol):
@@ -3781,7 +3817,7 @@ async def cd_poll_loop(symbol):
                         minus_di_i = minus_di_series[idx] if minus_di_series else None
                         await check_cd_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], rsi_i, adx_i, plus_di_i, minus_di_i)
 
-                    await check_cd_sl(symbol, price)
+                    await check_cd_sl_tp(symbol, price)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -6507,6 +6543,20 @@ def _cd_bt_set_sl(position, cfg, margin, leverage):
     position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
 
 
+def _cd_bt_set_tp(position, cfg, margin, leverage):
+    """Backtest-Pendant zu _cd_set_tp - setzt tp_price auf der Position (fester $-Betrag)."""
+    if not cfg.get("cd_tp_enabled", False):
+        position["tp_price"] = None
+        return
+    size = position["size"]
+    if size <= 0:
+        position["tp_price"] = None
+        return
+    dist_tp = cfg.get("cd_tp_manual_usd", 10.0) / size
+    entry = position["entry"]
+    position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
+
+
 def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
     """Backtest-Pendant zu check_cd_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
     mit Z-Score-Filter (siehe compute_rolling_zscore), optionalem RSI-Regime-Filter (RSI ueber
@@ -6553,11 +6603,16 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=No
 
         if position is not None:
             sl_price = position.get("sl_price")
+            tp_price = position.get("tp_price")
             hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
             if hit_sl:
                 _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
 
         in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
 
@@ -6568,10 +6623,12 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=No
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
                 _cd_bt_set_sl(position, cfg, margin, leverage)
+                _cd_bt_set_tp(position, cfg, margin, leverage)
             elif sell_i and short_ok(i):
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
                 _cd_bt_set_sl(position, cfg, margin, leverage)
+                _cd_bt_set_tp(position, cfg, margin, leverage)
             continue
 
         if position["dir"] == "long" and sell_i:
@@ -6593,6 +6650,7 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=No
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
                 _cd_bt_set_sl(position, cfg, margin, leverage)
+                _cd_bt_set_tp(position, cfg, margin, leverage)
         elif position["dir"] == "short" and buy_i:
             can_flip = direction_mode != "short_only" and long_ok(i)
             if can_flip:
@@ -6612,6 +6670,7 @@ def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=No
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
                 _cd_bt_set_sl(position, cfg, margin, leverage)
+                _cd_bt_set_tp(position, cfg, margin, leverage)
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)

@@ -464,6 +464,8 @@ def default_config():
         "cd_sl_enabled": os.getenv("CD_SL_ENABLED", "false").lower() == "true",
         "cd_sl_manual_usd": float(os.getenv("CD_SL_MANUAL_USD", "5.0")),
         "cd_sl_cooldown_seconds": float(os.getenv("CD_SL_COOLDOWN_SECONDS", "30")),
+        "cd_tp_enabled": os.getenv("CD_TP_ENABLED", "false").lower() == "true",  # ohne TP ist der einzige Ausstieg die naechste GEGENSAETZLICHE Extrem-Kerze - ein bereits profitabler Trade kann komplett zurücklaufen, bevor ein Gegensignal kommt
+        "cd_tp_manual_usd": float(os.getenv("CD_TP_MANUAL_USD", "10.0")),
         "cd_use_heikin_ashi": os.getenv("CD_USE_HEIKIN_ASHI", "false").lower() == "true",  # Score wird auf HA-Kerzen berechnet, Ein-/Ausstieg trotzdem immer zum echten Kurs
     }
 
@@ -2162,6 +2164,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="candle_dna"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="cd_sl_manual_usd"></div>
   <div data-mode="candle_dna"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="cd_sl_cooldown_seconds"></div>
+  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler fester Take-Profit (fester $-Betrag): ohne TP ist der einzige Ausstieg die naechste
+    GEGENSAETZLICHE Extrem-Kerze - ein bereits profitabler Trade kann dabei komplett wieder
+    zurücklaufen, bevor überhaupt ein Gegensignal kommt. Der TP realisiert Gewinne sofort bei
+    Zielerreichung, unabhängig vom nächsten Signal. Bricht "immer im Markt" NUR im TP-Fall
+    (kein Cooldown danach - der Bot wartet direkt auf das nächste Ersteinstiegs-Signal).
+  </div>
+  <div data-mode="candle_dna"><label>Take-Profit</label>
+    <select class="cfg" id="cd_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="candle_dna"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="cd_tp_manual_usd"></div>
   <div data-mode="candle_dna"><label>Heikin-Ashi für Score-Berechnung</label>
     <select class="cfg" id="cd_use_heikin_ashi">
       <option value="false">Aus - normale Kerzen</option>
@@ -4057,6 +4073,8 @@ async function refresh() {
     document.getElementById('cd_sl_enabled').value = String(data.config.cd_sl_enabled);
     document.getElementById('cd_sl_manual_usd').value = data.config.cd_sl_manual_usd;
     document.getElementById('cd_sl_cooldown_seconds').value = data.config.cd_sl_cooldown_seconds;
+    document.getElementById('cd_tp_enabled').value = String(data.config.cd_tp_enabled);
+    document.getElementById('cd_tp_manual_usd').value = data.config.cd_tp_manual_usd;
     document.getElementById('cd_use_heikin_ashi').value = String(data.config.cd_use_heikin_ashi);
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
@@ -4464,6 +4482,8 @@ function buildConfigPayload() {
     cd_sl_enabled: document.getElementById('cd_sl_enabled').value === 'true',
     cd_sl_manual_usd: parseFloat(document.getElementById('cd_sl_manual_usd').value),
     cd_sl_cooldown_seconds: parseFloat(document.getElementById('cd_sl_cooldown_seconds').value),
+    cd_tp_enabled: document.getElementById('cd_tp_enabled').value === 'true',
+    cd_tp_manual_usd: parseFloat(document.getElementById('cd_tp_manual_usd').value),
     cd_use_heikin_ashi: document.getElementById('cd_use_heikin_ashi').value === 'true',
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
@@ -4716,7 +4736,8 @@ async def handle_config_update(request):
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
                 "cd_rsi_filter_enabled", "cd_rsi_length", "cd_rsi_midline",
                 "cd_adx_filter_enabled", "cd_adx_length", "cd_adx_threshold",
-                "cd_sl_enabled", "cd_sl_manual_usd", "cd_sl_cooldown_seconds", "cd_use_heikin_ashi",
+                "cd_sl_enabled", "cd_sl_manual_usd", "cd_sl_cooldown_seconds",
+                "cd_tp_enabled", "cd_tp_manual_usd", "cd_use_heikin_ashi",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
