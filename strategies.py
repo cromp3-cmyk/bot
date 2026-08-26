@@ -4812,6 +4812,26 @@ async def on_price_update(symbol, price):
         if not bot_active or cfg["entry_mode"] != "grid":
             return
         direction_mode = cfg.get("grid_direction_mode", "both")
+
+        # Anker-Nachfuehrung (optional): in long_only/short_only kann der Kurs beliebig weit
+        # in die GESPERRTE Richtung weglaufen, ohne dass je ein Entry triggert - der Bot wuerde
+        # sonst endlos auf eine Rueckkehr zur alten Zone warten (siehe Kursverlauf-Chart: Anker
+        # weit unter dem aktuellen Kurs). Ist der Abstand zu gross, wird der Anker auf den
+        # aktuellen Kurs nachgezogen, damit die Entry-Schwelle wieder in erreichbarer Naehe liegt.
+        # Bewusst NUR fuer long_only/short_only - bei "both" bleibt irgendwann immer eine Seite
+        # erreichbar, dort wuerde Nachfuehren nur unnoetig fruehe Entries erzeugen.
+        if cfg.get("grid_anchor_follow_enabled", False) and direction_mode != "both" and st["anchor_price"]:
+            old_anchor = st["anchor_price"]
+            follow_abs = old_anchor * (cfg.get("grid_anchor_follow_pct", 1.0) / 100.0)
+            if direction_mode == "long_only" and price > old_anchor + follow_abs:
+                actual_pct = round((price - old_anchor) / old_anchor * 100, 2)
+                debug_log(f"⚓ [{symbol}] Grid-Anker nachgezogen (long_only): {round(old_anchor,4)} -> {price} (Kurs war {actual_pct}% über dem Anker)")
+                st["anchor_price"] = price
+            elif direction_mode == "short_only" and price < old_anchor - follow_abs:
+                actual_pct = round((old_anchor - price) / old_anchor * 100, 2)
+                debug_log(f"⚓ [{symbol}] Grid-Anker nachgezogen (short_only): {round(old_anchor,4)} -> {price} (Kurs war {actual_pct}% unter dem Anker)")
+                st["anchor_price"] = price
+
         grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
         if price <= st["anchor_price"] - grid_step_abs and direction_mode != "short_only":
             await execute_entry(symbol, "long", price, is_add_on=False)

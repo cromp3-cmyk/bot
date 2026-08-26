@@ -185,6 +185,8 @@ def default_config():
         "max_nachkauf": int(os.getenv("MAX_NACHKAUF", "5")),
         "grid_sl_enabled": os.getenv("GRID_SL_ENABLED", "false").lower() == "true",
         "grid_sl_manual_usd": float(os.getenv("GRID_SL_MANUAL_USD", "20.0")),
+        "grid_anchor_follow_enabled": os.getenv("GRID_ANCHOR_FOLLOW_ENABLED", "false").lower() == "true",  # nur relevant bei long_only/short_only - siehe on_price_update
+        "grid_anchor_follow_pct": float(os.getenv("GRID_ANCHOR_FOLLOW_PCT", "1.0")),  # ab wie viel % Abstand vom Anker (in der gesperrten Richtung) der Anker auf den aktuellen Kurs nachgezogen wird
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
@@ -2174,6 +2176,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="grid"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="grid_sl_manual_usd"></div>
+  <div data-mode="grid" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Nur relevant bei "Nur Long"/"Nur Short": läuft der Kurs weit in die GESPERRTE Richtung weg
+    (z.B. Kurs steigt bei "Nur Long" immer weiter über den Anker), würde der Bot sonst endlos auf
+    eine Rückkehr in die alte Zone warten. Ist der Abstand größer als der eingestellte Prozentwert,
+    wird der Anker auf den aktuellen Kurs nachgezogen - die Entry-Schwelle bleibt so erreichbar.
+    Bei "Beide" ohne Wirkung (dort wird irgendwann immer eine Seite erreicht).
+  </div>
+  <div data-mode="grid"><label>Anker-Nachführung</label>
+    <select class="cfg" id="grid_anchor_follow_enabled">
+      <option value="false">Aus (Standard - Anker bleibt fest, bis eine Position schließt)</option>
+      <option value="true">An - Anker folgt dem Kurs bei zu großem Abstand in gesperrter Richtung</option>
+    </select>
+  </div>
+  <div data-mode="grid"><label>Nachführ-Schwelle (%)</label><input type="number" step="0.1" min="0.1" id="grid_anchor_follow_pct"></div>
   <div data-mode="grid"><label>Nach TP sofort drehen</label>
     <select class="cfg" id="auto_reverse">
       <option value="true">Ja - sofort Gegenposition</option>
@@ -4030,6 +4046,8 @@ async function refresh() {
     document.getElementById('max_nachkauf').value = data.config.max_nachkauf;
     document.getElementById('grid_sl_enabled').value = String(data.config.grid_sl_enabled);
     document.getElementById('grid_sl_manual_usd').value = data.config.grid_sl_manual_usd;
+    document.getElementById('grid_anchor_follow_enabled').value = String(data.config.grid_anchor_follow_enabled);
+    document.getElementById('grid_anchor_follow_pct').value = data.config.grid_anchor_follow_pct;
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('binance_market_type').value = data.config.binance_market_type;
     document.getElementById('auto_reverse').value = String(data.config.auto_reverse);
@@ -4432,6 +4450,8 @@ function buildConfigPayload() {
     max_nachkauf: parseInt(document.getElementById('max_nachkauf').value),
     grid_sl_enabled: document.getElementById('grid_sl_enabled').value === 'true',
     grid_sl_manual_usd: parseFloat(document.getElementById('grid_sl_manual_usd').value),
+    grid_anchor_follow_enabled: document.getElementById('grid_anchor_follow_enabled').value === 'true',
+    grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
     auto_reverse: document.getElementById('auto_reverse').value === 'true',
@@ -4610,7 +4630,8 @@ async def handle_config_update(request):
     body = await request.json()
     cfg = BOTS[symbol]["config"]
     for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_direction_mode", "grid_step_pct", "tp_step_pct",
-                "grid_step_usd", "tp_step_usd", "max_nachkauf", "grid_sl_enabled", "grid_sl_manual_usd", "dry_run", "auto_reverse", "binance_market_type",
+                "grid_step_usd", "tp_step_usd", "max_nachkauf", "grid_sl_enabled", "grid_sl_manual_usd",
+                "grid_anchor_follow_enabled", "grid_anchor_follow_pct", "dry_run", "auto_reverse", "binance_market_type",
                 "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_instant_reset_ratio", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_depth_weighting_enabled", "obi_use_median", "obi_min_liquidity", "obi_breakeven_enabled", "obi_breakeven_trigger_ratio", "obi_breakeven_lock_usd", "obi_breakeven_lock_pct", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
                 "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length",
                 "obi_spread_filter_enabled", "obi_max_spread_pct",
