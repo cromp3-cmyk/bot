@@ -722,6 +722,31 @@ async def place_market_order(client, market_index, symbol, is_ask, base_amount, 
     return tx, tx_hash, err
 
 
+async def get_account_position_from_exchange(client, market_index, retries=5, delay=0.6):
+    """Fragt die ECHTE Positionsdaten (u.a. avg_entry_price, realized_pnl) direkt von der Boerse
+    ab - im Gegensatz zum theoretischen Zielpreis, mit dem eine Market-Order platziert wird, ist
+    das der TATSAECHLICHE, von der Boersen-Matching-Engine bestimmte Wert. Kurzer Retry, weil die
+    on-chain Verbuchung nach einer Order minimal verzoegert sein kann. Gibt None zurueck, wenn die
+    Position nicht gefunden wird oder die Abfrage fehlschlaegt - der Aufrufer MUSS in diesem Fall
+    auf die bisherige (theoretische) Berechnung zurueckfallen, damit ein API-Hakler niemals einen
+    Trade blockiert oder falsche Daten erzwingt."""
+    try:
+        import lighter
+        account_api = lighter.AccountApi(client.api_client)
+        for attempt in range(retries):
+            try:
+                resp = await account_api.account(by="index", value=str(client.account_index))
+                if resp and resp.accounts:
+                    for pos in (resp.accounts[0].positions or []):
+                        if pos.market_id == market_index:
+                            return pos
+            except Exception as e:
+                debug_log(f"⚠️ Positionsabfrage fehlgeschlagen (Versuch {attempt+1}/{retries})", {"error": str(e)})
+            await asyncio.sleep(delay)
+    except Exception as e:
+        debug_log("⚠️ Konnte AccountApi nicht initialisieren - falle auf theoretischen Preis zurück", {"error": str(e)})
+    return None
+
 
 
 def estimate_liquidation_price(symbol):
@@ -804,11 +829,25 @@ async def execute_entry(symbol, direction, price, is_add_on, size_multiplier=1.0
             return False
         is_ask = direction == "short"
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=False)
-        await client.close()
         if err:
+            await client.close()
             debug_log(f"⚠️ [{symbol}] Entry-Order fehlgeschlagen", {"error": str(err)})
             return False
         debug_log(f"✅ [{symbol}] ECHTE Order ausgeführt: {direction.upper()} @ ~{price}", {"tx_hash": str(tx_hash)})
+
+        # Der tatsaechliche Fill-Preis einer Market-Order kann vom theoretischen Zielpreis
+        # abweichen (Slippage, Latenz, schnelle Kursbewegung) - deshalb hier den ECHTEN Preis
+        # direkt von der Boerse abfragen statt blind den Zielpreis zu uebernehmen. Schlaegt die
+        # Abfrage fehl, wird bewusst der Zielpreis als Naeherung beibehalten (kein Blockieren).
+        real_pos = await get_account_position_from_exchange(client, market_index)
+        await client.close()
+        if real_pos is not None and real_pos.avg_entry_price:
+            real_price = float(real_pos.avg_entry_price)
+            if price and abs(real_price - price) / price > 0.0005:
+                debug_log(f"🎯 [{symbol}] Echter Fill-Preis von der Börse: {real_price} (Ziel war {price}, Abweichung {round((real_price-price)/price*100,3)}%)")
+            price = real_price
+        else:
+            debug_log(f"⚠️ [{symbol}] Konnte echten Fill-Preis nicht abfragen - verwende Zielpreis {price} als Näherung")
 
     if is_add_on:
         total_value = st["avg_entry_price"] * st["total_coin_size"] + price * new_units
@@ -841,6 +880,7 @@ async def execute_partial_exit(symbol, price, fraction, reason):
     close_size = st["total_coin_size"] * fraction
     position_side = st["position"]
     pnl_usd = (price - st["avg_entry_price"]) * close_size if position_side == "long" else (st["avg_entry_price"] - price) * close_size
+    exit_price_for_log = price
 
     if not cfg["dry_run"]:
         client = get_lighter_client()
@@ -855,22 +895,38 @@ async def execute_partial_exit(symbol, price, fraction, reason):
             await client.close()
             return False
         is_ask = position_side == "long"
+
+        pos_before = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
+        realized_pnl_before = float(pos_before.realized_pnl) if pos_before is not None and pos_before.realized_pnl is not None else None
+
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
-        await client.close()
         if err:
+            await client.close()
             debug_log(f"⚠️ [{symbol}] Teil-Exit-Order fehlgeschlagen", {"error": str(err)})
             return False
 
+        pos_after = await get_account_position_from_exchange(client, market_index)
+        await client.close()
+        if realized_pnl_before is not None and pos_after is not None and pos_after.realized_pnl is not None:
+            real_pnl_usd = float(pos_after.realized_pnl) - realized_pnl_before
+            if abs(real_pnl_usd - pnl_usd) > 0.01:
+                debug_log(f"🎯 [{symbol}] Echter realisierter Teil-PnL von der Börse: ${round(real_pnl_usd,3)} (Schätzung war ${round(pnl_usd,3)})")
+            pnl_usd = real_pnl_usd
+            if close_size > 0:
+                exit_price_for_log = round(st["avg_entry_price"] + (pnl_usd / close_size if position_side == "long" else -pnl_usd / close_size), 4)
+        else:
+            debug_log(f"⚠️ [{symbol}] Konnte echten Teil-PnL nicht abfragen - verwende Schätzung basierend auf Zielpreis {price}")
+
     st["stats"]["total_pnl_usd"] += pnl_usd
     st["trade_log"].append({
-        "side": position_side, "avg_entry": round(st["avg_entry_price"], 2), "exit": price,
+        "side": position_side, "avg_entry": round(st["avg_entry_price"], 2), "exit": exit_price_for_log,
         "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3),
         "opened_at": st.get("position_opened_at"), "closed_at": now_local().isoformat(),
         "reason": reason, "partial": True, "fraction": fraction,
     })
 
     st["total_coin_size"] -= close_size
-    debug_log(f"✂️ [{symbol}] Teil-Exit ({reason}): {position_side.upper()} {round(fraction*100)}% @ {price} | PnL ${round(pnl_usd,3)} | Rest {round(st['total_coin_size'],6)}")
+    debug_log(f"✂️ [{symbol}] Teil-Exit ({reason}): {position_side.upper()} {round(fraction*100)}% @ {exit_price_for_log} | PnL ${round(pnl_usd,3)} | Rest {round(st['total_coin_size'],6)}")
     await save_bot_state()
     return True
 
@@ -882,6 +938,7 @@ async def execute_exit(symbol, price, reason):
 
     pnl_usd = (price - st["avg_entry_price"]) * st["total_coin_size"] if st["position"] == "long" else (st["avg_entry_price"] - price) * st["total_coin_size"]
     closing_side = st["position"]
+    exit_price_for_log = price
 
     if not cfg["dry_run"]:
         client = get_lighter_client()
@@ -891,29 +948,52 @@ async def execute_exit(symbol, price, reason):
         precision = get_precision(symbol)
         base_amount = int(round(st["total_coin_size"] * precision))
         is_ask = st["position"] == "long"
+
+        # realized_pnl VOR dem Exit merken, um danach den ECHTEN PnL-Zuwachs zu bestimmen (siehe
+        # unten) - schlaegt das fehl, wird still auf die theoretische Schaetzung zurueckgefallen.
+        pos_before = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
+        realized_pnl_before = float(pos_before.realized_pnl) if pos_before is not None and pos_before.realized_pnl is not None else None
+
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
-        await client.close()
         if err:
+            await client.close()
             debug_log(f"⚠️ [{symbol}] Exit-Order fehlgeschlagen - Position bleibt offen!", {"error": str(err)})
             return
+
+        # Der tatsaechliche Fuellpreis einer Market-Order (und damit der echte PnL) kann vom
+        # theoretischen Zielpreis abweichen (Slippage, Latenz, schnelle Kursbewegung) - deshalb
+        # hier den ECHTEN realisierten PnL direkt von der Boerse abfragen (Differenz von
+        # realized_pnl vor/nach dem Exit) statt blind mit dem Zielpreis zu rechnen.
+        pos_after = await get_account_position_from_exchange(client, market_index)
+        await client.close()
+        if realized_pnl_before is not None and pos_after is not None and pos_after.realized_pnl is not None:
+            real_pnl_usd = float(pos_after.realized_pnl) - realized_pnl_before
+            if abs(real_pnl_usd - pnl_usd) > 0.01:
+                debug_log(f"🎯 [{symbol}] Echter realisierter PnL von der Börse: ${round(real_pnl_usd,3)} (Schätzung war ${round(pnl_usd,3)})")
+            pnl_usd = real_pnl_usd
+            # Nur fuer die Anzeige im Trade-Log: echten Exit-Preis aus dem echten PnL zurueckrechnen.
+            if st["total_coin_size"] > 0:
+                exit_price_for_log = round(st["avg_entry_price"] + (pnl_usd / st["total_coin_size"] if closing_side == "long" else -pnl_usd / st["total_coin_size"]), 4)
+        else:
+            debug_log(f"⚠️ [{symbol}] Konnte echten PnL nicht abfragen - verwende Schätzung basierend auf Zielpreis {price}")
 
     stats = st["stats"]
     stats["trades"] += 1
     stats["total_pnl_usd"] += pnl_usd
     stats["wins" if pnl_usd > 0 else "losses"] += 1
     st["trade_log"].append({
-        "side": st["position"], "avg_entry": round(st["avg_entry_price"], 2), "exit": price,
+        "side": st["position"], "avg_entry": round(st["avg_entry_price"], 2), "exit": exit_price_for_log,
         "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3),
         "opened_at": st.get("position_opened_at"), "closed_at": now_local().isoformat(), "reason": reason,
     })
 
-    debug_log(f"🏁 [{symbol}] Position geschlossen ({reason}): {st['position'].upper()} Ø{round(st['avg_entry_price'],2)} -> {price} | PnL ${round(pnl_usd,3)}")
+    debug_log(f"🏁 [{symbol}] Position geschlossen ({reason}): {st['position'].upper()} Ø{round(st['avg_entry_price'],2)} -> {exit_price_for_log} | PnL ${round(pnl_usd,3)}")
 
     st["position"] = None
     st["avg_entry_price"] = None
     st["total_coin_size"] = 0.0
     st["entry_count"] = 0
-    st["anchor_price"] = price
+    st["anchor_price"] = exit_price_for_log
     st["position_opened_at"] = None
     st["last_entry_price"] = None
     await save_bot_state()
@@ -922,7 +1002,7 @@ async def execute_exit(symbol, price, reason):
         opposite = "short" if closing_side == "long" else "long"
         direction_mode = cfg.get("grid_direction_mode", "both")
         if direction_mode == "both" or (direction_mode == "long_only" and opposite == "long") or (direction_mode == "short_only" and opposite == "short"):
-            await execute_entry(symbol, opposite, price, is_add_on=False)
+            await execute_entry(symbol, opposite, exit_price_for_log, is_add_on=False)
         # sonst (Richtung erlaubt die Gegenrichtung nicht): bleibt flach, wartet auf das naechste
         # Grid-Level in der erlaubten Richtung (siehe on_price_update)
 
