@@ -473,6 +473,25 @@ def default_config():
         "cd_tp_enabled": os.getenv("CD_TP_ENABLED", "false").lower() == "true",  # ohne TP ist der einzige Ausstieg die naechste GEGENSAETZLICHE Extrem-Kerze - ein bereits profitabler Trade kann komplett zurücklaufen, bevor ein Gegensignal kommt
         "cd_tp_manual_usd": float(os.getenv("CD_TP_MANUAL_USD", "10.0")),
         "cd_use_heikin_ashi": os.getenv("CD_USE_HEIKIN_ASHI", "false").lower() == "true",  # Score wird auf HA-Kerzen berechnet, Ein-/Ausstieg trotzdem immer zum echten Kurs
+        "rf_resolution": os.getenv("RF_RESOLUTION", "5m"),
+        "rf_period": int(os.getenv("RF_PERIOD", "20")),  # "Swing Period" (n) im Original-Pine-Script
+        "rf_qty": float(os.getenv("RF_QTY", "3.5")),  # "Swing Multiplier" (qty) im Original-Pine-Script
+        "rf_direction_mode": os.getenv("RF_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "rf_zscore_filter_enabled": os.getenv("RF_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
+        "rf_zscore_resolution": os.getenv("RF_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
+        "rf_zscore_lookback": int(os.getenv("RF_ZSCORE_LOOKBACK", "20")),
+        "rf_zscore_smooth": int(os.getenv("RF_ZSCORE_SMOOTH", "3")),
+        "rf_rsi_filter_enabled": os.getenv("RF_RSI_FILTER_ENABLED", "false").lower() == "true",
+        "rf_rsi_length": int(os.getenv("RF_RSI_LENGTH", "14")),
+        "rf_rsi_midline": float(os.getenv("RF_RSI_MIDLINE", "50")),
+        "rf_adx_filter_enabled": os.getenv("RF_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "rf_adx_length": int(os.getenv("RF_ADX_LENGTH", "14")),
+        "rf_adx_threshold": float(os.getenv("RF_ADX_THRESHOLD", "20")),
+        "rf_sl_enabled": os.getenv("RF_SL_ENABLED", "false").lower() == "true",
+        "rf_sl_manual_usd": float(os.getenv("RF_SL_MANUAL_USD", "5.0")),
+        "rf_sl_cooldown_seconds": float(os.getenv("RF_SL_COOLDOWN_SECONDS", "30")),
+        "rf_tp_enabled": os.getenv("RF_TP_ENABLED", "false").lower() == "true",
+        "rf_tp_manual_usd": float(os.getenv("RF_TP_MANUAL_USD", "10.0")),
     }
 
 
@@ -512,6 +531,7 @@ def default_state():
         "utb_sl_price": None, "utb_sl_cooldown_until": 0.0,
         "fr_sl_price": None, "fr_sl_cooldown_until": 0.0,
         "cd_sl_price": None, "cd_sl_cooldown_until": 0.0,
+        "rf_sl_price": None, "rf_tp_price": None, "rf_sl_cooldown_until": 0.0,
         "utb_trend_pct_last": None,
         "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
         "wtc_sl_price": None, "wtc_tp_price": None,
@@ -1212,11 +1232,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="elte_smart">ELTE Smart (SuperTrend auf ohlc4 mit Auto-Sensitivity, TP1/TP2/TP3 gestufte Teilverkäufe mit nachziehendem SL)</option>
       <option value="candle_patterns">Candle Patterns (3 Line Strike / Engulfing, SL+TP fest oder ATR-basiert, ATR-Breakeven)</option>
       <option value="mo7_scalp">MO7 Scalp (Composite-Oszillator aus 7 Indikatoren, Schwellenwert-Cross oder 5-Kerzen-Summe, fester SL+TP)</option>
-      <option value="ut_bot_hull">UT Bot + Hull Flip (ATR-Trailing-Stop, immer im Markt, Flip-Trigger wählbar, kein SL/TP)</option>
+      <option value="ut_bot_hull">UT Bot + Hull Flip (ATR-Trailing-Stop, immer im Markt, Flip-Trigger wählbar, optionaler fester SL/TP + Trailing-TP)</option>
       <option value="wavetrend_cross">WaveTrend Cross (Cipher-B-Kernsignal, Zonenfilter wählbar, immer im Markt oder normal, fester SL+TP)</option>
       <option value="pieki_algo">Pieki Algo (SuperTrend+SMA9-Signal, Flip oder fester SL+TP, optionaler MTF-Trend%-Filter)</option>
       <option value="fractals_flip">Williams Fractals (Swing-High/Low-Umkehrpunkte, immer im Markt, nur Buy/Sell-Wechsel)</option>
       <option value="candle_dna">Kerzen-DNA (eigener Konviktions-Score aus Körper+Docht je Kerze, immer im Markt, nur Buy/Sell-Wechsel)</option>
+      <option value="range_filter">Range Filter (DonovanWall, nachziehende Glättungslinie, immer im Markt, optionaler fester SL/TP)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -2350,6 +2371,119 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
 
+  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📶 Range Filter (Port von "Range Filter - B&S Signals", DonovanWall): eine nachziehende
+    Glättungslinie, die sich nur bewegt, wenn der Kurs eine Bandbreite (aus doppelt geglätteter
+    EMA der Kursänderung) verlässt. Kauf/Verkauf beim ersten qualifizierten Richtungswechsel,
+    NACHDEM zuvor der jeweils andere Zustand aktiv war - kein wiederholtes Feuern in dieselbe
+    Richtung. Immer im Markt, reiner Buy/Sell-Wechsel wie bei Kerzen-DNA/Fractals.
+  </div>
+  <div data-mode="range_filter"><label>Zeitrahmen</label>
+    <select class="cfg" id="rf_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="rf_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="range_filter"><label>Swing-Periode (n)</label><input type="number" step="1" min="1" id="rf_period"></div>
+  <div data-mode="range_filter"><label>Swing-Multiplikator (qty)</label><input type="number" step="0.1" min="0.01" id="rf_qty"></div>
+  <div data-mode="range_filter"><label>Richtung</label>
+    <select class="cfg" id="rf_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler Z-Score-Filter (portiert aus "Rolling Z-Score Trend [QuantAlgo]"): misst, wie
+    viele Standardabweichungen der Kurs vom gleitenden Durchschnitt entfernt ist. Über 0 = nur
+    Long erlaubt, unter 0 = nur Short erlaubt - gilt für jeden Einstieg, auch beim Flip.
+  </div>
+  <div data-mode="range_filter"><label>Z-Score-Filter</label>
+    <select class="cfg" id="rf_zscore_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Long nur über 0, Short nur unter 0</option>
+    </select>
+  </div>
+  <div data-mode="range_filter" data-requires="rf_zscore_filter_enabled"><label>Z-Score Zeiteinheit</label>
+    <select class="cfg" id="rf_zscore_resolution">
+      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="rf_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="range_filter" data-requires="rf_zscore_filter_enabled"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="rf_zscore_lookback"></div>
+  <div data-mode="range_filter" data-requires="rf_zscore_filter_enabled"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="rf_zscore_smooth"></div>
+  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler RSI-Regime-Filter, unabhängig vom Z-Score-Filter kombinierbar (beide können
+    gleichzeitig an sein - dann müssen beide zustimmen): RSI über der Mittellinie -> nur Long
+    erlaubt, RSI unter der Mittellinie -> nur Short erlaubt.
+  </div>
+  <div data-mode="range_filter"><label>RSI-Filter</label>
+    <select class="cfg" id="rf_rsi_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Long nur über Mittellinie, Short nur darunter</option>
+    </select>
+  </div>
+  <div data-mode="range_filter" data-requires="rf_rsi_filter_enabled"><label>RSI-Länge</label><input type="number" step="1" min="2" id="rf_rsi_length"></div>
+  <div data-mode="range_filter" data-requires="rf_rsi_filter_enabled"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="rf_rsi_midline"></div>
+  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler ADX/DI-Trendfilter, unabhängig von Z-Score- und RSI-Filter kombinierbar (mehrere
+    gleichzeitig aktiv -> alle müssen zustimmen): ADX über der Schwelle UND +DI über -DI -> nur
+    Long erlaubt. ADX über der Schwelle UND -DI über +DI -> nur Short erlaubt. Liegt der ADX
+    UNTER der Schwelle (kein klarer Trend), sind BEIDE Richtungen gesperrt.
+  </div>
+  <div data-mode="range_filter"><label>ADX/DI-Filter</label>
+    <select class="cfg" id="rf_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - nur bei genug Trendstärke und passender Richtung</option>
+    </select>
+  </div>
+  <div data-mode="range_filter" data-requires="rf_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="rf_adx_length"></div>
+  <div data-mode="range_filter" data-requires="rf_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="rf_adx_threshold"></div>
+  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler fester Stop-Loss (fester $-Betrag): durchbricht "immer im Markt" NUR im SL-Fall -
+    die Position geht dann glatt (statt zu drehen) und wartet nach einem Cooldown auf das
+    nächste gültige Ersteinstiegs-Signal.
+  </div>
+  <div data-mode="range_filter"><label>Stop-Loss</label>
+    <select class="cfg" id="rf_sl_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="range_filter" data-requires="rf_sl_enabled"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="rf_sl_manual_usd"></div>
+  <div data-mode="range_filter" data-requires="rf_sl_enabled"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="rf_sl_cooldown_seconds"></div>
+  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler fester Take-Profit (fester $-Betrag): ohne TP ist der einzige Ausstieg der nächste
+    GEGENSÄTZLICHE Richtungswechsel - ein bereits profitabler Trade kann dabei komplett wieder
+    zurücklaufen, bevor überhaupt ein Gegensignal kommt.
+  </div>
+  <div data-mode="range_filter"><label>Take-Profit</label>
+    <select class="cfg" id="rf_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="range_filter" data-requires="rf_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="rf_tp_manual_usd"></div>
+
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
       <option value="both">Beide (Long unter Anker, Short über Anker)</option>
@@ -2789,6 +2923,56 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<div data-mode-section="range_filter" style="display:none;">
+<h2 class="section-title">🎲 Range-Filter-Parameter-Sweep (Swing-Periode × Multiplikator)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet alle Kombinationen aus Swing-Periode (n) und Swing-Multiplikator (qty) gegeneinander -
+    das sind die beiden Parameter, die im Original die Bandbreite und damit das Signal bestimmen.
+    Ergebnisse mit weniger als 5 Trades sind statistisch kaum aussagekräftig und werden nach
+    unten sortiert, aber nicht versteckt.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="rf-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Swing-Periode von</label><input type="number" step="1" id="rf-sweep-period-min" value="10" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="1" id="rf-sweep-period-max" value="50" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" id="rf-sweep-period-step" value="5" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Multiplikator von</label><input type="number" step="0.1" id="rf-sweep-qty-min" value="1.0" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" id="rf-sweep-qty-max" value="6.0" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.1" id="rf-sweep-qty-step" value="0.5" style="width:80px;"></div>
+    <button id="btn-rf-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="rf-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <table id="rf-sweep-results-table" style="display:none; margin-top:12px;">
+    <thead><tr>
+      <th class="sortable" data-key="rf_period">Swing-Periode ⇅</th>
+      <th class="sortable" data-key="rf_qty">Multiplikator ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="rf-sweep-worst-title">📉 Die 20 schlechtesten Kombinationen (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="rf-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="rf_period">Swing-Periode ⇅</th>
+      <th class="sortable" data-key="rf_qty">Multiplikator ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
     </tr></thead>
@@ -3237,7 +3421,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3284,6 +3468,12 @@ function resetBacktestUI() {
   document.getElementById('utb-sweep-worst-title').style.display = 'none';
   window.utbSweepResultsData = [];
   window.utbSweepWorstData = [];
+  document.getElementById('rf-sweep-status').innerText = '';
+  document.getElementById('rf-sweep-results-table').style.display = 'none';
+  document.getElementById('rf-sweep-worst-table').style.display = 'none';
+  document.getElementById('rf-sweep-worst-title').style.display = 'none';
+  window.rfSweepResultsData = [];
+  window.rfSweepWorstData = [];
 }
 
 document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
@@ -3413,6 +3603,68 @@ const daSweepRowHtml = (r) => `
   </tr>`;
 const renderDaSweepResults = makeSortableTable('da-sweep-results-table', () => window.daSweepResultsData, daSweepRowHtml);
 const renderDaSweepWorst = makeSortableTable('da-sweep-worst-table', () => window.daSweepWorstData, daSweepRowHtml);
+
+document.getElementById('btn-rf-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-rf-sweep');
+  const statusEl = document.getElementById('rf-sweep-status');
+  const tableEl = document.getElementById('rf-sweep-results-table');
+  const worstTableEl = document.getElementById('rf-sweep-worst-table');
+  const worstTitleEl = document.getElementById('rf-sweep-worst-title');
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('rf-sweep-days').value) || 30,
+    period_min: parseInt(document.getElementById('rf-sweep-period-min').value),
+    period_max: parseInt(document.getElementById('rf-sweep-period-max').value),
+    period_step: parseInt(document.getElementById('rf-sweep-period-step').value),
+    qty_min: parseFloat(document.getElementById('rf-sweep-qty-min').value),
+    qty_max: parseFloat(document.getElementById('rf-sweep-qty-max').value),
+    qty_step: parseFloat(document.getElementById('rf-sweep-qty-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  tableEl.style.display = 'none';
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Kombinationen etwas dauern.`;
+  try {
+    const res = await fetch(`/api/rf_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
+      window.rfSweepResultsData = data.results || [];
+      window.rfSweepWorstData = data.worst_results || [];
+      renderRfSweepResults();
+      renderRfSweepWorst();
+      tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.rfSweepResultsData = [];
+window.rfSweepWorstData = [];
+const rfSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.rf_period}</td>
+    <td>${r.rf_qty}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderRfSweepResults = makeSortableTable('rf-sweep-results-table', () => window.rfSweepResultsData, rfSweepRowHtml);
+const renderRfSweepWorst = makeSortableTable('rf-sweep-worst-table', () => window.rfSweepWorstData, rfSweepRowHtml);
 
 document.getElementById('btn-es-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-es-sweep');
@@ -4295,6 +4547,25 @@ async function refresh() {
     document.getElementById('cd_tp_enabled').value = String(data.config.cd_tp_enabled);
     document.getElementById('cd_tp_manual_usd').value = data.config.cd_tp_manual_usd;
     document.getElementById('cd_use_heikin_ashi').value = String(data.config.cd_use_heikin_ashi);
+    setResolutionField('rf_resolution', data.config.rf_resolution);
+    document.getElementById('rf_period').value = data.config.rf_period;
+    document.getElementById('rf_qty').value = data.config.rf_qty;
+    document.getElementById('rf_direction_mode').value = data.config.rf_direction_mode;
+    document.getElementById('rf_zscore_filter_enabled').value = String(data.config.rf_zscore_filter_enabled);
+    setResolutionField('rf_zscore_resolution', data.config.rf_zscore_resolution);
+    document.getElementById('rf_zscore_lookback').value = data.config.rf_zscore_lookback;
+    document.getElementById('rf_zscore_smooth').value = data.config.rf_zscore_smooth;
+    document.getElementById('rf_rsi_filter_enabled').value = String(data.config.rf_rsi_filter_enabled);
+    document.getElementById('rf_rsi_length').value = data.config.rf_rsi_length;
+    document.getElementById('rf_rsi_midline').value = data.config.rf_rsi_midline;
+    document.getElementById('rf_adx_filter_enabled').value = String(data.config.rf_adx_filter_enabled);
+    document.getElementById('rf_adx_length').value = data.config.rf_adx_length;
+    document.getElementById('rf_adx_threshold').value = data.config.rf_adx_threshold;
+    document.getElementById('rf_sl_enabled').value = String(data.config.rf_sl_enabled);
+    document.getElementById('rf_sl_manual_usd').value = data.config.rf_sl_manual_usd;
+    document.getElementById('rf_sl_cooldown_seconds').value = data.config.rf_sl_cooldown_seconds;
+    document.getElementById('rf_tp_enabled').value = String(data.config.rf_tp_enabled);
+    document.getElementById('rf_tp_manual_usd').value = data.config.rf_tp_manual_usd;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -4710,6 +4981,25 @@ function buildConfigPayload() {
     cd_tp_enabled: document.getElementById('cd_tp_enabled').value === 'true',
     cd_tp_manual_usd: parseFloat(document.getElementById('cd_tp_manual_usd').value),
     cd_use_heikin_ashi: document.getElementById('cd_use_heikin_ashi').value === 'true',
+    rf_resolution: getResolutionField('rf_resolution'),
+    rf_period: parseInt(document.getElementById('rf_period').value),
+    rf_qty: parseFloat(document.getElementById('rf_qty').value),
+    rf_direction_mode: document.getElementById('rf_direction_mode').value,
+    rf_zscore_filter_enabled: document.getElementById('rf_zscore_filter_enabled').value === 'true',
+    rf_zscore_resolution: getResolutionField('rf_zscore_resolution'),
+    rf_zscore_lookback: parseInt(document.getElementById('rf_zscore_lookback').value),
+    rf_zscore_smooth: parseInt(document.getElementById('rf_zscore_smooth').value),
+    rf_rsi_filter_enabled: document.getElementById('rf_rsi_filter_enabled').value === 'true',
+    rf_rsi_length: parseInt(document.getElementById('rf_rsi_length').value),
+    rf_rsi_midline: parseFloat(document.getElementById('rf_rsi_midline').value),
+    rf_adx_filter_enabled: document.getElementById('rf_adx_filter_enabled').value === 'true',
+    rf_adx_length: parseInt(document.getElementById('rf_adx_length').value),
+    rf_adx_threshold: parseFloat(document.getElementById('rf_adx_threshold').value),
+    rf_sl_enabled: document.getElementById('rf_sl_enabled').value === 'true',
+    rf_sl_manual_usd: parseFloat(document.getElementById('rf_sl_manual_usd').value),
+    rf_sl_cooldown_seconds: parseFloat(document.getElementById('rf_sl_cooldown_seconds').value),
+    rf_tp_enabled: document.getElementById('rf_tp_enabled').value === 'true',
+    rf_tp_manual_usd: parseFloat(document.getElementById('rf_tp_manual_usd').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -4872,6 +5162,7 @@ async def handle_status(request):
         "utb_sl_price": st.get("utb_sl_price"),
         "fr_sl_price": st.get("fr_sl_price"),
         "cd_sl_price": st.get("cd_sl_price"),
+        "rf_sl_price": st.get("rf_sl_price"), "rf_tp_price": st.get("rf_tp_price"),
         "utb_trend_pct_last": st.get("utb_trend_pct_last"),
         "wtc_last_wt1": st.get("wtc_last_wt1"), "wtc_last_wt2": st.get("wtc_last_wt2"),
         "wtc_sl_price": st.get("wtc_sl_price"), "wtc_tp_price": st.get("wtc_tp_price"),
@@ -4965,6 +5256,12 @@ async def handle_config_update(request):
                 "cd_adx_filter_enabled", "cd_adx_length", "cd_adx_threshold",
                 "cd_sl_enabled", "cd_sl_manual_usd", "cd_sl_cooldown_seconds",
                 "cd_tp_enabled", "cd_tp_manual_usd", "cd_use_heikin_ashi",
+                "rf_resolution", "rf_period", "rf_qty", "rf_direction_mode",
+                "rf_zscore_filter_enabled", "rf_zscore_resolution", "rf_zscore_lookback", "rf_zscore_smooth",
+                "rf_rsi_filter_enabled", "rf_rsi_length", "rf_rsi_midline",
+                "rf_adx_filter_enabled", "rf_adx_length", "rf_adx_threshold",
+                "rf_sl_enabled", "rf_sl_manual_usd", "rf_sl_cooldown_seconds",
+                "rf_tp_enabled", "rf_tp_manual_usd",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
@@ -5073,6 +5370,36 @@ async def handle_da_sweep(request):
 
     result = await run_da_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
                                        sensitivity_min, sensitivity_max, sensitivity_step)
+    return web.json_response(result)
+
+
+async def handle_rf_sweep(request):
+    """'Monte-Carlo'-Parametersweep fuer Range Filter: testet einen Bereich von Swing-Periode
+    und Swing-Multiplikator gegeneinander und gibt die besten/schlechtesten Kombinationen
+    zurueck."""
+    from strategies import run_rf_param_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        period_min = max(1, int(body.get("period_min", 10)))
+        period_max = max(period_min, int(body.get("period_max", 50)))
+        period_step = max(1, int(body.get("period_step", 5)))
+        qty_min = max(0.01, float(body.get("qty_min", 1.0)))
+        qty_max = max(qty_min, float(body.get("qty_max", 6.0)))
+        qty_step = max(0.01, float(body.get("qty_step", 0.5)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_rf_param_sweep(symbol, cfg, days, period_min, period_max, period_step,
+                                       qty_min, qty_max, qty_step)
     return web.json_response(result)
 
 

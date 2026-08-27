@@ -3664,7 +3664,329 @@ def compute_cd_signals(opens, highs, lows, closes, rejection_mult, threshold):
     return buy_i, sell_i, score
 
 
-def _cd_set_sl(st, cfg, direction, entry_price):
+def compute_range_filter(closes, period, qty):
+    """Portiert aus 'Range Filter - B&S Signals' (DonovanWall, Pine v4): eine sich selbst
+    nachziehende Glaettungslinie (filt), die sich nur bewegt, wenn der Kurs die aktuelle
+    Bandbreite (rng, aus einer doppelt geglaetteten EMA der Kursaenderung) verlaesst -
+    aehnlich einer Chandelier-/SuperTrend-Linie, aber symmetrisch um den Kurs statt am
+    Hoch/Tief. long_flip/short_flip feuern beim naechsten qualifizierten Richtungswechsel,
+    NACHDEM zuvor der jeweils andere Zustand aktiv war (wie longCondition/shortCondition im
+    Original via CondIni) - verhindert wiederholtes Feuern in dieselbe Richtung, solange der
+    Kurs auf derselben Seite des Filters bleibt. longCond/shortCond im Original vereinfachen
+    sich algebraisch zu genau 'Kurs > filt UND Filter steigend' bzw. 'Kurs < filt UND Filter
+    fallend' (die Original-Bedingung deckt beide Faelle rng_src>rng_src[1] und <rng_src[1] ab,
+    was zusammen bereits 'ungleich' abdeckt)."""
+    n = len(closes)
+    if n < 2:
+        return [False] * n, [False] * n
+
+    wper = period * 2 - 1
+    diffs = [0.0] + [abs(closes[i] - closes[i - 1]) for i in range(1, n)]
+    avrng = _ema_series(diffs, period)
+    ac = _ema_series(avrng, wper)
+    rng = [v * qty for v in ac]
+
+    filt = [0.0] * n
+    filt[0] = closes[0]
+    for i in range(1, n):
+        r = rng[i]
+        prev = filt[i - 1]
+        x = closes[i]
+        if x - r > prev:
+            filt[i] = x - r
+        elif x + r < prev:
+            filt[i] = x + r
+        else:
+            filt[i] = prev
+
+    fdir = [0] * n
+    for i in range(1, n):
+        if filt[i] > filt[i - 1]:
+            fdir[i] = 1
+        elif filt[i] < filt[i - 1]:
+            fdir[i] = -1
+        else:
+            fdir[i] = fdir[i - 1]
+
+    long_cond = [False] * n
+    short_cond = [False] * n
+    for i in range(1, n):
+        long_cond[i] = closes[i] > filt[i] and fdir[i] == 1
+        short_cond[i] = closes[i] < filt[i] and fdir[i] == -1
+
+    cond_ini = [0] * n
+    for i in range(1, n):
+        if long_cond[i]:
+            cond_ini[i] = 1
+        elif short_cond[i]:
+            cond_ini[i] = -1
+        else:
+            cond_ini[i] = cond_ini[i - 1]
+
+    long_flip = [False] * n
+    short_flip = [False] * n
+    for i in range(1, n):
+        long_flip[i] = long_cond[i] and cond_ini[i - 1] == -1
+        short_flip[i] = short_cond[i] and cond_ini[i - 1] == 1
+
+    return long_flip, short_flip
+
+
+def _rf_set_sl(st, cfg, direction, entry_price):
+    """Setzt den festen SL-Preis (fester $-Betrag) - siehe _cd_set_sl, identisches Muster."""
+    if not cfg.get("rf_sl_enabled", False):
+        st["rf_sl_price"] = None
+        return
+    size = st.get("total_coin_size") or 0
+    if size <= 0:
+        st["rf_sl_price"] = None
+        return
+    dist_sl = cfg.get("rf_sl_manual_usd", 5.0) / size
+    st["rf_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
+
+
+def _rf_set_tp(st, cfg, direction, entry_price):
+    """Setzt den festen TP-Preis (fester $-Betrag) - siehe _cd_set_tp, identisches Muster."""
+    if not cfg.get("rf_tp_enabled", False):
+        st["rf_tp_price"] = None
+        return
+    size = st.get("total_coin_size") or 0
+    if size <= 0:
+        st["rf_tp_price"] = None
+        return
+    dist_tp = cfg.get("rf_tp_manual_usd", 10.0) / size
+    st["rf_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
+
+
+async def check_rf_sl_tp(symbol, price):
+    """Optionaler fester SL UND optionaler fester TP - siehe check_cd_sl_tp, identisches
+    Muster. Beide unabhaengig voneinander an/abschaltbar."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+
+    tp_price = st.get("rf_tp_price")
+    if tp_price is not None:
+        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
+        if hit_tp:
+            debug_log(f"🎯 [{symbol}] Range Filter TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+            await execute_exit(symbol, price, "TP")
+            st["rf_sl_price"] = None
+            st["rf_tp_price"] = None
+            return
+
+    sl_price = st.get("rf_sl_price")
+    if sl_price is None:
+        return
+    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+    if hit_sl:
+        debug_log(f"🚪 [{symbol}] Range Filter SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, "SL")
+        st["rf_sl_price"] = None
+        st["rf_tp_price"] = None
+        st["rf_sl_cooldown_until"] = time.time() + cfg.get("rf_sl_cooldown_seconds", 30)
+
+
+async def check_rf_signal(symbol, long_flip_i, short_flip_i, price, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
+    """Immer im Markt, reiner Buy/Sell-Wechsel - siehe check_cd_signal, identisches Muster
+    inkl. optionalem Z-Score-Filter (rf_zscore_filter_enabled), optionalem RSI-Regime-Filter
+    (rf_rsi_filter_enabled), optionalem ADX/DI-Trendfilter (rf_adx_filter_enabled) und
+    optionalem festem SL (rf_sl_enabled, siehe check_rf_sl_tp). Alle drei Filter sind
+    unabhaengig voneinander kombinierbar - sind mehrere an, muessen alle zustimmen."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    if time.time() < st.get("rf_sl_cooldown_until", 0.0):
+        return
+    direction_mode = cfg.get("rf_direction_mode", "both")
+    zscore_enabled = cfg.get("rf_zscore_filter_enabled", False)
+    rsi_enabled = cfg.get("rf_rsi_filter_enabled", False)
+    rsi_midline = cfg.get("rf_rsi_midline", 50)
+    adx_enabled = cfg.get("rf_adx_filter_enabled", False)
+    adx_threshold = cfg.get("rf_adx_threshold", 20)
+    adx_missing = adx is None or plus_di is None or minus_di is None
+    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
+    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
+    long_ok = (direction_mode != "short_only"
+               and (not zscore_enabled or zscore is None or zscore > 0)
+               and (not rsi_enabled or rsi is None or rsi > rsi_midline)
+               and adx_long_ok)
+    short_ok = (direction_mode != "long_only"
+                and (not zscore_enabled or zscore is None or zscore < 0)
+                and (not rsi_enabled or rsi is None or rsi < rsi_midline)
+                and adx_short_ok)
+    pos = st["position"]
+
+    if pos is None:
+        if long_flip_i and long_ok:
+            debug_log(f"📡 [{symbol}] Range Filter Ersteinstieg: LONG @ {price}")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _rf_set_sl(st, cfg, "long", price)
+                _rf_set_tp(st, cfg, "long", price)
+        elif short_flip_i and short_ok:
+            debug_log(f"📡 [{symbol}] Range Filter Ersteinstieg: SHORT @ {price}")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _rf_set_sl(st, cfg, "short", price)
+                _rf_set_tp(st, cfg, "short", price)
+        return
+
+    if pos == "long" and short_flip_i:
+        if direction_mode == "long_only" or not short_ok:
+            if direction_mode == "long_only":
+                reason = "RF-EXIT-DIR"
+            elif rsi_enabled and not (rsi is None or rsi < rsi_midline):
+                reason = "RF-EXIT-RSI"
+            elif adx_enabled and not adx_short_ok:
+                reason = "RF-EXIT-ADX"
+            else:
+                reason = "RF-EXIT-ZSCORE"
+            debug_log(f"🚪 [{symbol}] Range Filter Exit: LONG @ {price}")
+            await execute_exit(symbol, price, reason)
+            st["rf_sl_price"] = None
+            st["rf_tp_price"] = None
+        else:
+            debug_log(f"🔄 [{symbol}] Range Filter Flip: LONG -> SHORT @ {price}")
+            await execute_exit(symbol, price, "RF-FLIP")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _rf_set_sl(st, cfg, "short", price)
+                _rf_set_tp(st, cfg, "short", price)
+    elif pos == "short" and long_flip_i:
+        if direction_mode == "short_only" or not long_ok:
+            if direction_mode == "short_only":
+                reason = "RF-EXIT-DIR"
+            elif rsi_enabled and not (rsi is None or rsi > rsi_midline):
+                reason = "RF-EXIT-RSI"
+            elif adx_enabled and not adx_long_ok:
+                reason = "RF-EXIT-ADX"
+            else:
+                reason = "RF-EXIT-ZSCORE"
+            debug_log(f"🚪 [{symbol}] Range Filter Exit: SHORT @ {price}")
+            await execute_exit(symbol, price, reason)
+            st["rf_sl_price"] = None
+            st["rf_tp_price"] = None
+        else:
+            debug_log(f"🔄 [{symbol}] Range Filter Flip: SHORT -> LONG @ {price}")
+            await execute_exit(symbol, price, "RF-FLIP")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _rf_set_sl(st, cfg, "long", price)
+                _rf_set_tp(st, cfg, "long", price)
+
+
+async def rf_poll_loop(symbol):
+    """Range Filter (DonovanWall, siehe compute_range_filter/check_rf_signal): immer im Markt,
+    reiner Buy/Sell-Wechsel. Wie bei Kerzen-DNA/Fractals: Ausfuehrung IMMER zum tatsaechlichen
+    Kerzenschlusskurs, nicht zum Live-Preis."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "range_filter" and cfg["bot_active"]:
+                resolution = cfg.get("rf_resolution", "5m")
+                period = cfg.get("rf_period", 20)
+                qty = cfg.get("rf_qty", 3.5)
+                min_needed = max(period * 3, 30)
+                needed_bars = min(1000, max(min_needed * 2, 220))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    long_flip, short_flip = compute_range_filter(closed_c, period, qty)
+
+                    zs_lookback = cfg.get("rf_zscore_lookback", 20)
+                    zs_smooth = cfg.get("rf_zscore_smooth", 3)
+                    zscore_resolution = cfg.get("rf_zscore_resolution", "same")
+                    if zscore_resolution in (None, "", "same") or zscore_resolution == resolution:
+                        zscore_series = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)
+                    else:
+                        zs_needed = min(500, max(zs_lookback, zs_smooth, 5) * 3 + 20)
+                        if zscore_resolution in SUB_MINUTE_RESOLUTIONS:
+                            zs_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[zscore_resolution], zs_needed)
+                            zs_c = zs_local[4] if zs_local else None
+                        else:
+                            zs_data = await fetch_candles_binance_multi(symbol, zscore_resolution, count_back=zs_needed, market_type=cfg.get("binance_market_type", "spot"))
+                            zs_c = zs_data[4][:-1] if zs_data else None
+                        if zs_c and len(zs_c) > max(zs_lookback, zs_smooth):
+                            zscore_now = compute_rolling_zscore(zs_c, zs_lookback, zs_smooth)[-1]
+                        else:
+                            zscore_now = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)[-1]
+                        zscore_series = [zscore_now] * len(closed_c)
+
+                    rsi_enabled = cfg.get("rf_rsi_filter_enabled", False)
+                    rsi_series = compute_rsi(closed_c, cfg.get("rf_rsi_length", 14)) if rsi_enabled else None
+
+                    adx_enabled = cfg.get("rf_adx_filter_enabled", False)
+                    if adx_enabled:
+                        adx_series, plus_di_series, minus_di_series = compute_adx(closed_h, closed_l, closed_c, cfg.get("rf_adx_length", 14))
+                    else:
+                        adx_series, plus_di_series, minus_di_series = None, None, None
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        rsi_log = f", RSI={round(rsi_series[-1],1)}" if rsi_series else ""
+                        adx_log = f", ADX={round(adx_series[-1],1)} (+DI={round(plus_di_series[-1],1)}/-DI={round(minus_di_series[-1],1)})" if adx_series else ""
+                        debug_log(f"💓 [{symbol}] Range Filter aktiv: Preis={closed_c[-1]}{rsi_log}{adx_log}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 1:
+                            continue
+                        price_i = closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        rsi_i = rsi_series[idx] if rsi_series else None
+                        adx_i = adx_series[idx] if adx_series else None
+                        plus_di_i = plus_di_series[idx] if plus_di_series else None
+                        minus_di_i = minus_di_series[idx] if minus_di_series else None
+                        await check_rf_signal(symbol, long_flip[idx], short_flip[idx], price_i, zscore_series[idx], rsi_i, adx_i, plus_di_i, minus_di_i)
+
+                    await check_rf_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Range Filter wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Range Filter wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Range-Filter-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+
     """Setzt den festen SL-Preis (fester $-Betrag) - siehe _fr_set_sl/_uh_set_sl, identisches
     Muster."""
     if not cfg.get("cd_sl_enabled", False):
@@ -6871,6 +7193,239 @@ def backtest_candle_dna(candles, cfg):
     return _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup=1, zscore=zscore, rsi=rsi, adx=adx, plus_di=plus_di, minus_di=minus_di)
 
 
+def _rf_bt_set_sl(position, cfg, margin, leverage):
+    """Backtest-Pendant zu _rf_set_sl - setzt sl_price auf der Position (fester $-Betrag)."""
+    if not cfg.get("rf_sl_enabled", False):
+        position["sl_price"] = None
+        return
+    size = position["size"]
+    if size <= 0:
+        position["sl_price"] = None
+        return
+    dist_sl = cfg.get("rf_sl_manual_usd", 5.0) / size
+    entry = position["entry"]
+    position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
+
+
+def _rf_bt_set_tp(position, cfg, margin, leverage):
+    """Backtest-Pendant zu _rf_set_tp - setzt tp_price auf der Position (fester $-Betrag)."""
+    if not cfg.get("rf_tp_enabled", False):
+        position["tp_price"] = None
+        return
+    size = position["size"]
+    if size <= 0:
+        position["tp_price"] = None
+        return
+    dist_tp = cfg.get("rf_tp_manual_usd", 10.0) / size
+    entry = position["entry"]
+    position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
+
+
+def _simulate_rf_trades(candles, cfg, long_flip, short_flip, warmup, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
+    """Backtest-Pendant zu check_rf_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
+    mit Z-Score-Filter, optionalem RSI-Regime-Filter, optionalem ADX/DI-Trendfilter und
+    optionalem festem SL/TP (siehe _rf_bt_set_sl/_rf_bt_set_tp). Alle drei Filter sind
+    unabhaengig kombinierbar - identisches Muster zu _simulate_cd_trades."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    direction_mode = cfg.get("rf_direction_mode", "both")
+    zscore_enabled = cfg.get("rf_zscore_filter_enabled", False)
+    rsi_enabled = cfg.get("rf_rsi_filter_enabled", False)
+    rsi_midline = cfg.get("rf_rsi_midline", 50)
+    adx_enabled = cfg.get("rf_adx_filter_enabled", False)
+    adx_threshold = cfg.get("rf_adx_threshold", 20)
+    sl_cooldown_ms = cfg.get("rf_sl_cooldown_seconds", 30) * 1000
+
+    def adx_long_ok(i):
+        return not adx_enabled or adx is None or (adx[i] > adx_threshold and plus_di[i] > minus_di[i])
+
+    def adx_short_ok(i):
+        return not adx_enabled or adx is None or (adx[i] > adx_threshold and minus_di[i] > plus_di[i])
+
+    def long_ok(i):
+        return (direction_mode != "short_only"
+                and (not zscore_enabled or zscore is None or zscore[i] > 0)
+                and (not rsi_enabled or rsi is None or rsi[i] > rsi_midline)
+                and adx_long_ok(i))
+
+    def short_ok(i):
+        return (direction_mode != "long_only"
+                and (not zscore_enabled or zscore is None or zscore[i] < 0)
+                and (not rsi_enabled or rsi is None or rsi[i] < rsi_midline)
+                and adx_short_ok(i))
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+        long_i = long_flip[i]
+        short_i = short_flip[i]
+
+        if position is not None:
+            sl_price = position.get("sl_price")
+            tp_price = position.get("tp_price")
+            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+
+        if position is None:
+            if in_sl_cooldown:
+                continue
+            if long_i and long_ok(i):
+                size = (margin * leverage) / price
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+                _rf_bt_set_sl(position, cfg, margin, leverage)
+                _rf_bt_set_tp(position, cfg, margin, leverage)
+            elif short_i and short_ok(i):
+                size = (margin * leverage) / price
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                _rf_bt_set_sl(position, cfg, margin, leverage)
+                _rf_bt_set_tp(position, cfg, margin, leverage)
+            continue
+
+        if position["dir"] == "long" and short_i:
+            can_flip = direction_mode != "long_only" and short_ok(i)
+            if can_flip:
+                reason = "RF-FLIP"
+            elif direction_mode == "long_only":
+                reason = "RF-EXIT-DIR"
+            elif rsi_enabled and not (rsi is None or rsi[i] < rsi_midline):
+                reason = "RF-EXIT-RSI"
+            elif adx_enabled and not adx_short_ok(i):
+                reason = "RF-EXIT-ADX"
+            else:
+                reason = "RF-EXIT-ZSCORE"
+            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
+            if not can_flip:
+                position = None
+            else:
+                size = (margin * leverage) / price
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                _rf_bt_set_sl(position, cfg, margin, leverage)
+                _rf_bt_set_tp(position, cfg, margin, leverage)
+        elif position["dir"] == "short" and long_i:
+            can_flip = direction_mode != "short_only" and long_ok(i)
+            if can_flip:
+                reason = "RF-FLIP"
+            elif direction_mode == "short_only":
+                reason = "RF-EXIT-DIR"
+            elif rsi_enabled and not (rsi is None or rsi[i] > rsi_midline):
+                reason = "RF-EXIT-RSI"
+            elif adx_enabled and not adx_long_ok(i):
+                reason = "RF-EXIT-ADX"
+            else:
+                reason = "RF-EXIT-ZSCORE"
+            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
+            if not can_flip:
+                position = None
+            else:
+                size = (margin * leverage) / price
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+                _rf_bt_set_sl(position, cfg, margin, leverage)
+                _rf_bt_set_tp(position, cfg, margin, leverage)
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_range_filter(candles, cfg):
+    ts, o, h, l, c = candles
+    period = cfg.get("rf_period", 20)
+    qty = cfg.get("rf_qty", 3.5)
+    long_flip, short_flip = compute_range_filter(c, period, qty)
+    zscore = cfg.get("_rf_zscore_precomputed")
+    if zscore is None and cfg.get("rf_zscore_filter_enabled", False):
+        zscore = compute_rolling_zscore(c, cfg.get("rf_zscore_lookback", 20), cfg.get("rf_zscore_smooth", 3))
+    rsi = None
+    if cfg.get("rf_rsi_filter_enabled", False):
+        rsi = compute_rsi(c, cfg.get("rf_rsi_length", 14))
+    adx = plus_di = minus_di = None
+    if cfg.get("rf_adx_filter_enabled", False):
+        adx, plus_di, minus_di = compute_adx(h, l, c, cfg.get("rf_adx_length", 14))
+    warmup = max(period * 2, 5) + 2
+    return _simulate_rf_trades(candles, cfg, long_flip, short_flip, warmup, zscore=zscore, rsi=rsi, adx=adx, plus_di=plus_di, minus_di=minus_di)
+
+
+RF_SWEEP_MAX_COMBOS = 400
+RF_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+async def run_rf_param_sweep(symbol, cfg, days, period_min, period_max, period_step,
+                              qty_min, qty_max, qty_step):
+    """'Monte-Carlo'-Parametersweep fuer Range Filter: testet einen Bereich von Swing-Periode
+    (n) und Swing-Multiplikator (qty) gegeneinander - genau die zwei Parameter, die im Original
+    die Bandbreite und damit das Signal bestimmen (siehe compute_range_filter). Identisches
+    Muster zu run_da_param_sweep."""
+    max_candles = BACKTEST_MAX_CANDLES["range_filter"]
+    resolution = cfg.get("rf_resolution", "5m")
+    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < 150:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+
+    periods = sorted(set(int(round(period_min + i * period_step))
+                          for i in range(int((period_max - period_min) / max(period_step, 1e-9)) + 1)
+                          if period_min + i * period_step <= period_max + 1e-9))
+    qtys = sorted(set(round(qty_min + i * qty_step, 4)
+                       for i in range(int((qty_max - qty_min) / max(qty_step, 1e-9)) + 1)
+                       if qty_min + i * qty_step <= qty_max + 1e-9))
+    periods = [p for p in periods if p >= 1]
+    qtys = [q for q in qtys if q > 0]
+
+    total_combos = len(periods) * len(qtys)
+    if total_combos == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
+    if total_combos > RF_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {RF_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
+    zscore = None
+    if cfg.get("rf_zscore_filter_enabled", False):
+        zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], c, resolution, "rf")
+        if zs_err:
+            return {"error": zs_err}
+    rsi = compute_rsi(c, cfg.get("rf_rsi_length", 14)) if cfg.get("rf_rsi_filter_enabled", False) else None
+    adx = plus_di = minus_di = None
+    if cfg.get("rf_adx_filter_enabled", False):
+        adx, plus_di, minus_di = compute_adx(h, l, c, cfg.get("rf_adx_length", 14))
+
+    results = []
+    for period in periods:
+        for qty in qtys:
+            long_flip, short_flip = compute_range_filter(c, period, qty)
+            warmup = max(period * 2, 5) + 2
+            trades = _simulate_rf_trades(candles, cfg, long_flip, short_flip, warmup, zscore=zscore, rsi=rsi, adx=adx, plus_di=plus_di, minus_di=minus_di)
+            stats = summarize_backtest_trades(trades)
+            results.append({"rf_period": period, "rf_qty": qty, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= RF_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
+        "min_reliable_trades": RF_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": total_combos,
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
+
+
 def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
     """Backtest-Pendant zu check_pk_signal/check_pk_sl_tp - siehe dort fuer die identische Logik
     im Live-Betrieb. trend_pct wird UNABHAENGIG von Sensitivity berechnet und beim Sweep nur
@@ -7149,6 +7704,7 @@ BACKTEST_MAX_CANDLES = {
     "pieki_algo": 100_000,
     "fractals_flip": 100_000,
     "candle_dna": 100_000,
+    "range_filter": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -7162,6 +7718,7 @@ BACKTEST_FUNCS = {
     "pieki_algo": backtest_peki_algo,
     "fractals_flip": backtest_fractals_flip,
     "candle_dna": backtest_candle_dna,
+    "range_filter": backtest_range_filter,
     # "mo7_scalp" bewusst NICHT hier drin - braucht eine 6er-Tupel-Kerzenquelle MIT Volumen
     # (MFI-Baustein), deshalb in run_backtest() als Sonderfall behandelt statt ueber diesen
     # generischen 5er-Tupel-Dispatch.
@@ -7192,11 +7749,11 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         }
 
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution", "fractals_flip": "fr_resolution", "candle_dna": "cd_resolution"}[entry_mode]
+    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution", "fractals_flip": "fr_resolution", "candle_dna": "cd_resolution", "range_filter": "rf_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
@@ -7254,6 +7811,12 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             return {"error": zs_err}
         cfg = dict(cfg)
         cfg["_cd_zscore_precomputed"] = zscore  # von backtest_candle_dna gelesen (nicht async, siehe dort)
+    elif entry_mode == "range_filter" and cfg.get("rf_zscore_filter_enabled", False):
+        zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "rf")
+        if zs_err:
+            return {"error": zs_err}
+        cfg = dict(cfg)
+        cfg["_rf_zscore_precomputed"] = zscore  # von backtest_range_filter gelesen (nicht async, siehe dort)
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades, exclude_top_n)
