@@ -1277,23 +1277,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - nur Longs über/Shorts unter EMA</option>
     </select>
   </div>
-  <div data-mode="obi_scalp"><label>Trend-EMA Länge (Trades)</label><input type="number" step="1" id="obi_trend_ema_length"></div>
+  <div data-mode="obi_scalp" data-requires="obi_trend_filter"><label>Trend-EMA Länge (Trades)</label><input type="number" step="1" id="obi_trend_ema_length"></div>
   <div data-mode="obi_scalp"><label>Spread-Filter (verwirft Signale bei zu weitem Bid/Ask-Spread)</label>
     <select class="cfg" id="obi_spread_filter_enabled">
       <option value="false">Aus</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="obi_scalp"><label>Max. Spread (% vom Mid-Preis)</label><input type="number" step="0.0001" id="obi_max_spread_pct"></div>
+  <div data-mode="obi_scalp" data-requires="obi_spread_filter_enabled"><label>Max. Spread (% vom Mid-Preis)</label><input type="number" step="0.0001" id="obi_max_spread_pct"></div>
   <div data-mode="obi_scalp"><label>Volatilitäts-Regime-Filter (verwirft Signale außerhalb Normalband)</label>
     <select class="cfg" id="obi_vol_filter_enabled">
       <option value="false">Aus</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="obi_scalp"><label>Volatilitäts-Fenster (Sek.)</label><input type="number" step="1" id="obi_vol_window_seconds"></div>
-  <div data-mode="obi_scalp"><label>Min. Volatilität (% Hoch-Tief-Spanne, darunter = zu ruhig)</label><input type="number" step="0.0001" id="obi_vol_min_pct"></div>
-  <div data-mode="obi_scalp"><label>Max. Volatilität (% Hoch-Tief-Spanne, darüber = zu wild)</label><input type="number" step="0.0001" id="obi_vol_max_pct"></div>
+  <div data-mode="obi_scalp" data-requires="obi_vol_filter_enabled"><label>Volatilitäts-Fenster (Sek.)</label><input type="number" step="1" id="obi_vol_window_seconds"></div>
+  <div data-mode="obi_scalp" data-requires="obi_vol_filter_enabled"><label>Min. Volatilität (% Hoch-Tief-Spanne, darunter = zu ruhig)</label><input type="number" step="0.0001" id="obi_vol_min_pct"></div>
+  <div data-mode="obi_scalp" data-requires="obi_vol_filter_enabled"><label>Max. Volatilität (% Hoch-Tief-Spanne, darüber = zu wild)</label><input type="number" step="0.0001" id="obi_vol_max_pct"></div>
   </div>
 
   <div data-mode="oms_scalp" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -1320,7 +1320,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="false">Aus</option>
     </select>
   </div>
-  <div data-mode="oms_scalp"><label>Funding-Grenze (absolut, z.B. 0.0005 = 0.05%)</label><input type="number" step="0.0001" id="oms_funding_max_abs"></div>
+  <div data-mode="oms_scalp" data-requires="oms_funding_filter_enabled"><label>Funding-Grenze (absolut, z.B. 0.0005 = 0.05%)</label><input type="number" step="0.0001" id="oms_funding_max_abs"></div>
   <div data-mode="oms_scalp"><label>Cooldown zwischen Signalen (Sek.)</label><input type="number" step="1" id="oms_cooldown_seconds"></div>
   <div data-mode="oms_scalp"><label>Exit-Modus</label>
     <select class="cfg" id="oms_exit_mode">
@@ -1353,7 +1353,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="oms_scalp"><label>RSI Zeitrahmen</label>
+  <div data-mode="oms_scalp" data-requires="oms_rsi_filter_enabled"><label>RSI Zeitrahmen</label>
     <select class="cfg" id="oms_rsi_resolution">
       <option value="10s">10 Sekunden</option>
       <option value="15s">15 Sekunden</option>
@@ -1365,25 +1365,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="15m">15 Minuten</option>
     </select>
   </div>
-  <div data-mode="oms_scalp"><label>RSI Periode</label><input type="number" step="1" id="oms_rsi_period"></div>
-  <div data-mode="oms_scalp"><label>RSI Mittellinie</label><input type="number" step="1" id="oms_rsi_midline"></div>
+  <div data-mode="oms_scalp" data-requires="oms_rsi_filter_enabled"><label>RSI Periode</label><input type="number" step="1" id="oms_rsi_period"></div>
+  <div data-mode="oms_scalp" data-requires="oms_rsi_filter_enabled"><label>RSI Mittellinie</label><input type="number" step="1" id="oms_rsi_midline"></div>
   <div data-mode="oms_scalp"><label>Open-Interest-Filter (Preis+OI kombiniert muss Richtung stützen)</label>
     <select class="cfg" id="oms_oi_filter_enabled">
       <option value="false">Aus</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="oms_scalp"><label>OI Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_oi_window_seconds"></div>
-  <div data-mode="oms_scalp"><label>OI Mindest-Änderung (%, z.B. 0.001 = 0.1%)</label><input type="number" step="0.0001" id="oms_oi_min_change_pct"></div>
-  <div data-mode="oms_scalp"><label>OI Mindest-Score (0-1)</label><input type="number" step="0.05" id="oms_oi_min_score"></div>
+  <div data-mode="oms_scalp" data-requires="oms_oi_filter_enabled"><label>OI Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_oi_window_seconds"></div>
+  <div data-mode="oms_scalp" data-requires="oms_oi_filter_enabled"><label>OI Mindest-Änderung (%, z.B. 0.001 = 0.1%)</label><input type="number" step="0.0001" id="oms_oi_min_change_pct"></div>
+  <div data-mode="oms_scalp" data-requires="oms_oi_filter_enabled"><label>OI Mindest-Score (0-1)</label><input type="number" step="0.05" id="oms_oi_min_score"></div>
   <div data-mode="oms_scalp"><label>Liquidations-Filter (Zwangsliquidationen müssen Richtung stützen)</label>
     <select class="cfg" id="oms_liq_filter_enabled">
       <option value="false">Aus</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="oms_scalp"><label>Liquidations Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_liq_window_seconds"></div>
-  <div data-mode="oms_scalp"><label>Liquidations Mindest-Verhältnis (0-1)</label><input type="number" step="0.05" id="oms_liq_min_ratio"></div>
+  <div data-mode="oms_scalp" data-requires="oms_liq_filter_enabled"><label>Liquidations Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_liq_window_seconds"></div>
+  <div data-mode="oms_scalp" data-requires="oms_liq_filter_enabled"><label>Liquidations Mindest-Verhältnis (0-1)</label><input type="number" step="0.05" id="oms_liq_min_ratio"></div>
 
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
@@ -1845,7 +1845,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - Short nur unter Short-Schwelle, Long nur über Long-Schwelle</option>
     </select>
   </div>
-  <div data-mode="ut_bot_hull"><label>Trend% Zeiteinheit 1</label>
+  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Zeiteinheit 1</label>
     <select class="cfg" id="utb_mtf_tf1">
       <option value="off">Aus</option>
       <option value="1m">1 Minute</option>
@@ -1861,7 +1861,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <input type="number" step="1" min="1" id="utb_mtf_tf1_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="ut_bot_hull"><label>Trend% Zeiteinheit 2</label>
+  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Zeiteinheit 2</label>
     <select class="cfg" id="utb_mtf_tf2">
       <option value="off">Aus</option>
       <option value="1m">1 Minute</option>
@@ -1877,7 +1877,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <input type="number" step="1" min="1" id="utb_mtf_tf2_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="ut_bot_hull"><label>Trend% Zeiteinheit 3</label>
+  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Zeiteinheit 3</label>
     <select class="cfg" id="utb_mtf_tf3">
       <option value="off">Aus</option>
       <option value="1m">1 Minute</option>
@@ -1893,11 +1893,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <input type="number" step="1" min="1" id="utb_mtf_tf3_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="ut_bot_hull"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="utb_mtf_long_threshold"></div>
-  <div data-mode="ut_bot_hull"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="utb_mtf_short_threshold"></div>
-  <div data-mode="ut_bot_hull"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="utb_mtf_fast_len"></div>
-  <div data-mode="ut_bot_hull"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="utb_mtf_slow_len"></div>
-  <div data-mode="ut_bot_hull"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="utb_mtf_atr_len"></div>
+  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="utb_mtf_long_threshold"></div>
+  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="utb_mtf_short_threshold"></div>
+  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="utb_mtf_fast_len"></div>
+  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="utb_mtf_slow_len"></div>
+  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="utb_mtf_atr_len"></div>
 
   <div data-mode="wavetrend_cross" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🌊 WaveTrend Cross (Kernsignal aus "Cipher B"): wt1 kreuzt wt2 - das sind die grünen/roten
@@ -2051,7 +2051,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     berechnet. Eine TF auf "Aus" stellen, um sie aus dem Durchschnitt rauszunehmen (z.B. nur 1
     oder 2 TFs statt 3 nutzen).
   </div>
-  <div data-mode="pieki_algo"><label>Trend% Zeiteinheit 1</label>
+  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Zeiteinheit 1</label>
     <select class="cfg" id="pk_mtf_tf1">
       <option value="off">Aus</option>
       <option value="1m">1 Minute</option>
@@ -2067,7 +2067,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <input type="number" step="1" min="1" id="pk_mtf_tf1_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="pieki_algo"><label>Trend% Zeiteinheit 2</label>
+  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Zeiteinheit 2</label>
     <select class="cfg" id="pk_mtf_tf2">
       <option value="off">Aus</option>
       <option value="1m">1 Minute</option>
@@ -2083,7 +2083,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <input type="number" step="1" min="1" id="pk_mtf_tf2_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="pieki_algo"><label>Trend% Zeiteinheit 3</label>
+  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Zeiteinheit 3</label>
     <select class="cfg" id="pk_mtf_tf3">
       <option value="off">Aus</option>
       <option value="1m">1 Minute</option>
@@ -2099,11 +2099,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <input type="number" step="1" min="1" id="pk_mtf_tf3_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="pieki_algo"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="pk_mtf_long_threshold"></div>
-  <div data-mode="pieki_algo"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="pk_mtf_short_threshold"></div>
-  <div data-mode="pieki_algo"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="pk_mtf_fast_len"></div>
-  <div data-mode="pieki_algo"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="pk_mtf_slow_len"></div>
-  <div data-mode="pieki_algo"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="pk_mtf_atr_len"></div>
+  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="pk_mtf_long_threshold"></div>
+  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="pk_mtf_short_threshold"></div>
+  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="pk_mtf_fast_len"></div>
+  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="pk_mtf_slow_len"></div>
+  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="pk_mtf_atr_len"></div>
 
   <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🔺 Williams Fractals: eine Kerze ist ein "Hoch-Fraktal", wenn sie hoeher ist als die
@@ -2156,7 +2156,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - Long nur über 0, Short nur unter 0</option>
     </select>
   </div>
-  <div data-mode="fractals_flip"><label>Z-Score Zeiteinheit</label>
+  <div data-mode="fractals_flip" data-requires="fr_zscore_filter_enabled"><label>Z-Score Zeiteinheit</label>
     <select class="cfg" id="fr_zscore_resolution">
       <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
       <option value="1m">1 Minute</option>
@@ -2170,8 +2170,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <input type="number" step="1" min="1" id="fr_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="fractals_flip"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="fr_zscore_lookback"></div>
-  <div data-mode="fractals_flip"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="fr_zscore_smooth"></div>
+  <div data-mode="fractals_flip" data-requires="fr_zscore_filter_enabled"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="fr_zscore_lookback"></div>
+  <div data-mode="fractals_flip" data-requires="fr_zscore_filter_enabled"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="fr_zscore_smooth"></div>
   <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Optionaler fester Stop-Loss (fester $-Betrag, wie bei UT-Bot+Hull): durchbricht "immer im
     Markt" NUR im SL-Fall - die Position geht dann glatt (statt zu drehen) und wartet nach einem
@@ -2245,7 +2245,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - Long nur über 0, Short nur unter 0</option>
     </select>
   </div>
-  <div data-mode="candle_dna"><label>Z-Score Zeiteinheit</label>
+  <div data-mode="candle_dna" data-requires="cd_zscore_filter_enabled"><label>Z-Score Zeiteinheit</label>
     <select class="cfg" id="cd_zscore_resolution">
       <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
       <option value="1m">1 Minute</option>
@@ -2259,8 +2259,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <input type="number" step="1" min="1" id="cd_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="candle_dna"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="cd_zscore_lookback"></div>
-  <div data-mode="candle_dna"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="cd_zscore_smooth"></div>
+  <div data-mode="candle_dna" data-requires="cd_zscore_filter_enabled"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="cd_zscore_lookback"></div>
+  <div data-mode="candle_dna" data-requires="cd_zscore_filter_enabled"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="cd_zscore_smooth"></div>
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Optionaler RSI-Regime-Filter, unabhängig vom Z-Score-Filter kombinierbar (beide können
     gleichzeitig an sein - dann müssen beide zustimmen): RSI über der Mittellinie -> nur Long
@@ -2273,8 +2273,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - Long nur über Mittellinie, Short nur darunter</option>
     </select>
   </div>
-  <div data-mode="candle_dna"><label>RSI-Länge</label><input type="number" step="1" min="2" id="cd_rsi_length"></div>
-  <div data-mode="candle_dna"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="cd_rsi_midline"></div>
+  <div data-mode="candle_dna" data-requires="cd_rsi_filter_enabled"><label>RSI-Länge</label><input type="number" step="1" min="2" id="cd_rsi_length"></div>
+  <div data-mode="candle_dna" data-requires="cd_rsi_filter_enabled"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="cd_rsi_midline"></div>
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Optionaler ADX/DI-Trendfilter, unabhängig von Z-Score- und RSI-Filter kombinierbar (mehrere
     gleichzeitig aktiv -> alle müssen zustimmen): ADX über der Schwelle UND +DI über -DI -> nur
@@ -2288,8 +2288,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - nur bei genug Trendstärke und passender Richtung</option>
     </select>
   </div>
-  <div data-mode="candle_dna"><label>ADX-Länge</label><input type="number" step="1" min="2" id="cd_adx_length"></div>
-  <div data-mode="candle_dna"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="cd_adx_threshold"></div>
+  <div data-mode="candle_dna" data-requires="cd_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="cd_adx_length"></div>
+  <div data-mode="candle_dna" data-requires="cd_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="cd_adx_threshold"></div>
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Optionaler fester Stop-Loss (fester $-Betrag, wie bei UT-Bot+Hull): durchbricht "immer im
     Markt" NUR im SL-Fall - die Position geht dann glatt (statt zu drehen) und wartet nach einem
@@ -2945,7 +2945,28 @@ function updateModeFields() {
   document.getElementById('backtest-zone').style.display = isOms ? 'none' : '';
   document.getElementById('generic-chart-wrap').style.display = isOms ? 'none' : '';
   if (isOms) updateOmsExitModeFields();
+  applyFilterRequires();
 }
+
+// Generischer "Filter aufklappen"-Mechanismus: jedes Element mit data-requires="checkbox_id"
+// blendet sich aus, solange die referenzierte Checkbox/Auswahl nicht auf "true" steht - so
+// zeigt jede Strategie nur die Unterfelder der Filter, die man tatsaechlich aktiviert hat,
+// statt immer alle Filter-Unterfelder gleichzeitig anzuzeigen. Rein Anzeige, aendert nichts
+// an gespeicherten Werten oder der Backend-Logik.
+function applyFilterRequires() {
+  const mode = document.getElementById('entry_mode').value;
+  document.querySelectorAll('[data-requires]').forEach(el => {
+    // Wenn das Feld ohnehin zu einer anderen Strategie gehoert, nicht anfassen -
+    // updateModeFields() hat es schon per data-mode ausgeblendet.
+    if (el.dataset.mode && el.dataset.mode !== mode) return;
+    const ctrl = document.getElementById(el.dataset.requires);
+    const active = ctrl && ctrl.value === 'true';
+    el.style.display = active ? '' : 'none';
+  });
+}
+document.getElementById('config-form').addEventListener('change', () => {
+  applyFilterRequires();
+});
 
 function updateOmsExitModeFields() {
   const exitMode = document.getElementById('oms_exit_mode').value;
@@ -3932,37 +3953,64 @@ async function refresh() {
   }
 
   const gl = data.grid_levels || {};
-  document.getElementById('status-grid').innerHTML = `
-    <div class="card"><div class="label">Symbol</div><div class="value">${data.symbol}</div></div>
-    <div class="card"><div class="label">Preis</div><div class="value">${data.last_price ?? '-'}</div></div>
-    <div class="card"><div class="label">Position</div><div class="value ${data.position==='long'?'green':data.position==='short'?'red':'yellow'}">${data.position || 'flach'}</div></div>
-    <div class="card"><div class="label">Ø-Einstieg</div><div class="value">${data.avg_entry_price ?? '-'}</div></div>
-    <div class="card"><div class="label">Unrealisiert $</div><div class="value ${data.unrealized_pnl_usd>=0?'green':'red'}">${data.unrealized_pnl_usd}</div></div>
-    <div class="card"><div class="label">Nachkauf-Stufe</div><div class="value">${data.entry_count} / ${data.config.max_nachkauf || '∞'}</div></div>
-    <div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>
-    <div class="card"><div class="label">OBI schnell (${data.config.entry_mode==='obi_scalp'?'aktiv':'inaktiv'})</div><div class="value ${data.obi_fast>=0?'green':'red'}">${data.obi_fast ?? '-'}</div></div>
-    <div class="card"><div class="label">OBI mittel</div><div class="value ${data.obi_medium>=0?'green':'red'}">${data.obi_medium ?? '-'}</div></div>
-    <div class="card"><div class="label">OBI langsam</div><div class="value ${data.obi_slow>=0?'green':'red'}">${data.obi_slow ?? '-'}</div></div>
-    <div class="card"><div class="label">OMS TP1 erreicht?</div><div class="value ${data.oms_tp1_done?'green':''}">${data.config.entry_mode==='oms_scalp'?(data.oms_tp1_done?'Ja - Rest wird getrailt':'Nein'):'-'}</div></div>
-    <div class="card"><div class="label">OMS Trailing-Referenz</div><div class="value">${data.oms_trail_price ?? '-'}</div></div>
-    <div class="card"><div class="label">OMS Nachkauf-Stufe</div><div class="value">${data.config.entry_mode==='oms_scalp'?`${data.oms_dca_count ?? 0} / ${data.config.oms_dca_max_entries}`:'-'}</div></div>
-    <div class="card"><div class="label">Spread % (Filter ${data.config.obi_spread_filter_enabled?'an':'aus'})</div><div class="value ${data.config.obi_spread_filter_enabled && data.obi_spread_pct!=null && data.obi_spread_pct>data.config.obi_max_spread_pct?'red':''}">${data.obi_spread_pct!=null?data.obi_spread_pct.toFixed(4):'-'}</div></div>
-    <div class="card"><div class="label">Volatilität % (Filter ${data.config.obi_vol_filter_enabled?'an':'aus'})</div><div class="value ${data.config.obi_vol_filter_enabled && data.obi_recent_vol_pct!=null && (data.obi_recent_vol_pct<data.config.obi_vol_min_pct || data.obi_recent_vol_pct>data.config.obi_vol_max_pct)?'red':''}">${data.obi_recent_vol_pct!=null?data.obi_recent_vol_pct.toFixed(4):'-'}</div></div>
-    <div class="card"><div class="label">Fib High / Low (${data.config.entry_mode==='fib_reversal'?'aktiv':'inaktiv'})</div><div class="value">${data.fib?.high ?? '-'} / ${data.fib?.low ?? '-'}</div></div>
-    <div class="card"><div class="label">Fib Einstieg 1 / 2</div><div class="value">${data.fib?.entry1_price ?? '-'} / ${data.fib?.entry2_price ?? '-'}</div></div>
-    <div class="card"><div class="label">Fib TP1 / TP2 / SL</div><div class="value">${data.fib?.tp1_price ?? '-'} / ${data.fib?.tp2_price ?? '-'} / ${data.fib?.sl_price ?? '-'}</div></div>
-    <div class="card"><div class="label">HalfTrend (${data.config.entry_mode==='halftrend'?'aktiv':'inaktiv'})</div><div class="value ${data.ht_direction===1?'green':data.ht_direction===-1?'red':''}">${data.ht_direction===1?'LONG-Signal':data.ht_direction===-1?'SHORT-Signal':'-'}</div></div>
-    <div class="card"><div class="label">HalfTrend SL</div><div class="value">${data.ht_sl_price!=null?data.ht_sl_price.toFixed(4):'-'}${data.ht_tp1_done?' (Break-Even)':''}</div></div>
-    <div class="card"><div class="label">HalfTrend TP1 / TP2 / TP3</div><div class="value">${data.ht_tp1_price!=null?data.ht_tp1_price.toFixed(4):'-'}${data.ht_tp1_done?'✓':''} / ${data.ht_tp2_price!=null?data.ht_tp2_price.toFixed(4):'-'}${data.ht_tp2_done?'✓':''} / ${data.ht_tp3_price!=null?data.ht_tp3_price.toFixed(4):'-'}</div></div>
-    <div class="card"><div class="label">Diamond Algo (${data.config.entry_mode==='diamond_algo'?'aktiv':'inaktiv'})</div><div class="value ${data.da_direction===1?'green':data.da_direction===-1?'red':''}">${data.da_direction===1?'LONG-Signal':data.da_direction===-1?'SHORT-Signal':'-'}</div></div>
-    <div class="card"><div class="label">Diamond Algo SL / TP</div><div class="value">${data.da_sl_price!=null?data.da_sl_price.toFixed(4):'-'} / ${data.da_tp_price!=null?data.da_tp_price.toFixed(4):'-'}</div></div>
-    <div class="card"><div class="label">ELTE Smart (${data.config.entry_mode==='elte_smart'?'aktiv':'inaktiv'})</div><div class="value ${data.es_direction===1?'green':data.es_direction===-1?'red':''}">${data.es_direction===1?'LONG-Signal':data.es_direction===-1?'SHORT-Signal':'-'} (Sens. ${data.es_sensitivity_last!=null?data.es_sensitivity_last.toFixed(2):'-'})</div></div>
-    <div class="card"><div class="label">ELTE Smart SL / TP1 / TP2 / TP3</div><div class="value">${data.es_sl_price!=null?data.es_sl_price.toFixed(4):'-'} / ${data.es_tp1_price!=null?data.es_tp1_price.toFixed(4):'-'}${data.es_tp1_done?'✓':''} / ${data.es_tp2_price!=null?data.es_tp2_price.toFixed(4):'-'}${data.es_tp2_done?'✓':''} / ${data.es_tp3_price!=null?data.es_tp3_price.toFixed(4):'-'}</div></div>
-    <div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>
-    <div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>
-    <div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>
-    <div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>
-  `;
+  const mode = data.config.entry_mode;
+
+  // Uebersicht: nur noch die Kern-Kacheln (immer relevant, egal welche Strategie) plus
+  // GENAU die Diagnose-Kacheln der aktuell gewaehlten Strategie - vorher standen hier
+  // IMMER alle Kacheln aller Strategien gleichzeitig (nur mit "(aktiv/inaktiv)"-Text),
+  // das war der groesste Uebersichtlichkeits-Kritikpunkt.
+  const coreCards = [
+    `<div class="card"><div class="label">Symbol</div><div class="value">${data.symbol}</div></div>`,
+    `<div class="card"><div class="label">Preis</div><div class="value">${data.last_price ?? '-'}</div></div>`,
+    `<div class="card"><div class="label">Position</div><div class="value ${data.position==='long'?'green':data.position==='short'?'red':'yellow'}">${data.position || 'flach'}</div></div>`,
+    `<div class="card"><div class="label">Ø-Einstieg</div><div class="value">${data.avg_entry_price ?? '-'}</div></div>`,
+    `<div class="card"><div class="label">Unrealisiert $</div><div class="value ${data.unrealized_pnl_usd>=0?'green':'red'}">${data.unrealized_pnl_usd}</div></div>`,
+    `<div class="card"><div class="label">Nachkauf-Stufe</div><div class="value">${data.entry_count} / ${data.config.max_nachkauf || '∞'}</div></div>`,
+    `<div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>`,
+    `<div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>`,
+    `<div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>`,
+  ];
+
+  const modeCards = {
+    obi_scalp: () => [
+      `<div class="card"><div class="label">OBI schnell</div><div class="value ${data.obi_fast>=0?'green':'red'}">${data.obi_fast ?? '-'}</div></div>`,
+      `<div class="card"><div class="label">OBI mittel</div><div class="value ${data.obi_medium>=0?'green':'red'}">${data.obi_medium ?? '-'}</div></div>`,
+      `<div class="card"><div class="label">OBI langsam</div><div class="value ${data.obi_slow>=0?'green':'red'}">${data.obi_slow ?? '-'}</div></div>`,
+      `<div class="card"><div class="label">Spread % (Filter ${data.config.obi_spread_filter_enabled?'an':'aus'})</div><div class="value ${data.config.obi_spread_filter_enabled && data.obi_spread_pct!=null && data.obi_spread_pct>data.config.obi_max_spread_pct?'red':''}">${data.obi_spread_pct!=null?data.obi_spread_pct.toFixed(4):'-'}</div></div>`,
+      `<div class="card"><div class="label">Volatilität % (Filter ${data.config.obi_vol_filter_enabled?'an':'aus'})</div><div class="value ${data.config.obi_vol_filter_enabled && data.obi_recent_vol_pct!=null && (data.obi_recent_vol_pct<data.config.obi_vol_min_pct || data.obi_recent_vol_pct>data.config.obi_vol_max_pct)?'red':''}">${data.obi_recent_vol_pct!=null?data.obi_recent_vol_pct.toFixed(4):'-'}</div></div>`,
+    ],
+    oms_scalp: () => [
+      `<div class="card"><div class="label">OMS TP1 erreicht?</div><div class="value ${data.oms_tp1_done?'green':''}">${data.oms_tp1_done?'Ja - Rest wird getrailt':'Nein'}</div></div>`,
+      `<div class="card"><div class="label">OMS Trailing-Referenz</div><div class="value">${data.oms_trail_price ?? '-'}</div></div>`,
+      `<div class="card"><div class="label">OMS Nachkauf-Stufe</div><div class="value">${data.oms_dca_count ?? 0} / ${data.config.oms_dca_max_entries}</div></div>`,
+    ],
+    fib_reversal: () => [
+      `<div class="card"><div class="label">Fib High / Low</div><div class="value">${data.fib?.high ?? '-'} / ${data.fib?.low ?? '-'}</div></div>`,
+      `<div class="card"><div class="label">Fib Einstieg 1 / 2</div><div class="value">${data.fib?.entry1_price ?? '-'} / ${data.fib?.entry2_price ?? '-'}</div></div>`,
+      `<div class="card"><div class="label">Fib TP1 / TP2 / SL</div><div class="value">${data.fib?.tp1_price ?? '-'} / ${data.fib?.tp2_price ?? '-'} / ${data.fib?.sl_price ?? '-'}</div></div>`,
+    ],
+    halftrend: () => [
+      `<div class="card"><div class="label">HalfTrend</div><div class="value ${data.ht_direction===1?'green':data.ht_direction===-1?'red':''}">${data.ht_direction===1?'LONG-Signal':data.ht_direction===-1?'SHORT-Signal':'-'}</div></div>`,
+      `<div class="card"><div class="label">HalfTrend SL</div><div class="value">${data.ht_sl_price!=null?data.ht_sl_price.toFixed(4):'-'}${data.ht_tp1_done?' (Break-Even)':''}</div></div>`,
+      `<div class="card"><div class="label">HalfTrend TP1 / TP2 / TP3</div><div class="value">${data.ht_tp1_price!=null?data.ht_tp1_price.toFixed(4):'-'}${data.ht_tp1_done?'✓':''} / ${data.ht_tp2_price!=null?data.ht_tp2_price.toFixed(4):'-'}${data.ht_tp2_done?'✓':''} / ${data.ht_tp3_price!=null?data.ht_tp3_price.toFixed(4):'-'}</div></div>`,
+    ],
+    diamond_algo: () => [
+      `<div class="card"><div class="label">Diamond Algo</div><div class="value ${data.da_direction===1?'green':data.da_direction===-1?'red':''}">${data.da_direction===1?'LONG-Signal':data.da_direction===-1?'SHORT-Signal':'-'}</div></div>`,
+      `<div class="card"><div class="label">Diamond Algo SL / TP</div><div class="value">${data.da_sl_price!=null?data.da_sl_price.toFixed(4):'-'} / ${data.da_tp_price!=null?data.da_tp_price.toFixed(4):'-'}</div></div>`,
+    ],
+    elte_smart: () => [
+      `<div class="card"><div class="label">ELTE Smart</div><div class="value ${data.es_direction===1?'green':data.es_direction===-1?'red':''}">${data.es_direction===1?'LONG-Signal':data.es_direction===-1?'SHORT-Signal':'-'} (Sens. ${data.es_sensitivity_last!=null?data.es_sensitivity_last.toFixed(2):'-'})</div></div>`,
+      `<div class="card"><div class="label">ELTE Smart SL / TP1 / TP2 / TP3</div><div class="value">${data.es_sl_price!=null?data.es_sl_price.toFixed(4):'-'} / ${data.es_tp1_price!=null?data.es_tp1_price.toFixed(4):'-'}${data.es_tp1_done?'✓':''} / ${data.es_tp2_price!=null?data.es_tp2_price.toFixed(4):'-'}${data.es_tp2_done?'✓':''} / ${data.es_tp3_price!=null?data.es_tp3_price.toFixed(4):'-'}</div></div>`,
+    ],
+  };
+
+  const diagnosticCards = [
+    `<div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>`,
+    `<div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>`,
+  ];
+
+  const extraCards = (modeCards[mode] ? modeCards[mode]() : []);
+  document.getElementById('status-grid').innerHTML = coreCards.concat(extraCards, diagnosticCards).join('');
 
   if (!window.formTouched) {
     document.getElementById('margin').value = data.config.margin;
