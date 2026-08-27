@@ -2531,6 +2531,54 @@ def _uh_set_sl(st, cfg, direction, entry_price):
     st["utb_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
 
 
+def _uh_set_tp(st, cfg, direction, entry_price):
+    """Setzt den festen TP-Preis (fester $-Betrag, analog zu _uh_set_sl) und setzt den
+    Trailing-TP-Zustand fuer die neue Position zurueck. Fester TP und Trailing-TP sind
+    unabhaengig voneinander kombinierbar - beide koennen gleichzeitig aktiv sein, je
+    nachdem welcher zuerst ausgeloest wird."""
+    if not cfg.get("utb_tp_enabled", False):
+        st["utb_tp_price"] = None
+    else:
+        size = st.get("total_coin_size") or 0
+        if size <= 0:
+            st["utb_tp_price"] = None
+        else:
+            dist_tp = cfg.get("utb_tp_manual_usd", 10.0) / size
+            st["utb_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
+    st["utb_trail_active"] = False
+    st["utb_trail_best_price"] = entry_price
+    st["utb_trail_tp_price"] = None
+
+
+def _uh_apply_trail_tp(st, cfg, direction, entry_price, price):
+    """Trailing-TP auf Prozent-Basis (wie bei Pieki Algo's Trailing-Stop, aber als
+    Gewinn-Exit statt als nachgezogener SL): sobald der Trade um utb_trail_tp_activation_pct %
+    im Profit war, wird ein Exit-Preis im Abstand von utb_trail_tp_step_pct % zum bisher besten
+    erreichten Preis nachgezogen. Verbessert den Trailing-Exit nur, verschlechtert ihn nie."""
+    if not cfg.get("utb_trail_tp_enabled", False):
+        return
+    best = st.get("utb_trail_best_price")
+    if best is None:
+        best = entry_price
+    best = max(best, price) if direction == "long" else min(best, price)
+    st["utb_trail_best_price"] = best
+
+    activation_pct = cfg.get("utb_trail_tp_activation_pct", 0.5)
+    step_pct = cfg.get("utb_trail_tp_step_pct", 0.3)
+    profit_pct = ((best - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - best) / entry_price * 100)
+
+    if not st.get("utb_trail_active") and profit_pct >= activation_pct:
+        st["utb_trail_active"] = True
+
+    if st.get("utb_trail_active"):
+        trail_price = best * (1 - step_pct / 100) if direction == "long" else best * (1 + step_pct / 100)
+        current = st.get("utb_trail_tp_price")
+        if direction == "long":
+            st["utb_trail_tp_price"] = trail_price if current is None else max(current, trail_price)
+        else:
+            st["utb_trail_tp_price"] = trail_price if current is None else min(current, trail_price)
+
+
 async def check_uh_sl(symbol, price):
     """Optionaler fester SL (fester $-Betrag, eingebbar). Anders als der Flip-Mechanismus geht
     die Position bei SL-Treffer erstmal GLATT (nicht direkt in die Gegenrichtung) und wartet -
@@ -2551,6 +2599,42 @@ async def check_uh_sl(symbol, price):
         await execute_exit(symbol, price, "SL")
         st["utb_sl_price"] = None
         st["utb_sl_cooldown_until"] = time.time() + cfg.get("utb_sl_cooldown_seconds", 30)
+
+
+async def check_uh_tp(symbol, price):
+    """Optionaler fester TP (fester $-Betrag) UND optionaler Trailing-TP (Prozent-basiert,
+    siehe _uh_apply_trail_tp) - unabhaengig voneinander kombinierbar, es gewinnt wer zuerst
+    trifft. Wie beim SL geht die Position bei Treffer GLATT (nicht direkt in die Gegenrichtung)
+    und wartet auf das naechste gueltige Ersteinstiegs-Signal - hier bewusst OHNE Cooldown
+    (ein Gewinnmitnahme-Exit soll den naechsten Einstieg nicht kuenstlich verzoegern)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    entry_price = st.get("avg_entry_price")
+    if entry_price is not None:
+        _uh_apply_trail_tp(st, cfg, pos, entry_price, price)
+
+    tp_price = st.get("utb_tp_price")
+    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
+
+    trail_price = st.get("utb_trail_tp_price")
+    hit_trail = st.get("utb_trail_active") and trail_price is not None and \
+        ((pos == "long" and price <= trail_price) or (pos == "short" and price >= trail_price))
+
+    if hit_tp:
+        debug_log(f"🎯 [{symbol}] UT-Bot+Hull TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP")
+        st["utb_tp_price"] = None
+        st["utb_trail_tp_price"] = None
+        st["utb_trail_active"] = False
+    elif hit_trail:
+        debug_log(f"🎯 [{symbol}] UT-Bot+Hull Trailing-TP: {pos.upper()} @ {price} (Nachzieh-Ziel war {round(trail_price, 4)})")
+        await execute_exit(symbol, price, "TRAIL-TP")
+        st["utb_tp_price"] = None
+        st["utb_trail_tp_price"] = None
+        st["utb_trail_active"] = False
 
 
 async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull_green_i, price, trend_pct=None):
@@ -2586,11 +2670,13 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
                 await execute_entry(symbol, "long", price, is_add_on=False)
                 if st["position"] is not None:
                     _uh_set_sl(st, cfg, "long", price)
+                    _uh_set_tp(st, cfg, "long", price)
             elif sell_i and short_ok:
                 debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg (nur Signal): SHORT @ {price}")
                 await execute_entry(symbol, "short", price, is_add_on=False)
                 if st["position"] is not None:
                     _uh_set_sl(st, cfg, "short", price)
+                    _uh_set_tp(st, cfg, "short", price)
             return
         if hull_green_i is None:
             return
@@ -2599,11 +2685,13 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
                 _uh_set_sl(st, cfg, "long", price)
+                _uh_set_tp(st, cfg, "long", price)
         elif sell_i and not hull_green_i and short_ok:
             debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg: SHORT @ {price}")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
                 _uh_set_sl(st, cfg, "short", price)
+                _uh_set_tp(st, cfg, "short", price)
         return
 
     if pos == "long" and short_flip_i:
@@ -2611,31 +2699,45 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
             debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (Richtung=Nur Long): LONG @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-EXIT-DIR")
             st["utb_sl_price"] = None
+            st["utb_tp_price"] = None
+            st["utb_trail_tp_price"] = None
+            st["utb_trail_active"] = False
         elif not short_ok:
             debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (MTF-Filter blockiert Short, Trend%={round(trend_pct,2) if trend_pct is not None else '?'}): LONG @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-EXIT-MTF")
             st["utb_sl_price"] = None
+            st["utb_tp_price"] = None
+            st["utb_trail_tp_price"] = None
+            st["utb_trail_active"] = False
         else:
             debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: LONG -> SHORT @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-FLIP")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
                 _uh_set_sl(st, cfg, "short", price)
+                _uh_set_tp(st, cfg, "short", price)
     elif pos == "short" and long_flip_i:
         if direction_mode == "short_only":
             debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (Richtung=Nur Short): SHORT @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-EXIT-DIR")
             st["utb_sl_price"] = None
+            st["utb_tp_price"] = None
+            st["utb_trail_tp_price"] = None
+            st["utb_trail_active"] = False
         elif not long_ok:
             debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (MTF-Filter blockiert Long, Trend%={round(trend_pct,2) if trend_pct is not None else '?'}): SHORT @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-EXIT-MTF")
             st["utb_sl_price"] = None
+            st["utb_tp_price"] = None
+            st["utb_trail_tp_price"] = None
+            st["utb_trail_active"] = False
         else:
             debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: SHORT -> LONG @ {price}")
             await execute_exit(symbol, price, "UTB-HULL-FLIP")
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
                 _uh_set_sl(st, cfg, "long", price)
+                _uh_set_tp(st, cfg, "long", price)
 
 
 async def utb_poll_loop(symbol):
@@ -2743,6 +2845,7 @@ async def utb_poll_loop(symbol):
                         await check_uh_signal(symbol, buy[idx], sell[idx], long_flip[idx], short_flip[idx], hull_green[idx], price_i, trend_now)
 
                     await check_uh_sl(symbol, price)
+                    await check_uh_tp(symbol, price)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -6113,6 +6216,53 @@ def _uh_bt_set_sl(position, cfg, margin, leverage):
     position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
 
 
+def _uh_bt_set_tp(position, cfg):
+    """Backtest-Pendant zu _uh_set_tp - setzt tp_price auf der Position (fester $-Betrag) und
+    setzt den Trailing-TP-Zustand zurueck."""
+    if not cfg.get("utb_tp_enabled", False):
+        position["tp_price"] = None
+    else:
+        size = position["size"]
+        if size <= 0:
+            position["tp_price"] = None
+        else:
+            dist_tp = cfg.get("utb_tp_manual_usd", 10.0) / size
+            entry = position["entry"]
+            position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
+    position["trail_active"] = False
+    position["trail_best_price"] = position["entry"]
+    position["trail_tp_price"] = None
+
+
+def _uh_bt_apply_trail_tp(position, cfg, bar_high, bar_low):
+    """Backtest-Pendant zu _uh_apply_trail_tp - nutzt das Hoch/Tief der Kerze (wie bei Pieki
+    Algos apply_trailing) als bestmoeglich erreichten Preis innerhalb der Kerze, statt nur
+    des Schlusskurses."""
+    if not cfg.get("utb_trail_tp_enabled", False):
+        return
+    direction = position["dir"]
+    entry_price = position["entry"]
+    extreme = bar_high if direction == "long" else bar_low
+    best = position.get("trail_best_price")
+    best = extreme if best is None else (max(best, extreme) if direction == "long" else min(best, extreme))
+    position["trail_best_price"] = best
+
+    activation_pct = cfg.get("utb_trail_tp_activation_pct", 0.5)
+    step_pct = cfg.get("utb_trail_tp_step_pct", 0.3)
+    profit_pct = ((best - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - best) / entry_price * 100)
+
+    if not position.get("trail_active") and profit_pct >= activation_pct:
+        position["trail_active"] = True
+
+    if position.get("trail_active"):
+        trail_price = best * (1 - step_pct / 100) if direction == "long" else best * (1 + step_pct / 100)
+        current = position.get("trail_tp_price")
+        if direction == "long":
+            position["trail_tp_price"] = trail_price if current is None else max(current, trail_price)
+        else:
+            position["trail_tp_price"] = trail_price if current is None else min(current, trail_price)
+
+
 def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct=None):
     """Immer-im-Markt-Simulation fuer UT Bot + Hull Flip (Flip statt Exit), optional mit festem
     SL (fester $-Betrag) - bei SL-Treffer geht die Position glatt und wartet (nach Cooldown) auf
@@ -6143,12 +6293,24 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
         price = c[i]
 
         if position is not None:
+            _uh_bt_apply_trail_tp(position, cfg, h[i], l[i])
             sl_price = position.get("sl_price")
+            tp_price = position.get("tp_price")
+            trail_tp_price = position.get("trail_tp_price")
             hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
+            hit_trail_tp = position.get("trail_active") and trail_tp_price is not None and \
+                ((position["dir"] == "long" and l[i] <= trail_tp_price) or (position["dir"] == "short" and h[i] >= trail_tp_price))
             if hit_sl:
                 _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+            elif hit_trail_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], trail_tp_price, position["size"], i, position["entry_i"], "TRAIL-TP", ts=ts)
+                position = None
 
         in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
 
@@ -6160,10 +6322,12 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
                     size = (margin * leverage) / price
                     position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
                     _uh_bt_set_sl(position, cfg, margin, leverage)
+                    _uh_bt_set_tp(position, cfg)
                 elif sell[i] and short_ok(i):
                     size = (margin * leverage) / price
                     position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
                     _uh_bt_set_sl(position, cfg, margin, leverage)
+                    _uh_bt_set_tp(position, cfg)
                 continue
             if hull_green[i] is None:
                 continue
@@ -6171,10 +6335,12 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
                 _uh_bt_set_sl(position, cfg, margin, leverage)
+                _uh_bt_set_tp(position, cfg)
             elif sell[i] and not hull_green[i] and short_ok(i):
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
                 _uh_bt_set_sl(position, cfg, margin, leverage)
+                _uh_bt_set_tp(position, cfg)
             continue
 
         if position["dir"] == "long" and short_flip[i]:
@@ -6192,6 +6358,7 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
                 _uh_bt_set_sl(position, cfg, margin, leverage)
+                _uh_bt_set_tp(position, cfg)
         elif position["dir"] == "short" and long_flip[i]:
             can_flip = direction_mode != "short_only" and long_ok(i)
             if can_flip:
@@ -6207,6 +6374,7 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
                 _uh_bt_set_sl(position, cfg, margin, leverage)
+                _uh_bt_set_tp(position, cfg)
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)

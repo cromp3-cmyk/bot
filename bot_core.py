@@ -389,6 +389,11 @@ def default_config():
         "utb_sl_enabled": os.getenv("UTB_SL_ENABLED", "false").lower() == "true",
         "utb_sl_manual_usd": float(os.getenv("UTB_SL_MANUAL_USD", "5.0")),
         "utb_sl_cooldown_seconds": float(os.getenv("UTB_SL_COOLDOWN_SECONDS", "30")),
+        "utb_tp_enabled": os.getenv("UTB_TP_ENABLED", "false").lower() == "true",
+        "utb_tp_manual_usd": float(os.getenv("UTB_TP_MANUAL_USD", "10.0")),
+        "utb_trail_tp_enabled": os.getenv("UTB_TRAIL_TP_ENABLED", "false").lower() == "true",
+        "utb_trail_tp_activation_pct": float(os.getenv("UTB_TRAIL_TP_ACTIVATION_PCT", "0.5")),
+        "utb_trail_tp_step_pct": float(os.getenv("UTB_TRAIL_TP_STEP_PCT", "0.3")),
         "utb_mtf_filter_enabled": os.getenv("UTB_MTF_FILTER_ENABLED", "false").lower() == "true",
         "utb_mtf_tf1": os.getenv("UTB_MTF_TF1", "1m"),  # wie bei Pieki Algo: bis zu 3 Zeiteinheiten gemittelt
         "utb_mtf_tf2": os.getenv("UTB_MTF_TF2", "2m"),
@@ -1834,6 +1839,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="ut_bot_hull"><label>SL Fester $-Betrag (nur wenn Stop-Loss An)</label><input type="number" step="0.5" id="utb_sl_manual_usd"></div>
   <div data-mode="ut_bot_hull"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="utb_sl_cooldown_seconds"></div>
+  <div data-mode="ut_bot_hull"><label>Take-Profit (fester $-Betrag)</label>
+    <select class="cfg" id="utb_tp_enabled">
+      <option value="false">Aus (Standard - reines Flip-System ohne TP)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot_hull" data-requires="utb_tp_enabled"><label>TP Fester $-Betrag (nur wenn Take-Profit An)</label><input type="number" step="0.5" id="utb_tp_manual_usd"></div>
+  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Trailing-TP (unabhängig vom festen TP kombinierbar): sobald der Trade um die Aktivierungs-Schwelle
+    im Profit ist, wird ein Gewinn-Exit im Nachzieh-Abstand zum bisher besten erreichten Preis
+    nachgezogen - schließt die Position, sobald der Kurs um den Nachzieh-Abstand vom Hoch/Tief
+    zurückfällt, statt auf den festen TP oder ein Gegen-Signal zu warten.
+  </div>
+  <div data-mode="ut_bot_hull"><label>Trailing-TP</label>
+    <select class="cfg" id="utb_trail_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot_hull" data-requires="utb_trail_tp_enabled"><label>Aktivierung ab Profit (%)</label><input type="number" step="0.01" id="utb_trail_tp_activation_pct"></div>
+  <div data-mode="ut_bot_hull" data-requires="utb_trail_tp_enabled"><label>Nachzieh-Abstand (%)</label><input type="number" step="0.01" id="utb_trail_tp_step_pct"></div>
   <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     MTF-Trend%-Filter (wie bei Pieki Algo): Trend% wird als Durchschnitt aus bis zu 3
     Zeiteinheiten berechnet. Gilt für JEDEN Einstieg, auch beim Flip in die Gegenrichtung -
@@ -4185,6 +4211,11 @@ async function refresh() {
     document.getElementById('utb_sl_enabled').value = String(data.config.utb_sl_enabled);
     document.getElementById('utb_sl_manual_usd').value = data.config.utb_sl_manual_usd;
     document.getElementById('utb_sl_cooldown_seconds').value = data.config.utb_sl_cooldown_seconds;
+    document.getElementById('utb_tp_enabled').value = String(data.config.utb_tp_enabled);
+    document.getElementById('utb_tp_manual_usd').value = data.config.utb_tp_manual_usd;
+    document.getElementById('utb_trail_tp_enabled').value = String(data.config.utb_trail_tp_enabled);
+    document.getElementById('utb_trail_tp_activation_pct').value = data.config.utb_trail_tp_activation_pct;
+    document.getElementById('utb_trail_tp_step_pct').value = data.config.utb_trail_tp_step_pct;
     document.getElementById('utb_mtf_filter_enabled').value = String(data.config.utb_mtf_filter_enabled);
     setResolutionField('utb_mtf_tf1', data.config.utb_mtf_tf1);
     setResolutionField('utb_mtf_tf2', data.config.utb_mtf_tf2);
@@ -4595,6 +4626,11 @@ function buildConfigPayload() {
     utb_sl_enabled: document.getElementById('utb_sl_enabled').value === 'true',
     utb_sl_manual_usd: parseFloat(document.getElementById('utb_sl_manual_usd').value),
     utb_sl_cooldown_seconds: parseFloat(document.getElementById('utb_sl_cooldown_seconds').value),
+    utb_tp_enabled: document.getElementById('utb_tp_enabled').value === 'true',
+    utb_tp_manual_usd: parseFloat(document.getElementById('utb_tp_manual_usd').value),
+    utb_trail_tp_enabled: document.getElementById('utb_trail_tp_enabled').value === 'true',
+    utb_trail_tp_activation_pct: parseFloat(document.getElementById('utb_trail_tp_activation_pct').value),
+    utb_trail_tp_step_pct: parseFloat(document.getElementById('utb_trail_tp_step_pct').value),
     utb_mtf_filter_enabled: document.getElementById('utb_mtf_filter_enabled').value === 'true',
     utb_mtf_tf1: getResolutionField('utb_mtf_tf1'),
     utb_mtf_tf2: getResolutionField('utb_mtf_tf2'),
@@ -4906,6 +4942,8 @@ async def handle_config_update(request):
                 "utb_resolution", "utb_atr_period", "utb_sensitivity", "utb_heikin_ashi",
                 "utb_hull_period", "utb_flip_trigger", "utb_direction_mode",
                 "utb_sl_enabled", "utb_sl_manual_usd", "utb_sl_cooldown_seconds",
+                "utb_tp_enabled", "utb_tp_manual_usd",
+                "utb_trail_tp_enabled", "utb_trail_tp_activation_pct", "utb_trail_tp_step_pct",
                 "utb_mtf_filter_enabled", "utb_mtf_tf1", "utb_mtf_tf2", "utb_mtf_tf3",
                 "utb_mtf_fast_len", "utb_mtf_slow_len", "utb_mtf_atr_len",
                 "utb_mtf_long_threshold", "utb_mtf_short_threshold",
