@@ -403,6 +403,17 @@ def default_config():
         "utb_mtf_atr_len": int(os.getenv("UTB_MTF_ATR_LEN", "14")),
         "utb_mtf_long_threshold": float(os.getenv("UTB_MTF_LONG_THRESHOLD", "0.5")),
         "utb_mtf_short_threshold": float(os.getenv("UTB_MTF_SHORT_THRESHOLD", "-0.5")),
+        "utb_instant_trigger_enabled": os.getenv("UTB_INSTANT_TRIGGER_ENABLED", "false").lower() == "true",  # feuert sofort bei einem Flip in der noch laufenden Kerze, statt bis zum Kerzenschluss zu warten (nur bei normalen Minuten-Aufloesungen, nicht bei Sekunden-Zeitrahmen)
+        "utb_zscore_filter_enabled": os.getenv("UTB_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
+        "utb_zscore_resolution": os.getenv("UTB_ZSCORE_RESOLUTION", "same"),
+        "utb_zscore_lookback": int(os.getenv("UTB_ZSCORE_LOOKBACK", "20")),
+        "utb_zscore_smooth": int(os.getenv("UTB_ZSCORE_SMOOTH", "3")),
+        "utb_rsi_filter_enabled": os.getenv("UTB_RSI_FILTER_ENABLED", "false").lower() == "true",
+        "utb_rsi_length": int(os.getenv("UTB_RSI_LENGTH", "14")),
+        "utb_rsi_midline": float(os.getenv("UTB_RSI_MIDLINE", "50")),
+        "utb_adx_filter_enabled": os.getenv("UTB_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "utb_adx_length": int(os.getenv("UTB_ADX_LENGTH", "14")),
+        "utb_adx_threshold": float(os.getenv("UTB_ADX_THRESHOLD", "20")),
         "wtc_resolution": os.getenv("WTC_RESOLUTION", "5m"),
         "wtc_channel_len": int(os.getenv("WTC_CHANNEL_LEN", "9")),
         "wtc_average_len": int(os.getenv("WTC_AVERAGE_LEN", "12")),
@@ -528,7 +539,7 @@ def default_state():
         "mo7_last_value": None, "mo7_sl_cooldown_until": 0.0,
         "mo7_sl_price": None, "mo7_tp_price": None,
         "utb_last_hull_green": None,
-        "utb_sl_price": None, "utb_sl_cooldown_until": 0.0,
+        "utb_sl_price": None, "utb_sl_cooldown_until": 0.0, "utb_instant_fired_ts": None,
         "fr_sl_price": None, "fr_sl_cooldown_until": 0.0,
         "cd_sl_price": None, "cd_sl_cooldown_until": 0.0,
         "rf_sl_price": None, "rf_tp_price": None, "rf_sl_cooldown_until": 0.0,
@@ -1232,7 +1243,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="elte_smart">ELTE Smart (SuperTrend auf ohlc4 mit Auto-Sensitivity, TP1/TP2/TP3 gestufte Teilverkäufe mit nachziehendem SL)</option>
       <option value="candle_patterns">Candle Patterns (3 Line Strike / Engulfing, SL+TP fest oder ATR-basiert, ATR-Breakeven)</option>
       <option value="mo7_scalp">MO7 Scalp (Composite-Oszillator aus 7 Indikatoren, Schwellenwert-Cross oder 5-Kerzen-Summe, fester SL+TP)</option>
-      <option value="ut_bot_hull">UT Bot + Hull Flip (ATR-Trailing-Stop, immer im Markt, Flip-Trigger wählbar, optionaler fester SL/TP + Trailing-TP)</option>
+      <option value="ut_bot_hull">UT Bot + Hull Flip (ATR-Trailing-Stop, immer im Markt, Flip-Trigger wählbar, Sofort-Trigger optional, Z-Score/RSI/ADX-Filter + MTF-Trend%-Filter, fester SL/TP + Trailing-TP)</option>
       <option value="wavetrend_cross">WaveTrend Cross (Cipher-B-Kernsignal, Zonenfilter wählbar, immer im Markt oder normal, fester SL+TP)</option>
       <option value="pieki_algo">Pieki Algo (SuperTrend+SMA9-Signal, Flip oder fester SL+TP, optionaler MTF-Trend%-Filter)</option>
       <option value="fractals_flip">Williams Fractals (Swing-High/Low-Umkehrpunkte, immer im Markt, nur Buy/Sell-Wechsel)</option>
@@ -1852,6 +1863,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short (bei Gegen-Flip glattstellen statt drehen)</option>
     </select>
   </div>
+  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Sofort-Trigger: wertet zusätzlich die noch OFFENE, gerade laufende Kerze mit dem aktuellen
+    Live-Preis aus und feuert sofort bei einem neuen Flip, statt bis zum tatsächlichen
+    Kerzenschluss zu warten. Nur bei normalen Minuten-Zeitrahmen möglich (10s/15s/30s/45s
+    liefern ausschließlich bereits abgeschlossene Kerzen, dort bleibt "Aus" ohne Wirkung).
+  </div>
+  <div data-mode="ut_bot_hull"><label>Sofort-Trigger</label>
+    <select class="cfg" id="utb_instant_trigger_enabled">
+      <option value="false">Aus - wartet auf echten Kerzenschluss</option>
+      <option value="true">An - feuert sofort in der laufenden Kerze</option>
+    </select>
+  </div>
   <div data-mode="ut_bot_hull"><label>Stop-Loss (fester $-Betrag, optional - durchbricht "immer im Markt" nur im SL-Fall)</label>
     <select class="cfg" id="utb_sl_enabled">
       <option value="false">Aus (Standard - reines Flip-System ohne SL)</option>
@@ -1945,6 +1968,61 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="utb_mtf_fast_len"></div>
   <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="utb_mtf_slow_len"></div>
   <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="utb_mtf_atr_len"></div>
+  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler Z-Score-Filter (portiert aus "Rolling Z-Score Trend [QuantAlgo]"), unabhängig
+    vom MTF-Filter kombinierbar (beide können gleichzeitig an sein - dann müssen beide
+    zustimmen): über 0 = nur Long erlaubt, unter 0 = nur Short erlaubt - gilt für jeden
+    Einstieg, auch beim Flip.
+  </div>
+  <div data-mode="ut_bot_hull"><label>Z-Score-Filter</label>
+    <select class="cfg" id="utb_zscore_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Long nur über 0, Short nur unter 0</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot_hull" data-requires="utb_zscore_filter_enabled"><label>Z-Score Zeiteinheit</label>
+    <select class="cfg" id="utb_zscore_resolution">
+      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="utb_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="ut_bot_hull" data-requires="utb_zscore_filter_enabled"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="utb_zscore_lookback"></div>
+  <div data-mode="ut_bot_hull" data-requires="utb_zscore_filter_enabled"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="utb_zscore_smooth"></div>
+  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler RSI-Regime-Filter, unabhängig von den anderen Filtern kombinierbar (mehrere
+    gleichzeitig aktiv -> alle müssen zustimmen): RSI über der Mittellinie -> nur Long erlaubt,
+    RSI unter der Mittellinie -> nur Short erlaubt.
+  </div>
+  <div data-mode="ut_bot_hull"><label>RSI-Filter</label>
+    <select class="cfg" id="utb_rsi_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - Long nur über Mittellinie, Short nur darunter</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot_hull" data-requires="utb_rsi_filter_enabled"><label>RSI-Länge</label><input type="number" step="1" min="2" id="utb_rsi_length"></div>
+  <div data-mode="ut_bot_hull" data-requires="utb_rsi_filter_enabled"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="utb_rsi_midline"></div>
+  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler ADX/DI-Trendfilter, unabhängig von den anderen Filtern kombinierbar: ADX über der
+    Schwelle UND +DI über -DI -> nur Long erlaubt. ADX über der Schwelle UND -DI über +DI -> nur
+    Short erlaubt. Liegt der ADX UNTER der Schwelle (kein klarer Trend), sind BEIDE Richtungen
+    gesperrt.
+  </div>
+  <div data-mode="ut_bot_hull"><label>ADX/DI-Filter</label>
+    <select class="cfg" id="utb_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - nur bei genug Trendstärke und passender Richtung</option>
+    </select>
+  </div>
+  <div data-mode="ut_bot_hull" data-requires="utb_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="utb_adx_length"></div>
+  <div data-mode="ut_bot_hull" data-requires="utb_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="utb_adx_threshold"></div>
 
   <div data-mode="wavetrend_cross" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🌊 WaveTrend Cross (Kernsignal aus "Cipher B"): wt1 kreuzt wt2 - das sind die grünen/roten
@@ -3421,7 +3499,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -4460,6 +4538,7 @@ async function refresh() {
     document.getElementById('utb_hull_period').value = data.config.utb_hull_period;
     document.getElementById('utb_flip_trigger').value = data.config.utb_flip_trigger;
     document.getElementById('utb_direction_mode').value = data.config.utb_direction_mode;
+    document.getElementById('utb_instant_trigger_enabled').value = String(data.config.utb_instant_trigger_enabled);
     document.getElementById('utb_sl_enabled').value = String(data.config.utb_sl_enabled);
     document.getElementById('utb_sl_manual_usd').value = data.config.utb_sl_manual_usd;
     document.getElementById('utb_sl_cooldown_seconds').value = data.config.utb_sl_cooldown_seconds;
@@ -4477,6 +4556,16 @@ async function refresh() {
     document.getElementById('utb_mtf_fast_len').value = data.config.utb_mtf_fast_len;
     document.getElementById('utb_mtf_slow_len').value = data.config.utb_mtf_slow_len;
     document.getElementById('utb_mtf_atr_len').value = data.config.utb_mtf_atr_len;
+    document.getElementById('utb_zscore_filter_enabled').value = String(data.config.utb_zscore_filter_enabled);
+    setResolutionField('utb_zscore_resolution', data.config.utb_zscore_resolution);
+    document.getElementById('utb_zscore_lookback').value = data.config.utb_zscore_lookback;
+    document.getElementById('utb_zscore_smooth').value = data.config.utb_zscore_smooth;
+    document.getElementById('utb_rsi_filter_enabled').value = String(data.config.utb_rsi_filter_enabled);
+    document.getElementById('utb_rsi_length').value = data.config.utb_rsi_length;
+    document.getElementById('utb_rsi_midline').value = data.config.utb_rsi_midline;
+    document.getElementById('utb_adx_filter_enabled').value = String(data.config.utb_adx_filter_enabled);
+    document.getElementById('utb_adx_length').value = data.config.utb_adx_length;
+    document.getElementById('utb_adx_threshold').value = data.config.utb_adx_threshold;
     setResolutionField('wtc_resolution', data.config.wtc_resolution);
     document.getElementById('wtc_channel_len').value = data.config.wtc_channel_len;
     document.getElementById('wtc_average_len').value = data.config.wtc_average_len;
@@ -4894,6 +4983,7 @@ function buildConfigPayload() {
     utb_hull_period: parseInt(document.getElementById('utb_hull_period').value),
     utb_flip_trigger: document.getElementById('utb_flip_trigger').value,
     utb_direction_mode: document.getElementById('utb_direction_mode').value,
+    utb_instant_trigger_enabled: document.getElementById('utb_instant_trigger_enabled').value === 'true',
     utb_sl_enabled: document.getElementById('utb_sl_enabled').value === 'true',
     utb_sl_manual_usd: parseFloat(document.getElementById('utb_sl_manual_usd').value),
     utb_sl_cooldown_seconds: parseFloat(document.getElementById('utb_sl_cooldown_seconds').value),
@@ -4911,6 +5001,16 @@ function buildConfigPayload() {
     utb_mtf_fast_len: parseInt(document.getElementById('utb_mtf_fast_len').value),
     utb_mtf_slow_len: parseInt(document.getElementById('utb_mtf_slow_len').value),
     utb_mtf_atr_len: parseInt(document.getElementById('utb_mtf_atr_len').value),
+    utb_zscore_filter_enabled: document.getElementById('utb_zscore_filter_enabled').value === 'true',
+    utb_zscore_resolution: getResolutionField('utb_zscore_resolution'),
+    utb_zscore_lookback: parseInt(document.getElementById('utb_zscore_lookback').value),
+    utb_zscore_smooth: parseInt(document.getElementById('utb_zscore_smooth').value),
+    utb_rsi_filter_enabled: document.getElementById('utb_rsi_filter_enabled').value === 'true',
+    utb_rsi_length: parseInt(document.getElementById('utb_rsi_length').value),
+    utb_rsi_midline: parseFloat(document.getElementById('utb_rsi_midline').value),
+    utb_adx_filter_enabled: document.getElementById('utb_adx_filter_enabled').value === 'true',
+    utb_adx_length: parseInt(document.getElementById('utb_adx_length').value),
+    utb_adx_threshold: parseFloat(document.getElementById('utb_adx_threshold').value),
     wtc_resolution: getResolutionField('wtc_resolution'),
     wtc_channel_len: parseInt(document.getElementById('wtc_channel_len').value),
     wtc_average_len: parseInt(document.getElementById('wtc_average_len').value),
@@ -5231,13 +5331,16 @@ async def handle_config_update(request):
                 "mo7_sl_enabled", "mo7_sl_manual_usd", "mo7_tp_enabled", "mo7_tp_manual_usd",
                 "mo7_sl_cooldown_seconds",
                 "utb_resolution", "utb_atr_period", "utb_sensitivity", "utb_heikin_ashi",
-                "utb_hull_period", "utb_flip_trigger", "utb_direction_mode",
+                "utb_hull_period", "utb_flip_trigger", "utb_direction_mode", "utb_instant_trigger_enabled",
                 "utb_sl_enabled", "utb_sl_manual_usd", "utb_sl_cooldown_seconds",
                 "utb_tp_enabled", "utb_tp_manual_usd",
                 "utb_trail_tp_enabled", "utb_trail_tp_activation_pct", "utb_trail_tp_step_pct",
                 "utb_mtf_filter_enabled", "utb_mtf_tf1", "utb_mtf_tf2", "utb_mtf_tf3",
                 "utb_mtf_fast_len", "utb_mtf_slow_len", "utb_mtf_atr_len",
                 "utb_mtf_long_threshold", "utb_mtf_short_threshold",
+                "utb_zscore_filter_enabled", "utb_zscore_resolution", "utb_zscore_lookback", "utb_zscore_smooth",
+                "utb_rsi_filter_enabled", "utb_rsi_length", "utb_rsi_midline",
+                "utb_adx_filter_enabled", "utb_adx_length", "utb_adx_threshold",
                 "wtc_resolution", "wtc_channel_len", "wtc_average_len", "wtc_ma_len",
                 "wtc_require_zone", "wtc_os_level", "wtc_ob_level", "wtc_direction_mode",
                 "wtc_always_in_market", "wtc_flip_exit_enabled", "wtc_sl_enabled",

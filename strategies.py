@@ -2637,7 +2637,7 @@ async def check_uh_tp(symbol, price):
         st["utb_trail_active"] = False
 
 
-async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull_green_i, price, trend_pct=None):
+async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull_green_i, price, trend_pct=None, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
     """Immer-im-Markt-System: beim allerersten Einstieg braucht es ein echtes UT-Bot-Signal PLUS
     passende Hull-Farbe - AUSSER im Modus 'signal_only', da zaehlt nur das UT-Bot-Signal, Hull
     wird komplett ignoriert. Danach entscheidet nur noch der gewaehlte Flip-Trigger
@@ -2645,9 +2645,9 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
     wird bei einem Gegen-Flip nicht auf die andere Seite gedreht, sondern nur glattgestellt
     (echtes 'immer im Markt' ergibt bei einseitiger Richtung ja keinen Sinn). Optionaler fester
     SL (siehe check_uh_sl) unterbricht 'immer im Markt' nur im SL-Fall. Optionaler MTF-Trend%-
-    Filter (wie bei Pieki Algo, siehe compute_pk_trend_percent/_pk_build_mtf_trend_pct) gilt fuer
-    JEDEN Einstieg, auch beim Flip in die Gegenrichtung: Long nur wenn trend_pct ueber der
-    Long-Schwelle, Short nur wenn darunter."""
+    Filter (wie bei Pieki Algo), optionaler Z-Score-Filter, optionaler RSI-Regime-Filter und
+    optionaler ADX/DI-Trendfilter (alle wie bei Kerzen-DNA/Range Filter) gelten fuer JEDEN
+    Einstieg, auch beim Flip in die Gegenrichtung - unabhaengig voneinander kombinierbar."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -2659,8 +2659,24 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
     mtf_enabled = cfg.get("utb_mtf_filter_enabled", False)
     long_thr = cfg.get("utb_mtf_long_threshold", 0.5)
     short_thr = cfg.get("utb_mtf_short_threshold", -0.5)
-    long_ok = direction_mode != "short_only" and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
-    short_ok = direction_mode != "long_only" and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
+    zscore_enabled = cfg.get("utb_zscore_filter_enabled", False)
+    rsi_enabled = cfg.get("utb_rsi_filter_enabled", False)
+    rsi_midline = cfg.get("utb_rsi_midline", 50)
+    adx_enabled = cfg.get("utb_adx_filter_enabled", False)
+    adx_threshold = cfg.get("utb_adx_threshold", 20)
+    adx_missing = adx is None or plus_di is None or minus_di is None
+    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
+    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
+    long_ok = (direction_mode != "short_only"
+               and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
+               and (not zscore_enabled or zscore is None or zscore > 0)
+               and (not rsi_enabled or rsi is None or rsi > rsi_midline)
+               and adx_long_ok)
+    short_ok = (direction_mode != "long_only"
+                and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
+                and (not zscore_enabled or zscore is None or zscore < 0)
+                and (not rsi_enabled or rsi is None or rsi < rsi_midline)
+                and adx_short_ok)
     pos = st["position"]
 
     if pos is None:
@@ -2696,15 +2712,21 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
 
     if pos == "long" and short_flip_i:
         if direction_mode == "long_only":
-            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (Richtung=Nur Long): LONG @ {price}")
-            await execute_exit(symbol, price, "UTB-HULL-EXIT-DIR")
-            st["utb_sl_price"] = None
-            st["utb_tp_price"] = None
-            st["utb_trail_tp_price"] = None
-            st["utb_trail_active"] = False
+            reason = "UTB-HULL-EXIT-DIR"
         elif not short_ok:
-            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (MTF-Filter blockiert Short, Trend%={round(trend_pct,2) if trend_pct is not None else '?'}): LONG @ {price}")
-            await execute_exit(symbol, price, "UTB-HULL-EXIT-MTF")
+            if mtf_enabled and not (trend_pct is None or trend_pct < short_thr):
+                reason = "UTB-HULL-EXIT-MTF"
+            elif zscore_enabled and not (zscore is None or zscore < 0):
+                reason = "UTB-HULL-EXIT-ZSCORE"
+            elif rsi_enabled and not (rsi is None or rsi < rsi_midline):
+                reason = "UTB-HULL-EXIT-RSI"
+            else:
+                reason = "UTB-HULL-EXIT-ADX"
+        else:
+            reason = None
+        if reason is not None:
+            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit ({reason}): LONG @ {price}")
+            await execute_exit(symbol, price, reason)
             st["utb_sl_price"] = None
             st["utb_tp_price"] = None
             st["utb_trail_tp_price"] = None
@@ -2718,15 +2740,21 @@ async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull
                 _uh_set_tp(st, cfg, "short", price)
     elif pos == "short" and long_flip_i:
         if direction_mode == "short_only":
-            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (Richtung=Nur Short): SHORT @ {price}")
-            await execute_exit(symbol, price, "UTB-HULL-EXIT-DIR")
-            st["utb_sl_price"] = None
-            st["utb_tp_price"] = None
-            st["utb_trail_tp_price"] = None
-            st["utb_trail_active"] = False
+            reason = "UTB-HULL-EXIT-DIR"
         elif not long_ok:
-            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit (MTF-Filter blockiert Long, Trend%={round(trend_pct,2) if trend_pct is not None else '?'}): SHORT @ {price}")
-            await execute_exit(symbol, price, "UTB-HULL-EXIT-MTF")
+            if mtf_enabled and not (trend_pct is None or trend_pct > long_thr):
+                reason = "UTB-HULL-EXIT-MTF"
+            elif zscore_enabled and not (zscore is None or zscore > 0):
+                reason = "UTB-HULL-EXIT-ZSCORE"
+            elif rsi_enabled and not (rsi is None or rsi > rsi_midline):
+                reason = "UTB-HULL-EXIT-RSI"
+            else:
+                reason = "UTB-HULL-EXIT-ADX"
+        else:
+            reason = None
+        if reason is not None:
+            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit ({reason}): SHORT @ {price}")
+            await execute_exit(symbol, price, reason)
             st["utb_sl_price"] = None
             st["utb_tp_price"] = None
             st["utb_trail_tp_price"] = None
@@ -2745,7 +2773,12 @@ async def utb_poll_loop(symbol):
     optional mit festem SL (fester $-Betrag, siehe check_uh_sl - unterbricht 'immer im Markt'
     nur im SL-Fall). Nutzt dieselbe Kerzenquelle/Aufloesungs-Logik wie Candle Patterns (inkl.
     Sekunden-Aufloesungen und eigene Minuten), da hier - anders als bei MO7 - kein
-    Handelsvolumen gebraucht wird."""
+    Handelsvolumen gebraucht wird. Optionaler Sofort-Trigger (utb_instant_trigger_enabled):
+    wertet zusaetzlich die noch OFFENE, gerade laufende Kerze mit dem aktuellen Live-Preis aus
+    und feuert sofort bei einem neuen Flip, statt bis zum tatsaechlichen Kerzenschluss zu
+    warten - nur fuer normale Binance-Minuten-Aufloesungen moeglich (Sekunden-Aufloesungen
+    liefern ueber get_seconds_candles() ausschliesslich bereits abgeschlossene Buckets, es gibt
+    dort keine 'laufende' Kerze zum Anzapfen)."""
     b = BOTS[symbol]
     last_processed_ts = None
     last_heartbeat = 0.0
@@ -2760,7 +2793,9 @@ async def utb_poll_loop(symbol):
                 min_needed = max(atr_period, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 5
                 needed_bars = min(1000, max(min_needed * 2, 220))
                 st = b["state"]
+                instant_enabled = cfg.get("utb_instant_trigger_enabled", False)
 
+                forming_o = forming_h = forming_l = forming_c = forming_ts = None
                 if resolution in SUB_MINUTE_RESOLUTIONS:
                     local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     if local:
@@ -2772,6 +2807,8 @@ async def utb_poll_loop(symbol):
                     if data:
                         timestamps, opens, highs, lows, closes = data
                         closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                        if instant_enabled and len(timestamps) >= 1:
+                            forming_ts, forming_o, forming_h, forming_l, forming_c = timestamps[-1], opens[-1], highs[-1], lows[-1], closes[-1]
                     else:
                         closed_ts = None
 
@@ -2822,11 +2859,73 @@ async def utb_poll_loop(symbol):
                         trend_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow, mtf_atr)[-1]
                     st["utb_trend_pct_last"] = trend_now
 
+                    zs_lookback = cfg.get("utb_zscore_lookback", 20)
+                    zs_smooth = cfg.get("utb_zscore_smooth", 3)
+                    zscore_resolution = cfg.get("utb_zscore_resolution", "same")
+                    if not cfg.get("utb_zscore_filter_enabled", False):
+                        zscore_series = None
+                    elif zscore_resolution in (None, "", "same") or zscore_resolution == resolution:
+                        zscore_series = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)
+                    else:
+                        zs_needed = min(500, max(zs_lookback, zs_smooth, 5) * 3 + 20)
+                        if zscore_resolution in SUB_MINUTE_RESOLUTIONS:
+                            zs_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[zscore_resolution], zs_needed)
+                            zs_c = zs_local[4] if zs_local else None
+                        else:
+                            zs_data = await fetch_candles_binance_multi(symbol, zscore_resolution, count_back=zs_needed, market_type=cfg.get("binance_market_type", "spot"))
+                            zs_c = zs_data[4][:-1] if zs_data else None
+                        if zs_c and len(zs_c) > max(zs_lookback, zs_smooth):
+                            zscore_now = compute_rolling_zscore(zs_c, zs_lookback, zs_smooth)[-1]
+                        else:
+                            zscore_now = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)[-1]
+                        zscore_series = [zscore_now] * len(closed_c)
+
+                    rsi_enabled = cfg.get("utb_rsi_filter_enabled", False)
+                    rsi_series = compute_rsi(closed_c, cfg.get("utb_rsi_length", 14)) if rsi_enabled else None
+
+                    adx_enabled = cfg.get("utb_adx_filter_enabled", False)
+                    if adx_enabled:
+                        adx_series, plus_di_series, minus_di_series = compute_adx(closed_h, closed_l, closed_c, cfg.get("utb_adx_length", 14))
+                    else:
+                        adx_series, plus_di_series, minus_di_series = None, None, None
+
                     if due_heartbeat:
                         last_heartbeat = now
+                        rsi_log = f", RSI={round(rsi_series[-1],1)}" if rsi_series else ""
+                        adx_log = f", ADX={round(adx_series[-1],1)} (+DI={round(plus_di_series[-1],1)}/-DI={round(minus_di_series[-1],1)})" if adx_series else ""
                         debug_log(f"💓 [{symbol}] UT-Bot+Hull aktiv: Preis={closed_c[-1]}, Hull-grün={hull_green[-1]}, "
                                   f"buy_i={buy[-1]}, sell_i={sell[-1]}, "
-                                  f"Trigger={cfg.get('utb_flip_trigger')}, Trend%={round(trend_now,2)}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                                  f"Trigger={cfg.get('utb_flip_trigger')}, Trend%={round(trend_now,2)}{rsi_log}{adx_log}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    # Sofort-Trigger: die noch offene Kerze (forming_*) wird mit dem aktuellen
+                    # Live-Preis als vorlaeufigem Schlusskurs an die geschlossene Historie
+                    # angehaengt und die komplette Signal-Kette darauf NEU berechnet. Feuert
+                    # der letzte (noch offene) Balken dabei einen frischen Flip, wird SOFORT
+                    # ausgefuehrt statt bis zum echten Kerzenschluss zu warten. utb_instant_fired_ts
+                    # merkt sich die Kerze, damit beim spaeteren echten Kerzenschluss nicht ein
+                    # zweites Mal fuer denselben Balken ausgefuehrt wird.
+                    if instant_enabled and forming_ts is not None and forming_ts != st.get("utb_instant_fired_ts"):
+                        live_price = price
+                        live_o = closed_o + [forming_o]
+                        live_h = closed_h + [max(forming_h, live_price)]
+                        live_l = closed_l + [min(forming_l, live_price)]
+                        live_c = closed_c + [live_price]
+                        buy2, sell2, _ = compute_ut_bot(live_o, live_h, live_l, live_c, atr_period, cfg.get("utb_sensitivity", 1.0), cfg.get("utb_heikin_ashi", False))
+                        hma2 = compute_hull_ma(live_c, hull_period)
+                        hull_green2 = [None] * len(live_c)
+                        for i in range(1, len(live_c)):
+                            if hma2[i] is not None and hma2[i - 1] is not None:
+                                hull_green2[i] = hma2[i] > hma2[i - 1]
+                        long_flip2, short_flip2 = compute_ut_hull_flip_signals(buy2, sell2, hull_green2, cfg)
+                        if long_flip2[-1] or short_flip2[-1]:
+                            debug_log(f"⚡ [{symbol}] UT-Bot+Hull Sofort-Trigger: neuer Flip in der laufenden Kerze erkannt @ {live_price}")
+                            st["utb_instant_fired_ts"] = forming_ts
+                            zs_i = zscore_series[-1] if zscore_series else None
+                            rsi_i2 = rsi_series[-1] if rsi_series else None
+                            adx_i2 = adx_series[-1] if adx_series else None
+                            plus_di_i2 = plus_di_series[-1] if plus_di_series else None
+                            minus_di_i2 = minus_di_series[-1] if minus_di_series else None
+                            await check_uh_signal(symbol, buy2[-1], sell2[-1], long_flip2[-1], short_flip2[-1], hull_green2[-1], live_price, trend_now, zs_i, rsi_i2, adx_i2, plus_di_i2, minus_di_i2)
 
                     if last_processed_ts is None:
                         new_indices = [len(closed_ts) - 1]
@@ -2840,9 +2939,17 @@ async def utb_poll_loop(symbol):
                     for idx in new_indices:
                         if idx < 2:
                             continue
+                        ts_i = closed_ts[idx]
+                        last_processed_ts = ts_i
+                        if ts_i == st.get("utb_instant_fired_ts"):
+                            continue  # bereits per Sofort-Trigger ausgefuehrt, als die Kerze noch offen war
                         price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        await check_uh_signal(symbol, buy[idx], sell[idx], long_flip[idx], short_flip[idx], hull_green[idx], price_i, trend_now)
+                        rsi_i = rsi_series[idx] if rsi_series else None
+                        adx_i = adx_series[idx] if adx_series else None
+                        plus_di_i = plus_di_series[idx] if plus_di_series else None
+                        minus_di_i = minus_di_series[idx] if minus_di_series else None
+                        zs_i = zscore_series[idx] if zscore_series else None
+                        await check_uh_signal(symbol, buy[idx], sell[idx], long_flip[idx], short_flip[idx], hull_green[idx], price_i, trend_now, zs_i, rsi_i, adx_i, plus_di_i, minus_di_i)
 
                     await check_uh_sl(symbol, price)
                     await check_uh_tp(symbol, price)
@@ -6585,12 +6692,13 @@ def _uh_bt_apply_trail_tp(position, cfg, bar_high, bar_low):
             position["trail_tp_price"] = trail_price if current is None else min(current, trail_price)
 
 
-def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct=None):
+def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct=None, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
     """Immer-im-Markt-Simulation fuer UT Bot + Hull Flip (Flip statt Exit), optional mit festem
     SL (fester $-Betrag) - bei SL-Treffer geht die Position glatt und wartet (nach Cooldown) auf
     das naechste gueltige Ersteinstiegs-Signal, statt direkt zu drehen. Siehe check_uh_signal/
-    check_uh_sl fuer die identische Logik im Live-Betrieb. Optionaler MTF-Trend%-Filter
-    (trend_pct, siehe _pk_build_mtf_trend_pct) gilt fuer JEDEN Einstieg, auch beim Flip."""
+    check_uh_sl fuer die identische Logik im Live-Betrieb. Optionaler MTF-Trend%-Filter,
+    optionaler Z-Score-Filter, optionaler RSI-Regime-Filter und optionaler ADX/DI-Trendfilter
+    gelten fuer JEDEN Einstieg, auch beim Flip - alle unabhaengig voneinander kombinierbar."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
@@ -6600,12 +6708,31 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
     mtf_enabled = cfg.get("utb_mtf_filter_enabled", False)
     long_thr = cfg.get("utb_mtf_long_threshold", 0.5)
     short_thr = cfg.get("utb_mtf_short_threshold", -0.5)
+    zscore_enabled = cfg.get("utb_zscore_filter_enabled", False)
+    rsi_enabled = cfg.get("utb_rsi_filter_enabled", False)
+    rsi_midline = cfg.get("utb_rsi_midline", 50)
+    adx_enabled = cfg.get("utb_adx_filter_enabled", False)
+    adx_threshold = cfg.get("utb_adx_threshold", 20)
+
+    def adx_long_ok(i):
+        return not adx_enabled or adx is None or (adx[i] > adx_threshold and plus_di[i] > minus_di[i])
+
+    def adx_short_ok(i):
+        return not adx_enabled or adx is None or (adx[i] > adx_threshold and minus_di[i] > plus_di[i])
 
     def long_ok(i):
-        return direction_mode != "short_only" and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr)
+        return (direction_mode != "short_only"
+                and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr)
+                and (not zscore_enabled or zscore is None or zscore[i] > 0)
+                and (not rsi_enabled or rsi is None or rsi[i] > rsi_midline)
+                and adx_long_ok(i))
 
     def short_ok(i):
-        return direction_mode != "long_only" and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr)
+        return (direction_mode != "long_only"
+                and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr)
+                and (not zscore_enabled or zscore is None or zscore[i] < 0)
+                and (not rsi_enabled or rsi is None or rsi[i] < rsi_midline)
+                and adx_short_ok(i))
 
     position = None
     trades = []
@@ -6671,8 +6798,14 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
                 reason = "UTB-HULL-FLIP"
             elif direction_mode == "long_only":
                 reason = "UTB-HULL-EXIT-DIR"
-            else:
+            elif mtf_enabled and not (trend_pct is None or trend_pct[i] < short_thr):
                 reason = "UTB-HULL-EXIT-MTF"
+            elif zscore_enabled and not (zscore is None or zscore[i] < 0):
+                reason = "UTB-HULL-EXIT-ZSCORE"
+            elif rsi_enabled and not (rsi is None or rsi[i] < rsi_midline):
+                reason = "UTB-HULL-EXIT-RSI"
+            else:
+                reason = "UTB-HULL-EXIT-ADX"
             _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
             if not can_flip:
                 position = None
@@ -6687,8 +6820,14 @@ def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_gre
                 reason = "UTB-HULL-FLIP"
             elif direction_mode == "short_only":
                 reason = "UTB-HULL-EXIT-DIR"
-            else:
+            elif mtf_enabled and not (trend_pct is None or trend_pct[i] > long_thr):
                 reason = "UTB-HULL-EXIT-MTF"
+            elif zscore_enabled and not (zscore is None or zscore[i] > 0):
+                reason = "UTB-HULL-EXIT-ZSCORE"
+            elif rsi_enabled and not (rsi is None or rsi[i] > rsi_midline):
+                reason = "UTB-HULL-EXIT-RSI"
+            else:
+                reason = "UTB-HULL-EXIT-ADX"
             _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
             if not can_flip:
                 position = None
@@ -6725,8 +6864,17 @@ def backtest_ut_bot_hull(candles, cfg):
         mtf_slow = cfg.get("utb_mtf_slow_len", 9)
         mtf_atr = cfg.get("utb_mtf_atr_len", 14)
         trend_pct = compute_pk_trend_percent(h, l, c, mtf_fast, mtf_slow, mtf_atr)
+    zscore = cfg.get("_utb_zscore_precomputed")
+    if zscore is None and cfg.get("utb_zscore_filter_enabled", False):
+        zscore = compute_rolling_zscore(c, cfg.get("utb_zscore_lookback", 20), cfg.get("utb_zscore_smooth", 3))
+    rsi = None
+    if cfg.get("utb_rsi_filter_enabled", False):
+        rsi = compute_rsi(c, cfg.get("utb_rsi_length", 14))
+    adx = plus_di = minus_di = None
+    if cfg.get("utb_adx_filter_enabled", False):
+        adx, plus_di, minus_di = compute_adx(h, l, c, cfg.get("utb_adx_length", 14))
     warmup = max(atr_period, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 2
-    return _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct)
+    return _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct, zscore=zscore, rsi=rsi, adx=adx, plus_di=plus_di, minus_di=minus_di)
 
 
 UTB_SWEEP_MAX_COMBOS = 2000
@@ -7793,12 +7941,18 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             return {"error": mtf_err}
         cfg = dict(cfg)  # eigene Kopie - der private Cache-Key darf nicht in die Aufrufer-Config
         cfg["_pk_trend_pct_precomputed"] = trend_pct  # von backtest_peki_algo gelesen (nicht async, siehe dort)
-    elif entry_mode == "ut_bot_hull" and cfg.get("utb_mtf_filter_enabled", False):
-        trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, prefix="utb")
-        if mtf_err:
-            return {"error": mtf_err}
+    elif entry_mode == "ut_bot_hull":
         cfg = dict(cfg)
-        cfg["_utb_trend_pct_precomputed"] = trend_pct  # von backtest_ut_bot_hull gelesen (nicht async, siehe dort)
+        if cfg.get("utb_mtf_filter_enabled", False):
+            trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, prefix="utb")
+            if mtf_err:
+                return {"error": mtf_err}
+            cfg["_utb_trend_pct_precomputed"] = trend_pct  # von backtest_ut_bot_hull gelesen (nicht async, siehe dort)
+        if cfg.get("utb_zscore_filter_enabled", False):
+            zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "utb")
+            if zs_err:
+                return {"error": zs_err}
+            cfg["_utb_zscore_precomputed"] = zscore  # von backtest_ut_bot_hull gelesen (nicht async, siehe dort)
     elif entry_mode == "fractals_flip" and cfg.get("fr_zscore_filter_enabled", False):
         zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "fr")
         if zs_err:
