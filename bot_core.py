@@ -806,7 +806,30 @@ def calc_grid_levels(symbol):
 
 
 
+_symbol_execution_locks = {}
+
+
+def _get_symbol_lock(symbol):
+    """Ein Lock pro Symbol, damit execute_entry/execute_exit/execute_partial_exit fuer
+    dasselbe Symbol NIEMALS ueberlappend laufen koennen. Noetig, weil diese Funktionen echte
+    Boersen-Anfragen awaiten (Order platzieren, danach Positionsdaten abfragen) - ohne Lock
+    koennte ein zweiter, fast gleichzeitiger Aufruf (z.B. zwei knapp aufeinanderfolgende
+    Preis-Ticks) den Zwischenzustand sehen, in dem 'position' noch nicht gesetzt ist, und
+    faelschlich EBENFALLS eine neue Position eroeffnen (siehe echter Vorfall: zwei 'Neue
+    Position'-Eintraege im selben Sekundenbereich)."""
+    lock = _symbol_execution_locks.get(symbol)
+    if lock is None:
+        lock = asyncio.Lock()
+        _symbol_execution_locks[symbol] = lock
+    return lock
+
+
 async def execute_entry(symbol, direction, price, is_add_on, size_multiplier=1.0):
+    async with _get_symbol_lock(symbol):
+        return await _execute_entry_locked(symbol, direction, price, is_add_on, size_multiplier)
+
+
+async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multiplier=1.0):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     market_index = MARKET_INDICES[symbol]
@@ -816,6 +839,7 @@ async def execute_entry(symbol, direction, price, is_add_on, size_multiplier=1.0
     precision = get_precision(symbol)
     base_amount = int(raw_units * precision)
     new_units = base_amount / precision
+    real_price_confirmed = False  # True, wenn 'price' unten durch den ECHTEN Boersen-Durchschnitt ersetzt wurde
 
     if not cfg["dry_run"]:
         client = get_lighter_client()
@@ -837,7 +861,9 @@ async def execute_entry(symbol, direction, price, is_add_on, size_multiplier=1.0
 
         # Der tatsaechliche Fill-Preis einer Market-Order kann vom theoretischen Zielpreis
         # abweichen (Slippage, Latenz, schnelle Kursbewegung) - deshalb hier den ECHTEN Preis
-        # direkt von der Boerse abfragen statt blind den Zielpreis zu uebernehmen. Schlaegt die
+        # direkt von der Boerse abfragen statt blind den Zielpreis zu uebernehmen. WICHTIG: das
+        # ist der GESAMT-Durchschnittspreis der kompletten aktuellen Position auf der Boerse
+        # (nicht nur dieses einen Fills) - siehe Verwendung unten bei is_add_on. Schlaegt die
         # Abfrage fehl, wird bewusst der Zielpreis als Naeherung beibehalten (kein Blockieren).
         real_pos = await get_account_position_from_exchange(client, market_index)
         await client.close()
@@ -846,13 +872,22 @@ async def execute_entry(symbol, direction, price, is_add_on, size_multiplier=1.0
             if price and abs(real_price - price) / price > 0.0005:
                 debug_log(f"🎯 [{symbol}] Echter Fill-Preis von der Börse: {real_price} (Ziel war {price}, Abweichung {round((real_price-price)/price*100,3)}%)")
             price = real_price
+            real_price_confirmed = True
         else:
             debug_log(f"⚠️ [{symbol}] Konnte echten Fill-Preis nicht abfragen - verwende Zielpreis {price} als Näherung")
 
     if is_add_on:
-        total_value = st["avg_entry_price"] * st["total_coin_size"] + price * new_units
-        st["total_coin_size"] += new_units
-        st["avg_entry_price"] = total_value / st["total_coin_size"]
+        if real_price_confirmed:
+            # 'price' ist hier bereits der ECHTE, von der Boerse bereits korrekt gewichtete
+            # Gesamt-Durchschnitt ueber ALLE bisherigen Fills - NICHT nochmal lokal reinrechnen
+            # (das wuerde die alte Position doppelt gewichten und den Durchschnitt mit jedem
+            # weiteren Nachkauf staerker verzerren - das war der Kaskaden-Bug).
+            st["avg_entry_price"] = price
+            st["total_coin_size"] += new_units
+        else:
+            total_value = st["avg_entry_price"] * st["total_coin_size"] + price * new_units
+            st["total_coin_size"] += new_units
+            st["avg_entry_price"] = total_value / st["total_coin_size"]
     else:
         st["avg_entry_price"] = price
         st["total_coin_size"] = new_units
@@ -867,6 +902,11 @@ async def execute_entry(symbol, direction, price, is_add_on, size_multiplier=1.0
 
 
 async def execute_partial_exit(symbol, price, fraction, reason):
+    async with _get_symbol_lock(symbol):
+        return await _execute_partial_exit_locked(symbol, price, fraction, reason)
+
+
+async def _execute_partial_exit_locked(symbol, price, fraction, reason):
     """Schliesst nur einen Teil der Position (z.B. 0.5 = 50%), Rest bleibt offen mit
     unveraendertem Ø-Einstiegspreis. Zaehlt NICHT in stats.trades/wins/losses, damit die
     Trefferquote nicht durch Teilverkaeufe verzerrt wird - nur der PnL wird verbucht."""
@@ -932,6 +972,11 @@ async def execute_partial_exit(symbol, price, fraction, reason):
 
 
 async def execute_exit(symbol, price, reason):
+    async with _get_symbol_lock(symbol):
+        return await _execute_exit_locked(symbol, price, reason)
+
+
+async def _execute_exit_locked(symbol, price, reason):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     market_index = MARKET_INDICES[symbol]
@@ -1002,7 +1047,7 @@ async def execute_exit(symbol, price, reason):
         opposite = "short" if closing_side == "long" else "long"
         direction_mode = cfg.get("grid_direction_mode", "both")
         if direction_mode == "both" or (direction_mode == "long_only" and opposite == "long") or (direction_mode == "short_only" and opposite == "short"):
-            await execute_entry(symbol, opposite, exit_price_for_log, is_add_on=False)
+            await _execute_entry_locked(symbol, opposite, exit_price_for_log, is_add_on=False)
         # sonst (Richtung erlaubt die Gegenrichtung nicht): bleibt flach, wartet auf das naechste
         # Grid-Level in der erlaubten Richtung (siehe on_price_update)
 
