@@ -465,6 +465,16 @@ def default_config():
         "fr_sl_cooldown_seconds": float(os.getenv("FR_SL_COOLDOWN_SECONDS", "30")),
         "fr_tp_enabled": os.getenv("FR_TP_ENABLED", "false").lower() == "true",
         "fr_tp_manual_usd": float(os.getenv("FR_TP_MANUAL_USD", "10.0")),
+        "fr_adx_filter_enabled": os.getenv("FR_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "fr_adx_length": int(os.getenv("FR_ADX_LENGTH", "14")),
+        "fr_adx_threshold": float(os.getenv("FR_ADX_THRESHOLD", "20")),
+        "fr_mtf_filter_enabled": os.getenv("FR_MTF_FILTER_ENABLED", "false").lower() == "true",
+        "fr_mtf_tf1": os.getenv("FR_MTF_TF1", "off"),  # uebergeordneter Zeitrahmen, "off" = kein Filter
+        "fr_mtf_fast_len": int(os.getenv("FR_MTF_FAST_LEN", "5")),
+        "fr_mtf_slow_len": int(os.getenv("FR_MTF_SLOW_LEN", "9")),
+        "fr_mtf_atr_len": int(os.getenv("FR_MTF_ATR_LEN", "14")),
+        "fr_mtf_long_threshold": float(os.getenv("FR_MTF_LONG_THRESHOLD", "0.5")),
+        "fr_mtf_short_threshold": float(os.getenv("FR_MTF_SHORT_THRESHOLD", "-0.5")),
         "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
         "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
@@ -2394,6 +2404,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="fractals_flip" data-requires="fr_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="fr_tp_manual_usd"></div>
+  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler ADX/DI-Trendfilter: Fractals baut auf echten Swing-Bewegungen auf - in totem
+    Seitwärts-Markt entstehen sonst nur Rausch-Fraktale. ADX über der Schwelle UND +DI über -DI
+    -> nur Long erlaubt. ADX über der Schwelle UND -DI über +DI -> nur Short erlaubt. Liegt der
+    ADX UNTER der Schwelle (kein klarer Trend), sind BEIDE Richtungen gesperrt.
+  </div>
+  <div data-mode="fractals_flip"><label>ADX/DI-Filter</label>
+    <select class="cfg" id="fr_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An - nur bei genug Trendstärke und passender Richtung</option>
+    </select>
+  </div>
+  <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="fr_adx_length"></div>
+  <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="fr_adx_threshold"></div>
+  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler MTF-Trend%-Filter (übergeordneter Zeitrahmen, wie bei Pieki Algo/UT-Bot+Hull):
+    filtert Fraktal-Signale gegen den größeren Trend raus - Long nur wenn der übergeordnete
+    Zeitrahmen über der Long-Schwelle liegt, Short nur wenn darunter. Unabhängig von Z-Score-
+    und ADX-Filter kombinierbar.
+  </div>
+  <div data-mode="fractals_flip"><label>MTF-Filter</label>
+    <select class="cfg" id="fr_mtf_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Übergeordneter Zeitrahmen</label>
+    <select class="cfg" id="fr_mtf_tf1">
+      <option value="off">Aus (kein übergeordneter Zeitrahmen)</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="fr_mtf_tf1_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="fr_mtf_long_threshold"></div>
+  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="fr_mtf_short_threshold"></div>
+  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="fr_mtf_fast_len"></div>
+  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="fr_mtf_slow_len"></div>
+  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="fr_mtf_atr_len"></div>
 
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧬 Kerzen-DNA (eigene Entwicklung, kein Port eines bestehenden Scripts): jede Kerze bekommt
@@ -3583,7 +3637,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -4701,6 +4755,16 @@ async function refresh() {
     document.getElementById('fr_sl_cooldown_seconds').value = data.config.fr_sl_cooldown_seconds;
     document.getElementById('fr_tp_enabled').value = String(data.config.fr_tp_enabled);
     document.getElementById('fr_tp_manual_usd').value = data.config.fr_tp_manual_usd;
+    document.getElementById('fr_adx_filter_enabled').value = String(data.config.fr_adx_filter_enabled);
+    document.getElementById('fr_adx_length').value = data.config.fr_adx_length;
+    document.getElementById('fr_adx_threshold').value = data.config.fr_adx_threshold;
+    document.getElementById('fr_mtf_filter_enabled').value = String(data.config.fr_mtf_filter_enabled);
+    setResolutionField('fr_mtf_tf1', data.config.fr_mtf_tf1);
+    document.getElementById('fr_mtf_long_threshold').value = data.config.fr_mtf_long_threshold;
+    document.getElementById('fr_mtf_short_threshold').value = data.config.fr_mtf_short_threshold;
+    document.getElementById('fr_mtf_fast_len').value = data.config.fr_mtf_fast_len;
+    document.getElementById('fr_mtf_slow_len').value = data.config.fr_mtf_slow_len;
+    document.getElementById('fr_mtf_atr_len').value = data.config.fr_mtf_atr_len;
     setResolutionField('cd_resolution', data.config.cd_resolution);
     document.getElementById('cd_threshold').value = data.config.cd_threshold;
     document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
@@ -5148,6 +5212,16 @@ function buildConfigPayload() {
     fr_sl_cooldown_seconds: parseFloat(document.getElementById('fr_sl_cooldown_seconds').value),
     fr_tp_enabled: document.getElementById('fr_tp_enabled').value === 'true',
     fr_tp_manual_usd: parseFloat(document.getElementById('fr_tp_manual_usd').value),
+    fr_adx_filter_enabled: document.getElementById('fr_adx_filter_enabled').value === 'true',
+    fr_adx_length: parseInt(document.getElementById('fr_adx_length').value),
+    fr_adx_threshold: parseFloat(document.getElementById('fr_adx_threshold').value),
+    fr_mtf_filter_enabled: document.getElementById('fr_mtf_filter_enabled').value === 'true',
+    fr_mtf_tf1: getResolutionField('fr_mtf_tf1'),
+    fr_mtf_long_threshold: parseFloat(document.getElementById('fr_mtf_long_threshold').value),
+    fr_mtf_short_threshold: parseFloat(document.getElementById('fr_mtf_short_threshold').value),
+    fr_mtf_fast_len: parseInt(document.getElementById('fr_mtf_fast_len').value),
+    fr_mtf_slow_len: parseInt(document.getElementById('fr_mtf_slow_len').value),
+    fr_mtf_atr_len: parseInt(document.getElementById('fr_mtf_atr_len').value),
     cd_resolution: getResolutionField('cd_resolution'),
     cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
     cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
@@ -5442,6 +5516,9 @@ async def handle_config_update(request):
                 "fr_zscore_filter_enabled", "fr_zscore_resolution", "fr_zscore_lookback", "fr_zscore_smooth",
                 "fr_sl_enabled", "fr_sl_manual_usd", "fr_sl_cooldown_seconds",
                 "fr_tp_enabled", "fr_tp_manual_usd",
+                "fr_adx_filter_enabled", "fr_adx_length", "fr_adx_threshold",
+                "fr_mtf_filter_enabled", "fr_mtf_tf1", "fr_mtf_fast_len", "fr_mtf_slow_len", "fr_mtf_atr_len",
+                "fr_mtf_long_threshold", "fr_mtf_short_threshold",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode", "cd_invert_direction",
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
                 "cd_rsi_filter_enabled", "cd_rsi_length", "cd_rsi_midline",

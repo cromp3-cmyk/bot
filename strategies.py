@@ -3601,15 +3601,22 @@ async def check_fr_sl_tp(symbol, price):
         st["fr_sl_cooldown_until"] = time.time() + cfg.get("fr_sl_cooldown_seconds", 30)
 
 
-async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None):
+async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None):
     """Immer im Markt, reiner Buy/Sell-Wechsel: Tief-Fraktal (down_fractal) = Kauf-Signal,
     Hoch-Fraktal (up_fractal) = Verkauf-Signal - oder umgekehrt, wenn fr_invert_direction an ist
     (buy_i/sell_i kommen von fr_poll_loop bereits entsprechend vertauscht, siehe dort). Optionaler
     Z-Score-Filter (fr_zscore_filter_enabled, siehe compute_rolling_zscore): Long nur wenn
-    zscore > 0, Short nur wenn zscore < 0 - gilt fuer jeden Einstieg, auch beim Flip. Optionaler
-    fester SL/TP (siehe check_fr_sl_tp) unterbricht 'immer im Markt' nur in diesen Faellen -
-    dreht sonst beim jeweils naechsten (erlaubten) Gegen-Signal direkt. Bei Long-/Short-only
-    bzw. vom Filter blockiertem Flip wird nur glattgestellt."""
+    zscore > 0, Short nur wenn zscore < 0. Optionaler ADX/DI-Trendfilter (fr_adx_filter_enabled):
+    ADX ueber der Schwelle UND +DI ueber -DI -> nur Long, umgekehrt -> nur Short, liegt der ADX
+    darunter (kein klarer Trend) sind BEIDE Richtungen gesperrt - Fractals baut auf echten
+    Swing-Bewegungen auf, in totem Seitwaerts-Markt entstehen sonst nur Rausch-Fraktale.
+    Optionaler MTF-Trend%-Filter (fr_mtf_filter_enabled, wie bei Pieki Algo/UT-Bot+Hull): Long
+    nur wenn der uebergeordnete Zeitrahmen ueber der Long-Schwelle liegt, Short nur darunter -
+    filtert Fraktal-Signale gegen den groesseren Trend raus. Alle drei Filter unabhaengig
+    voneinander kombinierbar, gelten fuer JEDEN Einstieg, auch beim Flip. Optionaler fester
+    SL/TP (siehe check_fr_sl_tp) unterbricht 'immer im Markt' nur in diesen Faellen - dreht
+    sonst beim jeweils naechsten (erlaubten) Gegen-Signal direkt. Bei Long-/Short-only bzw. vom
+    Filter blockiertem Flip wird nur glattgestellt."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -3618,8 +3625,22 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None):
         return
     direction_mode = cfg.get("fr_direction_mode", "both")
     zscore_enabled = cfg.get("fr_zscore_filter_enabled", False)
-    long_ok = direction_mode != "short_only" and (not zscore_enabled or zscore is None or zscore > 0)
-    short_ok = direction_mode != "long_only" and (not zscore_enabled or zscore is None or zscore < 0)
+    adx_enabled = cfg.get("fr_adx_filter_enabled", False)
+    adx_threshold = cfg.get("fr_adx_threshold", 20)
+    adx_missing = adx is None or plus_di is None or minus_di is None
+    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
+    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
+    mtf_enabled = cfg.get("fr_mtf_filter_enabled", False)
+    long_thr = cfg.get("fr_mtf_long_threshold", 0.5)
+    short_thr = cfg.get("fr_mtf_short_threshold", -0.5)
+    long_ok = (direction_mode != "short_only"
+               and (not zscore_enabled or zscore is None or zscore > 0)
+               and adx_long_ok
+               and (not mtf_enabled or trend_pct is None or trend_pct > long_thr))
+    short_ok = (direction_mode != "long_only"
+                and (not zscore_enabled or zscore is None or zscore < 0)
+                and adx_short_ok
+                and (not mtf_enabled or trend_pct is None or trend_pct < short_thr))
     pos = st["position"]
 
     if pos is None:
@@ -3638,9 +3659,20 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None):
         return
 
     if pos == "long" and sell_i:
-        if direction_mode == "long_only" or not short_ok:
-            debug_log(f"🚪 [{symbol}] Fractals Exit: LONG @ {price}")
-            await execute_exit(symbol, price, "FR-EXIT-DIR" if direction_mode == "long_only" else "FR-EXIT-ZSCORE")
+        if direction_mode == "long_only":
+            reason = "FR-EXIT-DIR"
+        elif not short_ok:
+            if zscore_enabled and not (zscore is None or zscore < 0):
+                reason = "FR-EXIT-ZSCORE"
+            elif adx_enabled and not adx_short_ok:
+                reason = "FR-EXIT-ADX"
+            else:
+                reason = "FR-EXIT-MTF"
+        else:
+            reason = None
+        if reason is not None:
+            debug_log(f"🚪 [{symbol}] Fractals Exit ({reason}): LONG @ {price}")
+            await execute_exit(symbol, price, reason)
             st["fr_sl_price"] = None
             st["fr_tp_price"] = None
         else:
@@ -3651,9 +3683,20 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None):
                 _fr_set_sl(st, cfg, "short", price)
                 _fr_set_tp(st, cfg, "short", price)
     elif pos == "short" and buy_i:
-        if direction_mode == "short_only" or not long_ok:
-            debug_log(f"🚪 [{symbol}] Fractals Exit: SHORT @ {price}")
-            await execute_exit(symbol, price, "FR-EXIT-DIR" if direction_mode == "short_only" else "FR-EXIT-ZSCORE")
+        if direction_mode == "short_only":
+            reason = "FR-EXIT-DIR"
+        elif not long_ok:
+            if zscore_enabled and not (zscore is None or zscore > 0):
+                reason = "FR-EXIT-ZSCORE"
+            elif adx_enabled and not adx_long_ok:
+                reason = "FR-EXIT-ADX"
+            else:
+                reason = "FR-EXIT-MTF"
+        else:
+            reason = None
+        if reason is not None:
+            debug_log(f"🚪 [{symbol}] Fractals Exit ({reason}): SHORT @ {price}")
+            await execute_exit(symbol, price, reason)
             st["fr_sl_price"] = None
             st["fr_tp_price"] = None
         else:
@@ -3727,6 +3770,41 @@ async def fr_poll_loop(symbol):
                         last_heartbeat = now
                         debug_log(f"💓 [{symbol}] Fractals aktiv: Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
+                    adx_enabled = cfg.get("fr_adx_filter_enabled", False)
+                    if adx_enabled:
+                        adx_series, plus_di_series, minus_di_series = compute_adx(closed_h, closed_l, closed_c, cfg.get("fr_adx_length", 14))
+                    else:
+                        adx_series, plus_di_series, minus_di_series = None, None, None
+
+                    mtf_enabled = cfg.get("fr_mtf_filter_enabled", False)
+                    trend_now = None
+                    if mtf_enabled:
+                        mtf_fast = cfg.get("fr_mtf_fast_len", 5)
+                        mtf_slow = cfg.get("fr_mtf_slow_len", 9)
+                        mtf_atr = cfg.get("fr_mtf_atr_len", 14)
+                        mtf_tf = cfg.get("fr_mtf_tf1", "off")
+                        if mtf_tf in (None, "", "off") or mtf_tf == resolution:
+                            trend_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow, mtf_atr)[-1]
+                        else:
+                            mtf_needed = min(500, max(mtf_slow, mtf_atr, 5) * 3 + 20)
+                            if mtf_tf in SUB_MINUTE_RESOLUTIONS:
+                                mtf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[mtf_tf], mtf_needed)
+                                tf_h = mtf_local[2] if mtf_local else None
+                                tf_l = mtf_local[3] if mtf_local else None
+                                tf_c = mtf_local[4] if mtf_local else None
+                            else:
+                                mtf_data = await fetch_candles_binance_multi(symbol, mtf_tf, count_back=mtf_needed, market_type=cfg.get("binance_market_type", "spot"))
+                                if mtf_data:
+                                    _, _, tf_h, tf_l, tf_c = mtf_data
+                                    tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
+                                else:
+                                    tf_h = tf_l = tf_c = None
+                            if tf_c and len(tf_c) > max(mtf_slow, mtf_atr):
+                                trend_now = compute_pk_trend_percent(tf_h, tf_l, tf_c, mtf_fast, mtf_slow, mtf_atr)[-1]
+                            else:
+                                trend_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow, mtf_atr)[-1]
+                        st["fr_trend_pct_last"] = trend_now
+
                     if last_processed_ts is None:
                         new_indices = [len(closed_ts) - 1]
                     else:
@@ -3746,7 +3824,10 @@ async def fr_poll_loop(symbol):
                         # nach dem eigentlichen Schluss).
                         price_i = closed_c[idx]
                         last_processed_ts = closed_ts[idx]
-                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx])
+                        adx_i = adx_series[idx] if adx_series else None
+                        plus_di_i = plus_di_series[idx] if plus_di_series else None
+                        minus_di_i = minus_di_series[idx] if minus_di_series else None
+                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], adx_i, plus_di_i, minus_di_i, trend_now)
 
                     await check_fr_sl_tp(symbol, price)
                 elif due_heartbeat:
@@ -7124,23 +7205,41 @@ def _fr_bt_set_tp(position, cfg):
     position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
 
 
-def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=None):
+def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None):
     """Backtest-Pendant zu check_fr_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
-    mit Z-Score-Filter (siehe compute_rolling_zscore) und optionalem festem SL/TP (siehe
-    _fr_bt_set_sl/_fr_bt_set_tp - durchbricht 'immer im Markt' NUR in diesen Faellen, Position
-    geht dann glatt; SL zusaetzlich mit Cooldown). Tief-Fraktal = Kauf, Hoch-Fraktal = Verkauf."""
+    mit Z-Score-Filter, optionalem ADX/DI-Trendfilter, optionalem MTF-Trend%-Filter (alle
+    unabhaengig kombinierbar) und optionalem festem SL/TP (siehe _fr_bt_set_sl/_fr_bt_set_tp -
+    durchbricht 'immer im Markt' NUR in diesen Faellen, Position geht dann glatt; SL zusaetzlich
+    mit Cooldown). Tief-Fraktal = Kauf, Hoch-Fraktal = Verkauf."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     direction_mode = cfg.get("fr_direction_mode", "both")
     zscore_enabled = cfg.get("fr_zscore_filter_enabled", False)
     sl_cooldown_ms = cfg.get("fr_sl_cooldown_seconds", 30) * 1000
+    adx_enabled = cfg.get("fr_adx_filter_enabled", False)
+    adx_threshold = cfg.get("fr_adx_threshold", 20)
+    mtf_enabled = cfg.get("fr_mtf_filter_enabled", False)
+    long_thr = cfg.get("fr_mtf_long_threshold", 0.5)
+    short_thr = cfg.get("fr_mtf_short_threshold", -0.5)
+
+    def adx_long_ok(i):
+        return not adx_enabled or adx is None or (adx[i] > adx_threshold and plus_di[i] > minus_di[i])
+
+    def adx_short_ok(i):
+        return not adx_enabled or adx is None or (adx[i] > adx_threshold and minus_di[i] > plus_di[i])
 
     def long_ok(i):
-        return direction_mode != "short_only" and (not zscore_enabled or zscore is None or zscore[i] > 0)
+        return (direction_mode != "short_only"
+                and (not zscore_enabled or zscore is None or zscore[i] > 0)
+                and adx_long_ok(i)
+                and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr))
 
     def short_ok(i):
-        return direction_mode != "long_only" and (not zscore_enabled or zscore is None or zscore[i] < 0)
+        return (direction_mode != "long_only"
+                and (not zscore_enabled or zscore is None or zscore[i] < 0)
+                and adx_short_ok(i)
+                and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr))
 
     position = None
     trades = []
@@ -7183,7 +7282,16 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
 
         if position["dir"] == "long" and sell_i:
             can_flip = direction_mode != "long_only" and short_ok(i)
-            reason = "FR-FLIP" if can_flip else ("FR-EXIT-DIR" if direction_mode == "long_only" else "FR-EXIT-ZSCORE")
+            if can_flip:
+                reason = "FR-FLIP"
+            elif direction_mode == "long_only":
+                reason = "FR-EXIT-DIR"
+            elif zscore_enabled and not (zscore is None or zscore[i] < 0):
+                reason = "FR-EXIT-ZSCORE"
+            elif adx_enabled and not adx_short_ok(i):
+                reason = "FR-EXIT-ADX"
+            else:
+                reason = "FR-EXIT-MTF"
             _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
             if not can_flip:
                 position = None
@@ -7194,7 +7302,16 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 _fr_bt_set_tp(position, cfg)
         elif position["dir"] == "short" and buy_i:
             can_flip = direction_mode != "short_only" and long_ok(i)
-            reason = "FR-FLIP" if can_flip else ("FR-EXIT-DIR" if direction_mode == "short_only" else "FR-EXIT-ZSCORE")
+            if can_flip:
+                reason = "FR-FLIP"
+            elif direction_mode == "short_only":
+                reason = "FR-EXIT-DIR"
+            elif zscore_enabled and not (zscore is None or zscore[i] > 0):
+                reason = "FR-EXIT-ZSCORE"
+            elif adx_enabled and not adx_long_ok(i):
+                reason = "FR-EXIT-ADX"
+            else:
+                reason = "FR-EXIT-MTF"
             _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
             if not can_flip:
                 position = None
@@ -7221,8 +7338,12 @@ def backtest_fractals_flip(candles, cfg):
     # Funktion selbst ist NICHT async (einheitliche BACKTEST_FUNCS-Signatur (candles, cfg))
     if zscore is None and cfg.get("fr_zscore_filter_enabled", False):
         zscore = compute_rolling_zscore(c, cfg.get("fr_zscore_lookback", 20), cfg.get("fr_zscore_smooth", 3))
+    adx = plus_di = minus_di = None
+    if cfg.get("fr_adx_filter_enabled", False):
+        adx, plus_di, minus_di = compute_adx(h, l, c, cfg.get("fr_adx_length", 14))
+    trend_pct = cfg.get("_fr_trend_pct_precomputed")  # von run_backtest vorab async berechnet, siehe _pk_build_mtf_trend_pct
     warmup = 2 * n_periods + 5
-    return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore)
+    return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore, adx=adx, plus_di=plus_di, minus_di=minus_di, trend_pct=trend_pct)
 
 
 def _cd_bt_set_sl(position, cfg, margin, leverage):
@@ -8009,12 +8130,18 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             if zs_err:
                 return {"error": zs_err}
             cfg["_utb_zscore_precomputed"] = zscore  # von backtest_ut_bot_hull gelesen (nicht async, siehe dort)
-    elif entry_mode == "fractals_flip" and cfg.get("fr_zscore_filter_enabled", False):
-        zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "fr")
-        if zs_err:
-            return {"error": zs_err}
+    elif entry_mode == "fractals_flip":
         cfg = dict(cfg)
-        cfg["_fr_zscore_precomputed"] = zscore  # von backtest_fractals_flip gelesen (nicht async, siehe dort)
+        if cfg.get("fr_zscore_filter_enabled", False):
+            zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "fr")
+            if zs_err:
+                return {"error": zs_err}
+            cfg["_fr_zscore_precomputed"] = zscore  # von backtest_fractals_flip gelesen (nicht async, siehe dort)
+        if cfg.get("fr_mtf_filter_enabled", False):
+            trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, prefix="fr")
+            if mtf_err:
+                return {"error": mtf_err}
+            cfg["_fr_trend_pct_precomputed"] = trend_pct  # von backtest_fractals_flip gelesen (nicht async, siehe dort)
     elif entry_mode == "candle_dna" and cfg.get("cd_zscore_filter_enabled", False):
         zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "cd")
         if zs_err:
