@@ -466,6 +466,7 @@ def default_config():
         "fr_tp_enabled": os.getenv("FR_TP_ENABLED", "false").lower() == "true",
         "fr_tp_manual_usd": float(os.getenv("FR_TP_MANUAL_USD", "10.0")),
         "fr_adx_filter_enabled": os.getenv("FR_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "fr_adx_resolution": os.getenv("FR_ADX_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "3m"/"1h" - gröberer Zeitrahmen als der Handels-Zeitrahmen ergibt einen stabileren Trendfilter
         "fr_adx_length": int(os.getenv("FR_ADX_LENGTH", "14")),
         "fr_adx_threshold": float(os.getenv("FR_ADX_THRESHOLD", "20")),
         "fr_mtf_filter_enabled": os.getenv("FR_MTF_FILTER_ENABLED", "false").lower() == "true",
@@ -475,6 +476,7 @@ def default_config():
         "fr_mtf_atr_len": int(os.getenv("FR_MTF_ATR_LEN", "14")),
         "fr_mtf_long_threshold": float(os.getenv("FR_MTF_LONG_THRESHOLD", "0.5")),
         "fr_mtf_short_threshold": float(os.getenv("FR_MTF_SHORT_THRESHOLD", "-0.5")),
+        "fr_flatten_on_block_enabled": os.getenv("FR_FLATTEN_ON_BLOCK_ENABLED", "true").lower() == "true",  # AN (Standard) = Position bei blockiertem Flip glattstellen. AUS = Signal ignorieren, Position bleibt offen bis ein Flip moeglich ist
         "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
         "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
@@ -2416,6 +2418,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - nur bei genug Trendstärke und passender Richtung</option>
     </select>
   </div>
+  <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Zeiteinheit</label>
+    <select class="cfg" id="fr_adx_resolution">
+      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+      <option value="1m">1 Minute</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="fr_adx_resolution_custom_minutes" placeholder="z.B. 3" style="display:none; margin-top:6px; width:140px;">
+  </div>
   <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="fr_adx_length"></div>
   <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="fr_adx_threshold"></div>
   <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
@@ -2448,6 +2465,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="fr_mtf_fast_len"></div>
   <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="fr_mtf_slow_len"></div>
   <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="fr_mtf_atr_len"></div>
+  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Was passiert, wenn ein Gegen-Fraktal kommt, aber Richtung/ein Filter das Drehen verbietet?
+    "Glattstellen" (Standard) schließt die Position sofort und wartet auf das nächste
+    Ersteinstiegs-Signal. "Signal ignorieren" lässt die Position stattdessen einfach unangetastet
+    offen (nur SL/TP können sie noch beenden) - bis irgendwann ein Gegen-Fraktal kommt, bei dem
+    ALLE Bedingungen für die neue Richtung gleichzeitig erfüllt sind und tatsächlich geflippt
+    werden kann.
+  </div>
+  <div data-mode="fractals_flip"><label>Bei blockiertem Flip</label>
+    <select class="cfg" id="fr_flatten_on_block_enabled">
+      <option value="true">Glattstellen (Standard)</option>
+      <option value="false">Signal ignorieren - Position bleibt offen</option>
+    </select>
+  </div>
 
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧬 Kerzen-DNA (eigene Entwicklung, kein Port eines bestehenden Scripts): jede Kerze bekommt
@@ -3637,7 +3668,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -4756,6 +4787,7 @@ async function refresh() {
     document.getElementById('fr_tp_enabled').value = String(data.config.fr_tp_enabled);
     document.getElementById('fr_tp_manual_usd').value = data.config.fr_tp_manual_usd;
     document.getElementById('fr_adx_filter_enabled').value = String(data.config.fr_adx_filter_enabled);
+    setResolutionField('fr_adx_resolution', data.config.fr_adx_resolution);
     document.getElementById('fr_adx_length').value = data.config.fr_adx_length;
     document.getElementById('fr_adx_threshold').value = data.config.fr_adx_threshold;
     document.getElementById('fr_mtf_filter_enabled').value = String(data.config.fr_mtf_filter_enabled);
@@ -4765,6 +4797,7 @@ async function refresh() {
     document.getElementById('fr_mtf_fast_len').value = data.config.fr_mtf_fast_len;
     document.getElementById('fr_mtf_slow_len').value = data.config.fr_mtf_slow_len;
     document.getElementById('fr_mtf_atr_len').value = data.config.fr_mtf_atr_len;
+    document.getElementById('fr_flatten_on_block_enabled').value = String(data.config.fr_flatten_on_block_enabled);
     setResolutionField('cd_resolution', data.config.cd_resolution);
     document.getElementById('cd_threshold').value = data.config.cd_threshold;
     document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
@@ -5213,6 +5246,7 @@ function buildConfigPayload() {
     fr_tp_enabled: document.getElementById('fr_tp_enabled').value === 'true',
     fr_tp_manual_usd: parseFloat(document.getElementById('fr_tp_manual_usd').value),
     fr_adx_filter_enabled: document.getElementById('fr_adx_filter_enabled').value === 'true',
+    fr_adx_resolution: getResolutionField('fr_adx_resolution'),
     fr_adx_length: parseInt(document.getElementById('fr_adx_length').value),
     fr_adx_threshold: parseFloat(document.getElementById('fr_adx_threshold').value),
     fr_mtf_filter_enabled: document.getElementById('fr_mtf_filter_enabled').value === 'true',
@@ -5222,6 +5256,7 @@ function buildConfigPayload() {
     fr_mtf_fast_len: parseInt(document.getElementById('fr_mtf_fast_len').value),
     fr_mtf_slow_len: parseInt(document.getElementById('fr_mtf_slow_len').value),
     fr_mtf_atr_len: parseInt(document.getElementById('fr_mtf_atr_len').value),
+    fr_flatten_on_block_enabled: document.getElementById('fr_flatten_on_block_enabled').value === 'true',
     cd_resolution: getResolutionField('cd_resolution'),
     cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
     cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
@@ -5516,9 +5551,10 @@ async def handle_config_update(request):
                 "fr_zscore_filter_enabled", "fr_zscore_resolution", "fr_zscore_lookback", "fr_zscore_smooth",
                 "fr_sl_enabled", "fr_sl_manual_usd", "fr_sl_cooldown_seconds",
                 "fr_tp_enabled", "fr_tp_manual_usd",
-                "fr_adx_filter_enabled", "fr_adx_length", "fr_adx_threshold",
+                "fr_adx_filter_enabled", "fr_adx_resolution", "fr_adx_length", "fr_adx_threshold",
                 "fr_mtf_filter_enabled", "fr_mtf_tf1", "fr_mtf_fast_len", "fr_mtf_slow_len", "fr_mtf_atr_len",
                 "fr_mtf_long_threshold", "fr_mtf_short_threshold",
+                "fr_flatten_on_block_enabled",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode", "cd_invert_direction",
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
                 "cd_rsi_filter_enabled", "cd_rsi_length", "cd_rsi_midline",
