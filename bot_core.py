@@ -463,6 +463,8 @@ def default_config():
         "fr_sl_enabled": os.getenv("FR_SL_ENABLED", "false").lower() == "true",
         "fr_sl_manual_usd": float(os.getenv("FR_SL_MANUAL_USD", "5.0")),
         "fr_sl_cooldown_seconds": float(os.getenv("FR_SL_COOLDOWN_SECONDS", "30")),
+        "fr_tp_enabled": os.getenv("FR_TP_ENABLED", "false").lower() == "true",
+        "fr_tp_manual_usd": float(os.getenv("FR_TP_MANUAL_USD", "10.0")),
         "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
         "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
@@ -540,7 +542,7 @@ def default_state():
         "mo7_sl_price": None, "mo7_tp_price": None,
         "utb_last_hull_green": None,
         "utb_sl_price": None, "utb_sl_cooldown_until": 0.0, "utb_instant_fired_ts": None,
-        "fr_sl_price": None, "fr_sl_cooldown_until": 0.0,
+        "fr_sl_price": None, "fr_tp_price": None, "fr_sl_cooldown_until": 0.0,
         "cd_sl_price": None, "cd_sl_cooldown_until": 0.0,
         "rf_sl_price": None, "rf_tp_price": None, "rf_sl_cooldown_until": 0.0,
         "utb_trend_pct_last": None,
@@ -2380,6 +2382,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="fractals_flip"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="fr_sl_manual_usd"></div>
   <div data-mode="fractals_flip"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="fr_sl_cooldown_seconds"></div>
+  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Optionaler fester Take-Profit (fester $-Betrag): ohne TP ist der einzige Ausstieg das nächste
+    GEGENSÄTZLICHE Fraktal - ein bereits profitabler Trade kann dabei komplett wieder
+    zurücklaufen, bevor überhaupt ein Gegensignal kommt.
+  </div>
+  <div data-mode="fractals_flip"><label>Take-Profit</label>
+    <select class="cfg" id="fr_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="fractals_flip" data-requires="fr_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="fr_tp_manual_usd"></div>
 
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧬 Kerzen-DNA (eigene Entwicklung, kein Port eines bestehenden Scripts): jede Kerze bekommt
@@ -4685,6 +4699,8 @@ async function refresh() {
     document.getElementById('fr_sl_enabled').value = String(data.config.fr_sl_enabled);
     document.getElementById('fr_sl_manual_usd').value = data.config.fr_sl_manual_usd;
     document.getElementById('fr_sl_cooldown_seconds').value = data.config.fr_sl_cooldown_seconds;
+    document.getElementById('fr_tp_enabled').value = String(data.config.fr_tp_enabled);
+    document.getElementById('fr_tp_manual_usd').value = data.config.fr_tp_manual_usd;
     setResolutionField('cd_resolution', data.config.cd_resolution);
     document.getElementById('cd_threshold').value = data.config.cd_threshold;
     document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
@@ -5130,6 +5146,8 @@ function buildConfigPayload() {
     fr_sl_enabled: document.getElementById('fr_sl_enabled').value === 'true',
     fr_sl_manual_usd: parseFloat(document.getElementById('fr_sl_manual_usd').value),
     fr_sl_cooldown_seconds: parseFloat(document.getElementById('fr_sl_cooldown_seconds').value),
+    fr_tp_enabled: document.getElementById('fr_tp_enabled').value === 'true',
+    fr_tp_manual_usd: parseFloat(document.getElementById('fr_tp_manual_usd').value),
     cd_resolution: getResolutionField('cd_resolution'),
     cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
     cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
@@ -5423,6 +5441,7 @@ async def handle_config_update(request):
                 "fr_resolution", "fr_periods", "fr_direction_mode", "fr_invert_direction",
                 "fr_zscore_filter_enabled", "fr_zscore_resolution", "fr_zscore_lookback", "fr_zscore_smooth",
                 "fr_sl_enabled", "fr_sl_manual_usd", "fr_sl_cooldown_seconds",
+                "fr_tp_enabled", "fr_tp_manual_usd",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode", "cd_invert_direction",
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
                 "cd_rsi_filter_enabled", "cd_rsi_length", "cd_rsi_midline",

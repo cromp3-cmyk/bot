@@ -3554,23 +3554,50 @@ def _fr_set_sl(st, cfg, direction, entry_price):
     st["fr_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
 
 
-async def check_fr_sl(symbol, price):
-    """Optionaler fester SL (fester $-Betrag) - durchbricht 'immer im Markt' NUR im SL-Fall,
-    Position geht dann glatt (nicht Flip) und wartet nach Cooldown auf das naechste gueltige
-    Ersteinstiegs-Signal. Siehe check_uh_sl bei UT-Bot+Hull, identisches Muster."""
+def _fr_set_tp(st, cfg, direction, entry_price):
+    """Setzt den festen TP-Preis (fester $-Betrag) - siehe _cd_set_tp/_rf_set_tp, identisches
+    Muster."""
+    if not cfg.get("fr_tp_enabled", False):
+        st["fr_tp_price"] = None
+        return
+    size = st.get("total_coin_size") or 0
+    if size <= 0:
+        st["fr_tp_price"] = None
+        return
+    dist_tp = cfg.get("fr_tp_manual_usd", 10.0) / size
+    st["fr_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
+
+
+async def check_fr_sl_tp(symbol, price):
+    """Optionaler fester SL UND optionaler fester TP (beide fester $-Betrag, unabhaengig
+    voneinander an/abschaltbar) - durchbricht 'immer im Markt' nur in diesen beiden Faellen,
+    Position geht dann glatt (nicht Flip). SL zusaetzlich mit Cooldown, TP ohne. Siehe
+    check_rf_sl_tp bei Range Filter, identisches Muster."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if st["position"] is None or price is None:
         return
+    pos = st["position"]
+
+    tp_price = st.get("fr_tp_price")
+    if tp_price is not None:
+        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
+        if hit_tp:
+            debug_log(f"🎯 [{symbol}] Fractals TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+            await execute_exit(symbol, price, "TP")
+            st["fr_sl_price"] = None
+            st["fr_tp_price"] = None
+            return
+
     sl_price = st.get("fr_sl_price")
     if sl_price is None:
         return
-    pos = st["position"]
     hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
     if hit_sl:
         debug_log(f"🚪 [{symbol}] Fractals SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
         await execute_exit(symbol, price, "SL")
         st["fr_sl_price"] = None
+        st["fr_tp_price"] = None
         st["fr_sl_cooldown_until"] = time.time() + cfg.get("fr_sl_cooldown_seconds", 30)
 
 
@@ -3580,9 +3607,9 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None):
     (buy_i/sell_i kommen von fr_poll_loop bereits entsprechend vertauscht, siehe dort). Optionaler
     Z-Score-Filter (fr_zscore_filter_enabled, siehe compute_rolling_zscore): Long nur wenn
     zscore > 0, Short nur wenn zscore < 0 - gilt fuer jeden Einstieg, auch beim Flip. Optionaler
-    fester SL (siehe check_fr_sl) unterbricht 'immer im Markt' nur im SL-Fall - dreht sonst beim
-    jeweils naechsten (erlaubten) Gegen-Signal direkt. Bei Long-/Short-only bzw. vom Filter
-    blockiertem Flip wird nur glattgestellt."""
+    fester SL/TP (siehe check_fr_sl_tp) unterbricht 'immer im Markt' nur in diesen Faellen -
+    dreht sonst beim jeweils naechsten (erlaubten) Gegen-Signal direkt. Bei Long-/Short-only
+    bzw. vom Filter blockiertem Flip wird nur glattgestellt."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -3601,11 +3628,13 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None):
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
                 _fr_set_sl(st, cfg, "long", price)
+                _fr_set_tp(st, cfg, "long", price)
         elif sell_i and short_ok:
             debug_log(f"📡 [{symbol}] Fractals Ersteinstieg: SHORT @ {price}")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
                 _fr_set_sl(st, cfg, "short", price)
+                _fr_set_tp(st, cfg, "short", price)
         return
 
     if pos == "long" and sell_i:
@@ -3613,23 +3642,27 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None):
             debug_log(f"🚪 [{symbol}] Fractals Exit: LONG @ {price}")
             await execute_exit(symbol, price, "FR-EXIT-DIR" if direction_mode == "long_only" else "FR-EXIT-ZSCORE")
             st["fr_sl_price"] = None
+            st["fr_tp_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] Fractals Flip: LONG -> SHORT @ {price}")
             await execute_exit(symbol, price, "FR-FLIP")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
                 _fr_set_sl(st, cfg, "short", price)
+                _fr_set_tp(st, cfg, "short", price)
     elif pos == "short" and buy_i:
         if direction_mode == "short_only" or not long_ok:
             debug_log(f"🚪 [{symbol}] Fractals Exit: SHORT @ {price}")
             await execute_exit(symbol, price, "FR-EXIT-DIR" if direction_mode == "short_only" else "FR-EXIT-ZSCORE")
             st["fr_sl_price"] = None
+            st["fr_tp_price"] = None
         else:
             debug_log(f"🔄 [{symbol}] Fractals Flip: SHORT -> LONG @ {price}")
             await execute_exit(symbol, price, "FR-FLIP")
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
                 _fr_set_sl(st, cfg, "long", price)
+                _fr_set_tp(st, cfg, "long", price)
 
 
 async def fr_poll_loop(symbol):
@@ -3715,7 +3748,7 @@ async def fr_poll_loop(symbol):
                         last_processed_ts = closed_ts[idx]
                         await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx])
 
-                    await check_fr_sl(symbol, price)
+                    await check_fr_sl_tp(symbol, price)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -7077,11 +7110,25 @@ def _fr_bt_set_sl(position, cfg, margin, leverage):
     position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
 
 
+def _fr_bt_set_tp(position, cfg):
+    """Backtest-Pendant zu _fr_set_tp - setzt tp_price auf der Position (fester $-Betrag)."""
+    if not cfg.get("fr_tp_enabled", False):
+        position["tp_price"] = None
+        return
+    size = position["size"]
+    if size <= 0:
+        position["tp_price"] = None
+        return
+    dist_tp = cfg.get("fr_tp_manual_usd", 10.0) / size
+    entry = position["entry"]
+    position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
+
+
 def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=None):
     """Backtest-Pendant zu check_fr_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
-    mit Z-Score-Filter (siehe compute_rolling_zscore) und optionalem festem SL (siehe
-    _fr_bt_set_sl - durchbricht 'immer im Markt' NUR im SL-Fall, Position geht dann glatt und
-    wartet nach Cooldown). Tief-Fraktal = Kauf, Hoch-Fraktal = Verkauf."""
+    mit Z-Score-Filter (siehe compute_rolling_zscore) und optionalem festem SL/TP (siehe
+    _fr_bt_set_sl/_fr_bt_set_tp - durchbricht 'immer im Markt' NUR in diesen Faellen, Position
+    geht dann glatt; SL zusaetzlich mit Cooldown). Tief-Fraktal = Kauf, Hoch-Fraktal = Verkauf."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
@@ -7106,11 +7153,16 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
 
         if position is not None:
             sl_price = position.get("sl_price")
+            tp_price = position.get("tp_price")
             hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
             if hit_sl:
                 _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
 
         in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
 
@@ -7121,10 +7173,12 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
                 _fr_bt_set_sl(position, cfg, margin, leverage)
+                _fr_bt_set_tp(position, cfg)
             elif sell_i and short_ok(i):
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
                 _fr_bt_set_sl(position, cfg, margin, leverage)
+                _fr_bt_set_tp(position, cfg)
             continue
 
         if position["dir"] == "long" and sell_i:
@@ -7137,6 +7191,7 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 size = (margin * leverage) / price
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
                 _fr_bt_set_sl(position, cfg, margin, leverage)
+                _fr_bt_set_tp(position, cfg)
         elif position["dir"] == "short" and buy_i:
             can_flip = direction_mode != "short_only" and long_ok(i)
             reason = "FR-FLIP" if can_flip else ("FR-EXIT-DIR" if direction_mode == "short_only" else "FR-EXIT-ZSCORE")
@@ -7147,6 +7202,7 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 size = (margin * leverage) / price
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
                 _fr_bt_set_sl(position, cfg, margin, leverage)
+                _fr_bt_set_tp(position, cfg)
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
