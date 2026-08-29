@@ -901,16 +901,46 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
         # ist der GESAMT-Durchschnittspreis der kompletten aktuellen Position auf der Boerse
         # (nicht nur dieses einen Fills) - siehe Verwendung unten bei is_add_on. Schlaegt die
         # Abfrage fehl, wird bewusst der Zielpreis als Naeherung beibehalten (kein Blockieren).
+        #
+        # ZWEI BUGS HIER GEFUNDEN+GEFIXT (live beobachtet: SHORT @ 77638.74 wurde als
+        # "Ø-Einstieg 0.0" verbucht): (1) 'avg_entry_price' kommt von der Boerse als STRING -
+        # die alte Pruefung 'if real_pos.avg_entry_price:' war ein reiner Python-Wahrheitswert-
+        # Check, und der String "0.0" ist NICHT leer, also "wahr", obwohl der Wert Null ist.
+        # (2) bei einer brandneuen Position (kein vorheriger Bestand) kann die erste Abfrage
+        # direkt nach der Order noch den ALTEN, flachen Zustand (Groesse 0, Preis "0.0")
+        # zurueckgeben, weil die Verbuchung auf der Boerse einen Hauch verzoegert ist - ohne
+        # Exception, also griff der interne Retry von get_account_position_from_exchange
+        # (der nur bei FEHLERN erneut fragt) hier nicht. Fix: explizit auf einen ECHTEN
+        # (>0) Preis pruefen und bei einer noch-flachen Antwort gezielt nachfragen.
         real_pos = await get_account_position_from_exchange(client, market_index)
+        real_price = None
+        if real_pos is not None and real_pos.avg_entry_price is not None:
+            try:
+                parsed = float(real_pos.avg_entry_price)
+                if parsed > 0:
+                    real_price = parsed
+            except (TypeError, ValueError):
+                pass
+        extra_attempts = 0
+        while real_price is None and extra_attempts < 5:
+            await asyncio.sleep(0.6)
+            real_pos = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
+            if real_pos is not None and real_pos.avg_entry_price is not None:
+                try:
+                    parsed = float(real_pos.avg_entry_price)
+                    if parsed > 0:
+                        real_price = parsed
+                except (TypeError, ValueError):
+                    pass
+            extra_attempts += 1
         await client.close()
-        if real_pos is not None and real_pos.avg_entry_price:
-            real_price = float(real_pos.avg_entry_price)
+        if real_price is not None:
             if price and abs(real_price - price) / price > 0.0005:
                 debug_log(f"🎯 [{symbol}] Echter Fill-Preis von der Börse: {real_price} (Ziel war {price}, Abweichung {round((real_price-price)/price*100,3)}%)")
             price = real_price
             real_price_confirmed = True
         else:
-            debug_log(f"⚠️ [{symbol}] Konnte echten Fill-Preis nicht abfragen - verwende Zielpreis {price} als Näherung")
+            debug_log(f"⚠️ [{symbol}] Konnte echten Fill-Preis nicht abfragen (blieb leer/0) - verwende Zielpreis {price} als Näherung")
 
     if is_add_on:
         if real_price_confirmed:
