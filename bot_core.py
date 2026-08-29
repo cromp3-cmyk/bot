@@ -1011,17 +1011,33 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
             debug_log(f"⚠️ [{symbol}] Teil-Exit-Order fehlgeschlagen", {"error": str(err)})
             return False
 
-        pos_after = await get_account_position_from_exchange(client, market_index)
+        # Siehe _execute_exit_locked fuer die ausfuehrliche Begruendung: nicht nur pruefen,
+        # ob EINE Antwort da ist, sondern ob sich realized_pnl tatsaechlich veraendert hat -
+        # sonst wird bei noch nicht durchgebuchtem PnL faelschlich real_pnl_usd=0 verwendet.
+        real_pnl_usd = None
+        if realized_pnl_before is not None:
+            extra_attempts = 0
+            while real_pnl_usd is None and extra_attempts < 8:
+                pos_after = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
+                if pos_after is not None and pos_after.realized_pnl is not None:
+                    try:
+                        parsed = float(pos_after.realized_pnl)
+                        if abs(parsed - realized_pnl_before) > 1e-9:
+                            real_pnl_usd = parsed - realized_pnl_before
+                    except (TypeError, ValueError):
+                        pass
+                if real_pnl_usd is None:
+                    await asyncio.sleep(0.6)
+                extra_attempts += 1
         await client.close()
-        if realized_pnl_before is not None and pos_after is not None and pos_after.realized_pnl is not None:
-            real_pnl_usd = float(pos_after.realized_pnl) - realized_pnl_before
+        if real_pnl_usd is not None:
             if abs(real_pnl_usd - pnl_usd) > 0.01:
                 debug_log(f"🎯 [{symbol}] Echter realisierter Teil-PnL von der Börse: ${round(real_pnl_usd,3)} (Schätzung war ${round(pnl_usd,3)})")
             pnl_usd = real_pnl_usd
             if close_size > 0:
                 exit_price_for_log = round(st["avg_entry_price"] + (pnl_usd / close_size if position_side == "long" else -pnl_usd / close_size), 4)
         else:
-            debug_log(f"⚠️ [{symbol}] Konnte echten Teil-PnL nicht abfragen - verwende Schätzung basierend auf Zielpreis {price}")
+            debug_log(f"⚠️ [{symbol}] Konnte echten Teil-PnL nicht bestätigen (realized_pnl änderte sich nicht rechtzeitig) - verwende Schätzung basierend auf Zielpreis {price}")
 
     st["stats"]["total_pnl_usd"] += pnl_usd
     st["trade_log"].append({
@@ -1075,10 +1091,34 @@ async def _execute_exit_locked(symbol, price, reason):
         # theoretischen Zielpreis abweichen (Slippage, Latenz, schnelle Kursbewegung) - deshalb
         # hier den ECHTEN realisierten PnL direkt von der Boerse abfragen (Differenz von
         # realized_pnl vor/nach dem Exit) statt blind mit dem Zielpreis zu rechnen.
-        pos_after = await get_account_position_from_exchange(client, market_index)
+        #
+        # GLEICHER BUG-TYP wie beim Einstieg (siehe _execute_entry_locked), hier aber
+        # konsequent statt sporadisch aufgetreten: 'pos_after is not None and
+        # pos_after.realized_pnl is not None' prueft nur, ob ueberhaupt EINE Antwort da ist -
+        # nicht, ob sie sich von der VOR dem Exit gemerkten Zahl tatsaechlich unterscheidet.
+        # Wenn die Verbuchung des realisierten PnL auf der Boerse noch nicht durch war, kam
+        # dieselbe (unveraenderte) Zahl zurueck -> real_pnl_usd wurde IMMER 0 -> exit_price_for_log
+        # wurde IMMER exakt gleich avg_entry_price gesetzt (live beobachtet: jeder einzelne
+        # Live-Exit zeigte Entry==Exit, PnL $0). Fix: explizit auf eine ECHTE AENDERUNG warten,
+        # mit mehreren Versuchen - erst wenn das dauerhaft ausbleibt, auf die theoretische
+        # Schaetzung (Zielpreis) zurueckfallen, NIE auf eine unveraenderte alte Zahl.
+        real_pnl_usd = None
+        if realized_pnl_before is not None:
+            extra_attempts = 0
+            while real_pnl_usd is None and extra_attempts < 8:
+                pos_after = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
+                if pos_after is not None and pos_after.realized_pnl is not None:
+                    try:
+                        parsed = float(pos_after.realized_pnl)
+                        if abs(parsed - realized_pnl_before) > 1e-9:
+                            real_pnl_usd = parsed - realized_pnl_before
+                    except (TypeError, ValueError):
+                        pass
+                if real_pnl_usd is None:
+                    await asyncio.sleep(0.6)
+                extra_attempts += 1
         await client.close()
-        if realized_pnl_before is not None and pos_after is not None and pos_after.realized_pnl is not None:
-            real_pnl_usd = float(pos_after.realized_pnl) - realized_pnl_before
+        if real_pnl_usd is not None:
             if abs(real_pnl_usd - pnl_usd) > 0.01:
                 debug_log(f"🎯 [{symbol}] Echter realisierter PnL von der Börse: ${round(real_pnl_usd,3)} (Schätzung war ${round(pnl_usd,3)})")
             pnl_usd = real_pnl_usd
@@ -1086,7 +1126,7 @@ async def _execute_exit_locked(symbol, price, reason):
             if st["total_coin_size"] > 0:
                 exit_price_for_log = round(st["avg_entry_price"] + (pnl_usd / st["total_coin_size"] if closing_side == "long" else -pnl_usd / st["total_coin_size"]), 4)
         else:
-            debug_log(f"⚠️ [{symbol}] Konnte echten PnL nicht abfragen - verwende Schätzung basierend auf Zielpreis {price}")
+            debug_log(f"⚠️ [{symbol}] Konnte echten PnL nicht bestätigen (realized_pnl änderte sich nicht rechtzeitig) - verwende Schätzung basierend auf Zielpreis {price}")
 
     stats = st["stats"]
     stats["trades"] += 1
