@@ -3625,7 +3625,15 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
     Signal warten). AUS = Signal wird komplett IGNORIERT, die laufende Position bleibt einfach
     unangetastet offen (nur SL/TP koennen sie noch beenden) - bis irgendwann ein Gegen-Signal
     kommt, bei dem ALLE Bedingungen fuer die neue Richtung gleichzeitig erfuellt sind und
-    tatsaechlich geflippt werden kann."""
+    tatsaechlich geflippt werden kann.
+
+    fr_dca_enabled (Nachkauf/DCA): kommt WAEHREND einer offenen Position ein weiteres Signal in
+    DERSELBEN Richtung (z.B. noch ein Tief-Fraktal waehrend Long), wird nachgekauft statt das
+    Signal zu ignorieren - bis zu fr_dca_max_entries mal (insgesamt also 1+N Einstiege). Nach
+    jedem Nachkauf werden SL/TP auf Basis des NEUEN Durchschnittspreises neu gesetzt (siehe
+    _fr_set_sl/_fr_set_tp) - der feste TP wird dadurch effektiv zu einem 'sobald die
+    Gesamtposition im Plus ist'-Ausstieg, je mehr nachgekauft wurde, desto naeher liegt er am
+    aktuellen Kurs. Nachkaeufe respektieren dieselben Filter (Z-Score/ADX/MTF) wie Ersteinstiege."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -3637,9 +3645,12 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
     zscore_enabled = cfg.get("fr_zscore_filter_enabled", False)
     adx_enabled = cfg.get("fr_adx_filter_enabled", False)
     adx_threshold = cfg.get("fr_adx_threshold", 20)
+    adx_invert = cfg.get("fr_adx_invert_enabled", False)
     adx_missing = adx is None or plus_di is None or minus_di is None
-    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
-    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
+    adx_di_long = (minus_di > plus_di) if adx_invert else (plus_di > minus_di) if not adx_missing else False
+    adx_di_short = (plus_di > minus_di) if adx_invert else (minus_di > plus_di) if not adx_missing else False
+    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and adx_di_long)
+    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and adx_di_short)
     mtf_enabled = cfg.get("fr_mtf_filter_enabled", False)
     long_thr = cfg.get("fr_mtf_long_threshold", 0.5)
     short_thr = cfg.get("fr_mtf_short_threshold", -0.5)
@@ -3666,6 +3677,28 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
             if st["position"] is not None:
                 _fr_set_sl(st, cfg, "short", price)
                 _fr_set_tp(st, cfg, "short", price)
+        return
+
+    if pos == "long" and buy_i:
+        dca_enabled = cfg.get("fr_dca_enabled", False)
+        max_entries = cfg.get("fr_dca_max_entries", 3)
+        if dca_enabled and long_ok and st["entry_count"] < 1 + max_entries:
+            debug_log(f"📥 [{symbol}] Fractals Nachkauf: LONG @ {price} (Stufe {st['entry_count'] + 1}/{1 + max_entries})")
+            await execute_entry(symbol, "long", price, is_add_on=True)
+            if st["position"] is not None:
+                _fr_set_sl(st, cfg, "long", st["avg_entry_price"])
+                _fr_set_tp(st, cfg, "long", st["avg_entry_price"])
+        return
+
+    if pos == "short" and sell_i:
+        dca_enabled = cfg.get("fr_dca_enabled", False)
+        max_entries = cfg.get("fr_dca_max_entries", 3)
+        if dca_enabled and short_ok and st["entry_count"] < 1 + max_entries:
+            debug_log(f"📥 [{symbol}] Fractals Nachkauf: SHORT @ {price} (Stufe {st['entry_count'] + 1}/{1 + max_entries})")
+            await execute_entry(symbol, "short", price, is_add_on=True)
+            if st["position"] is not None:
+                _fr_set_sl(st, cfg, "short", st["avg_entry_price"])
+                _fr_set_tp(st, cfg, "short", st["avg_entry_price"])
         return
 
     if pos == "long" and sell_i:
@@ -7260,15 +7293,22 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
     sl_cooldown_ms = cfg.get("fr_sl_cooldown_seconds", 30) * 1000
     adx_enabled = cfg.get("fr_adx_filter_enabled", False)
     adx_threshold = cfg.get("fr_adx_threshold", 20)
+    adx_invert = cfg.get("fr_adx_invert_enabled", False)
     mtf_enabled = cfg.get("fr_mtf_filter_enabled", False)
     long_thr = cfg.get("fr_mtf_long_threshold", 0.5)
     short_thr = cfg.get("fr_mtf_short_threshold", -0.5)
 
     def adx_long_ok(i):
-        return not adx_enabled or adx is None or (adx[i] > adx_threshold and plus_di[i] > minus_di[i])
+        if not adx_enabled or adx is None:
+            return True
+        di_ok = (minus_di[i] > plus_di[i]) if adx_invert else (plus_di[i] > minus_di[i])
+        return adx[i] > adx_threshold and di_ok
 
     def adx_short_ok(i):
-        return not adx_enabled or adx is None or (adx[i] > adx_threshold and minus_di[i] > plus_di[i])
+        if not adx_enabled or adx is None:
+            return True
+        di_ok = (plus_di[i] > minus_di[i]) if adx_invert else (minus_di[i] > plus_di[i])
+        return adx[i] > adx_threshold and di_ok
 
     def long_ok(i):
         return (direction_mode != "short_only"
@@ -7285,6 +7325,8 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
     position = None
     trades = []
     sl_cooldown_until_ts = None
+    dca_enabled = cfg.get("fr_dca_enabled", False)
+    dca_max_entries = cfg.get("fr_dca_max_entries", 3)
 
     for i in range(warmup, n):
         price = c[i]
@@ -7311,14 +7353,37 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 continue
             if buy_i and long_ok(i):
                 size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "entries": 1}
                 _fr_bt_set_sl(position, cfg, margin, leverage)
                 _fr_bt_set_tp(position, cfg)
             elif sell_i and short_ok(i):
                 size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "entries": 1}
                 _fr_bt_set_sl(position, cfg, margin, leverage)
                 _fr_bt_set_tp(position, cfg)
+            continue
+
+        # Nachkauf/DCA: dasselbe Signal wie der Ersteinstieg feuert WAEHREND die Position noch
+        # offen ist erneut in derselben Richtung - siehe check_fr_signal fuer die identische
+        # Logik im Live-Betrieb. Durchschnittspreis wird neu gewichtet, SL/TP werden danach auf
+        # Basis des neuen Durchschnitts neu gesetzt.
+        if position["dir"] == "long" and buy_i and dca_enabled and long_ok(i) and position["entries"] < 1 + dca_max_entries:
+            add_size = (margin * leverage) / price
+            total_value = position["entry"] * position["size"] + price * add_size
+            position["size"] += add_size
+            position["entry"] = total_value / position["size"]
+            position["entries"] += 1
+            _fr_bt_set_sl(position, cfg, margin, leverage)
+            _fr_bt_set_tp(position, cfg)
+            continue
+        if position["dir"] == "short" and sell_i and dca_enabled and short_ok(i) and position["entries"] < 1 + dca_max_entries:
+            add_size = (margin * leverage) / price
+            total_value = position["entry"] * position["size"] + price * add_size
+            position["size"] += add_size
+            position["entry"] = total_value / position["size"]
+            position["entries"] += 1
+            _fr_bt_set_sl(position, cfg, margin, leverage)
+            _fr_bt_set_tp(position, cfg)
             continue
 
         if position["dir"] == "long" and sell_i:
@@ -7340,7 +7405,7 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 position = None
             else:
                 size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "entries": 1}
                 _fr_bt_set_sl(position, cfg, margin, leverage)
                 _fr_bt_set_tp(position, cfg)
         elif position["dir"] == "short" and buy_i:
@@ -7362,7 +7427,7 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 position = None
             else:
                 size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "entries": 1}
                 _fr_bt_set_sl(position, cfg, margin, leverage)
                 _fr_bt_set_tp(position, cfg)
 

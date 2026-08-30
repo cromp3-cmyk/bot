@@ -469,6 +469,7 @@ def default_config():
         "fr_adx_resolution": os.getenv("FR_ADX_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "3m"/"1h" - gröberer Zeitrahmen als der Handels-Zeitrahmen ergibt einen stabileren Trendfilter
         "fr_adx_length": int(os.getenv("FR_ADX_LENGTH", "14")),
         "fr_adx_threshold": float(os.getenv("FR_ADX_THRESHOLD", "20")),
+        "fr_adx_invert_enabled": os.getenv("FR_ADX_INVERT_ENABLED", "false").lower() == "true",  # tauscht +DI/-DI: normal = +DI>-DI erlaubt Long, invertiert = -DI>+DI erlaubt Long
         "fr_mtf_filter_enabled": os.getenv("FR_MTF_FILTER_ENABLED", "false").lower() == "true",
         "fr_mtf_tf1": os.getenv("FR_MTF_TF1", "off"),  # uebergeordneter Zeitrahmen, "off" = kein Filter
         "fr_mtf_fast_len": int(os.getenv("FR_MTF_FAST_LEN", "5")),
@@ -477,6 +478,8 @@ def default_config():
         "fr_mtf_long_threshold": float(os.getenv("FR_MTF_LONG_THRESHOLD", "0.5")),
         "fr_mtf_short_threshold": float(os.getenv("FR_MTF_SHORT_THRESHOLD", "-0.5")),
         "fr_flatten_on_block_enabled": os.getenv("FR_FLATTEN_ON_BLOCK_ENABLED", "true").lower() == "true",  # AN (Standard) = Position bei blockiertem Flip glattstellen. AUS = Signal ignorieren, Position bleibt offen bis ein Flip moeglich ist
+        "fr_dca_enabled": os.getenv("FR_DCA_ENABLED", "false").lower() == "true",  # Nachkauf bei weiterem Signal in DERSELBEN Richtung waehrend die Position noch offen ist
+        "fr_dca_max_entries": int(os.getenv("FR_DCA_MAX_ENTRIES", "3")),
         "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
         "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
@@ -2435,6 +2438,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="fr_adx_length"></div>
   <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="fr_adx_threshold"></div>
+  <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX/DI Invertiert</label>
+    <select class="cfg" id="fr_adx_invert_enabled">
+      <option value="false">Aus (normal: +DI über -DI = Long, -DI über +DI = Short)</option>
+      <option value="true">An (vertauscht: -DI über +DI = Long, +DI über -DI = Short)</option>
+    </select>
+  </div>
   <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Optionaler MTF-Trend%-Filter (übergeordneter Zeitrahmen, wie bei Pieki Algo/UT-Bot+Hull):
     filtert Fraktal-Signale gegen den größeren Trend raus - Long nur wenn der übergeordnete
@@ -2479,6 +2488,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="false">Signal ignorieren - Position bleibt offen</option>
     </select>
   </div>
+  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Nachkauf/DCA: kommt WÄHREND einer offenen Position ein weiteres Signal in DERSELBEN Richtung
+    (z.B. noch ein Tief-Fraktal während Long), wird nachgekauft statt das Signal zu ignorieren -
+    bis zu der eingestellten Anzahl mal. Nach jedem Nachkauf werden SL/TP auf Basis des NEUEN
+    Durchschnittspreises neu gesetzt - kombiniere das mit dem Take-Profit oben, dann verkauft der
+    Bot effektiv "sobald die Gesamtposition im Plus ist", je mehr nachgekauft wurde, desto näher
+    liegt das TP am aktuellen Kurs. Nachkäufe respektieren dieselben Filter wie Ersteinstiege.
+  </div>
+  <div data-mode="fractals_flip"><label>Nachkauf/DCA</label>
+    <select class="cfg" id="fr_dca_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="fractals_flip" data-requires="fr_dca_enabled"><label>Max. Nachkäufe (zusätzlich zum Ersteinstieg)</label><input type="number" step="1" min="1" id="fr_dca_max_entries"></div>
 
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧬 Kerzen-DNA (eigene Entwicklung, kein Port eines bestehenden Scripts): jede Kerze bekommt
@@ -4790,6 +4814,7 @@ async function refresh() {
     setResolutionField('fr_adx_resolution', data.config.fr_adx_resolution);
     document.getElementById('fr_adx_length').value = data.config.fr_adx_length;
     document.getElementById('fr_adx_threshold').value = data.config.fr_adx_threshold;
+    document.getElementById('fr_adx_invert_enabled').value = String(data.config.fr_adx_invert_enabled);
     document.getElementById('fr_mtf_filter_enabled').value = String(data.config.fr_mtf_filter_enabled);
     setResolutionField('fr_mtf_tf1', data.config.fr_mtf_tf1);
     document.getElementById('fr_mtf_long_threshold').value = data.config.fr_mtf_long_threshold;
@@ -4798,6 +4823,8 @@ async function refresh() {
     document.getElementById('fr_mtf_slow_len').value = data.config.fr_mtf_slow_len;
     document.getElementById('fr_mtf_atr_len').value = data.config.fr_mtf_atr_len;
     document.getElementById('fr_flatten_on_block_enabled').value = String(data.config.fr_flatten_on_block_enabled);
+    document.getElementById('fr_dca_enabled').value = String(data.config.fr_dca_enabled);
+    document.getElementById('fr_dca_max_entries').value = data.config.fr_dca_max_entries;
     setResolutionField('cd_resolution', data.config.cd_resolution);
     document.getElementById('cd_threshold').value = data.config.cd_threshold;
     document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
@@ -5249,6 +5276,7 @@ function buildConfigPayload() {
     fr_adx_resolution: getResolutionField('fr_adx_resolution'),
     fr_adx_length: parseInt(document.getElementById('fr_adx_length').value),
     fr_adx_threshold: parseFloat(document.getElementById('fr_adx_threshold').value),
+    fr_adx_invert_enabled: document.getElementById('fr_adx_invert_enabled').value === 'true',
     fr_mtf_filter_enabled: document.getElementById('fr_mtf_filter_enabled').value === 'true',
     fr_mtf_tf1: getResolutionField('fr_mtf_tf1'),
     fr_mtf_long_threshold: parseFloat(document.getElementById('fr_mtf_long_threshold').value),
@@ -5257,6 +5285,8 @@ function buildConfigPayload() {
     fr_mtf_slow_len: parseInt(document.getElementById('fr_mtf_slow_len').value),
     fr_mtf_atr_len: parseInt(document.getElementById('fr_mtf_atr_len').value),
     fr_flatten_on_block_enabled: document.getElementById('fr_flatten_on_block_enabled').value === 'true',
+    fr_dca_enabled: document.getElementById('fr_dca_enabled').value === 'true',
+    fr_dca_max_entries: parseInt(document.getElementById('fr_dca_max_entries').value),
     cd_resolution: getResolutionField('cd_resolution'),
     cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
     cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
@@ -5551,10 +5581,11 @@ async def handle_config_update(request):
                 "fr_zscore_filter_enabled", "fr_zscore_resolution", "fr_zscore_lookback", "fr_zscore_smooth",
                 "fr_sl_enabled", "fr_sl_manual_usd", "fr_sl_cooldown_seconds",
                 "fr_tp_enabled", "fr_tp_manual_usd",
-                "fr_adx_filter_enabled", "fr_adx_resolution", "fr_adx_length", "fr_adx_threshold",
+                "fr_adx_filter_enabled", "fr_adx_resolution", "fr_adx_length", "fr_adx_threshold", "fr_adx_invert_enabled",
                 "fr_mtf_filter_enabled", "fr_mtf_tf1", "fr_mtf_fast_len", "fr_mtf_slow_len", "fr_mtf_atr_len",
                 "fr_mtf_long_threshold", "fr_mtf_short_threshold",
                 "fr_flatten_on_block_enabled",
+                "fr_dca_enabled", "fr_dca_max_entries",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode", "cd_invert_direction",
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
                 "cd_rsi_filter_enabled", "cd_rsi_length", "cd_rsi_midline",
