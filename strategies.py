@@ -3572,12 +3572,24 @@ async def check_fr_sl_tp(symbol, price):
     """Optionaler fester SL UND optionaler fester TP (beide fester $-Betrag, unabhaengig
     voneinander an/abschaltbar) - durchbricht 'immer im Markt' nur in diesen beiden Faellen,
     Position geht dann glatt (nicht Flip). SL zusaetzlich mit Cooldown, TP ohne. Siehe
-    check_rf_sl_tp bei Range Filter, identisches Muster."""
+    check_rf_sl_tp bei Range Filter, identisches Muster.
+
+    NACHTRAEGLICHES SETZEN (live beobachtet: TP auf $2 gesetzt, Position lief bis $17 Gewinn ohne
+    zu schliessen): _fr_set_sl/_fr_set_tp werden normalerweise nur beim Einstieg oder Nachkauf
+    aufgerufen. Wurde SL/TP aber erst AKTIVIERT, waehrend eine Position schon offen war, hatte
+    diese Position nie einen SL/TP-Preis bekommen - "an" ohne gesetzten Zielpreis aendert dann
+    nichts, ganz egal wie hoch der Gewinn/Verlust laeuft. Fix: hier bei jedem Aufruf pruefen und
+    fehlende SL/TP-Preise auf Basis des AKTUELLEN Durchschnittspreises nachtragen."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if st["position"] is None or price is None:
         return
     pos = st["position"]
+
+    if cfg.get("fr_tp_enabled", False) and st.get("fr_tp_price") is None and st.get("avg_entry_price") is not None:
+        _fr_set_tp(st, cfg, pos, st["avg_entry_price"])
+    if cfg.get("fr_sl_enabled", False) and st.get("fr_sl_price") is None and st.get("avg_entry_price") is not None:
+        _fr_set_sl(st, cfg, pos, st["avg_entry_price"])
 
     tp_price = st.get("fr_tp_price")
     if tp_price is not None:
