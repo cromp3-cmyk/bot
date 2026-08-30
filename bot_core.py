@@ -845,8 +845,15 @@ def calc_unrealized_pnl(symbol):
 def compute_step_abs(reference_price, cfg, which):
     """which: 'grid' oder 'tp' - liefert den Abstand in Preiseinheiten, je nach grid_mode."""
     if cfg["grid_mode"] == "usd":
-        return cfg["grid_step_usd"] if which == "grid" else cfg["tp_step_usd"]
+        val = cfg["grid_step_usd"] if which == "grid" else cfg["tp_step_usd"]
+        return val if val is not None else 0.0
     pct = cfg["grid_step_pct"] if which == "grid" else cfg["tp_step_pct"]
+    # Absicherung: calc_grid_levels() wird fuer JEDEN Coin bei JEDEM /api/status-Aufruf berechnet,
+    # auch wenn die aktive Strategie gar nicht Grid ist - ein verunreinigter/leerer Wert hier
+    # (z.B. durch einen frontend-seitigen Bug, der einen NaN-Wert als "null" gespeichert hat)
+    # legt sonst SOFORT jede einzelne Status-Abfrage fuer den betroffenen Coin lahm.
+    if pct is None or reference_price is None:
+        return 0.0
     return reference_price * (pct / 100)
 
 
@@ -3761,6 +3768,15 @@ const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTrade
 function setResolutionField(fieldId, value) {
   const select = document.getElementById(fieldId);
   const customInput = document.getElementById(fieldId + '_custom_minutes');
+  // Defensiv: manche Zeitrahmen-Selects (z.B. Maverick Edge) haben bewusst KEINE "Eigene
+  // Minuten"-Option und damit auch kein customInput-Element - ohne diese Absicherung wuerde
+  // das die komplette Formular-Befuellung fuer JEDEN Aufruf danach abbrechen (live beobachtet:
+  // dadurch blieb tp_step_pct dauerhaft leer, was spaeter beim Speichern zu einem serverseitigen
+  // Absturz fuehrte, weil ein leerer Wert als 'null' ankam).
+  if (!customInput) {
+    select.value = value;
+    return;
+  }
   const hasOption = Array.from(select.options).some(o => o.value === value);
   if (hasOption) {
     select.value = value;
@@ -4960,7 +4976,7 @@ async function refresh() {
     document.getElementById('rf_sl_cooldown_seconds').value = data.config.rf_sl_cooldown_seconds;
     document.getElementById('rf_tp_enabled').value = String(data.config.rf_tp_enabled);
     document.getElementById('rf_tp_manual_usd').value = data.config.rf_tp_manual_usd;
-    setResolutionField('mv_resolution', data.config.mv_resolution);
+    document.getElementById('mv_resolution').value = data.config.mv_resolution;
     document.getElementById('mv_fast_len').value = data.config.mv_fast_len;
     document.getElementById('mv_slow_len').value = data.config.mv_slow_len;
     document.getElementById('mv_guide_len').value = data.config.mv_guide_len;
@@ -5437,7 +5453,7 @@ function buildConfigPayload() {
     rf_sl_cooldown_seconds: parseFloat(document.getElementById('rf_sl_cooldown_seconds').value),
     rf_tp_enabled: document.getElementById('rf_tp_enabled').value === 'true',
     rf_tp_manual_usd: parseFloat(document.getElementById('rf_tp_manual_usd').value),
-    mv_resolution: getResolutionField('mv_resolution'),
+    mv_resolution: document.getElementById('mv_resolution').value,
     mv_fast_len: parseInt(document.getElementById('mv_fast_len').value),
     mv_slow_len: parseInt(document.getElementById('mv_slow_len').value),
     mv_guide_len: parseInt(document.getElementById('mv_guide_len').value),
