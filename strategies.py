@@ -3651,8 +3651,21 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
     adx_threshold = cfg.get("fr_adx_threshold", 20)
     adx_invert = cfg.get("fr_adx_invert_enabled", False)
     adx_missing = adx is None or plus_di is None or minus_di is None
-    adx_di_long = (minus_di > plus_di) if adx_invert else (plus_di > minus_di) if not adx_missing else False
-    adx_di_short = (plus_di > minus_di) if adx_invert else (minus_di > plus_di) if not adx_missing else False
+    # WICHTIG: adx_missing MUSS zuerst geprueft werden - "A if C1 else B if C2 else D" wertet in
+    # Python als "A if C1 else (B if C2 else D)" aus, das heisst die alte Reihenfolge hat bei
+    # adx_invert=True den None-Check komplett uebersprungen und direkt "minus_di > plus_di" mit
+    # zwei None-Werten verglichen, sobald der ADX-Filter selbst aus war (aber adx_invert noch
+    # gespeichert auf "An" stand) - live abgestuerzt mit "'>' not supported between NoneType and
+    # NoneType". Fix: erst auf fehlende Daten pruefen, DANACH ggf. invertieren.
+    if adx_missing:
+        adx_di_long = False
+        adx_di_short = False
+    elif adx_invert:
+        adx_di_long = minus_di > plus_di
+        adx_di_short = plus_di > minus_di
+    else:
+        adx_di_long = plus_di > minus_di
+        adx_di_short = minus_di > plus_di
     adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and adx_di_long)
     adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and adx_di_short)
     mtf_enabled = cfg.get("fr_mtf_filter_enabled", False)
