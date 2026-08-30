@@ -3633,7 +3633,11 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
     jedem Nachkauf werden SL/TP auf Basis des NEUEN Durchschnittspreises neu gesetzt (siehe
     _fr_set_sl/_fr_set_tp) - der feste TP wird dadurch effektiv zu einem 'sobald die
     Gesamtposition im Plus ist'-Ausstieg, je mehr nachgekauft wurde, desto naeher liegt er am
-    aktuellen Kurs. Nachkaeufe respektieren dieselben Filter (Z-Score/ADX/MTF) wie Ersteinstiege."""
+    aktuellen Kurs. Nachkaeufe respektieren dieselben Filter (Z-Score/ADX/MTF) wie Ersteinstiege.
+    WICHTIG: solange fr_dca_enabled an ist, werden Gegen-Signale (die sonst einen Flip/Exit
+    ausloesen wuerden) komplett IGNORIERT - die Position kann dann ausschliesslich ueber SL/TP
+    beendet werden. Sonst wuerde das naechstbeste Gegen-Fraktal die nachgekaufte Position
+    wegreissen, bevor sie ueberhaupt die Chance hatte, durchschnittlich ins Plus zu laufen."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -3702,6 +3706,10 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
         return
 
     if pos == "long" and sell_i:
+        if cfg.get("fr_dca_enabled", False):
+            return  # Solange DCA aktiv ist, ergibt Flip/Exit ueber Gegen-Signale keinen Sinn
+            # mehr - die (evtl. nachgekaufte) Position soll ausschliesslich ueber SL/TP wieder
+            # rausgehen, nicht durch das naechstbeste Gegen-Fraktal weggerissen werden.
         if direction_mode == "long_only":
             reason = "FR-EXIT-DIR"
         elif not short_ok:
@@ -3728,6 +3736,8 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
                 _fr_set_sl(st, cfg, "short", price)
                 _fr_set_tp(st, cfg, "short", price)
     elif pos == "short" and buy_i:
+        if cfg.get("fr_dca_enabled", False):
+            return  # siehe long-Zweig oben - identische Begruendung
         if direction_mode == "short_only":
             reason = "FR-EXIT-DIR"
         elif not long_ok:
@@ -7387,6 +7397,8 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
             continue
 
         if position["dir"] == "long" and sell_i:
+            if dca_enabled:
+                continue  # siehe check_fr_signal: solange DCA aktiv ist, kein Flip/Exit ueber Gegen-Signale
             can_flip = direction_mode != "long_only" and short_ok(i)
             if can_flip:
                 reason = "FR-FLIP"
@@ -7409,6 +7421,8 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 _fr_bt_set_sl(position, cfg, margin, leverage)
                 _fr_bt_set_tp(position, cfg)
         elif position["dir"] == "short" and buy_i:
+            if dca_enabled:
+                continue  # siehe check_fr_signal: solange DCA aktiv ist, kein Flip/Exit ueber Gegen-Signale
             can_flip = direction_mode != "short_only" and long_ok(i)
             if can_flip:
                 reason = "FR-FLIP"
