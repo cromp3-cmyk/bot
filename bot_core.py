@@ -520,6 +520,22 @@ def default_config():
         "rf_sl_cooldown_seconds": float(os.getenv("RF_SL_COOLDOWN_SECONDS", "30")),
         "rf_tp_enabled": os.getenv("RF_TP_ENABLED", "false").lower() == "true",
         "rf_tp_manual_usd": float(os.getenv("RF_TP_MANUAL_USD", "10.0")),
+        "mv_resolution": os.getenv("MV_RESOLUTION", "5m"),
+        "mv_fast_len": int(os.getenv("MV_FAST_LEN", "9")),
+        "mv_slow_len": int(os.getenv("MV_SLOW_LEN", "21")),
+        "mv_guide_len": int(os.getenv("MV_GUIDE_LEN", "34")),
+        "mv_atr_len": int(os.getenv("MV_ATR_LEN", "14")),
+        "mv_strong_mult": float(os.getenv("MV_STRONG_MULT", "1.5")),
+        "mv_use_volume_enabled": os.getenv("MV_USE_VOLUME_ENABLED", "true").lower() == "true",
+        "mv_vol_len": int(os.getenv("MV_VOL_LEN", "20")),
+        "mv_vol_mult": float(os.getenv("MV_VOL_MULT", "1.3")),
+        "mv_direction_mode": os.getenv("MV_DIRECTION_MODE", "both"),
+        "mv_sl_mode": os.getenv("MV_SL_MODE", "fixed"),  # "fixed" | "guide_trail"
+        "mv_sl_enabled": os.getenv("MV_SL_ENABLED", "true").lower() == "true",  # nur relevant bei sl_mode="fixed"
+        "mv_sl_manual_usd": float(os.getenv("MV_SL_MANUAL_USD", "5.0")),
+        "mv_sl_cooldown_seconds": float(os.getenv("MV_SL_COOLDOWN_SECONDS", "30")),
+        "mv_tp_enabled": os.getenv("MV_TP_ENABLED", "false").lower() == "true",
+        "mv_tp_manual_usd": float(os.getenv("MV_TP_MANUAL_USD", "10.0")),
     }
 
 
@@ -560,6 +576,7 @@ def default_state():
         "fr_sl_price": None, "fr_tp_price": None, "fr_sl_cooldown_until": 0.0,
         "cd_sl_price": None, "cd_sl_cooldown_until": 0.0,
         "rf_sl_price": None, "rf_tp_price": None, "rf_sl_cooldown_until": 0.0,
+        "mv_sl_price": None, "mv_tp_price": None, "mv_sl_cooldown_until": 0.0,
         "utb_trend_pct_last": None,
         "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
         "wtc_sl_price": None, "wtc_tp_price": None,
@@ -1341,6 +1358,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="fractals_flip">Williams Fractals (Swing-High/Low-Umkehrpunkte, immer im Markt, nur Buy/Sell-Wechsel)</option>
       <option value="candle_dna">Kerzen-DNA (eigener Konviktions-Score aus Körper+Docht je Kerze, immer im Markt, nur Buy/Sell-Wechsel)</option>
       <option value="range_filter">Range Filter (DonovanWall, nachziehende Glättungslinie, immer im Markt, optionaler fester SL/TP)</option>
+      <option value="maverick_edge">Maverick Edge (Trend-EMA + Guide-Linie + Kerzenstärke, reiner Signal-Einstieg, SL fest oder Guide-Linie als Trail-Stop, fester TP)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -2760,6 +2778,67 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="range_filter" data-requires="rf_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="rf_tp_manual_usd"></div>
 
+  <div data-mode="maverick_edge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🗺️ Maverick Edge (Port von "Maverick Edge Style - Modul 1"): Trend-Kontrolle aus zwei EMAs
+    (schneller EMA über/unter langsamem UND steigend/fallend), eine "Guide-Linie" (EMA) als
+    Richtungs-Schwelle, und eine Kerzenstärke-Prüfung (Körper im Verhältnis zum ATR, optional
+    zusätzlich Mindest-Volumen). Reiner Signal-Einstieg, KEIN Flip - Ausstieg ausschließlich über
+    SL/TP. Braucht Handelsvolumen, deshalb nur normale Binance-Minuten-Zeitrahmen (kein
+    Sekunden-Zeitrahmen möglich).
+  </div>
+  <div data-mode="maverick_edge"><label>Zeitrahmen</label>
+    <select class="cfg" id="mv_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="maverick_edge"><label>Schneller EMA (Trendrichtung)</label><input type="number" step="1" min="1" id="mv_fast_len"></div>
+  <div data-mode="maverick_edge"><label>Langsamer EMA (Trendrichtung)</label><input type="number" step="1" min="1" id="mv_slow_len"></div>
+  <div data-mode="maverick_edge"><label>Guide-Linie Länge (EMA)</label><input type="number" step="1" min="1" id="mv_guide_len"></div>
+  <div data-mode="maverick_edge"><label>ATR-Länge (für Kerzenstärke)</label><input type="number" step="1" min="1" id="mv_atr_len"></div>
+  <div data-mode="maverick_edge"><label>Schwelle: starke Kerze (x ATR)</label><input type="number" step="0.1" min="0.1" id="mv_strong_mult"></div>
+  <div data-mode="maverick_edge"><label>Volumen zusätzlich berücksichtigen</label>
+    <select class="cfg" id="mv_use_volume_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="maverick_edge" data-requires="mv_use_volume_enabled"><label>Volumen-Durchschnitt Länge</label><input type="number" step="1" min="1" id="mv_vol_len"></div>
+  <div data-mode="maverick_edge" data-requires="mv_use_volume_enabled"><label>Volumen-Schwelle (x Durchschnitt)</label><input type="number" step="0.1" min="0.1" id="mv_vol_mult"></div>
+  <div data-mode="maverick_edge"><label>Richtung</label>
+    <select class="cfg" id="mv_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="maverick_edge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Stop-Loss: entweder ein fester $-Betrag (wie bei den anderen Strategien), ODER die
+    Guide-Linie selbst als Trail-Stop - dann wird der SL bei jeder neuen Kerze auf den aktuellen
+    Guide-Linien-Wert nachgezogen, die Position schließt automatisch, sobald der Kurs die
+    Guide-Linie durchbricht.
+  </div>
+  <div data-mode="maverick_edge"><label>Stop-Loss-Modus</label>
+    <select class="cfg" id="mv_sl_mode">
+      <option value="fixed">Fester $-Betrag</option>
+      <option value="guide_trail">Guide-Linie als Trail-Stop</option>
+    </select>
+  </div>
+  <div data-mode="maverick_edge" data-requires="mv_sl_mode" data-requires-value="fixed"><label>SL Fester $-Betrag (nur bei Modus "Fest")</label><input type="number" step="0.5" id="mv_sl_manual_usd"></div>
+  <div data-mode="maverick_edge" data-requires="mv_sl_mode" data-requires-value="fixed"><label>Cooldown nach SL (Sek., nur bei Modus "Fest")</label><input type="number" step="1" id="mv_sl_cooldown_seconds"></div>
+  <div data-mode="maverick_edge"><label>Take-Profit (fester $-Betrag)</label>
+    <select class="cfg" id="mv_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="maverick_edge" data-requires="mv_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="mv_tp_manual_usd"></div>
+
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
       <option value="both">Beide (Long unter Anker, Short über Anker)</option>
@@ -3446,7 +3525,11 @@ function applyFilterRequires() {
     // updateModeFields() hat es schon per data-mode ausgeblendet.
     if (el.dataset.mode && el.dataset.mode !== mode) return;
     const ctrl = document.getElementById(el.dataset.requires);
-    const active = ctrl && ctrl.value === 'true';
+    // Standard: Checkbox-Auswahl (true/false). Optional data-requires-value="wert" fuer
+    // Mehrwert-Selects (z.B. mv_sl_mode: "fixed"/"guide_trail") - dann zaehlt Gleichheit mit
+    // diesem Wert statt 'true'.
+    const expected = el.dataset.requiresValue;
+    const active = ctrl && (expected !== undefined ? ctrl.value === expected : ctrl.value === 'true');
     el.style.display = active ? '' : 'none';
   });
 }
@@ -4877,6 +4960,21 @@ async function refresh() {
     document.getElementById('rf_sl_cooldown_seconds').value = data.config.rf_sl_cooldown_seconds;
     document.getElementById('rf_tp_enabled').value = String(data.config.rf_tp_enabled);
     document.getElementById('rf_tp_manual_usd').value = data.config.rf_tp_manual_usd;
+    setResolutionField('mv_resolution', data.config.mv_resolution);
+    document.getElementById('mv_fast_len').value = data.config.mv_fast_len;
+    document.getElementById('mv_slow_len').value = data.config.mv_slow_len;
+    document.getElementById('mv_guide_len').value = data.config.mv_guide_len;
+    document.getElementById('mv_atr_len').value = data.config.mv_atr_len;
+    document.getElementById('mv_strong_mult').value = data.config.mv_strong_mult;
+    document.getElementById('mv_use_volume_enabled').value = String(data.config.mv_use_volume_enabled);
+    document.getElementById('mv_vol_len').value = data.config.mv_vol_len;
+    document.getElementById('mv_vol_mult').value = data.config.mv_vol_mult;
+    document.getElementById('mv_direction_mode').value = data.config.mv_direction_mode;
+    document.getElementById('mv_sl_mode').value = data.config.mv_sl_mode;
+    document.getElementById('mv_sl_manual_usd').value = data.config.mv_sl_manual_usd;
+    document.getElementById('mv_sl_cooldown_seconds').value = data.config.mv_sl_cooldown_seconds;
+    document.getElementById('mv_tp_enabled').value = String(data.config.mv_tp_enabled);
+    document.getElementById('mv_tp_manual_usd').value = data.config.mv_tp_manual_usd;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -5339,6 +5437,21 @@ function buildConfigPayload() {
     rf_sl_cooldown_seconds: parseFloat(document.getElementById('rf_sl_cooldown_seconds').value),
     rf_tp_enabled: document.getElementById('rf_tp_enabled').value === 'true',
     rf_tp_manual_usd: parseFloat(document.getElementById('rf_tp_manual_usd').value),
+    mv_resolution: getResolutionField('mv_resolution'),
+    mv_fast_len: parseInt(document.getElementById('mv_fast_len').value),
+    mv_slow_len: parseInt(document.getElementById('mv_slow_len').value),
+    mv_guide_len: parseInt(document.getElementById('mv_guide_len').value),
+    mv_atr_len: parseInt(document.getElementById('mv_atr_len').value),
+    mv_strong_mult: parseFloat(document.getElementById('mv_strong_mult').value),
+    mv_use_volume_enabled: document.getElementById('mv_use_volume_enabled').value === 'true',
+    mv_vol_len: parseInt(document.getElementById('mv_vol_len').value),
+    mv_vol_mult: parseFloat(document.getElementById('mv_vol_mult').value),
+    mv_direction_mode: document.getElementById('mv_direction_mode').value,
+    mv_sl_mode: document.getElementById('mv_sl_mode').value,
+    mv_sl_manual_usd: parseFloat(document.getElementById('mv_sl_manual_usd').value),
+    mv_sl_cooldown_seconds: parseFloat(document.getElementById('mv_sl_cooldown_seconds').value),
+    mv_tp_enabled: document.getElementById('mv_tp_enabled').value === 'true',
+    mv_tp_manual_usd: parseFloat(document.getElementById('mv_tp_manual_usd').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -5610,6 +5723,10 @@ async def handle_config_update(request):
                 "rf_adx_filter_enabled", "rf_adx_length", "rf_adx_threshold",
                 "rf_sl_enabled", "rf_sl_manual_usd", "rf_sl_cooldown_seconds",
                 "rf_tp_enabled", "rf_tp_manual_usd",
+                "mv_resolution", "mv_fast_len", "mv_slow_len", "mv_guide_len", "mv_atr_len", "mv_strong_mult",
+                "mv_use_volume_enabled", "mv_vol_len", "mv_vol_mult", "mv_direction_mode",
+                "mv_sl_mode", "mv_sl_enabled", "mv_sl_manual_usd", "mv_sl_cooldown_seconds",
+                "mv_tp_enabled", "mv_tp_manual_usd",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

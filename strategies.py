@@ -3991,6 +3991,223 @@ def compute_cd_signals(opens, highs, lows, closes, rejection_mult, threshold):
     return buy_i, sell_i, score
 
 
+def compute_maverick_signals(o, h, l, c, v, fast_len, slow_len, guide_len, atr_len, strong_mult, use_volume, vol_len, vol_mult):
+    """Portiert aus 'Maverick Edge Style - Modul 1' (Pine v5): Trend-Kontrolle aus zwei EMAs
+    (schneller EMA ueber/unter langsamem UND steigend/fallend = Bulle/Baer-Kontrolle), eine
+    'Guide-Linie' (EMA, Standard-Laenge 34) als Richtungs-Schwelle, und eine Kerzenstaerke-
+    Klassifizierung (Kerzenkoerper im Verhaeltnis zum ATR, optional zusaetzlich Mindest-Volumen).
+    longCondition/shortCondition im Original feuern JEDEN Balken, an dem die Bedingungen
+    zutreffen (kein einmaliges Kreuzungs-Ereignis) - hier bewusst als FLANKE (erst True, wenn es
+    im Balken davor noch False war) umgesetzt, damit nicht bei jeder neuen Kerze im selben Trend
+    erneut ein Signal gezaehlt wird. Gibt (long_entry, short_entry, guide_line) zurueck."""
+    n = len(c)
+    if n < 2:
+        return [False] * n, [False] * n, [None] * n
+
+    ema_fast = _ema_series(c, fast_len)
+    ema_slow = _ema_series(c, slow_len)
+    guide_line = _ema_series(c, guide_len)
+    atr = compute_atr(h, l, c, atr_len)
+    avg_vol = _sma_series(v, vol_len) if (use_volume and v) else None
+
+    bull_control = [False] * n
+    bear_control = [False] * n
+    for i in range(1, n):
+        bull_control[i] = ema_fast[i] > ema_slow[i] and ema_fast[i] > ema_fast[i - 1]
+        bear_control[i] = ema_fast[i] < ema_slow[i] and ema_fast[i] < ema_fast[i - 1]
+
+    long_cond = [False] * n
+    short_cond = [False] * n
+    for i in range(n):
+        above_guide = c[i] > guide_line[i]
+        below_guide = c[i] < guide_line[i]
+        body_size = abs(c[i] - o[i])
+        body_to_atr = (body_size / atr[i]) if atr[i] and atr[i] > 0 else 0
+        vol_ok = (v[i] > avg_vol[i] * vol_mult) if avg_vol is not None else True
+        strength_ge_2 = body_to_atr >= strong_mult and vol_ok
+        is_bull = c[i] > o[i]
+        is_bear = c[i] < o[i]
+        long_cond[i] = bull_control[i] and above_guide and strength_ge_2 and is_bull
+        short_cond[i] = bear_control[i] and below_guide and strength_ge_2 and is_bear
+
+    long_entry = [False] * n
+    short_entry = [False] * n
+    for i in range(1, n):
+        long_entry[i] = long_cond[i] and not long_cond[i - 1]
+        short_entry[i] = short_cond[i] and not short_cond[i - 1]
+
+    return long_entry, short_entry, guide_line
+
+
+def _mv_set_sl_tp(st, cfg, direction, entry_price, guide_now):
+    """Setzt SL (fester $-Betrag ODER Guide-Linie als Trail-Stop) und TP (fester $-Betrag).
+    Bei sl_mode='guide_trail' TRACKT der SL direkt den aktuellen Guide-Linien-Wert (keine
+    'nur verbessern'-Klammer wie bei einem ATR-Trailing-Stop - die Guide-Linie ist selbst schon
+    eine geglaettete EMA und bewegt sich von Haus aus nur mit dem Trend mit)."""
+    sl_mode = cfg.get("mv_sl_mode", "fixed")
+    if sl_mode == "guide_trail":
+        st["mv_sl_price"] = guide_now
+    elif cfg.get("mv_sl_enabled", True):
+        size = st.get("total_coin_size") or 0
+        if size <= 0:
+            st["mv_sl_price"] = None
+        else:
+            dist_sl = cfg.get("mv_sl_manual_usd", 5.0) / size
+            st["mv_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
+    else:
+        st["mv_sl_price"] = None
+
+    if not cfg.get("mv_tp_enabled", False):
+        st["mv_tp_price"] = None
+        return
+    size = st.get("total_coin_size") or 0
+    if size <= 0:
+        st["mv_tp_price"] = None
+        return
+    dist_tp = cfg.get("mv_tp_manual_usd", 10.0) / size
+    st["mv_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
+
+
+async def check_mv_sl_tp(symbol, price, guide_now):
+    """Prueft SL (fest ODER Guide-Linien-Trail) und TP (fest). Bei sl_mode='guide_trail' wird
+    der SL-Preis JEDE neue geschlossene Kerze auf den aktuellen Guide-Linien-Wert nachgezogen -
+    Position schliesst, sobald der Kurs die Guide-Linie durchbricht."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+
+    if cfg.get("mv_sl_mode", "fixed") == "guide_trail" and guide_now is not None:
+        st["mv_sl_price"] = guide_now
+
+    tp_price = st.get("mv_tp_price")
+    if tp_price is not None:
+        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
+        if hit_tp:
+            debug_log(f"🎯 [{symbol}] Maverick TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+            await execute_exit(symbol, price, "TP")
+            st["mv_sl_price"] = None
+            st["mv_tp_price"] = None
+            return
+
+    sl_price = st.get("mv_sl_price")
+    if sl_price is None:
+        return
+    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+    if hit_sl:
+        reason = "SL" if cfg.get("mv_sl_mode", "fixed") == "fixed" else "GUIDE-SL"
+        debug_log(f"🚪 [{symbol}] Maverick {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, reason)
+        st["mv_sl_price"] = None
+        st["mv_tp_price"] = None
+        if cfg.get("mv_sl_mode", "fixed") == "fixed":
+            st["mv_sl_cooldown_until"] = time.time() + cfg.get("mv_sl_cooldown_seconds", 30)
+
+
+async def check_mv_entry(symbol, long_entry_i, short_entry_i, price, guide_now):
+    """Reiner Signal-Einstieg (kein Flip-System): Long/Short nur bei frischem Setup-Signal,
+    solange keine Position offen ist. Ausstieg ausschliesslich ueber SL/TP (siehe
+    check_mv_sl_tp), kein Exit durch ein Gegen-Signal - passend zum Original, das explizit nur
+    Einstiegs-Setups markiert, keine Exit-Logik definiert."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None or st["position"] is not None:
+        return
+    if time.time() < st.get("mv_sl_cooldown_until", 0.0):
+        return
+    direction_mode = cfg.get("mv_direction_mode", "both")
+
+    if long_entry_i and direction_mode != "short_only":
+        debug_log(f"📡 [{symbol}] Maverick Ersteinstieg: LONG @ {price}")
+        await execute_entry(symbol, "long", price, is_add_on=False)
+        if st["position"] is not None:
+            _mv_set_sl_tp(st, cfg, "long", price, guide_now)
+    elif short_entry_i and direction_mode != "long_only":
+        debug_log(f"📡 [{symbol}] Maverick Ersteinstieg: SHORT @ {price}")
+        await execute_entry(symbol, "short", price, is_add_on=False)
+        if st["position"] is not None:
+            _mv_set_sl_tp(st, cfg, "short", price, guide_now)
+
+
+async def mv_poll_loop(symbol):
+    """Maverick Edge Style (siehe compute_maverick_signals): Trend-EMA-Kontrolle + Guide-Linie
+    + Kerzenstaerke (ATR/Volumen) als Einstiegsfilter, reiner Signal-Einstieg ohne Flip, Ausstieg
+    ausschliesslich ueber SL (fest ODER Guide-Linie als Trail-Stop) und TP (fest). Braucht
+    Handelsvolumen (siehe fetch_candles_binance_vol) - wie MO7, deshalb bewusst NUR normale
+    Binance-Minuten-Aufloesungen (kein Sekunden-/Lighter-Tick-Fallback, da dort kein Volumen
+    vorliegt)."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "maverick_edge" and cfg["bot_active"]:
+                resolution = cfg.get("mv_resolution", "5m")
+                fast_len = cfg.get("mv_fast_len", 9)
+                slow_len = cfg.get("mv_slow_len", 21)
+                guide_len = cfg.get("mv_guide_len", 34)
+                atr_len = cfg.get("mv_atr_len", 14)
+                strong_mult = cfg.get("mv_strong_mult", 1.5)
+                use_volume = cfg.get("mv_use_volume_enabled", True)
+                vol_len = cfg.get("mv_vol_len", 20)
+                vol_mult = cfg.get("mv_vol_mult", 1.3)
+                min_needed = max(slow_len, guide_len, atr_len, vol_len) + 5
+                needed_bars = min(1000, max(min_needed * 2, 220))
+                st = b["state"]
+
+                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
+                if data:
+                    timestamps, opens, highs, lows, closes, volumes = data
+                    closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                else:
+                    closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    long_entry, short_entry, guide_line = compute_maverick_signals(
+                        closed_o, closed_h, closed_l, closed_c, closed_v,
+                        fast_len, slow_len, guide_len, atr_len, strong_mult, use_volume, vol_len, vol_mult)
+                    guide_now = guide_line[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] Maverick aktiv: Preis={closed_c[-1]}, Guide-Linie={round(guide_now,4) if guide_now is not None else '-'}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 1:
+                            continue
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        await check_mv_entry(symbol, long_entry[idx], short_entry[idx], price_i, guide_line[idx])
+
+                    await check_mv_sl_tp(symbol, price, guide_now)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Maverick wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Maverick wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Maverick-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
 def compute_range_filter(closes, period, qty):
     """Portiert aus 'Range Filter - B&S Signals' (DonovanWall, Pine v4): eine sich selbst
     nachziehende Glaettungslinie (filt), die sich nur bewegt, wenn der Kurs die aktuelle
@@ -6761,6 +6978,104 @@ def backtest_mo7(candles_vol, cfg):
     return _simulate_mo7_trades(candles_vol, mo7, cfg, bull, bear, warmup)
 
 
+def _mv_bt_set_sl_tp(position, cfg, guide_at_entry):
+    """Backtest-Pendant zu _mv_set_sl_tp - siehe dort fuer die identische Logik."""
+    sl_mode = cfg.get("mv_sl_mode", "fixed")
+    if sl_mode == "guide_trail":
+        position["sl_price"] = guide_at_entry
+    elif cfg.get("mv_sl_enabled", True):
+        size = position["size"]
+        if size <= 0:
+            position["sl_price"] = None
+        else:
+            dist_sl = cfg.get("mv_sl_manual_usd", 5.0) / size
+            entry = position["entry"]
+            position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
+    else:
+        position["sl_price"] = None
+
+    if not cfg.get("mv_tp_enabled", False):
+        position["tp_price"] = None
+        return
+    size = position["size"]
+    if size <= 0:
+        position["tp_price"] = None
+        return
+    dist_tp = cfg.get("mv_tp_manual_usd", 10.0) / size
+    entry = position["entry"]
+    position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
+
+
+def _simulate_mv_trades(candles, cfg, long_entry, short_entry, guide_line, warmup):
+    """Backtest-Pendant zu check_mv_entry/check_mv_sl_tp - reiner Signal-Einstieg (kein Flip),
+    Ausstieg ausschliesslich ueber SL (fest ODER Guide-Linie als Trail-Stop, intrabar per
+    Kerzen-Hoch/Tief geprueft) und TP (fest)."""
+    ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    direction_mode = cfg.get("mv_direction_mode", "both")
+    sl_mode = cfg.get("mv_sl_mode", "fixed")
+    sl_cooldown_ms = cfg.get("mv_sl_cooldown_seconds", 30) * 1000
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            if sl_mode == "guide_trail" and guide_line[i] is not None:
+                position["sl_price"] = guide_line[i]
+            sl_price = position.get("sl_price")
+            tp_price = position.get("tp_price")
+            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
+            if hit_sl:
+                reason = "SL" if sl_mode == "fixed" else "GUIDE-SL"
+                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+                if sl_mode == "fixed":
+                    sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+
+        if position is None:
+            if in_sl_cooldown:
+                continue
+            if long_entry[i] and direction_mode != "short_only":
+                size = (margin * leverage) / price
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
+                _mv_bt_set_sl_tp(position, cfg, guide_line[i])
+            elif short_entry[i] and direction_mode != "long_only":
+                size = (margin * leverage) / price
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
+                _mv_bt_set_sl_tp(position, cfg, guide_line[i])
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_maverick_edge(candles_vol, cfg):
+    ts, o, h, l, c, v = candles_vol
+    fast_len = cfg.get("mv_fast_len", 9)
+    slow_len = cfg.get("mv_slow_len", 21)
+    guide_len = cfg.get("mv_guide_len", 34)
+    atr_len = cfg.get("mv_atr_len", 14)
+    strong_mult = cfg.get("mv_strong_mult", 1.5)
+    use_volume = cfg.get("mv_use_volume_enabled", True)
+    vol_len = cfg.get("mv_vol_len", 20)
+    vol_mult = cfg.get("mv_vol_mult", 1.3)
+    long_entry, short_entry, guide_line = compute_maverick_signals(o, h, l, c, v, fast_len, slow_len, guide_len, atr_len, strong_mult, use_volume, vol_len, vol_mult)
+    warmup = max(slow_len, guide_len, atr_len, vol_len) + 2
+    return _simulate_mv_trades((ts, o, h, l, c), cfg, long_entry, short_entry, guide_line, warmup)
+
+
 MO7_SUM_SWEEP_MAX_COMBOS = 2000
 MO7_SUM_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -8202,6 +8517,7 @@ BACKTEST_MAX_CANDLES = {
     "fractals_flip": 100_000,
     "candle_dna": 100_000,
     "range_filter": 100_000,
+    "maverick_edge": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -8223,6 +8539,29 @@ BACKTEST_FUNCS = {
 
 
 async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
+    if entry_mode == "maverick_edge":
+        max_candles = BACKTEST_MAX_CANDLES.get("maverick_edge", 100_000)
+        resolution = cfg.get("mv_resolution", "5m")
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        min_needed = max(cfg.get("mv_slow_len", 21), cfg.get("mv_guide_len", 34), cfg.get("mv_atr_len", 14), cfg.get("mv_vol_len", 20)) + 10
+        if not candles or len(candles[4]) < min_needed:
+            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+        n_candles = len(candles[4])
+        trades = backtest_maverick_edge(candles, cfg)
+        stats = summarize_backtest_trades(trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
+
     if entry_mode == "mo7_scalp":
         max_candles = BACKTEST_MAX_CANDLES["mo7_scalp"]
         resolution = cfg.get("mo7_resolution", "5m")
@@ -8246,7 +8585,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         }
 
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
