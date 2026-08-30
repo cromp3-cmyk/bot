@@ -893,6 +893,7 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
     base_amount = int(raw_units * precision)
     new_units = base_amount / precision
     real_price_confirmed = False  # True, wenn 'price' unten durch den ECHTEN Boersen-Durchschnitt ersetzt wurde
+    avg_entry_before = st["avg_entry_price"] if is_add_on else None  # siehe Nachkauf-Bug unten
 
     if not cfg["dry_run"]:
         client = get_lighter_client()
@@ -919,36 +920,40 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
         # (nicht nur dieses einen Fills) - siehe Verwendung unten bei is_add_on. Schlaegt die
         # Abfrage fehl, wird bewusst der Zielpreis als Naeherung beibehalten (kein Blockieren).
         #
-        # ZWEI BUGS HIER GEFUNDEN+GEFIXT (live beobachtet: SHORT @ 77638.74 wurde als
-        # "Ø-Einstieg 0.0" verbucht): (1) 'avg_entry_price' kommt von der Boerse als STRING -
-        # die alte Pruefung 'if real_pos.avg_entry_price:' war ein reiner Python-Wahrheitswert-
-        # Check, und der String "0.0" ist NICHT leer, also "wahr", obwohl der Wert Null ist.
-        # (2) bei einer brandneuen Position (kein vorheriger Bestand) kann die erste Abfrage
-        # direkt nach der Order noch den ALTEN, flachen Zustand (Groesse 0, Preis "0.0")
-        # zurueckgeben, weil die Verbuchung auf der Boerse einen Hauch verzoegert ist - ohne
-        # Exception, also griff der interne Retry von get_account_position_from_exchange
-        # (der nur bei FEHLERN erneut fragt) hier nicht. Fix: explizit auf einen ECHTEN
-        # (>0) Preis pruefen und bei einer noch-flachen Antwort gezielt nachfragen.
+        # DRITTER BUG HIER GEFUNDEN+GEFIXT (live beobachtet: DCA-Nachkauf bei Fractals hat TP nie
+        # erreicht, obwohl der Kurs es haette hergeben muessen): die alte Pruefung 'parsed > 0'
+        # schuetzt nur beim ERSTEINSTIEG (da war die Position vorher wirklich bei 0). Bei einem
+        # NACHKAUF ist der alte Durchschnittspreis schon > 0 - kam die Boerse zu schnell zurueck
+        # (Verbuchung des neuen Fills noch nicht durch), lieferte sie den ALTEN, unveraenderten
+        # Durchschnitt zurueck, der die Pruefung 'parsed > 0' trotzdem bestand. Der Bot hielt das
+        # faelschlich fuer bestaetigt und uebernahm den UNVERAENDERTEN alten Durchschnitt, obwohl
+        # total_coin_size trotzdem korrekt erhoeht wurde - der interne Ø-Einstieg blieb dadurch zu
+        # hoch haengen (bei einem Long-Nachkauf tiefer im Kurs muesste er ja SINKEN), TP wurde nie
+        # erreicht. Fix: bei einem Nachkauf zusaetzlich verlangen, dass sich der Wert TATSAECHLICH
+        # vom Stand VOR dieser Order unterscheidet - identisches Muster zum realized_pnl-Fix beim
+        # Exit (siehe _execute_exit_locked).
         real_pos = await get_account_position_from_exchange(client, market_index)
         real_price = None
-        if real_pos is not None and real_pos.avg_entry_price is not None:
+
+        def _extract_valid_price(pos):
+            if pos is None or pos.avg_entry_price is None:
+                return None
             try:
-                parsed = float(real_pos.avg_entry_price)
-                if parsed > 0:
-                    real_price = parsed
+                parsed = float(pos.avg_entry_price)
             except (TypeError, ValueError):
-                pass
+                return None
+            if parsed <= 0:
+                return None
+            if avg_entry_before is not None and abs(parsed - avg_entry_before) < 1e-9:
+                return None  # unveraendert gegenueber vorher -> Nachkauf noch nicht verbucht
+            return parsed
+
+        real_price = _extract_valid_price(real_pos)
         extra_attempts = 0
-        while real_price is None and extra_attempts < 5:
+        while real_price is None and extra_attempts < 8:
             await asyncio.sleep(0.6)
             real_pos = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
-            if real_pos is not None and real_pos.avg_entry_price is not None:
-                try:
-                    parsed = float(real_pos.avg_entry_price)
-                    if parsed > 0:
-                        real_price = parsed
-                except (TypeError, ValueError):
-                    pass
+            real_price = _extract_valid_price(real_pos)
             extra_attempts += 1
         await client.close()
         if real_price is not None:
@@ -957,7 +962,7 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
             price = real_price
             real_price_confirmed = True
         else:
-            debug_log(f"⚠️ [{symbol}] Konnte echten Fill-Preis nicht abfragen (blieb leer/0) - verwende Zielpreis {price} als Näherung")
+            debug_log(f"⚠️ [{symbol}] Konnte echten Fill-Preis nicht bestätigen (blieb leer/0/unverändert) - verwende Zielpreis {price} als Näherung")
 
     if is_add_on:
         if real_price_confirmed:
@@ -4503,6 +4508,13 @@ async function refresh() {
 
   const gl = data.grid_levels || {};
   const mode = data.config.entry_mode;
+  // Nachkauf-Stufe: die generische max_nachkauf-Einstellung gilt eigentlich nur fuer Grid -
+  // bei Fractals+DCA war hier faelschlich IMMER der Grid-Wert zu sehen, unabhaengig von der
+  // tatsaechlich eingestellten fr_dca_max_entries-Grenze.
+  let nachkaufMax = data.config.max_nachkauf || '∞';
+  if (mode === 'fractals_flip' && data.config.fr_dca_enabled) {
+    nachkaufMax = 1 + data.config.fr_dca_max_entries;
+  }
 
   // Uebersicht: nur noch die Kern-Kacheln (immer relevant, egal welche Strategie) plus
   // GENAU die Diagnose-Kacheln der aktuell gewaehlten Strategie - vorher standen hier
@@ -4514,7 +4526,7 @@ async function refresh() {
     `<div class="card"><div class="label">Position</div><div class="value ${data.position==='long'?'green':data.position==='short'?'red':'yellow'}">${data.position || 'flach'}</div></div>`,
     `<div class="card"><div class="label">Ø-Einstieg</div><div class="value">${data.avg_entry_price ?? '-'}</div></div>`,
     `<div class="card"><div class="label">Unrealisiert $</div><div class="value ${data.unrealized_pnl_usd>=0?'green':'red'}">${data.unrealized_pnl_usd}</div></div>`,
-    `<div class="card"><div class="label">Nachkauf-Stufe</div><div class="value">${data.entry_count} / ${data.config.max_nachkauf || '∞'}</div></div>`,
+    `<div class="card"><div class="label">Nachkauf-Stufe</div><div class="value">${data.entry_count} / ${nachkaufMax}</div></div>`,
     `<div class="card"><div class="label">Geschätzter Liq.-Preis</div><div class="value red">${data.liquidation_price ?? '-'}</div></div>`,
     `<div class="card"><div class="label">Realisiert (gesamt) $</div><div class="value ${data.stats.total_pnl_usd>=0?'green':'red'}">${data.stats.total_pnl_usd}</div></div>`,
     `<div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>`,
