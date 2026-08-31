@@ -4173,6 +4173,8 @@ async def mv_poll_loop(symbol):
                     long_entry, short_entry, guide_line = compute_maverick_signals(
                         closed_o, closed_h, closed_l, closed_c, closed_v,
                         fast_len, slow_len, guide_len, atr_len, strong_mult, use_volume, vol_len, vol_mult)
+                    if cfg.get("mv_invert_direction", False):
+                        long_entry, short_entry = short_entry, long_entry
                     guide_now = guide_line[-1]
 
                     if due_heartbeat:
@@ -7072,6 +7074,8 @@ def backtest_maverick_edge(candles_vol, cfg):
     vol_len = cfg.get("mv_vol_len", 20)
     vol_mult = cfg.get("mv_vol_mult", 1.3)
     long_entry, short_entry, guide_line = compute_maverick_signals(o, h, l, c, v, fast_len, slow_len, guide_len, atr_len, strong_mult, use_volume, vol_len, vol_mult)
+    if cfg.get("mv_invert_direction", False):
+        long_entry, short_entry = short_entry, long_entry
     warmup = max(slow_len, guide_len, atr_len, vol_len) + 2
     return _simulate_mv_trades((ts, o, h, l, c), cfg, long_entry, short_entry, guide_line, warmup)
 

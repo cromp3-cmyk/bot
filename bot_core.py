@@ -530,6 +530,7 @@ def default_config():
         "mv_vol_len": int(os.getenv("MV_VOL_LEN", "20")),
         "mv_vol_mult": float(os.getenv("MV_VOL_MULT", "1.3")),
         "mv_direction_mode": os.getenv("MV_DIRECTION_MODE", "both"),
+        "mv_invert_direction": os.getenv("MV_INVERT_DIRECTION", "false").lower() == "true",  # tauscht Long/Short-Signal komplett
         "mv_sl_mode": os.getenv("MV_SL_MODE", "fixed"),  # "fixed" | "guide_trail"
         "mv_sl_enabled": os.getenv("MV_SL_ENABLED", "true").lower() == "true",  # nur relevant bei sl_mode="fixed"
         "mv_sl_manual_usd": float(os.getenv("MV_SL_MANUAL_USD", "5.0")),
@@ -2801,7 +2802,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
+      <option value="2h">2 Stunden</option>
       <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
     </select>
   </div>
   <div data-mode="maverick_edge"><label>Schneller EMA (Trendrichtung)</label><input type="number" step="1" min="1" id="mv_fast_len"></div>
@@ -2822,6 +2825,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="both">Beide (Long + Short)</option>
       <option value="long_only">Nur Long</option>
       <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="maverick_edge"><label>Invertiert</label>
+    <select class="cfg" id="mv_invert_direction">
+      <option value="false">Aus (normal: Long-Setup = Long, Short-Setup = Short)</option>
+      <option value="true">An (vertauscht: Long-Setup = Short, Short-Setup = Long)</option>
     </select>
   </div>
   <div data-mode="maverick_edge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
@@ -4986,6 +4995,7 @@ async function refresh() {
     document.getElementById('mv_vol_len').value = data.config.mv_vol_len;
     document.getElementById('mv_vol_mult').value = data.config.mv_vol_mult;
     document.getElementById('mv_direction_mode').value = data.config.mv_direction_mode;
+    document.getElementById('mv_invert_direction').value = String(data.config.mv_invert_direction);
     document.getElementById('mv_sl_mode').value = data.config.mv_sl_mode;
     document.getElementById('mv_sl_manual_usd').value = data.config.mv_sl_manual_usd;
     document.getElementById('mv_sl_cooldown_seconds').value = data.config.mv_sl_cooldown_seconds;
@@ -5463,6 +5473,7 @@ function buildConfigPayload() {
     mv_vol_len: parseInt(document.getElementById('mv_vol_len').value),
     mv_vol_mult: parseFloat(document.getElementById('mv_vol_mult').value),
     mv_direction_mode: document.getElementById('mv_direction_mode').value,
+    mv_invert_direction: document.getElementById('mv_invert_direction').value === 'true',
     mv_sl_mode: document.getElementById('mv_sl_mode').value,
     mv_sl_manual_usd: parseFloat(document.getElementById('mv_sl_manual_usd').value),
     mv_sl_cooldown_seconds: parseFloat(document.getElementById('mv_sl_cooldown_seconds').value),
@@ -5740,7 +5751,7 @@ async def handle_config_update(request):
                 "rf_sl_enabled", "rf_sl_manual_usd", "rf_sl_cooldown_seconds",
                 "rf_tp_enabled", "rf_tp_manual_usd",
                 "mv_resolution", "mv_fast_len", "mv_slow_len", "mv_guide_len", "mv_atr_len", "mv_strong_mult",
-                "mv_use_volume_enabled", "mv_vol_len", "mv_vol_mult", "mv_direction_mode",
+                "mv_use_volume_enabled", "mv_vol_len", "mv_vol_mult", "mv_direction_mode", "mv_invert_direction",
                 "mv_sl_mode", "mv_sl_enabled", "mv_sl_manual_usd", "mv_sl_cooldown_seconds",
                 "mv_tp_enabled", "mv_tp_manual_usd",
                 "quad_stoch_resolution"]:
