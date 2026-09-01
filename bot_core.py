@@ -480,6 +480,7 @@ def default_config():
         "fr_flatten_on_block_enabled": os.getenv("FR_FLATTEN_ON_BLOCK_ENABLED", "true").lower() == "true",  # AN (Standard) = Position bei blockiertem Flip glattstellen. AUS = Signal ignorieren, Position bleibt offen bis ein Flip moeglich ist
         "fr_dca_enabled": os.getenv("FR_DCA_ENABLED", "false").lower() == "true",  # Nachkauf bei weiterem Signal in DERSELBEN Richtung waehrend die Position noch offen ist
         "fr_dca_max_entries": int(os.getenv("FR_DCA_MAX_ENTRIES", "3")),
+        "fr_dca_step_usd": float(os.getenv("FR_DCA_STEP_USD", "250.0")),  # Mindest-$-Preisabstand zum aktuellen Durchschnitt, bevor die naechste Nachkauf-Stufe erlaubt ist (0 = kein Mindestabstand)
         "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
         "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
@@ -995,8 +996,24 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
             # Gesamt-Durchschnitt ueber ALLE bisherigen Fills - NICHT nochmal lokal reinrechnen
             # (das wuerde die alte Position doppelt gewichten und den Durchschnitt mit jedem
             # weiteren Nachkauf staerker verzerren - das war der Kaskaden-Bug).
+            #
+            # VIERTER BUG HIER GEFUNDEN+GEFIXT (live beobachtet: Grid-Nachkauf-Abstaende
+            # schrumpften trotz gesetztem grid_step_usd immer weiter bis auf ~0, obwohl der Code
+            # extra 'last_entry_price statt avg_entry_price' nutzt um genau das zu verhindern -
+            # siehe Kommentar in strategies.py bei der Nachkauf-Pruefung): 'price' WAR an dieser
+            # Stelle schon auf den GESAMT-Durchschnitt umgeschrieben (Zeile oben), und
+            # 'last_entry_price = price' (weiter unten) hat dadurch faelschlich den DURCHSCHNITT
+            # statt den Preis DIESES EINEN Fills gespeichert - die Absicherung griff nur dem
+            # Namen nach, in Wirklichkeit war last_entry_price == avg_entry_price und der Abstand
+            # schrumpfte trotzdem mit jedem Nachkauf. Fix: den echten Fill-Preis DIESES Nachkaufs
+            # aus altem/neuem Durchschnitt und den hinzugekommenen Einheiten zurueckrechnen,
+            # BEVOR 'price' unten fuer last_entry_price verwendet wird.
+            old_total_size = st["total_coin_size"]
+            new_total_size = old_total_size + new_units
+            this_fill_price = ((price * new_total_size) - (avg_entry_before * old_total_size)) / new_units if new_units > 0 else price
             st["avg_entry_price"] = price
-            st["total_coin_size"] += new_units
+            st["total_coin_size"] = new_total_size
+            price = this_fill_price  # ab hier nur noch fuer last_entry_price unten relevant
         else:
             total_value = st["avg_entry_price"] * st["total_coin_size"] + price * new_units
             st["total_coin_size"] += new_units
@@ -2534,6 +2551,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="fractals_flip" data-requires="fr_dca_enabled"><label>Max. Nachkäufe (zusätzlich zum Ersteinstieg)</label><input type="number" step="1" min="1" id="fr_dca_max_entries"></div>
+  <div data-mode="fractals_flip" data-requires="fr_dca_enabled"><label>Mindest-$-Abstand zum Ø-Einstieg (0 = kein Mindestabstand)</label><input type="number" step="1" min="0" id="fr_dca_step_usd"></div>
 
   <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧬 Kerzen-DNA (eigene Entwicklung, kein Port eines bestehenden Scripts): jede Kerze bekommt
@@ -4945,6 +4963,7 @@ async function refresh() {
     document.getElementById('fr_flatten_on_block_enabled').value = String(data.config.fr_flatten_on_block_enabled);
     document.getElementById('fr_dca_enabled').value = String(data.config.fr_dca_enabled);
     document.getElementById('fr_dca_max_entries').value = data.config.fr_dca_max_entries;
+    document.getElementById('fr_dca_step_usd').value = data.config.fr_dca_step_usd;
     setResolutionField('cd_resolution', data.config.cd_resolution);
     document.getElementById('cd_threshold').value = data.config.cd_threshold;
     document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
@@ -5423,6 +5442,7 @@ function buildConfigPayload() {
     fr_flatten_on_block_enabled: document.getElementById('fr_flatten_on_block_enabled').value === 'true',
     fr_dca_enabled: document.getElementById('fr_dca_enabled').value === 'true',
     fr_dca_max_entries: parseInt(document.getElementById('fr_dca_max_entries').value),
+    fr_dca_step_usd: parseFloat(document.getElementById('fr_dca_step_usd').value),
     cd_resolution: getResolutionField('cd_resolution'),
     cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
     cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
@@ -5737,7 +5757,7 @@ async def handle_config_update(request):
                 "fr_mtf_filter_enabled", "fr_mtf_tf1", "fr_mtf_fast_len", "fr_mtf_slow_len", "fr_mtf_atr_len",
                 "fr_mtf_long_threshold", "fr_mtf_short_threshold",
                 "fr_flatten_on_block_enabled",
-                "fr_dca_enabled", "fr_dca_max_entries",
+                "fr_dca_enabled", "fr_dca_max_entries", "fr_dca_step_usd",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode", "cd_invert_direction",
                 "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
                 "cd_rsi_filter_enabled", "cd_rsi_length", "cd_rsi_midline",

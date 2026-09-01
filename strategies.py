@@ -3613,7 +3613,7 @@ async def check_fr_sl_tp(symbol, price):
         st["fr_sl_cooldown_until"] = time.time() + cfg.get("fr_sl_cooldown_seconds", 30)
 
 
-async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None):
+async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None, is_latest_bar=True):
     """Immer im Markt, reiner Buy/Sell-Wechsel: Tief-Fraktal (down_fractal) = Kauf-Signal,
     Hoch-Fraktal (up_fractal) = Verkauf-Signal - oder umgekehrt, wenn fr_invert_direction an ist
     (buy_i/sell_i kommen von fr_poll_loop bereits entsprechend vertauscht, siehe dort). Optionaler
@@ -3641,11 +3641,24 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
 
     fr_dca_enabled (Nachkauf/DCA): kommt WAEHREND einer offenen Position ein weiteres Signal in
     DERSELBEN Richtung (z.B. noch ein Tief-Fraktal waehrend Long), wird nachgekauft statt das
-    Signal zu ignorieren - bis zu fr_dca_max_entries mal (insgesamt also 1+N Einstiege). Nach
-    jedem Nachkauf werden SL/TP auf Basis des NEUEN Durchschnittspreises neu gesetzt (siehe
+    Signal zu ignorieren - bis zu fr_dca_max_entries mal (insgesamt also 1+N Einstiege), UND nur
+    wenn der Kurs sich seit dem aktuellen Durchschnittspreis um mindestens fr_dca_step_usd
+    (Preis-Distanz in $, nicht PnL) in die Nachkauf-Richtung bewegt hat - wie ein Grid-Abstand.
+    Verhindert, dass mehrere Fraktal-Signale kurz hintereinander auf fast demselben Kursniveau
+    unnoetig viele Nachkauf-Stufen verbrauchen. Nach jedem Nachkauf werden SL/TP auf Basis des NEUEN Durchschnittspreises neu gesetzt (siehe
     _fr_set_sl/_fr_set_tp) - der feste TP wird dadurch effektiv zu einem 'sobald die
     Gesamtposition im Plus ist'-Ausstieg, je mehr nachgekauft wurde, desto naeher liegt er am
     aktuellen Kurs. Nachkaeufe respektieren dieselben Filter (Z-Score/ADX/MTF) wie Ersteinstiege.
+    SICHERHEITSNETZ (live beobachtet: 20 echte Nachkauf-Orders in 79 Sekunden auf 1m-Kerzen - technisch
+    unmoeglich bei echtzeitnaher Verarbeitung): haengt der Poll-Loop mal hinterher (z.B. durch
+    WS-Cache-Aussetzer) und verarbeitet dadurch einen ganzen Rueckstand an neuen Kerzen in einer
+    engen Schleife OHNE echten Zeitabstand dazwischen, wuerde jede darin bereits bestaetigte
+    Fraktal-Wiederholung einen SOFORTIGEN Nachkauf ausloesen - bei Flip-Logik ist das
+    selbstkorrigierend (unschoen, aber nicht gefaehrlich), bei DCA blaeht das die Positionsgroesse
+    dagegen unkontrolliert auf. Nachkauf feuert deshalb NUR, wenn is_latest_bar=True ist (die
+    gerade verarbeitete Kerze ist wirklich die neueste, kein nachgeholter Rueckstand) - normale
+    Ersteinstiege/Flips/Exits sind davon nicht betroffen und laufen wie gehabt auch fuer
+    nachgeholte Kerzen.
     WICHTIG: solange fr_dca_enabled an ist, werden Gegen-Signale (die sonst einen Flip/Exit
     ausloesen wuerden) komplett IGNORIERT - die Position kann dann ausschliesslich ueber SL/TP
     beendet werden. Sonst wuerde das naechstbeste Gegen-Fraktal die nachgekaufte Position
@@ -3711,7 +3724,9 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
     if pos == "long" and buy_i:
         dca_enabled = cfg.get("fr_dca_enabled", False)
         max_entries = cfg.get("fr_dca_max_entries", 3)
-        if dca_enabled and long_ok and st["entry_count"] < 1 + max_entries:
+        step_usd = cfg.get("fr_dca_step_usd", 250.0)
+        far_enough = step_usd <= 0 or st["avg_entry_price"] is None or (st["avg_entry_price"] - price) >= step_usd
+        if dca_enabled and is_latest_bar and long_ok and far_enough and st["entry_count"] < 1 + max_entries:
             debug_log(f"📥 [{symbol}] Fractals Nachkauf: LONG @ {price} (Stufe {st['entry_count'] + 1}/{1 + max_entries})")
             await execute_entry(symbol, "long", price, is_add_on=True)
             if st["position"] is not None:
@@ -3722,7 +3737,9 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
     if pos == "short" and sell_i:
         dca_enabled = cfg.get("fr_dca_enabled", False)
         max_entries = cfg.get("fr_dca_max_entries", 3)
-        if dca_enabled and short_ok and st["entry_count"] < 1 + max_entries:
+        step_usd = cfg.get("fr_dca_step_usd", 250.0)
+        far_enough = step_usd <= 0 or st["avg_entry_price"] is None or (price - st["avg_entry_price"]) >= step_usd
+        if dca_enabled and is_latest_bar and short_ok and far_enough and st["entry_count"] < 1 + max_entries:
             debug_log(f"📥 [{symbol}] Fractals Nachkauf: SHORT @ {price} (Stufe {st['entry_count'] + 1}/{1 + max_entries})")
             await execute_entry(symbol, "short", price, is_add_on=True)
             if st["position"] is not None:
@@ -3933,7 +3950,8 @@ async def fr_poll_loop(symbol):
                         adx_i = adx_series[idx] if adx_series else None
                         plus_di_i = plus_di_series[idx] if plus_di_series else None
                         minus_di_i = minus_di_series[idx] if minus_di_series else None
-                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], adx_i, plus_di_i, minus_di_i, trend_now)
+                        is_latest_bar = idx == len(closed_ts) - 1
+                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], adx_i, plus_di_i, minus_di_i, trend_now, is_latest_bar)
 
                     await check_fr_sl_tp(symbol, price)
                 elif due_heartbeat:
@@ -7681,6 +7699,7 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
     sl_cooldown_until_ts = None
     dca_enabled = cfg.get("fr_dca_enabled", False)
     dca_max_entries = cfg.get("fr_dca_max_entries", 3)
+    dca_step_usd = cfg.get("fr_dca_step_usd", 250.0)
 
     for i in range(warmup, n):
         price = c[i]
@@ -7719,9 +7738,11 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
 
         # Nachkauf/DCA: dasselbe Signal wie der Ersteinstieg feuert WAEHREND die Position noch
         # offen ist erneut in derselben Richtung - siehe check_fr_signal fuer die identische
-        # Logik im Live-Betrieb. Durchschnittspreis wird neu gewichtet, SL/TP werden danach auf
-        # Basis des neuen Durchschnitts neu gesetzt.
-        if position["dir"] == "long" and buy_i and dca_enabled and long_ok(i) and position["entries"] < 1 + dca_max_entries:
+        # Logik im Live-Betrieb. Zusaetzlich erst ab einem Mindest-$-Abstand zum aktuellen
+        # Durchschnittspreis (dca_step_usd, wie ein Grid-Abstand) - verhindert mehrere
+        # Nachkauf-Stufen auf fast demselben Kursniveau. Durchschnittspreis wird neu gewichtet,
+        # SL/TP werden danach auf Basis des neuen Durchschnitts neu gesetzt.
+        if position["dir"] == "long" and buy_i and dca_enabled and long_ok(i) and position["entries"] < 1 + dca_max_entries and (dca_step_usd <= 0 or (position["entry"] - price) >= dca_step_usd):
             add_size = (margin * leverage) / price
             total_value = position["entry"] * position["size"] + price * add_size
             position["size"] += add_size
@@ -7730,7 +7751,7 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
             _fr_bt_set_sl(position, cfg, margin, leverage)
             _fr_bt_set_tp(position, cfg)
             continue
-        if position["dir"] == "short" and sell_i and dca_enabled and short_ok(i) and position["entries"] < 1 + dca_max_entries:
+        if position["dir"] == "short" and sell_i and dca_enabled and short_ok(i) and position["entries"] < 1 + dca_max_entries and (dca_step_usd <= 0 or (price - position["entry"]) >= dca_step_usd):
             add_size = (margin * leverage) / price
             total_value = position["entry"] * position["size"] + price * add_size
             position["size"] += add_size
