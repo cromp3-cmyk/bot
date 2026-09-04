@@ -16,7 +16,7 @@ from collections import deque
 
 from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
-    BOTS, execute_entry, execute_exit, execute_partial_exit, compute_step_abs, GLOBAL_SETTINGS,
+    BOTS, execute_entry, execute_exit, execute_partial_exit, compute_step_abs, compute_step_abs_g2, GLOBAL_SETTINGS,
 )
 import binance_ws  # WebSocket-Kerzen-Cache - reduziert REST-Traffic gegen Binance drastisch,
 # siehe fetch_candles_binance()/fetch_candles_binance_vol() weiter unten
@@ -5914,6 +5914,8 @@ async def on_price_update(symbol, price):
         await check_es_sl_tp(symbol, price)
         return
 
+    await check_grid_v2_tick(symbol, price)
+
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
@@ -5978,6 +5980,124 @@ async def on_price_update(symbol, price):
             await execute_exit(symbol, price, "TP")
         elif bot_active and price >= st["last_entry_price"] + grid_step_abs and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf):
             await execute_entry(symbol, "short", price, is_add_on=True)
+
+
+def _g2_nachkauf_size_multiplier(st, cfg):
+    """Verdopplung (optional): 1. Nachkauf 1x, 2. Nachkauf 2x, 3. Nachkauf 4x, 4. Nachkauf 8x, ...
+    st['entry_count'] ist zum Zeitpunkt des Aufrufs die Anzahl der BISHERIGEN Einstiege (1 nach
+    dem Ersteinstieg, 2 nach dem 1. Nachkauf, usw.), execute_entry erhoeht ihn erst DANACH -
+    der naechste Nachkauf ist also Stufe (entry_count), 0-indiziert fuer die Verdopplung."""
+    if not cfg.get("g2_double_enabled", False):
+        return 1.0
+    return float(2 ** (st["entry_count"] - 1))
+
+
+async def check_grid_v2_tick(symbol, price):
+    """Grid 2 - zweite, unabhaengige Grid-Strategie (eigenes Feld-Praefix g2_, eigene Werte,
+    komplett unabhaengig von der ersten Grid-Strategie). Identische Grundmechanik (Anker,
+    Nachkauf, TP, SL, Richtung, Anker-Nachfuehrung, Nach-TP-sofort-drehen) - siehe der erste
+    Grid-Block oben fuer die identische Kommentierung dieser Teile. Zwei zusaetzliche, unabhaengig
+    zuschaltbare Optionen:
+
+    g2_revisit_enabled: die Nachkauf-Schwelle bleibt FEST auf dem urspruenglichen Level (Anker
+    +/- Grid-Stufe) statt sich mit jedem Nachkauf weiter zu verschieben (wie beim ersten Grid,
+    wo der Abstand bewusst vom LETZTEN Kaufpreis aus gemessen wird, damit jeder Nachkauf einen
+    NEUEN, weiter entfernten Kurs braucht). Bei Grid 2 mit aktivem Revisit kann derselbe Level
+    dagegen MEHRFACH ausloesen: sobald der Kurs den Level erreicht, wird nachgekauft und der
+    Level "entschaerft" (armed=False) - erst wenn der Kurs wieder ueber den Level zurueckkehrt
+    (long) bzw. darunter (short), wird er erneut "scharf" (armed=True) und kann beim naechsten
+    Erreichen wieder ausloesen. Beispiel: Kurs faellt auf 90 Cent -> Nachkauf, entschaerft. Kurs
+    steigt auf 1 Dollar -> wieder scharf. Kurs faellt zurueck auf 90 Cent -> Nachkauf ERNEUT (nicht
+    erst bei 80 Cent wie beim klassischen Grid).
+
+    g2_double_enabled: jede Nachkauf-Stufe verdoppelt die Positionsgroesse der vorherigen (siehe
+    _g2_nachkauf_size_multiplier) - nutzt den bereits vorhandenen size_multiplier-Parameter von
+    execute_entry, keine Sonderlogik noetig.
+    """
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if cfg["entry_mode"] != "grid_v2" or price is None:
+        return
+    bot_active = cfg["bot_active"]
+
+    if st["anchor_price"] is None:
+        st["anchor_price"] = price
+        return
+
+    if st["position"] is None:
+        if not bot_active:
+            return
+        direction_mode = cfg.get("g2_direction_mode", "both")
+
+        if cfg.get("g2_anchor_follow_enabled", False) and direction_mode != "both" and st["anchor_price"]:
+            old_anchor = st["anchor_price"]
+            follow_abs = old_anchor * (cfg.get("g2_anchor_follow_pct", 1.0) / 100.0)
+            if direction_mode == "long_only" and price > old_anchor + follow_abs:
+                actual_pct = round((price - old_anchor) / old_anchor * 100, 2)
+                debug_log(f"⚓ [{symbol}] Grid-2-Anker nachgezogen (long_only): {round(old_anchor,4)} -> {price} (Kurs war {actual_pct}% über dem Anker)")
+                st["anchor_price"] = price
+            elif direction_mode == "short_only" and price < old_anchor - follow_abs:
+                actual_pct = round((old_anchor - price) / old_anchor * 100, 2)
+                debug_log(f"⚓ [{symbol}] Grid-2-Anker nachgezogen (short_only): {round(old_anchor,4)} -> {price} (Kurs war {actual_pct}% unter dem Anker)")
+                st["anchor_price"] = price
+
+        grid_step_abs = compute_step_abs_g2(st["anchor_price"], cfg, "grid")
+        if price <= st["anchor_price"] - grid_step_abs and direction_mode != "short_only":
+            st["g2_trigger_armed"] = True
+            await execute_entry(symbol, "long", price, is_add_on=False)
+        elif price >= st["anchor_price"] + grid_step_abs and direction_mode != "long_only":
+            st["g2_trigger_armed"] = True
+            await execute_entry(symbol, "short", price, is_add_on=False)
+        return
+
+    if cfg.get("g2_sl_enabled", False) and st.get("avg_entry_price") is not None and st.get("total_coin_size"):
+        avg_entry = st["avg_entry_price"]
+        size = st["total_coin_size"]
+        unrealized_pnl = (price - avg_entry) * size if st["position"] == "long" else (avg_entry - price) * size
+        sl_usd = cfg.get("g2_sl_manual_usd", 20.0)
+        if unrealized_pnl <= -sl_usd:
+            debug_log(f"🚪 [{symbol}] Grid-2 SL: {st['position'].upper()} @ {price} (unrealisierter Verlust {round(unrealized_pnl, 2)} $ erreicht -{sl_usd} $)")
+            await execute_exit(symbol, price, "SL")
+            return
+
+    tp_step_abs = compute_step_abs_g2(st["avg_entry_price"], cfg, "tp")
+    max_nachkauf = cfg.get("g2_max_nachkauf", 5)
+    revisit_enabled = cfg.get("g2_revisit_enabled", False)
+    can_nachkauf = bot_active and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf)
+
+    if revisit_enabled:
+        # Fest am Anker-Level, nicht am letzten Kaufpreis - siehe Docstring oben.
+        base_step_abs = compute_step_abs_g2(st["anchor_price"], cfg, "grid")
+        trigger_price = st["anchor_price"] - base_step_abs if st["position"] == "long" else st["anchor_price"] + base_step_abs
+    else:
+        ref = st["last_entry_price"] or st["avg_entry_price"]
+        step_abs = compute_step_abs_g2(ref, cfg, "grid")
+        trigger_price = (ref - step_abs) if st["position"] == "long" else (ref + step_abs)
+
+    if st["position"] == "long":
+        if price >= st["avg_entry_price"] + tp_step_abs:
+            await execute_exit(symbol, price, "TP")
+            return
+        if revisit_enabled:
+            if price > trigger_price:
+                st["g2_trigger_armed"] = True
+            elif price <= trigger_price and st.get("g2_trigger_armed", True) and can_nachkauf:
+                await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+                st["g2_trigger_armed"] = False
+        elif price <= trigger_price and can_nachkauf:
+            await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+    elif st["position"] == "short":
+        if price <= st["avg_entry_price"] - tp_step_abs:
+            await execute_exit(symbol, price, "TP")
+            return
+        if revisit_enabled:
+            if price < trigger_price:
+                st["g2_trigger_armed"] = True
+            elif price >= trigger_price and st.get("g2_trigger_armed", True) and can_nachkauf:
+                await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+                st["g2_trigger_armed"] = False
+        elif price >= trigger_price and can_nachkauf:
+            await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
 
 
 

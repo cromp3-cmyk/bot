@@ -189,6 +189,21 @@ def default_config():
         "grid_anchor_follow_pct": float(os.getenv("GRID_ANCHOR_FOLLOW_PCT", "1.0")),  # ab wie viel % Abstand vom Anker (in der gesperrten Richtung) der Anker auf den aktuellen Kurs nachgezogen wird
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
+        # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
+        "g2_mode": os.getenv("G2_MODE", "pct"),  # "pct" oder "usd"
+        "g2_direction_mode": os.getenv("G2_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "g2_step_pct": float(os.getenv("G2_STEP_PCT", "0.25")),
+        "g2_tp_step_pct": float(os.getenv("G2_TP_STEP_PCT", "0.25")),
+        "g2_step_usd": float(os.getenv("G2_STEP_USD", "150")),
+        "g2_tp_step_usd": float(os.getenv("G2_TP_STEP_USD", "150")),
+        "g2_max_nachkauf": int(os.getenv("G2_MAX_NACHKAUF", "5")),
+        "g2_sl_enabled": os.getenv("G2_SL_ENABLED", "false").lower() == "true",
+        "g2_sl_manual_usd": float(os.getenv("G2_SL_MANUAL_USD", "20.0")),
+        "g2_anchor_follow_enabled": os.getenv("G2_ANCHOR_FOLLOW_ENABLED", "false").lower() == "true",
+        "g2_anchor_follow_pct": float(os.getenv("G2_ANCHOR_FOLLOW_PCT", "1.0")),
+        "g2_auto_reverse": os.getenv("G2_AUTO_REVERSE", "true").lower() == "true",
+        "g2_revisit_enabled": os.getenv("G2_REVISIT_ENABLED", "false").lower() == "true",  # Nachkauf-Schwelle bleibt FEST am Anker-Level statt sich mit jedem Nachkauf weiter zu verschieben - kann dadurch mehrfach an derselben Kursmarke ausloesen
+        "g2_double_enabled": os.getenv("G2_DOUBLE_ENABLED", "false").lower() == "true",  # jede Nachkauf-Stufe verdoppelt die Positionsgroesse der vorherigen (1x, 2x, 4x, 8x, ...)
         "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
         "obi_mode": os.getenv("OBI_MODE", "momentum"),  # "momentum" (mit dem Ungleichgewicht), "mean_reversion" (dagegen) oder "reversal" (separater Long/Short-Einstieg bei Umkehr aus Extremzone)
         "obi_long_threshold": float(os.getenv("OBI_LONG_THRESHOLD", "0.20")),  # nur Reversal-Modus: Long-Zone ab OBI <= -Wert
@@ -544,7 +559,7 @@ def default_config():
 def default_state():
     return {
         "position": None, "avg_entry_price": None, "total_coin_size": 0.0,
-        "entry_count": 0, "anchor_price": None, "last_price": None,
+        "entry_count": 0, "anchor_price": None, "last_price": None, "g2_trigger_armed": True,
         "price_history": [],
         "position_opened_at": None,
         "obi_book": {"bids": {}, "asks": {}}, "obi_avg_buffer": [], "obi_last_signal_direction": None,
@@ -859,28 +874,52 @@ def compute_step_abs(reference_price, cfg, which):
     return reference_price * (pct / 100)
 
 
+def compute_step_abs_g2(reference_price, cfg, which):
+    """Identisches Muster zu compute_step_abs, aber fuer die zweite, unabhaengige Grid-Strategie
+    ('Grid 2', eigenes Feld-Praefix g2_) - eigene Einstellungen, komplett unabhaengig von der
+    ersten Grid-Strategie, auch wenn beide fuer denselben Coin nacheinander getestet werden."""
+    if cfg.get("g2_mode", "pct") == "usd":
+        val = cfg.get("g2_step_usd") if which == "grid" else cfg.get("g2_tp_step_usd")
+        return val if val is not None else 0.0
+    pct = cfg.get("g2_step_pct") if which == "grid" else cfg.get("g2_tp_step_pct")
+    if pct is None or reference_price is None:
+        return 0.0
+    return reference_price * (pct / 100)
+
+
 def calc_grid_levels(symbol):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     levels = {"anchor": st["anchor_price"], "tp_price": None, "next_nachkauf_price": None,
               "grid_step_abs": None, "tp_step_abs": None}
+    is_g2 = cfg.get("entry_mode") == "grid_v2"
+    step_fn = compute_step_abs_g2 if is_g2 else compute_step_abs
     if st["position"] is None:
         if st["anchor_price"] is not None:
-            step = compute_step_abs(st["anchor_price"], cfg, "grid")
+            step = step_fn(st["anchor_price"], cfg, "grid")
             levels["next_entry_long"] = round(st["anchor_price"] - step, 4)
             levels["next_entry_short"] = round(st["anchor_price"] + step, 4)
             levels["grid_step_abs"] = round(step, 4)
     elif st["avg_entry_price"] is not None:
-        tp_step = compute_step_abs(st["avg_entry_price"], cfg, "tp")
-        grid_step = compute_step_abs(st["avg_entry_price"], cfg, "grid")
+        tp_step = step_fn(st["avg_entry_price"], cfg, "tp")
+        # Nachkauf-Referenz: bei Grid 2 mit aktivem Revisit-Modus bleibt die Schwelle FEST am
+        # Anker (siehe check_grid_v2_tick) - sonst (klassisches Grid 1 UND Grid 2 ohne Revisit)
+        # wird vom LETZTEN Kaufpreis aus gemessen, nicht vom laufenden Durchschnitt (sonst
+        # schrumpft der angezeigte Abstand mit jedem Nachkauf, obwohl der echte Trigger das
+        # nicht tut - siehe echter Bugfix dazu in execute_entry).
+        if is_g2 and cfg.get("g2_revisit_enabled", False) and st["anchor_price"] is not None:
+            nachkauf_ref = st["anchor_price"]
+        else:
+            nachkauf_ref = st["last_entry_price"] or st["avg_entry_price"]
+        grid_step = step_fn(nachkauf_ref, cfg, "grid")
         levels["tp_step_abs"] = round(tp_step, 4)
         levels["grid_step_abs"] = round(grid_step, 4)
         if st["position"] == "long":
             levels["tp_price"] = round(st["avg_entry_price"] + tp_step, 4)
-            levels["next_nachkauf_price"] = round(st["avg_entry_price"] - grid_step, 4)
+            levels["next_nachkauf_price"] = round(nachkauf_ref - grid_step, 4)
         else:
             levels["tp_price"] = round(st["avg_entry_price"] - tp_step, 4)
-            levels["next_nachkauf_price"] = round(st["avg_entry_price"] + grid_step, 4)
+            levels["next_nachkauf_price"] = round(nachkauf_ref + grid_step, 4)
     return levels
 
 
@@ -1211,6 +1250,7 @@ async def _execute_exit_locked(symbol, price, reason):
     st["anchor_price"] = exit_price_for_log
     st["position_opened_at"] = None
     st["last_entry_price"] = None
+    st["g2_trigger_armed"] = True  # Grid 2 Revisit-Modus: fuer den naechsten Zyklus neu "scharf"
     await save_bot_state()
 
     if cfg.get("auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid":
@@ -1220,6 +1260,11 @@ async def _execute_exit_locked(symbol, price, reason):
             await _execute_entry_locked(symbol, opposite, exit_price_for_log, is_add_on=False)
         # sonst (Richtung erlaubt die Gegenrichtung nicht): bleibt flach, wartet auf das naechste
         # Grid-Level in der erlaubten Richtung (siehe on_price_update)
+    elif cfg.get("g2_auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid_v2":
+        opposite = "short" if closing_side == "long" else "long"
+        direction_mode = cfg.get("g2_direction_mode", "both")
+        if direction_mode == "both" or (direction_mode == "long_only" and opposite == "long") or (direction_mode == "short_only" and opposite == "short"):
+            await _execute_entry_locked(symbol, opposite, exit_price_for_log, is_add_on=False)
 
 
 
@@ -1336,11 +1381,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="coin-overview" id="coin-overview"></div>
 
+<details id="widget-grid-section" open style="margin-top:8px;">
+<summary style="cursor:pointer; font-size:18px; font-weight:700; padding:10px 0; color:var(--text);">📊 Live-Kacheln (Pocket-Trading, Scalp-Board, Gauges, ...) (aufklappen/einklappen)</summary>
 <div id="oms-grid-header" style="display:none; margin-bottom:8px;">
   <button id="btn-reset-layout" type="button">↺ Layout zurücksetzen</button>
   <div style="font-size:11px; color:var(--text-dim); padding-top:8px;">Ziehe an der Titelleiste eines Kachel, um sie zu verschieben - an der unteren rechten Ecke ziehen, um die Größe zu ändern.</div>
 </div>
 <div class="grid-stack" id="oms-grid" style="margin-bottom:12px;"></div>
+</details>
 
 <div id="generic-chart-wrap">
   <h2 class="section-title">Kursverlauf</h2>
@@ -1369,6 +1417,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div><label>Strategie</label>
     <select class="cfg" id="entry_mode">
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
+      <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="obi_scalp">OBI-Scalp (Orderbuch-Ungleichgewicht, symmetrisches TP/SL)</option>
       <option value="oms_scalp">OBI-Momentum-Scalp (OBI + CVD-Bestätigung + Funding-Filter, TP1+Trailing, Nachkauf)</option>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
@@ -2916,6 +2965,82 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="auto_reverse">
       <option value="true">Ja - sofort Gegenposition</option>
       <option value="false">Nein - warten auf neues Gitter-Signal</option>
+    </select>
+  </div>
+
+  <div data-mode="grid_v2" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🔁 Grid 2: identische Grundmechanik wie das erste Grid (Anker, Nachkauf, TP, SL, Richtung,
+    Anker-Nachführung) - eigene, komplett unabhängige Einstellungen, plus zwei zusätzliche
+    Optionen weiter unten (wiederkehrende Nachkauf-Level + Verdopplung).
+  </div>
+  <div data-mode="grid_v2"><label>Richtung</label>
+    <select class="cfg" id="g2_direction_mode">
+      <option value="both">Beide (Long unter Anker, Short über Anker)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="grid_v2"><label>Grid-Modus</label>
+    <select class="cfg" id="g2_mode">
+      <option value="pct">Prozent (%)</option>
+      <option value="usd">Fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="grid_v2"><label>Grid-Stufe (%)</label><input type="number" step="any" id="g2_step_pct"></div>
+  <div data-mode="grid_v2"><label>TP-Stufe (%)</label><input type="number" step="any" id="g2_tp_step_pct"></div>
+  <div data-mode="grid_v2"><label>Grid-Stufe ($)</label><input type="number" step="any" id="g2_step_usd"></div>
+  <div data-mode="grid_v2"><label>TP-Stufe ($)</label><input type="number" step="any" id="g2_tp_step_usd"></div>
+  <div data-mode="grid_v2"><label>Max. Nachkauf</label><input type="number" step="1" id="g2_max_nachkauf"></div>
+  <div data-mode="grid_v2"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
+    <select class="cfg" id="g2_sl_enabled">
+      <option value="false">Aus (Standard)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="grid_v2"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="g2_sl_manual_usd"></div>
+  <div data-mode="grid_v2" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Nur relevant bei "Nur Long"/"Nur Short": läuft der Kurs weit in die GESPERRTE Richtung weg,
+    würde der Bot sonst endlos auf eine Rückkehr in die alte Zone warten. Ist der Abstand größer
+    als der eingestellte Prozentwert, wird der Anker auf den aktuellen Kurs nachgezogen. Bei
+    "Beide" ohne Wirkung.
+  </div>
+  <div data-mode="grid_v2"><label>Anker-Nachführung</label>
+    <select class="cfg" id="g2_anchor_follow_enabled">
+      <option value="false">Aus (Standard - Anker bleibt fest, bis eine Position schließt)</option>
+      <option value="true">An - Anker folgt dem Kurs bei zu großem Abstand in gesperrter Richtung</option>
+    </select>
+  </div>
+  <div data-mode="grid_v2"><label>Nachführ-Schwelle (%)</label><input type="number" step="0.1" min="0.1" id="g2_anchor_follow_pct"></div>
+  <div data-mode="grid_v2"><label>Nach TP sofort drehen</label>
+    <select class="cfg" id="g2_auto_reverse">
+      <option value="true">Ja - sofort Gegenposition</option>
+      <option value="false">Nein - warten auf neues Gitter-Signal</option>
+    </select>
+  </div>
+  <div data-mode="grid_v2" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Wiederkehrende Nachkauf-Level: AUS (Standard) = wie beim ersten Grid, jeder Nachkauf braucht
+    einen NEUEN, weiter entfernten Kurs (Abstand wird vom letzten Kaufpreis gemessen). AN = die
+    Nachkauf-Schwelle bleibt FEST auf dem ursprünglichen Level (Anker ± Grid-Stufe) - läuft der
+    Kurs z.B. auf 90 Cent, kauft der Bot dort. Steigt der Kurs danach auf 1 Dollar und fällt
+    wieder auf 90 Cent, kauft er dort ERNEUT (nicht erst bei 80 Cent wie beim klassischen Grid) -
+    bis die maximale Nachkauf-Anzahl erreicht ist.
+  </div>
+  <div data-mode="grid_v2"><label>Wiederkehrende Nachkauf-Level</label>
+    <select class="cfg" id="g2_revisit_enabled">
+      <option value="false">Aus (Standard - wie Grid 1, jeder Nachkauf braucht neuen Kurs)</option>
+      <option value="true">An - Nachkauf-Level bleibt fest, kann mehrfach auslösen</option>
+    </select>
+  </div>
+  <div data-mode="grid_v2" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Nachkauf-Größe verdoppeln: AUS (Standard) = jeder Nachkauf nutzt dieselbe Positionsgröße
+    (Margin × Hebel). AN = jede weitere Nachkauf-Stufe verdoppelt die Größe der vorherigen
+    (1x, 2x, 4x, 8x, ...) - z.B. bei 100$ Basisgröße: 1. Nachkauf 100$, 2. Nachkauf 200$,
+    3. Nachkauf 400$, 4. Nachkauf 800$, begrenzt durch "Max. Nachkauf" oben.
+  </div>
+  <div data-mode="grid_v2"><label>Nachkauf-Größe verdoppeln</label>
+    <select class="cfg" id="g2_double_enabled">
+      <option value="false">Aus (Standard - immer gleiche Größe)</option>
+      <option value="true">An - jede Stufe verdoppelt die vorherige</option>
     </select>
   </div>
   <div><label>Modus</label>
@@ -5034,6 +5159,20 @@ async function refresh() {
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('binance_market_type').value = data.config.binance_market_type;
     document.getElementById('auto_reverse').value = String(data.config.auto_reverse);
+    document.getElementById('g2_direction_mode').value = data.config.g2_direction_mode;
+    document.getElementById('g2_mode').value = data.config.g2_mode;
+    document.getElementById('g2_step_pct').value = data.config.g2_step_pct;
+    document.getElementById('g2_tp_step_pct').value = data.config.g2_tp_step_pct;
+    document.getElementById('g2_step_usd').value = data.config.g2_step_usd;
+    document.getElementById('g2_tp_step_usd').value = data.config.g2_tp_step_usd;
+    document.getElementById('g2_max_nachkauf').value = data.config.g2_max_nachkauf;
+    document.getElementById('g2_sl_enabled').value = String(data.config.g2_sl_enabled);
+    document.getElementById('g2_sl_manual_usd').value = data.config.g2_sl_manual_usd;
+    document.getElementById('g2_anchor_follow_enabled').value = String(data.config.g2_anchor_follow_enabled);
+    document.getElementById('g2_anchor_follow_pct').value = data.config.g2_anchor_follow_pct;
+    document.getElementById('g2_auto_reverse').value = String(data.config.g2_auto_reverse);
+    document.getElementById('g2_revisit_enabled').value = String(data.config.g2_revisit_enabled);
+    document.getElementById('g2_double_enabled').value = String(data.config.g2_double_enabled);
   }
   updateModeFields();
 
@@ -5513,6 +5652,20 @@ function buildConfigPayload() {
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
     auto_reverse: document.getElementById('auto_reverse').value === 'true',
+    g2_direction_mode: document.getElementById('g2_direction_mode').value,
+    g2_mode: document.getElementById('g2_mode').value,
+    g2_step_pct: parseFloat(document.getElementById('g2_step_pct').value),
+    g2_tp_step_pct: parseFloat(document.getElementById('g2_tp_step_pct').value),
+    g2_step_usd: parseFloat(document.getElementById('g2_step_usd').value),
+    g2_tp_step_usd: parseFloat(document.getElementById('g2_tp_step_usd').value),
+    g2_max_nachkauf: parseInt(document.getElementById('g2_max_nachkauf').value),
+    g2_sl_enabled: document.getElementById('g2_sl_enabled').value === 'true',
+    g2_sl_manual_usd: parseFloat(document.getElementById('g2_sl_manual_usd').value),
+    g2_anchor_follow_enabled: document.getElementById('g2_anchor_follow_enabled').value === 'true',
+    g2_anchor_follow_pct: parseFloat(document.getElementById('g2_anchor_follow_pct').value),
+    g2_auto_reverse: document.getElementById('g2_auto_reverse').value === 'true',
+    g2_revisit_enabled: document.getElementById('g2_revisit_enabled').value === 'true',
+    g2_double_enabled: document.getElementById('g2_double_enabled').value === 'true',
   };
 }
 
@@ -5691,6 +5844,9 @@ async def handle_config_update(request):
     for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_direction_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "grid_sl_enabled", "grid_sl_manual_usd",
                 "grid_anchor_follow_enabled", "grid_anchor_follow_pct", "dry_run", "auto_reverse", "binance_market_type",
+                "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
+                "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_manual_usd", "g2_anchor_follow_enabled", "g2_anchor_follow_pct",
+                "g2_auto_reverse", "g2_revisit_enabled", "g2_double_enabled",
                 "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_instant_reset_ratio", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_depth_weighting_enabled", "obi_use_median", "obi_min_liquidity", "obi_breakeven_enabled", "obi_breakeven_trigger_ratio", "obi_breakeven_lock_usd", "obi_breakeven_lock_pct", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
                 "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length",
                 "obi_spread_filter_enabled", "obi_max_spread_pct",
