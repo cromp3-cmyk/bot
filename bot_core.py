@@ -902,15 +902,13 @@ def calc_grid_levels(symbol):
             levels["grid_step_abs"] = round(step, 4)
     elif st["avg_entry_price"] is not None:
         tp_step = step_fn(st["avg_entry_price"], cfg, "tp")
-        # Nachkauf-Referenz: bei Grid 2 mit aktivem Revisit-Modus bleibt die Schwelle FEST am
-        # Anker (siehe check_grid_v2_tick) - sonst (klassisches Grid 1 UND Grid 2 ohne Revisit)
-        # wird vom LETZTEN Kaufpreis aus gemessen, nicht vom laufenden Durchschnitt (sonst
-        # schrumpft der angezeigte Abstand mit jedem Nachkauf, obwohl der echte Trigger das
-        # nicht tut - siehe echter Bugfix dazu in execute_entry).
-        if is_g2 and cfg.get("g2_revisit_enabled", False) and st["anchor_price"] is not None:
-            nachkauf_ref = st["anchor_price"]
-        else:
-            nachkauf_ref = st["last_entry_price"] or st["avg_entry_price"]
+        # Nachkauf-Referenz: IMMER vom letzten Kaufpreis aus gemessen (nicht vom laufenden
+        # Durchschnitt - sonst schrumpft der angezeigte Abstand mit jedem Nachkauf, obwohl der
+        # echte Trigger das nicht tut, siehe Bugfix dazu in execute_entry). Gilt fuer Grid 1 UND
+        # Grid 2 identisch - der Revisit-Modus bei Grid 2 aendert NICHT die Referenz, sondern
+        # erlaubt zusaetzlich ein erneutes Ausloesen GENAU AUF diesem Referenz-Level, wenn der
+        # Kurs zwischenzeitlich darueber/darunter war (siehe check_grid_v2_tick).
+        nachkauf_ref = st["last_entry_price"] or st["avg_entry_price"]
         grid_step = step_fn(nachkauf_ref, cfg, "grid")
         levels["tp_step_abs"] = round(tp_step, 4)
         levels["grid_step_abs"] = round(grid_step, 4)
@@ -3018,17 +3016,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="grid_v2" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Wiederkehrende Nachkauf-Level: AUS (Standard) = wie beim ersten Grid, jeder Nachkauf braucht
-    einen NEUEN, weiter entfernten Kurs (Abstand wird vom letzten Kaufpreis gemessen). AN = die
-    Nachkauf-Schwelle bleibt FEST auf dem ursprünglichen Level (Anker ± Grid-Stufe) - läuft der
-    Kurs z.B. auf 90 Cent, kauft der Bot dort. Steigt der Kurs danach auf 1 Dollar und fällt
-    wieder auf 90 Cent, kauft er dort ERNEUT (nicht erst bei 80 Cent wie beim klassischen Grid) -
-    bis die maximale Nachkauf-Anzahl erreicht ist.
+    Wiederkehrende Nachkauf-Level: läuft GENAUSO wie beim ersten Grid weiter absteigend (jeder
+    neue, tiefere Level braucht einen NEUEN, weiter entfernten Kurs) - AUS (Standard) ändert daran
+    nichts. AN = zusätzlich kann auch das ZULETZT gekaufte Level nochmal auslösen, wenn der Kurs
+    zwischenzeitlich darüber (Long) bzw. darunter (Short) zurückgekehrt ist. Beispiel: Kurs fällt
+    von 1$ auf 90 Cent (Nachkauf), weiter auf 80 Cent (Nachkauf, neuer Level). Kurs steigt auf 85
+    Cent, fällt zurück auf 80 Cent -> Nachkauf ERNEUT auf demselben 80-Cent-Level (nicht erst bei
+    70 Cent nötig) - bis die maximale Nachkauf-Anzahl erreicht ist.
   </div>
   <div data-mode="grid_v2"><label>Wiederkehrende Nachkauf-Level</label>
     <select class="cfg" id="g2_revisit_enabled">
-      <option value="false">Aus (Standard - wie Grid 1, jeder Nachkauf braucht neuen Kurs)</option>
-      <option value="true">An - Nachkauf-Level bleibt fest, kann mehrfach auslösen</option>
+      <option value="false">Aus (Standard - wie Grid 1, nur neue, tiefere Level)</option>
+      <option value="true">An - zuletzt gekauftes Level kann zusätzlich erneut auslösen</option>
     </select>
   </div>
   <div data-mode="grid_v2" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">

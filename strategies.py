@@ -5999,16 +5999,16 @@ async def check_grid_v2_tick(symbol, price):
     Grid-Block oben fuer die identische Kommentierung dieser Teile. Zwei zusaetzliche, unabhaengig
     zuschaltbare Optionen:
 
-    g2_revisit_enabled: die Nachkauf-Schwelle bleibt FEST auf dem urspruenglichen Level (Anker
-    +/- Grid-Stufe) statt sich mit jedem Nachkauf weiter zu verschieben (wie beim ersten Grid,
-    wo der Abstand bewusst vom LETZTEN Kaufpreis aus gemessen wird, damit jeder Nachkauf einen
-    NEUEN, weiter entfernten Kurs braucht). Bei Grid 2 mit aktivem Revisit kann derselbe Level
-    dagegen MEHRFACH ausloesen: sobald der Kurs den Level erreicht, wird nachgekauft und der
-    Level "entschaerft" (armed=False) - erst wenn der Kurs wieder ueber den Level zurueckkehrt
-    (long) bzw. darunter (short), wird er erneut "scharf" (armed=True) und kann beim naechsten
-    Erreichen wieder ausloesen. Beispiel: Kurs faellt auf 90 Cent -> Nachkauf, entschaerft. Kurs
-    steigt auf 1 Dollar -> wieder scharf. Kurs faellt zurueck auf 90 Cent -> Nachkauf ERNEUT (nicht
-    erst bei 80 Cent wie beim klassischen Grid).
+    g2_revisit_enabled: laeuft GENAUSO wie beim ersten Grid weiter absteigend (jeder neue, tiefere
+    Level braucht einen NEUEN, weiter entfernten Kurs - Abstand vom letzten Kaufpreis aus
+    gemessen) - ZUSAETZLICH kann aber auch das ZULETZT gekaufte Level ein weiteres Mal ausloesen,
+    wenn der Kurs zwischenzeitlich darueber (long) bzw. darunter (short) zurueckgekehrt ist. Jedes
+    Level hat dafuer einen "scharf/entschaerft"-Zustand: direkt nach einem Kauf ist es entschaerft,
+    erst wenn der Kurs wieder darueber steigt (long) wird es erneut scharf und kann beim naechsten
+    Erreichen nochmal ausloesen. Beispiel: Kurs faellt von 1$ auf 90 Cent -> Nachkauf (entschaerft).
+    Kurs faellt weiter auf 80 Cent -> Nachkauf (neuer, tieferer Level, wie beim ersten Grid).
+    Kurs steigt auf 85 Cent -> die 80-Cent-Schwelle wird wieder scharf. Kurs faellt zurueck auf
+    80 Cent -> Nachkauf ERNEUT auf demselben Level (nicht erst bei 70 Cent noetig).
 
     g2_double_enabled: jede Nachkauf-Stufe verdoppelt die Positionsgroesse der vorherigen (siehe
     _g2_nachkauf_size_multiplier) - nutzt den bereits vorhandenen size_multiplier-Parameter von
@@ -6065,39 +6065,44 @@ async def check_grid_v2_tick(symbol, price):
     revisit_enabled = cfg.get("g2_revisit_enabled", False)
     can_nachkauf = bot_active and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf)
 
-    if revisit_enabled:
-        # Fest am Anker-Level, nicht am letzten Kaufpreis - siehe Docstring oben.
-        base_step_abs = compute_step_abs_g2(st["anchor_price"], cfg, "grid")
-        trigger_price = st["anchor_price"] - base_step_abs if st["position"] == "long" else st["anchor_price"] + base_step_abs
-    else:
-        ref = st["last_entry_price"] or st["avg_entry_price"]
-        step_abs = compute_step_abs_g2(ref, cfg, "grid")
-        trigger_price = (ref - step_abs) if st["position"] == "long" else (ref + step_abs)
+    # ref = das zuletzt gekaufte Level - GENAU wie beim ersten Grid der Bezugspunkt fuer den
+    # naechsten, TIEFEREN (long) bzw. HOEHEREN (short) Level. step_abs = Abstand zum naechsten
+    # neuen Level. Ohne Revisit ist das die komplette Logik (identisch zu Grid 1). Mit Revisit
+    # kommt zusaetzlich die Moeglichkeit dazu, GENAU AUF ref nochmal zu kaufen, wenn der Kurs
+    # zwischenzeitlich darueber/darunter war (siehe Docstring oben).
+    ref = st["last_entry_price"] or st["avg_entry_price"]
+    step_abs = compute_step_abs_g2(ref, cfg, "grid")
 
     if st["position"] == "long":
         if price >= st["avg_entry_price"] + tp_step_abs:
             await execute_exit(symbol, price, "TP")
             return
-        if revisit_enabled:
-            if price > trigger_price:
-                st["g2_trigger_armed"] = True
-            elif price <= trigger_price and st.get("g2_trigger_armed", True) and can_nachkauf:
-                await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-                st["g2_trigger_armed"] = False
-        elif price <= trigger_price and can_nachkauf:
+        if revisit_enabled and price > ref:
+            st["g2_trigger_armed"] = True
+        new_level_price = ref - step_abs
+        if price <= new_level_price and can_nachkauf:
+            # Klassischer, NEUER (tieferer) Level - wie beim ersten Grid, unabhaengig vom
+            # Revisit-Status. Nach diesem Kauf ist das neue (tiefere) Level erstmal entschaerft.
             await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+            st["g2_trigger_armed"] = False
+        elif revisit_enabled and price <= ref and st.get("g2_trigger_armed", False) and can_nachkauf:
+            # Revisit: exakt dasselbe (zuletzt gekaufte) Level wird erneut erreicht, nachdem
+            # der Kurs zwischenzeitlich wieder darueber war.
+            await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+            st["g2_trigger_armed"] = False
     elif st["position"] == "short":
         if price <= st["avg_entry_price"] - tp_step_abs:
             await execute_exit(symbol, price, "TP")
             return
-        if revisit_enabled:
-            if price < trigger_price:
-                st["g2_trigger_armed"] = True
-            elif price >= trigger_price and st.get("g2_trigger_armed", True) and can_nachkauf:
-                await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-                st["g2_trigger_armed"] = False
-        elif price >= trigger_price and can_nachkauf:
+        if revisit_enabled and price < ref:
+            st["g2_trigger_armed"] = True
+        new_level_price = ref + step_abs
+        if price >= new_level_price and can_nachkauf:
             await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+            st["g2_trigger_armed"] = False
+        elif revisit_enabled and price >= ref and st.get("g2_trigger_armed", False) and can_nachkauf:
+            await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+            st["g2_trigger_armed"] = False
 
 
 
