@@ -6081,13 +6081,20 @@ async def check_grid_v2_tick(symbol, price):
         st["g2_levels"] = [{"price": st["avg_entry_price"], "armed": False}]
     levels = st["g2_levels"]
 
-    if revisit_enabled:
-        for lvl in levels:
-            if (direction == "long" and price > lvl["price"]) or (direction == "short" and price < lvl["price"]):
-                lvl["armed"] = True
-
     deepest_price = min(l["price"] for l in levels) if direction == "long" else max(l["price"] for l in levels)
     step_abs = compute_step_abs_g2(deepest_price, cfg, "grid")
+
+    if revisit_enabled:
+        # Mindest-Erholung, bevor ein Level wieder "scharf" wird (Bruchteil der Grid-Stufe, siehe
+        # g2_revisit_rearm_pct) - OHNE das reicht schon normales Markt-Rauschen (ein paar Cent hin
+        # und her um genau ein Level herum) aus, um dasselbe Level dutzende Male pro Minute
+        # auszuloesen (live beobachtet: 17+ Trades in 4 Minuten bei nur ~$1 Kursspanne und $0,50
+        # Grid-Stufe - der Kurs hat rein zufaellig ein Level mehrfach ganz knapp uebersprungen).
+        rearm_margin = step_abs * (cfg.get("g2_revisit_rearm_pct", 50.0) / 100.0)
+        for lvl in levels:
+            if (direction == "long" and price > lvl["price"] + rearm_margin) or (direction == "short" and price < lvl["price"] - rearm_margin):
+                lvl["armed"] = True
+
     new_level_price = deepest_price - step_abs if direction == "long" else deepest_price + step_abs
 
     if direction == "long":

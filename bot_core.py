@@ -203,6 +203,7 @@ def default_config():
         "g2_anchor_follow_pct": float(os.getenv("G2_ANCHOR_FOLLOW_PCT", "1.0")),
         "g2_auto_reverse": os.getenv("G2_AUTO_REVERSE", "true").lower() == "true",
         "g2_revisit_enabled": os.getenv("G2_REVISIT_ENABLED", "false").lower() == "true",  # Nachkauf-Schwelle bleibt FEST am Anker-Level statt sich mit jedem Nachkauf weiter zu verschieben - kann dadurch mehrfach an derselben Kursmarke ausloesen
+        "g2_revisit_rearm_pct": float(os.getenv("G2_REVISIT_REARM_PCT", "50.0")),  # Mindest-Erholung (in % der Grid-Stufe) bevor ein Level wieder "scharf" wird - schuetzt vor Ausloesen durch reines Markt-Rauschen
         "g2_double_enabled": os.getenv("G2_DOUBLE_ENABLED", "false").lower() == "true",  # jede Nachkauf-Stufe verdoppelt die Positionsgroesse der vorherigen (1x, 2x, 4x, 8x, ...)
         "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
         "obi_mode": os.getenv("OBI_MODE", "momentum"),  # "momentum" (mit dem Ungleichgewicht), "mean_reversion" (dagegen) oder "reversal" (separater Long/Short-Einstieg bei Umkehr aus Extremzone)
@@ -3027,11 +3028,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_v2" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Wiederkehrende Nachkauf-Level: läuft GENAUSO wie beim ersten Grid weiter absteigend (jeder
     neue, tiefere Level braucht einen NEUEN, weiter entfernten Kurs) - AUS (Standard) ändert daran
-    nichts. AN = zusätzlich kann auch das ZULETZT gekaufte Level nochmal auslösen, wenn der Kurs
-    zwischenzeitlich darüber (Long) bzw. darunter (Short) zurückgekehrt ist. Beispiel: Kurs fällt
-    von 1$ auf 90 Cent (Nachkauf), weiter auf 80 Cent (Nachkauf, neuer Level). Kurs steigt auf 85
-    Cent, fällt zurück auf 80 Cent -> Nachkauf ERNEUT auf demselben 80-Cent-Level (nicht erst bei
-    70 Cent nötig) - bis die maximale Nachkauf-Anzahl erreicht ist.
+    nichts. AN = zusätzlich kann JEDES bereits gekaufte Level nochmal auslösen, wenn der Kurs
+    zwischenzeitlich ausreichend darüber (Long) bzw. darunter (Short) zurückgekehrt ist - "ausreichend"
+    steuerst du über die Mindest-Erholung darunter, damit reines Kurs-Rauschen ein Level nicht
+    ständig scharf/entschärft schaltet. Beispiel: Kurs fällt von 1$ auf 90 Cent (Nachkauf), weiter
+    auf 80 Cent (Nachkauf, neuer Level). Kurs steigt auf 87 Cent (nur das 80-Cent-Level wird wieder
+    scharf), fällt zurück auf 80 Cent -> Nachkauf ERNEUT dort (nicht erst bei 70 Cent nötig) - bis
+    die maximale Nachkauf-Anzahl erreicht ist.
   </div>
   <div data-mode="grid_v2"><label>Wiederkehrende Nachkauf-Level</label>
     <select class="cfg" id="g2_revisit_enabled">
@@ -3039,6 +3042,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An - zuletzt gekauftes Level kann zusätzlich erneut auslösen</option>
     </select>
   </div>
+  <div data-mode="grid_v2" data-requires="g2_revisit_enabled"><label>Mindest-Erholung für "wieder scharf" (% der Grid-Stufe)</label><input type="number" step="1" min="1" max="200" id="g2_revisit_rearm_pct"></div>
   <div data-mode="grid_v2" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Nachkauf-Größe verdoppeln: AUS (Standard) = jeder Nachkauf nutzt dieselbe Positionsgröße
     (Margin × Hebel). AN = jede weitere Nachkauf-Stufe verdoppelt die Größe der vorherigen
@@ -5185,6 +5189,7 @@ async function refresh() {
     document.getElementById('g2_anchor_follow_pct').value = data.config.g2_anchor_follow_pct;
     document.getElementById('g2_auto_reverse').value = String(data.config.g2_auto_reverse);
     document.getElementById('g2_revisit_enabled').value = String(data.config.g2_revisit_enabled);
+    document.getElementById('g2_revisit_rearm_pct').value = data.config.g2_revisit_rearm_pct;
     document.getElementById('g2_double_enabled').value = String(data.config.g2_double_enabled);
   }
   updateModeFields();
@@ -5691,6 +5696,7 @@ function buildConfigPayload() {
     g2_anchor_follow_pct: parseFloat(document.getElementById('g2_anchor_follow_pct').value),
     g2_auto_reverse: document.getElementById('g2_auto_reverse').value === 'true',
     g2_revisit_enabled: document.getElementById('g2_revisit_enabled').value === 'true',
+    g2_revisit_rearm_pct: parseFloat(document.getElementById('g2_revisit_rearm_pct').value),
     g2_double_enabled: document.getElementById('g2_double_enabled').value === 'true',
   };
 }
@@ -5873,7 +5879,7 @@ async def handle_config_update(request):
                 "grid_anchor_follow_enabled", "grid_anchor_follow_pct", "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_manual_usd", "g2_anchor_follow_enabled", "g2_anchor_follow_pct",
-                "g2_auto_reverse", "g2_revisit_enabled", "g2_double_enabled",
+                "g2_auto_reverse", "g2_revisit_enabled", "g2_revisit_rearm_pct", "g2_double_enabled",
                 "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_instant_reset_ratio", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_depth_weighting_enabled", "obi_use_median", "obi_min_liquidity", "obi_breakeven_enabled", "obi_breakeven_trigger_ratio", "obi_breakeven_lock_usd", "obi_breakeven_lock_pct", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
                 "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length",
                 "obi_spread_filter_enabled", "obi_max_spread_pct",
