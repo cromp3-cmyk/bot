@@ -560,6 +560,7 @@ def default_state():
     return {
         "position": None, "avg_entry_price": None, "total_coin_size": 0.0,
         "entry_count": 0, "anchor_price": None, "last_price": None, "g2_trigger_armed": True, "g2_levels": None,
+        "current_position_entries": [],
         "price_history": [],
         "position_opened_at": None,
         "obi_book": {"bids": {}, "asks": {}}, "obi_avg_buffer": [], "obi_last_signal_direction": None,
@@ -1063,6 +1064,12 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
 
     st["last_entry_price"] = price
     st["entry_count"] += 1
+    if st.get("current_position_entries") is None:
+        st["current_position_entries"] = []
+    st["current_position_entries"].append({
+        "time": now_local().isoformat(), "price": round(price, 6), "size": round(new_units, 8),
+        "stufe": st["entry_count"], "is_add_on": is_add_on,
+    })
     debug_log(f"📈 [{symbol}] {'Nachkauf' if is_add_on else 'Neue Position'}: {direction.upper()} @ {price} | Ø-Einstieg {round(st['avg_entry_price'], 2)} | Stufe {st['entry_count']}")
     await save_bot_state()
     return True
@@ -1250,6 +1257,7 @@ async def _execute_exit_locked(symbol, price, reason):
     st["last_entry_price"] = None
     st["g2_trigger_armed"] = True  # ungenutzt, siehe g2_levels - bleibt fuer Abwaertskompatibilitaet
     st["g2_levels"] = None  # Grid 2 Revisit-Modus: fuer den naechsten Zyklus alle Level zuruecksetzen
+    st["current_position_entries"] = []  # Tabelle "Laufende Nachkäufe" - neuer Zyklus, alte Eintraege weg
     await save_bot_state()
 
     if cfg.get("auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid":
@@ -3500,6 +3508,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 </details>
 
+<h2 class="section-title">Laufende Nachkäufe (aktuelle Position) <span id="entries-debug" style="font-size:11px; color:var(--text-dim); font-weight:normal;"></span></h2>
+<div class="panel-card">
+<table id="entries-table"><thead><tr><th>Zeit</th><th>Stufe</th><th>Preis</th><th>Größe (Coins)</th><th>Typ</th></tr></thead><tbody></tbody></table>
+</div>
+
 <h2 class="section-title">Letzte abgeschlossene Trades <span id="trades-debug" style="font-size:11px; color:var(--text-dim); font-weight:normal;"></span></h2>
 <div class="panel-card">
 <table id="trades-table"><thead><tr><th>Eröffnet</th><th>Geschlossen</th><th>Seite</th><th>Ø-Einstieg</th><th>Exit</th><th>Stufen</th><th>Grund</th><th>PnL $</th></tr></thead><tbody></tbody></table>
@@ -5302,6 +5315,19 @@ async function refresh() {
   }
 
   try {
+    const entries = (data.current_position_entries || []).slice().reverse();
+    document.getElementById('entries-debug').innerText = entries.length ? `(${entries.length} bisher)` : '';
+    const fmtTime2 = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
+    document.querySelector('#entries-table tbody').innerHTML = entries.map(e => `
+      <tr><td>${fmtTime2(e.time)}</td><td>${e.stufe}</td><td>${e.price}</td><td>${e.size}</td><td>${e.is_add_on ? 'Nachkauf' : 'Ersteinstieg'}</td></tr>
+    `).join('') || '<tr><td colspan="5" style="color:var(--text-dim);">Aktuell keine offene Position</td></tr>';
+  } catch (e) {
+    console.error('Nachkauf-Tabelle-Fehler:', e);
+    const dbg = document.getElementById('entries-debug');
+    if (dbg) dbg.innerText = `(Fehler: ${e})`;
+  }
+
+  try {
     const trades = (data.trade_log || []).slice(-15).reverse();
     document.getElementById('trades-debug').innerText = '';
     const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
@@ -5779,6 +5805,7 @@ async def handle_status(request):
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),
         "unrealized_pnl_usd": calc_unrealized_pnl(symbol),
         "grid_levels": calc_grid_levels(symbol),
+        "current_position_entries": st.get("current_position_entries", []),
         "obi_current": st.get("obi_current"), "obi_fast": st.get("obi_fast"),
         "obi_medium": st.get("obi_medium"), "obi_slow": st.get("obi_slow"),
         "oms_signal": st.get("oms_signal"), "oms_obi_fast": st.get("oms_obi_fast"),
