@@ -559,7 +559,7 @@ def default_config():
 def default_state():
     return {
         "position": None, "avg_entry_price": None, "total_coin_size": 0.0,
-        "entry_count": 0, "anchor_price": None, "last_price": None, "g2_trigger_armed": True,
+        "entry_count": 0, "anchor_price": None, "last_price": None, "g2_trigger_armed": True, "g2_levels": None,
         "price_history": [],
         "position_opened_at": None,
         "obi_book": {"bids": {}, "asks": {}}, "obi_avg_buffer": [], "obi_last_signal_direction": None,
@@ -1248,7 +1248,8 @@ async def _execute_exit_locked(symbol, price, reason):
     st["anchor_price"] = exit_price_for_log
     st["position_opened_at"] = None
     st["last_entry_price"] = None
-    st["g2_trigger_armed"] = True  # Grid 2 Revisit-Modus: fuer den naechsten Zyklus neu "scharf"
+    st["g2_trigger_armed"] = True  # ungenutzt, siehe g2_levels - bleibt fuer Abwaertskompatibilitaet
+    st["g2_levels"] = None  # Grid 2 Revisit-Modus: fuer den naechsten Zyklus alle Level zuruecksetzen
     await save_bot_state()
 
     if cfg.get("auto_reverse", True) and cfg["bot_active"] and cfg["entry_mode"] == "grid":

@@ -6064,45 +6064,65 @@ async def check_grid_v2_tick(symbol, price):
     max_nachkauf = cfg.get("g2_max_nachkauf", 5)
     revisit_enabled = cfg.get("g2_revisit_enabled", False)
     can_nachkauf = bot_active and (max_nachkauf == 0 or st["entry_count"] < max_nachkauf)
+    direction = st["position"]
 
-    # ref = das zuletzt gekaufte Level - GENAU wie beim ersten Grid der Bezugspunkt fuer den
-    # naechsten, TIEFEREN (long) bzw. HOEHEREN (short) Level. step_abs = Abstand zum naechsten
-    # neuen Level. Ohne Revisit ist das die komplette Logik (identisch zu Grid 1). Mit Revisit
-    # kommt zusaetzlich die Moeglichkeit dazu, GENAU AUF ref nochmal zu kaufen, wenn der Kurs
-    # zwischenzeitlich darueber/darunter war (siehe Docstring oben).
-    ref = st["last_entry_price"] or st["avg_entry_price"]
-    step_abs = compute_step_abs_g2(ref, cfg, "grid")
+    # g2_levels: EIN Eintrag pro bisher gekauftem Level in diesem Zyklus ({"price":..,"armed":..}),
+    # nicht nur der letzte - jedes Level bekommt seinen EIGENEN Scharf/Entschaerft-Status. Direkt
+    # nach dem Kauf ist ein Level entschaerft; es wird erst wieder scharf, wenn der Kurs ERNEUT
+    # darueber (long) bzw. darunter (short) steigt/faellt - unabhaengig davon, ob zwischenzeitlich
+    # TIEFERE (long) Level dazugekauft wurden. Beispiel: 90/80/70 Cent gekauft (alle drei
+    # entschaerft), Kurs steigt auf 87 Cent -> nur 80 und 70 Cent werden wieder scharf (90 Cent
+    # bleibt entschaerft, da nie wieder erreicht) -> faellt der Kurs zurueck, kauft der Bot
+    # WIEDER bei 80 Cent, dann WIEDER bei 70 Cent, dann erst bei einem NEUEN, tieferen Level
+    # (60 Cent). Steigt der Kurs danach durch, OHNE zu fallen, wird an 70/80 Cent NICHT gekauft
+    # (Kaeufe passieren nur beim Faellen/Steigen in die JEWEILIGE Nachkauf-Richtung, nie beim
+    # Erholen in die Gegenrichtung).
+    if not st.get("g2_levels"):
+        st["g2_levels"] = [{"price": st["avg_entry_price"], "armed": False}]
+    levels = st["g2_levels"]
 
-    if st["position"] == "long":
+    if revisit_enabled:
+        for lvl in levels:
+            if (direction == "long" and price > lvl["price"]) or (direction == "short" and price < lvl["price"]):
+                lvl["armed"] = True
+
+    deepest_price = min(l["price"] for l in levels) if direction == "long" else max(l["price"] for l in levels)
+    step_abs = compute_step_abs_g2(deepest_price, cfg, "grid")
+    new_level_price = deepest_price - step_abs if direction == "long" else deepest_price + step_abs
+
+    if direction == "long":
         if price >= st["avg_entry_price"] + tp_step_abs:
             await execute_exit(symbol, price, "TP")
             return
-        if revisit_enabled and price > ref:
-            st["g2_trigger_armed"] = True
-        new_level_price = ref - step_abs
         if price <= new_level_price and can_nachkauf:
             # Klassischer, NEUER (tieferer) Level - wie beim ersten Grid, unabhaengig vom
-            # Revisit-Status. Nach diesem Kauf ist das neue (tiefere) Level erstmal entschaerft.
+            # Revisit-Status. Nach diesem Kauf ist das neue Level erstmal entschaerft.
             await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-            st["g2_trigger_armed"] = False
-        elif revisit_enabled and price <= ref and st.get("g2_trigger_armed", False) and can_nachkauf:
-            # Revisit: exakt dasselbe (zuletzt gekaufte) Level wird erneut erreicht, nachdem
-            # der Kurs zwischenzeitlich wieder darueber war.
-            await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-            st["g2_trigger_armed"] = False
-    elif st["position"] == "short":
+            levels.append({"price": price, "armed": False})
+            return
+        if revisit_enabled and can_nachkauf:
+            # Von den scharfen Leveln bei/ueber dem aktuellen Kurs nur das HOECHSTE (naechstliegende)
+            # nehmen - pro Tick maximal EIN Nachkauf, sonst koennte ein Ruckstand/Sprung mehrere
+            # Level auf einmal ausloesen (siehe echter Vorfall bei Fractals+DCA).
+            candidates = [l for l in levels if l["armed"] and price <= l["price"]]
+            if candidates:
+                target = max(candidates, key=lambda l: l["price"])
+                await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+                target["armed"] = False
+    else:
         if price <= st["avg_entry_price"] - tp_step_abs:
             await execute_exit(symbol, price, "TP")
             return
-        if revisit_enabled and price < ref:
-            st["g2_trigger_armed"] = True
-        new_level_price = ref + step_abs
         if price >= new_level_price and can_nachkauf:
             await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-            st["g2_trigger_armed"] = False
-        elif revisit_enabled and price >= ref and st.get("g2_trigger_armed", False) and can_nachkauf:
-            await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-            st["g2_trigger_armed"] = False
+            levels.append({"price": price, "armed": False})
+            return
+        if revisit_enabled and can_nachkauf:
+            candidates = [l for l in levels if l["armed"] and price >= l["price"]]
+            if candidates:
+                target = min(candidates, key=lambda l: l["price"])
+                await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+                target["armed"] = False
 
 
 
