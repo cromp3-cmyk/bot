@@ -6103,9 +6103,17 @@ async def check_grid_v2_tick(symbol, price):
             return
         if price <= new_level_price and can_nachkauf:
             # Klassischer, NEUER (tieferer) Level - wie beim ersten Grid, unabhaengig vom
-            # Revisit-Status. Nach diesem Kauf ist das neue Level erstmal entschaerft.
-            await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-            levels.append({"price": price, "armed": False})
+            # Revisit-Status. WICHTIG: levels.append() PASSIERT VOR dem await execute_entry(...) -
+            # kommen mehrere Preis-Updates kurz hintereinander rein (live beobachtet: "3x
+            # gleichzeitig"), wuerden sonst ALLE noch den alten Zustand sehen, bevor die erste
+            # Order ueberhaupt verbucht ist, und ALLE parallel feuern. Da zwischen zwei await-
+            # Punkten in Python niemals ein anderer Task dazwischenfunkt, schliesst das
+            # Vorziehen der Zustandsaenderung dieses Zeitfenster komplett.
+            new_level = {"price": price, "armed": False}
+            levels.append(new_level)
+            ok = await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+            if not ok:
+                levels.remove(new_level)  # Order fehlgeschlagen - Level-Eintrag zurücknehmen
             return
         if revisit_enabled and can_nachkauf:
             # Von den scharfen Leveln bei/ueber dem aktuellen Kurs nur das HOECHSTE (naechstliegende)
@@ -6114,22 +6122,29 @@ async def check_grid_v2_tick(symbol, price):
             candidates = [l for l in levels if l["armed"] and price <= l["price"]]
             if candidates:
                 target = max(candidates, key=lambda l: l["price"])
-                await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-                target["armed"] = False
+                target["armed"] = False  # VOR dem await - siehe Kommentar oben
+                ok = await execute_entry(symbol, "long", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+                if not ok:
+                    target["armed"] = True  # Order fehlgeschlagen - Level bleibt scharf
     else:
         if price <= st["avg_entry_price"] - tp_step_abs:
             await execute_exit(symbol, price, "TP")
             return
         if price >= new_level_price and can_nachkauf:
-            await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-            levels.append({"price": price, "armed": False})
+            new_level = {"price": price, "armed": False}
+            levels.append(new_level)
+            ok = await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+            if not ok:
+                levels.remove(new_level)
             return
         if revisit_enabled and can_nachkauf:
             candidates = [l for l in levels if l["armed"] and price >= l["price"]]
             if candidates:
                 target = min(candidates, key=lambda l: l["price"])
-                await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
-                target["armed"] = False
+                target["armed"] = False  # VOR dem await - siehe Kommentar oben
+                ok = await execute_entry(symbol, "short", price, is_add_on=True, size_multiplier=_g2_nachkauf_size_multiplier(st, cfg))
+                if not ok:
+                    target["armed"] = True
 
 
 
