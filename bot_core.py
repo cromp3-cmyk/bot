@@ -497,6 +497,15 @@ def default_config():
         "fr_dca_enabled": os.getenv("FR_DCA_ENABLED", "false").lower() == "true",  # Nachkauf bei weiterem Signal in DERSELBEN Richtung waehrend die Position noch offen ist
         "fr_dca_max_entries": int(os.getenv("FR_DCA_MAX_ENTRIES", "3")),
         "fr_dca_step_usd": float(os.getenv("FR_DCA_STEP_USD", "250.0")),  # Mindest-$-Preisabstand zum aktuellen Durchschnitt, bevor die naechste Nachkauf-Stufe erlaubt ist (0 = kein Mindestabstand)
+        "ii_resolution": os.getenv("II_RESOLUTION", "15m"),
+        "ii_pivot_sens": int(os.getenv("II_PIVOT_SENS", "20")),  # "pivot_sens" im Original-Pine-Script (Kerzen links+rechts fuer die ITH/ITL-Bestaetigung)
+        "ii_atr_period": int(os.getenv("II_ATR_PERIOD", "14")),
+        "ii_sl_atr_mult": float(os.getenv("II_SL_ATR_MULT", "0.15")),  # ATR-Puffer hinter dem Pivot-Extrem fuer den SL (wie atrVal*0.15 im Original)
+        "ii_rr_ratio": float(os.getenv("II_RR_RATIO", "3.0")),  # Ziel-Risk-Reward, TP = Einstieg +/- Risiko*rr_ratio
+        "ii_direction_mode": os.getenv("II_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "ii_invert_direction": os.getenv("II_INVERT_DIRECTION", "false").lower() == "true",  # ITH=Long/ITL=Short statt umgekehrt
+        "ii_flip_exit_enabled": os.getenv("II_FLIP_EXIT_ENABLED", "false").lower() == "true",  # Gegen-Signal dreht die Position statt sie nur ueber SL/TP zu beenden
+        "ii_sl_cooldown_seconds": float(os.getenv("II_SL_COOLDOWN_SECONDS", "30")),
         "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
         "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
         "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
@@ -1441,8 +1450,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="candle_dna">Kerzen-DNA (eigener Konviktions-Score aus Körper+Docht je Kerze, immer im Markt, nur Buy/Sell-Wechsel)</option>
       <option value="range_filter">Range Filter (DonovanWall, nachziehende Glättungslinie, immer im Markt, optionaler fester SL/TP)</option>
       <option value="maverick_edge">Maverick Edge (Trend-EMA + Guide-Linie + Kerzenstärke, reiner Signal-Einstieg, SL fest oder Guide-Linie als Trail-Stop, fester TP)</option>
+      <option value="ith_itl_signal">ITH/ITL Signal (Pivot-Hoch/-Tief-Umkehrpunkte, diskreter Einstieg, ATR-basiertes SL + festes Risk-Reward-TP)</option>
     </select>
   </div>
+  <div data-mode="ith_itl_signal"><label>Zeiteinheit</label>
+    <select class="cfg" id="ii_resolution">
+      <option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option>
+      <option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+    </select>
+  </div>
+  <div data-mode="ith_itl_signal"><label>Pivot-Sensitivität (Kerzen links+rechts für ITH/ITL-Bestätigung)</label><input type="number" step="1" id="ii_pivot_sens"></div>
+  <div data-mode="ith_itl_signal"><label>ATR-Periode</label><input type="number" step="1" id="ii_atr_period"></div>
+  <div data-mode="ith_itl_signal"><label>SL-ATR-Puffer (Vielfaches der ATR hinter dem Pivot)</label><input type="number" step="0.01" id="ii_sl_atr_mult"></div>
+  <div data-mode="ith_itl_signal"><label>Ziel-Risk-Reward (1:X)</label><input type="number" step="0.5" id="ii_rr_ratio"></div>
+  <div data-mode="ith_itl_signal"><label>Richtung</label>
+    <select class="cfg" id="ii_direction_mode">
+      <option value="both">Beide</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="ith_itl_signal" style="grid-column:1/-1;">
+    <label><input type="checkbox" class="cfg" id="ii_invert_direction"> Invertieren (ITH=Long / ITL=Short statt umgekehrt)</label>
+  </div>
+  <div data-mode="ith_itl_signal" style="grid-column:1/-1;">
+    <label><input type="checkbox" class="cfg" id="ii_flip_exit_enabled"> Bei Gegen-Signal drehen statt nur über SL/TP zu beenden</label>
+  </div>
+  <div data-mode="ith_itl_signal"><label>SL-Cooldown (Sek.)</label><input type="number" step="1" id="ii_sl_cooldown_seconds"></div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
   <div data-mode="obi_scalp"><label>OBI Modus</label>
     <select class="cfg" id="obi_mode">
@@ -5963,6 +5997,8 @@ async def handle_config_update(request):
                 "mv_use_volume_enabled", "mv_vol_len", "mv_vol_mult", "mv_direction_mode", "mv_invert_direction",
                 "mv_sl_mode", "mv_sl_enabled", "mv_sl_manual_usd", "mv_sl_cooldown_seconds",
                 "mv_tp_enabled", "mv_tp_manual_usd",
+                "ii_resolution", "ii_pivot_sens", "ii_atr_period", "ii_sl_atr_mult", "ii_rr_ratio",
+                "ii_direction_mode", "ii_invert_direction", "ii_flip_exit_enabled", "ii_sl_cooldown_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
