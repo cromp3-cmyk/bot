@@ -3966,295 +3966,6 @@ async def fr_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
-def _ii_set_sl_tp(st, cfg, direction, pivot_price, atr_val, entry_price):
-    """Setzt SL/TP fuer ITH/ITL Signal - 1:1 aus dem Original-Pine-Script uebernommenes Konzept:
-    SL liegt einen ATR-Puffer (ii_sl_atr_mult, Original 0.15) HINTER dem Pivot-Extrem selbst (also
-    ueber dem ITH bei Short, unter dem ITL bei Long) statt bei einem festen $-Betrag wie bei den
-    meisten anderen Strategien - der Stop ist damit automatisch an die aktuelle Volatilitaet
-    angepasst. TP ist ein festes Vielfaches (ii_rr_ratio, Standard 1:3) des sich daraus ergebenden
-    SL-Abstands vom Einstieg, exakt wie die Box-Zonen im Pine-Indikator."""
-    sl_buffer = atr_val * cfg.get("ii_sl_atr_mult", 0.15)
-    if direction == "short":
-        sl_price = pivot_price + sl_buffer
-        risk = sl_price - entry_price
-        tp_price = entry_price - risk * cfg.get("ii_rr_ratio", 3.0)
-    else:
-        sl_price = pivot_price - sl_buffer
-        risk = entry_price - sl_price
-        tp_price = entry_price + risk * cfg.get("ii_rr_ratio", 3.0)
-    st["ii_sl_price"] = sl_price
-    st["ii_tp_price"] = tp_price
-
-
-async def check_ii_sl_tp(symbol, price):
-    """SL/TP-Pruefung fuer ITH/ITL Signal - anders als beim optionalen fixen SL/TP der meisten
-    anderen Strategien sind SL/TP hier IMMER gesetzt (Kernbestandteil der Strategie, siehe
-    _ii_set_sl_tp), es gibt also keinen Nachtrag-Fall wie bei check_fr_sl_tp."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    sl_price = st.get("ii_sl_price")
-    if sl_price is not None:
-        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-        if hit_sl:
-            debug_log(f"🚪 [{symbol}] ITH/ITL SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-            await execute_exit(symbol, price, "SL")
-            st["ii_sl_price"] = None
-            st["ii_tp_price"] = None
-            st["ii_sl_cooldown_until"] = time.time() + cfg.get("ii_sl_cooldown_seconds", 30)
-            return
-
-    tp_price = st.get("ii_tp_price")
-    if tp_price is not None:
-        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
-        if hit_tp:
-            debug_log(f"🎯 [{symbol}] ITH/ITL TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-            await execute_exit(symbol, price, "TP")
-            st["ii_sl_price"] = None
-            st["ii_tp_price"] = None
-
-
-async def check_ii_signal(symbol, ith_confirmed, itl_confirmed, price, ith_price, itl_price, atr_val):
-    """Portiert aus dem Pine-Indikator 'Dynamic ICT 2022 Model': Kein 'immer im Markt'-Prinzip
-    wie Fractals/Kerzen-DNA/Range Filter, sondern reiner diskreter Signal-Einstieg mit festem
-    SL/TP (wie SuperTrend Fusion/Chandelier) - solange eine Position offen ist, werden neue
-    ITH/ITL-Signale IGNORIERT (ausser ii_flip_exit_enabled ist an), sie kann ausschliesslich ueber
-    SL oder TP beendet werden. ii_invert_direction tauscht die Zuordnung: normal = neues ITL
-    (Pivot-Tief) -> Long, neues ITH (Pivot-Hoch) -> Short (wie im Original). ii_direction_mode
-    schraenkt zusaetzlich auf long_only/short_only ein.
-
-    ii_flip_exit_enabled (zusaetzlich zum Original): kommt waehrend einer offenen Position ein
-    Gegen-Signal, wird glatt gedreht statt ignoriert - fuer wer die Strategie 'immer im Markt'
-    statt nur bei einzelnen Setups fahren will."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None or atr_val is None:
-        return
-    if time.time() < st.get("ii_sl_cooldown_until", 0.0):
-        return
-
-    invert = cfg.get("ii_invert_direction", False)
-    long_signal = ith_confirmed if invert else itl_confirmed
-    short_signal = itl_confirmed if invert else ith_confirmed
-    long_pivot_price = ith_price if invert else itl_price
-    short_pivot_price = itl_price if invert else ith_price
-
-    direction_mode = cfg.get("ii_direction_mode", "both")
-    long_ok = direction_mode != "short_only" and long_signal
-    short_ok = direction_mode != "long_only" and short_signal
-    flip_exit_enabled = cfg.get("ii_flip_exit_enabled", False)
-    pos = st["position"]
-
-    if pos is None:
-        if long_ok:
-            debug_log(f"📡 [{symbol}] ITH/ITL Ersteinstieg: LONG @ {price} (ITL-Pivot bei {round(long_pivot_price, 4)})")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _ii_set_sl_tp(st, cfg, "long", long_pivot_price, atr_val, price)
-        elif short_ok:
-            debug_log(f"📡 [{symbol}] ITH/ITL Ersteinstieg: SHORT @ {price} (ITH-Pivot bei {round(short_pivot_price, 4)})")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _ii_set_sl_tp(st, cfg, "short", short_pivot_price, atr_val, price)
-        return
-
-    if not flip_exit_enabled:
-        return  # Position bleibt unangetastet offen, nur SL/TP koennen sie beenden
-
-    if pos == "long" and short_ok:
-        debug_log(f"🔄 [{symbol}] ITH/ITL Flip: LONG -> SHORT @ {price}")
-        await execute_exit(symbol, price, "II-FLIP")
-        st["ii_sl_price"] = None
-        st["ii_tp_price"] = None
-        await execute_entry(symbol, "short", price, is_add_on=False)
-        if st["position"] is not None:
-            _ii_set_sl_tp(st, cfg, "short", short_pivot_price, atr_val, price)
-    elif pos == "short" and long_ok:
-        debug_log(f"🔄 [{symbol}] ITH/ITL Flip: SHORT -> LONG @ {price}")
-        await execute_exit(symbol, price, "II-FLIP")
-        st["ii_sl_price"] = None
-        st["ii_tp_price"] = None
-        await execute_entry(symbol, "long", price, is_add_on=False)
-        if st["position"] is not None:
-            _ii_set_sl_tp(st, cfg, "long", long_pivot_price, atr_val, price)
-
-
-async def ith_itl_poll_loop(symbol):
-    """Poll-Loop fuer ITH/ITL Signal - identisches Geruest zu fr_poll_loop (Kerzen holen, neue
-    abgeschlossene Kerzen seit dem letzten Durchlauf verarbeiten, Fraktal-Bestaetigung erst nach
-    ii_pivot_sens Kerzen links+rechts moeglich). Nutzt DIESELBE Pivot-Erkennung wie Williams
-    Fractals (compute_fractals - ta.pivothigh/ta.pivotlow mit symmetrischem Lookback ist exakt
-    dasselbe Konzept wie ITH/ITL im Original-Indikator), nur mit eigener, i.d.R. groesserer
-    Sensitivitaet (Standard 20 statt 2) und eigenem ATR-basiertem SL/TP statt 'immer im Markt'.
-
-    BEWUSST VEREINFACHT ggue. Original-Pine-Script: Einstiegspreis ist dort open[pivot_sens-1]
-    (die Kerze VOR der Pivot-Bestaetigung), hier wie bei allen anderen Strategien im Bot der
-    Schlusskurs der Kerze, auf der die Bestaetigung tatsaechlich eintrifft - konsistent mit dem
-    Rest der Codebase und ohne EXAKT dieselbe Slippage-Annahme wie das Original."""
-    b = BOTS[symbol]
-    st = b["state"]
-    last_processed_ts = None
-    last_heartbeat = 0
-
-    while True:
-        cfg = b["config"]
-        try:
-            if cfg["entry_mode"] == "ith_itl_signal":
-                resolution = cfg.get("ii_resolution", "15m")
-                pivot_sens = cfg.get("ii_pivot_sens", 20)
-                atr_period = cfg.get("ii_atr_period", 14)
-                min_needed = 2 * pivot_sens + atr_period + 5
-                count_back = min(500, min_needed + 100)
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], count_back)
-                    closed_ts, closed_o, closed_h, closed_l, closed_c = local if local else (None, None, None, None, None)
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=count_back, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        ts_all, o_all, h_all, l_all, c_all = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = ts_all[:-1], o_all[:-1], h_all[:-1], l_all[:-1], c_all[:-1]
-                    else:
-                        closed_ts = closed_o = closed_h = closed_l = closed_c = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat >= 60
-
-                if closed_c and len(closed_c) >= min_needed:
-                    price = closed_c[-1]
-                    up_fractal, down_fractal = compute_fractals(closed_h, closed_l, pivot_sens)
-                    atr = compute_atr(closed_h, closed_l, closed_c, atr_period)
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] ITH/ITL aktiv: Preis={price}, Sensitivitaet={pivot_sens}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 2 * pivot_sens:
-                            continue
-                        price_i = closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        ith_price_i = closed_h[idx - pivot_sens] if up_fractal[idx] else None
-                        itl_price_i = closed_l[idx - pivot_sens] if down_fractal[idx] else None
-                        await check_ii_signal(symbol, up_fractal[idx], down_fractal[idx], price_i, ith_price_i, itl_price_i, atr[idx])
-
-                    await check_ii_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] ITH/ITL wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] ITH/ITL wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] ITH/ITL-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def backtest_ith_itl_signal(candles, cfg):
-    """Backtest-Pendant zu check_ii_signal/check_ii_sl_tp/ith_itl_poll_loop - identische Logik,
-    siehe dort fuer Kommentare. SL/TP-Treffer werden wie ueberall sonst intrabar (Hoch/Tief der
-    Kerze) statt nur am Schlusskurs geprueft."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    pivot_sens = cfg.get("ii_pivot_sens", 20)
-    atr_period = cfg.get("ii_atr_period", 14)
-    sl_atr_mult = cfg.get("ii_sl_atr_mult", 0.15)
-    rr_ratio = cfg.get("ii_rr_ratio", 3.0)
-    direction_mode = cfg.get("ii_direction_mode", "both")
-    invert = cfg.get("ii_invert_direction", False)
-    flip_exit_enabled = cfg.get("ii_flip_exit_enabled", False)
-    sl_cooldown_ms = cfg.get("ii_sl_cooldown_seconds", 30) * 1000
-
-    up_fractal, down_fractal = compute_fractals(h, l, pivot_sens)
-    atr = compute_atr(h, l, c, atr_period)
-    warmup = 2 * pivot_sens + atr_period + 2
-
-    def make_sl_tp(direction, pivot_price, atr_val, entry_price):
-        sl_buffer = atr_val * sl_atr_mult
-        if direction == "short":
-            sl_price = pivot_price + sl_buffer
-            risk = sl_price - entry_price
-            tp_price = entry_price - risk * rr_ratio
-        else:
-            sl_price = pivot_price - sl_buffer
-            risk = entry_price - sl_price
-            tp_price = entry_price + risk * rr_ratio
-        return sl_price, tp_price
-
-    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-        long_signal = up_fractal[i] if invert else down_fractal[i]
-        short_signal = down_fractal[i] if invert else up_fractal[i]
-        long_pivot_price = h[i - pivot_sens] if invert else l[i - pivot_sens]
-        short_pivot_price = l[i - pivot_sens] if invert else h[i - pivot_sens]
-        long_ok = direction_mode != "short_only" and long_signal
-        short_ok = direction_mode != "long_only" and short_signal
-
-        if position is not None:
-            sl_price, tp_price = position["sl_price"], position["tp_price"]
-            hit_sl = (position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price)
-            hit_tp = (position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price)
-            if hit_sl:
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-
-        in_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-
-        if position is None:
-            if in_cooldown:
-                continue
-            if long_ok:
-                size = (margin * leverage) / price
-                sl_price, tp_price = make_sl_tp("long", long_pivot_price, atr[i], price)
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
-            elif short_ok:
-                size = (margin * leverage) / price
-                sl_price, tp_price = make_sl_tp("short", short_pivot_price, atr[i], price)
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
-            continue
-
-        if not flip_exit_enabled:
-            continue
-
-        if position["dir"] == "long" and short_ok:
-            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "II-FLIP", ts=ts)
-            size = (margin * leverage) / price
-            sl_price, tp_price = make_sl_tp("short", short_pivot_price, atr[i], price)
-            position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
-        elif position["dir"] == "short" and long_ok:
-            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "II-FLIP", ts=ts)
-            size = (margin * leverage) / price
-            sl_price, tp_price = make_sl_tp("long", long_pivot_price, atr[i], price)
-            position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
 def compute_candle_dna(opens, highs, lows, closes, rejection_mult):
     """Eigene Entwicklung (kein Port): Konviktions-Score je Kerze von -100 (voll bearisch) bis
     +100 (voll bullisch). Basis: Koerper-Anteil an der Hoch-Tief-Spanne (100*body/range,
@@ -8999,7 +8710,6 @@ BACKTEST_MAX_CANDLES = {
     "candle_dna": 100_000,
     "range_filter": 100_000,
     "maverick_edge": 100_000,
-    "ith_itl_signal": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -9014,7 +8724,6 @@ BACKTEST_FUNCS = {
     "fractals_flip": backtest_fractals_flip,
     "candle_dna": backtest_candle_dna,
     "range_filter": backtest_range_filter,
-    "ith_itl_signal": backtest_ith_itl_signal,
     # "mo7_scalp" bewusst NICHT hier drin - braucht eine 6er-Tupel-Kerzenquelle MIT Volumen
     # (MFI-Baustein), deshalb in run_backtest() als Sonderfall behandelt statt ueber diesen
     # generischen 5er-Tupel-Dispatch.
@@ -9068,11 +8777,11 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         }
 
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge, ith_itl_signal - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution", "fractals_flip": "fr_resolution", "candle_dna": "cd_resolution", "range_filter": "rf_resolution", "ith_itl_signal": "ii_resolution"}[entry_mode]
+    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution", "fractals_flip": "fr_resolution", "candle_dna": "cd_resolution", "range_filter": "rf_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
