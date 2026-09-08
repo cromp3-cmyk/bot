@@ -3966,6 +3966,469 @@ async def fr_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+def compute_sr_signals(highs, lows, closes, atr_period, multiplier, rsi_period):
+    """SuperTrend(ATR-Periode, Multiplikator) + RSI - nach Nutzer-Vorgabe (kein Pine-Script-Port,
+    eigene Kombination). Nutzt denselben SuperTrend-Kernbaustein wie Diamond Algo/Pieki Algo
+    (compute_diamond_supertrend). bull = klassisches SuperTrend-Long-Signal (Kurs kreuzt die
+    SuperTrend-Linie von unten nach oben). bear = umgekehrt. RSI wird hier nur berechnet, NICHT
+    gefiltert - die RSI>Mittellinie/<Mittellinie-Bestaetigung passiert erst in check_sr_signal/
+    backtest_sr_signal (der RSI-Wert zum Signal-Zeitpunkt zaehlt, nicht der beim Crossover)."""
+    n = len(closes)
+    st_line, _ = compute_diamond_supertrend(highs, lows, closes, multiplier, atr_period)
+    rsi = compute_rsi(closes, rsi_period)
+    bull = [False] * n
+    bear = [False] * n
+    for i in range(1, n):
+        bull[i] = closes[i - 1] <= st_line[i - 1] and closes[i] > st_line[i]
+        bear[i] = closes[i - 1] >= st_line[i - 1] and closes[i] < st_line[i]
+    return bull, bear, rsi, st_line
+
+
+def _sr_set_sl_tp(st, cfg, direction, entry_price):
+    """Fester SL/TP (fester $-Betrag, wie bei UT-Bot+Hull/Pieki Algo/Fractals)."""
+    size = st.get("total_coin_size") or 0
+    if cfg.get("sr_sl_enabled", True) and size > 0:
+        dist_sl = cfg.get("sr_sl_manual_usd", 5.0) / size
+        st["sr_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
+    else:
+        st["sr_sl_price"] = None
+    if cfg.get("sr_tp_enabled", True) and size > 0:
+        dist_tp = cfg.get("sr_tp_manual_usd", 10.0) / size
+        st["sr_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
+    else:
+        st["sr_tp_price"] = None
+
+
+async def check_sr_sl_tp(symbol, price):
+    """Optionaler fester SL/TP (fester $-Betrag) - wie bei UT-Bot+Hull geht die Position bei
+    Treffer GLATT (nicht sofort in die Gegenrichtung); SL hat einen kurzen Cooldown, TP nicht."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+
+    sl_price = st.get("sr_sl_price")
+    if sl_price is not None:
+        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+        if hit_sl:
+            debug_log(f"🚪 [{symbol}] SuperTrend+RSI SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+            await execute_exit(symbol, price, "SL")
+            st["sr_sl_price"] = None
+            st["sr_tp_price"] = None
+            st["sr_sl_cooldown_until"] = time.time() + cfg.get("sr_sl_cooldown_seconds", 30)
+            return
+
+    tp_price = st.get("sr_tp_price")
+    if tp_price is not None:
+        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
+        if hit_tp:
+            debug_log(f"🎯 [{symbol}] SuperTrend+RSI TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+            await execute_exit(symbol, price, "TP")
+            st["sr_sl_price"] = None
+            st["sr_tp_price"] = None
+
+
+async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, zscore=None, trend_pct=None, volume_ok=None):
+    """Kernsignal (nach Nutzer-Vorgabe): SuperTrend dreht bullisch UND RSI > Mittellinie -> Long.
+    SuperTrend dreht baerisch UND RSI < Mittellinie -> Short. Zusaetzlich vier unabhaengig
+    voneinander zuschaltbare Filter (wie bei UT-Bot+Hull/Fractals/Kerzen-DNA/Range Filter):
+    ADX/DI-Trendfilter, Volumen-Filter (relatives Volumen), MTF-Trend%-Filter (wie bei Pieki
+    Algo), Z-Score-Filter. Bei offener Position dreht ein Gegen-Signal die Position IMMER (Flip) -
+    ausser Richtungsmodus oder ein aktiver Filter blockieren die Gegenrichtung, dann wird nur
+    glattgestellt (identisches Prinzip zu check_uh_signal bei UT-Bot+Hull)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None or rsi_val is None:
+        return
+    if time.time() < st.get("sr_sl_cooldown_until", 0.0):
+        return
+
+    direction_mode = cfg.get("sr_direction_mode", "both")
+    rsi_midline = cfg.get("sr_rsi_midline", 50)
+    mtf_enabled = cfg.get("sr_mtf_filter_enabled", False)
+    long_thr = cfg.get("sr_mtf_long_threshold", 0.5)
+    short_thr = cfg.get("sr_mtf_short_threshold", -0.5)
+    zscore_enabled = cfg.get("sr_zscore_filter_enabled", False)
+    volume_enabled = cfg.get("sr_volume_filter_enabled", False)
+    adx_enabled = cfg.get("sr_adx_filter_enabled", False)
+    adx_threshold = cfg.get("sr_adx_threshold", 20)
+    adx_missing = adx is None or plus_di is None or minus_di is None
+    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
+    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
+
+    long_ok = (direction_mode != "short_only"
+               and rsi_val > rsi_midline
+               and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
+               and (not zscore_enabled or zscore is None or zscore > 0)
+               and (not volume_enabled or volume_ok is None or volume_ok)
+               and adx_long_ok)
+    short_ok = (direction_mode != "long_only"
+                and rsi_val < rsi_midline
+                and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
+                and (not zscore_enabled or zscore is None or zscore < 0)
+                and (not volume_enabled or volume_ok is None or volume_ok)
+                and adx_short_ok)
+    pos = st["position"]
+
+    if pos is None:
+        if bull_i and long_ok:
+            debug_log(f"📡 [{symbol}] SuperTrend+RSI Ersteinstieg: LONG @ {price} (RSI={round(rsi_val, 1)})")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _sr_set_sl_tp(st, cfg, "long", price)
+        elif bear_i and short_ok:
+            debug_log(f"📡 [{symbol}] SuperTrend+RSI Ersteinstieg: SHORT @ {price} (RSI={round(rsi_val, 1)})")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _sr_set_sl_tp(st, cfg, "short", price)
+        return
+
+    if pos == "long" and bear_i:
+        if direction_mode == "long_only":
+            reason = "SR-EXIT-DIR"
+        elif not short_ok:
+            if not (rsi_val < rsi_midline):
+                reason = "SR-EXIT-RSI"
+            elif mtf_enabled and not (trend_pct is None or trend_pct < short_thr):
+                reason = "SR-EXIT-MTF"
+            elif zscore_enabled and not (zscore is None or zscore < 0):
+                reason = "SR-EXIT-ZSCORE"
+            elif volume_enabled and not (volume_ok is None or volume_ok):
+                reason = "SR-EXIT-VOLUME"
+            else:
+                reason = "SR-EXIT-ADX"
+        else:
+            reason = None
+        if reason is not None:
+            debug_log(f"🚪 [{symbol}] SuperTrend+RSI Exit ({reason}): LONG @ {price}")
+            await execute_exit(symbol, price, reason)
+            st["sr_sl_price"] = None
+            st["sr_tp_price"] = None
+        else:
+            debug_log(f"🔄 [{symbol}] SuperTrend+RSI Flip: LONG -> SHORT @ {price}")
+            await execute_exit(symbol, price, "SR-FLIP")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _sr_set_sl_tp(st, cfg, "short", price)
+    elif pos == "short" and bull_i:
+        if direction_mode == "short_only":
+            reason = "SR-EXIT-DIR"
+        elif not long_ok:
+            if not (rsi_val > rsi_midline):
+                reason = "SR-EXIT-RSI"
+            elif mtf_enabled and not (trend_pct is None or trend_pct > long_thr):
+                reason = "SR-EXIT-MTF"
+            elif zscore_enabled and not (zscore is None or zscore > 0):
+                reason = "SR-EXIT-ZSCORE"
+            elif volume_enabled and not (volume_ok is None or volume_ok):
+                reason = "SR-EXIT-VOLUME"
+            else:
+                reason = "SR-EXIT-ADX"
+        else:
+            reason = None
+        if reason is not None:
+            debug_log(f"🚪 [{symbol}] SuperTrend+RSI Exit ({reason}): SHORT @ {price}")
+            await execute_exit(symbol, price, reason)
+            st["sr_sl_price"] = None
+            st["sr_tp_price"] = None
+        else:
+            debug_log(f"🔄 [{symbol}] SuperTrend+RSI Flip: SHORT -> LONG @ {price}")
+            await execute_exit(symbol, price, "SR-FLIP")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _sr_set_sl_tp(st, cfg, "long", price)
+
+
+async def sr_poll_loop(symbol):
+    """SuperTrend(ATR-Periode, Multiplikator)+RSI, nach Nutzer-Vorgabe. Geruest identisch zu
+    pk_poll_loop/fr_poll_loop (Kerzen holen, neue abgeschlossene Kerzen seit dem letzten
+    Durchlauf verarbeiten). MTF-Trend%-Filter wie bei Pieki Algo (bis zu 3 Zeiteinheiten,
+    einmal pro Durchlauf berechnet und fuer alle in diesem Durchlauf neuen Kerzen konstant
+    verwendet - identische vereinfachte Behandlung wie bei Pieki Algo). ADX/Z-Score/Volumen-
+    Filter werden bewusst NUR auf dem eigenen Handels-Zeitrahmen berechnet (kein eigenes
+    Zeiteinheit-Feld dafuer, anders als beim MTF-Filter - haelt die Konfiguration einfacher)."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "st_rsi_signal" and cfg["bot_active"]:
+                resolution = cfg.get("sr_resolution", "5m")
+                atr_period = cfg.get("sr_st_atr_period", 10)
+                multiplier = cfg.get("sr_st_multiplier", 2.0)
+                rsi_period = cfg.get("sr_rsi_period", 9)
+                volume_enabled = cfg.get("sr_volume_filter_enabled", False)
+                volume_len = cfg.get("sr_volume_length", 20)
+                zscore_enabled = cfg.get("sr_zscore_filter_enabled", False)
+                zscore_lookback = cfg.get("sr_zscore_lookback", 20)
+                zscore_smooth = cfg.get("sr_zscore_smooth", 3)
+                adx_enabled = cfg.get("sr_adx_filter_enabled", False)
+                adx_length = cfg.get("sr_adx_length", 14)
+                mtf_enabled = cfg.get("sr_mtf_filter_enabled", False)
+                mtf_fast = cfg.get("sr_mtf_fast_len", 5)
+                mtf_slow_len = cfg.get("sr_mtf_slow_len", 9)
+                mtf_atr_len = cfg.get("sr_mtf_atr_len", 14)
+                min_needed = max(atr_period, rsi_period, volume_len, zscore_lookback, adx_length, mtf_slow_len, mtf_atr_len, 5) + 5
+                needed_bars = min(1000, max(min_needed * 2, 220))
+                st = b["state"]
+
+                if volume_enabled:
+                    data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes, volumes = data
+                        closed_ts, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                    else:
+                        closed_ts = closed_h = closed_l = closed_c = closed_v = None
+                elif resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                    else:
+                        closed_ts = closed_h = closed_l = closed_c = None
+                    closed_v = None
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                    if data:
+                        timestamps, opens, highs, lows, closes = data
+                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
+                    else:
+                        closed_ts = closed_h = closed_l = closed_c = None
+                    closed_v = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    bull, bear, rsi, st_line = compute_sr_signals(closed_h, closed_l, closed_c, atr_period, multiplier, rsi_period)
+
+                    adx = plus_di = minus_di = None
+                    if adx_enabled:
+                        adx, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
+
+                    zscore = None
+                    if zscore_enabled:
+                        zscore = compute_rolling_zscore(closed_c, zscore_lookback, zscore_smooth)
+
+                    volume_ok = None
+                    if volume_enabled and closed_v:
+                        vol_ma = _sma_series(closed_v, volume_len)
+                        volume_mult = cfg.get("sr_volume_mult", 1.3)
+                        volume_ok = [closed_v[i] > vol_ma[i] * volume_mult for i in range(len(closed_v))]
+
+                    trend_pct_now = None
+                    if mtf_enabled:
+                        active_tfs = [cfg.get(f"sr_mtf_tf{i}", "off") for i in (1, 2, 3)]
+                        active_tfs = [tf for tf in active_tfs if tf not in (None, "", "off")]
+                        tf_values = []
+                        for tf in active_tfs:
+                            if tf == resolution:
+                                tf_h, tf_l, tf_c = closed_h, closed_l, closed_c
+                            else:
+                                mtf_needed = min(500, max(mtf_slow_len, mtf_atr_len, 5) * 3 + 20)
+                                if tf in SUB_MINUTE_RESOLUTIONS:
+                                    mtf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf], mtf_needed)
+                                    tf_h = mtf_local[2] if mtf_local else None
+                                    tf_l = mtf_local[3] if mtf_local else None
+                                    tf_c = mtf_local[4] if mtf_local else None
+                                else:
+                                    mtf_data = await fetch_candles_binance_multi(symbol, tf, count_back=mtf_needed, market_type=cfg.get("binance_market_type", "spot"))
+                                    if mtf_data:
+                                        _, _, tf_h, tf_l, tf_c = mtf_data
+                                        tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
+                                    else:
+                                        tf_h = tf_l = tf_c = None
+                            if tf_c and len(tf_c) > max(mtf_slow_len, mtf_atr_len):
+                                tf_trend = compute_pk_trend_percent(tf_h, tf_l, tf_c, mtf_fast, mtf_slow_len, mtf_atr_len)
+                                tf_values.append(tf_trend[-1])
+                        if tf_values:
+                            trend_pct_now = sum(tf_values) / len(tf_values)
+                        else:
+                            trend_pct_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow_len, mtf_atr_len)[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] SuperTrend+RSI aktiv: Preis={closed_c[-1]}, RSI={round(rsi[-1], 1)}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 1:
+                            continue
+                        price_i = closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        await check_sr_signal(
+                            symbol, bull[idx], bear[idx], price_i, rsi[idx],
+                            adx=adx[idx] if adx is not None else None,
+                            plus_di=plus_di[idx] if plus_di is not None else None,
+                            minus_di=minus_di[idx] if minus_di is not None else None,
+                            zscore=zscore[idx] if zscore is not None else None,
+                            trend_pct=trend_pct_now,
+                            volume_ok=volume_ok[idx] if volume_ok is not None else None,
+                        )
+
+                    await check_sr_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] SuperTrend+RSI wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] SuperTrend+RSI wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] SuperTrend+RSI-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+async def _build_volume_ok_series_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix):
+    """Baut die 'genug relatives Volumen'-Boolean-Serie fuer den Backtest: holt die historischen
+    Kerzen MIT Volumen (fetch_historical_candles_binance_vol - der normale Backtest-Kerzen-Fetch
+    liefert kein Volumen), berechnet volume > SMA(volume, laenge)*multiplikator, bildet das per
+    Forward-Fill (siehe _align_htf_series) auf die Zeitstempel der Einstiegs-Kerzen ab. Bewusst
+    IMMER auf dem eigenen Handels-Zeitrahmen (kein eigenes Zeiteinheit-Feld dafuer, wie bei
+    ADX/Z-Score). Gibt (volume_ok, error) zurueck."""
+    length = cfg.get(f"{prefix}_volume_length", 20)
+    mult = cfg.get(f"{prefix}_volume_mult", 1.3)
+    tf_candles, err = await fetch_historical_candles_binance_vol(symbol, primary_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return None, f"Volumen-Zeiteinheit ({primary_resolution}): {err}"
+    if not tf_candles or len(tf_candles[4]) < length + 5:
+        return None, f"Zu wenig historische Kerzen (mit Volumen) für den Volumen-Filter erhalten."
+    t_ts, t_o, t_h, t_l, t_c, t_v = tf_candles
+    vol_ma = _sma_series(t_v, length)
+    volume_ok_htf = [t_v[i] > vol_ma[i] * mult for i in range(len(t_v))]
+    return _align_htf_series(base_ts, t_ts, volume_ok_htf), None
+
+
+def backtest_sr_signal(candles, cfg):
+    """Backtest-Pendant zu check_sr_signal/check_sr_sl_tp/sr_poll_loop - identische Logik, siehe
+    dort fuer Kommentare. ADX/Z-Score/Volumen/MTF-Trend%-Serien werden - falls die jeweiligen
+    Filter aktiv sind - von run_backtest VORAB async berechnet und unter cfg['_sr_*_precomputed']
+    uebergeben (diese Funktion selbst ist NICHT async, einheitliche BACKTEST_FUNCS-Signatur)."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    atr_period = cfg.get("sr_st_atr_period", 10)
+    multiplier = cfg.get("sr_st_multiplier", 2.0)
+    rsi_period = cfg.get("sr_rsi_period", 9)
+    rsi_midline = cfg.get("sr_rsi_midline", 50)
+    direction_mode = cfg.get("sr_direction_mode", "both")
+    sl_enabled = cfg.get("sr_sl_enabled", True)
+    tp_enabled = cfg.get("sr_tp_enabled", True)
+    sl_usd = cfg.get("sr_sl_manual_usd", 5.0)
+    tp_usd = cfg.get("sr_tp_manual_usd", 10.0)
+    sl_cooldown_ms = cfg.get("sr_sl_cooldown_seconds", 30) * 1000
+
+    mtf_enabled = cfg.get("sr_mtf_filter_enabled", False)
+    long_thr = cfg.get("sr_mtf_long_threshold", 0.5)
+    short_thr = cfg.get("sr_mtf_short_threshold", -0.5)
+    zscore_enabled = cfg.get("sr_zscore_filter_enabled", False)
+    volume_enabled = cfg.get("sr_volume_filter_enabled", False)
+    adx_enabled = cfg.get("sr_adx_filter_enabled", False)
+    adx_threshold = cfg.get("sr_adx_threshold", 20)
+
+    bull, bear, rsi, st_line = compute_sr_signals(h, l, c, atr_period, multiplier, rsi_period)
+
+    trend_pct = cfg.get("_sr_trend_pct_precomputed") if mtf_enabled else None
+    zscore_series = cfg.get("_sr_zscore_precomputed") if zscore_enabled else None
+    adx_data = cfg.get("_sr_adx_precomputed") if adx_enabled else None
+    adx_series, plus_di_series, minus_di_series = adx_data if adx_data else (None, None, None)
+    volume_ok_series = cfg.get("_sr_volume_precomputed") if volume_enabled else None
+
+    warmup = max(atr_period, rsi_period, cfg.get("sr_mtf_slow_len", 9), cfg.get("sr_mtf_atr_len", 14), cfg.get("sr_zscore_lookback", 20), cfg.get("sr_adx_length", 14), cfg.get("sr_volume_length", 20), 5) + 2
+
+    def eval_ok(i, want_long):
+        adx_missing = adx_series is None or plus_di_series is None or minus_di_series is None
+        if want_long:
+            adx_ok = not adx_enabled or adx_missing or (adx_series[i] > adx_threshold and plus_di_series[i] > minus_di_series[i])
+            return (direction_mode != "short_only"
+                    and rsi[i] > rsi_midline
+                    and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr)
+                    and (not zscore_enabled or zscore_series is None or zscore_series[i] > 0)
+                    and (not volume_enabled or volume_ok_series is None or volume_ok_series[i])
+                    and adx_ok)
+        else:
+            adx_ok = not adx_enabled or adx_missing or (adx_series[i] > adx_threshold and minus_di_series[i] > plus_di_series[i])
+            return (direction_mode != "long_only"
+                    and rsi[i] < rsi_midline
+                    and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr)
+                    and (not zscore_enabled or zscore_series is None or zscore_series[i] < 0)
+                    and (not volume_enabled or volume_ok_series is None or volume_ok_series[i])
+                    and adx_ok)
+
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            sl_price, tp_price = position["sl_price"], position["tp_price"]
+            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        in_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+
+        if position is None:
+            if in_cooldown:
+                continue
+            if bull[i] and eval_ok(i, True):
+                size = (margin * leverage) / price
+                sl_price = (price - sl_usd / size) if sl_enabled else None
+                tp_price = (price + tp_usd / size) if tp_enabled else None
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+            elif bear[i] and eval_ok(i, False):
+                size = (margin * leverage) / price
+                sl_price = (price + sl_usd / size) if sl_enabled else None
+                tp_price = (price - tp_usd / size) if tp_enabled else None
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+            continue
+
+        if position["dir"] == "long" and bear[i]:
+            if direction_mode == "long_only" or not eval_ok(i, False):
+                _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "SR-EXIT", ts=ts)
+                position = None
+            else:
+                _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
+                size = (margin * leverage) / price
+                sl_price = (price + sl_usd / size) if sl_enabled else None
+                tp_price = (price - tp_usd / size) if tp_enabled else None
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+        elif position["dir"] == "short" and bull[i]:
+            if direction_mode == "short_only" or not eval_ok(i, True):
+                _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "SR-EXIT", ts=ts)
+                position = None
+            else:
+                _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
+                size = (margin * leverage) / price
+                sl_price = (price - sl_usd / size) if sl_enabled else None
+                tp_price = (price + tp_usd / size) if tp_enabled else None
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
 def compute_candle_dna(opens, highs, lows, closes, rejection_mult):
     """Eigene Entwicklung (kein Port): Konviktions-Score je Kerze von -100 (voll bearisch) bis
     +100 (voll bullisch). Basis: Koerper-Anteil an der Hoch-Tief-Spanne (100*body/range,
@@ -8710,6 +9173,7 @@ BACKTEST_MAX_CANDLES = {
     "candle_dna": 100_000,
     "range_filter": 100_000,
     "maverick_edge": 100_000,
+    "st_rsi_signal": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -8724,6 +9188,7 @@ BACKTEST_FUNCS = {
     "fractals_flip": backtest_fractals_flip,
     "candle_dna": backtest_candle_dna,
     "range_filter": backtest_range_filter,
+    "st_rsi_signal": backtest_sr_signal,
     # "mo7_scalp" bewusst NICHT hier drin - braucht eine 6er-Tupel-Kerzenquelle MIT Volumen
     # (MFI-Baustein), deshalb in run_backtest() als Sonderfall behandelt statt ueber diesen
     # generischen 5er-Tupel-Dispatch.
@@ -8777,11 +9242,11 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         }
 
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge, st_rsi_signal - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution", "fractals_flip": "fr_resolution", "candle_dna": "cd_resolution", "range_filter": "rf_resolution"}[entry_mode]
+    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution", "fractals_flip": "fr_resolution", "candle_dna": "cd_resolution", "range_filter": "rf_resolution", "st_rsi_signal": "sr_resolution"}[entry_mode]
     resolution = cfg.get(resolution_key, "1m")
     if resolution in SUB_MINUTE_RESOLUTIONS:
         # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
@@ -8862,6 +9327,28 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             return {"error": zs_err}
         cfg = dict(cfg)
         cfg["_rf_zscore_precomputed"] = zscore  # von backtest_range_filter gelesen (nicht async, siehe dort)
+    elif entry_mode == "st_rsi_signal":
+        cfg = dict(cfg)
+        if cfg.get("sr_mtf_filter_enabled", False):
+            trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, prefix="sr")
+            if mtf_err:
+                return {"error": mtf_err}
+            cfg["_sr_trend_pct_precomputed"] = trend_pct  # von backtest_sr_signal gelesen (nicht async, siehe dort)
+        if cfg.get("sr_zscore_filter_enabled", False):
+            zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "sr")
+            if zs_err:
+                return {"error": zs_err}
+            cfg["_sr_zscore_precomputed"] = zscore  # von backtest_sr_signal gelesen (nicht async, siehe dort)
+        if cfg.get("sr_adx_filter_enabled", False):
+            adx, plus_di, minus_di, adx_err = await _build_adx_series_for_backtest(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, "sr")
+            if adx_err:
+                return {"error": adx_err}
+            cfg["_sr_adx_precomputed"] = (adx, plus_di, minus_di)  # von backtest_sr_signal gelesen (nicht async, siehe dort)
+        if cfg.get("sr_volume_filter_enabled", False):
+            volume_ok, vol_err = await _build_volume_ok_series_for_backtest(symbol, cfg, days, candles[0], resolution, "sr")
+            if vol_err:
+                return {"error": vol_err}
+            cfg["_sr_volume_precomputed"] = volume_ok  # von backtest_sr_signal gelesen (nicht async, siehe dort)
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades, exclude_top_n)

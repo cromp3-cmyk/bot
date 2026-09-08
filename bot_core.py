@@ -554,6 +554,35 @@ def default_config():
         "mv_sl_cooldown_seconds": float(os.getenv("MV_SL_COOLDOWN_SECONDS", "30")),
         "mv_tp_enabled": os.getenv("MV_TP_ENABLED", "false").lower() == "true",
         "mv_tp_manual_usd": float(os.getenv("MV_TP_MANUAL_USD", "10.0")),
+        "sr_resolution": os.getenv("SR_RESOLUTION", "5m"),
+        "sr_st_atr_period": int(os.getenv("SR_ST_ATR_PERIOD", "10")),
+        "sr_st_multiplier": float(os.getenv("SR_ST_MULTIPLIER", "2.0")),
+        "sr_rsi_period": int(os.getenv("SR_RSI_PERIOD", "9")),
+        "sr_rsi_midline": float(os.getenv("SR_RSI_MIDLINE", "50")),
+        "sr_direction_mode": os.getenv("SR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "sr_adx_filter_enabled": os.getenv("SR_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "sr_adx_length": int(os.getenv("SR_ADX_LENGTH", "14")),
+        "sr_adx_threshold": float(os.getenv("SR_ADX_THRESHOLD", "20")),
+        "sr_volume_filter_enabled": os.getenv("SR_VOLUME_FILTER_ENABLED", "false").lower() == "true",
+        "sr_volume_length": int(os.getenv("SR_VOLUME_LENGTH", "20")),
+        "sr_volume_mult": float(os.getenv("SR_VOLUME_MULT", "1.3")),
+        "sr_mtf_filter_enabled": os.getenv("SR_MTF_FILTER_ENABLED", "false").lower() == "true",
+        "sr_mtf_tf1": os.getenv("SR_MTF_TF1", "off"),
+        "sr_mtf_tf2": os.getenv("SR_MTF_TF2", "off"),
+        "sr_mtf_tf3": os.getenv("SR_MTF_TF3", "off"),
+        "sr_mtf_fast_len": int(os.getenv("SR_MTF_FAST_LEN", "5")),
+        "sr_mtf_slow_len": int(os.getenv("SR_MTF_SLOW_LEN", "9")),
+        "sr_mtf_atr_len": int(os.getenv("SR_MTF_ATR_LEN", "14")),
+        "sr_mtf_long_threshold": float(os.getenv("SR_MTF_LONG_THRESHOLD", "0.5")),
+        "sr_mtf_short_threshold": float(os.getenv("SR_MTF_SHORT_THRESHOLD", "-0.5")),
+        "sr_zscore_filter_enabled": os.getenv("SR_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
+        "sr_zscore_lookback": int(os.getenv("SR_ZSCORE_LOOKBACK", "20")),
+        "sr_zscore_smooth": int(os.getenv("SR_ZSCORE_SMOOTH", "3")),
+        "sr_sl_enabled": os.getenv("SR_SL_ENABLED", "true").lower() == "true",
+        "sr_sl_manual_usd": float(os.getenv("SR_SL_MANUAL_USD", "5.0")),
+        "sr_tp_enabled": os.getenv("SR_TP_ENABLED", "true").lower() == "true",
+        "sr_tp_manual_usd": float(os.getenv("SR_TP_MANUAL_USD", "10.0")),
+        "sr_sl_cooldown_seconds": float(os.getenv("SR_SL_COOLDOWN_SECONDS", "30")),
     }
 
 
@@ -1441,6 +1470,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="candle_dna">Kerzen-DNA (eigener Konviktions-Score aus Körper+Docht je Kerze, immer im Markt, nur Buy/Sell-Wechsel)</option>
       <option value="range_filter">Range Filter (DonovanWall, nachziehende Glättungslinie, immer im Markt, optionaler fester SL/TP)</option>
       <option value="maverick_edge">Maverick Edge (Trend-EMA + Guide-Linie + Kerzenstärke, reiner Signal-Einstieg, SL fest oder Guide-Linie als Trail-Stop, fester TP)</option>
+      <option value="st_rsi_signal">SuperTrend+RSI (SuperTrend 10/2-Flip + RSI 9-Bestätigung, immer Flip bei Gegensignal, optional ADX/Volumen/MTF%/Z-Score-Filter, fester SL+TP)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -2929,6 +2959,105 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="maverick_edge" data-requires="mv_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="mv_tp_manual_usd"></div>
+
+  <div data-mode="st_rsi_signal"><label>Zeiteinheit</label>
+    <select class="cfg" id="sr_resolution">
+      <option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option>
+      <option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="sr_st_atr_period"></div>
+  <div data-mode="st_rsi_signal"><label>SuperTrend Multiplikator</label><input type="number" step="0.1" min="0.1" id="sr_st_multiplier"></div>
+  <div data-mode="st_rsi_signal"><label>RSI-Periode</label><input type="number" step="1" min="1" id="sr_rsi_period"></div>
+  <div data-mode="st_rsi_signal"><label>RSI-Mittellinie (Long über / Short unter diesem Wert)</label><input type="number" step="1" id="sr_rsi_midline"></div>
+  <div data-mode="st_rsi_signal"><label>Richtung</label>
+    <select class="cfg" id="sr_direction_mode">
+      <option value="both">Beide (Long + Short)</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Bei offener Position dreht ein Gegen-Signal (SuperTrend-Flip) die Position immer (Flip) -
+    außer Richtung oder ein aktiver Filter unten blockiert die Gegenrichtung, dann wird nur
+    glattgestellt statt gedreht.
+  </div>
+
+  <div data-mode="st_rsi_signal"><label>ADX/DI-Trendfilter</label>
+    <select class="cfg" id="sr_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="1" id="sr_adx_length"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX-Schwelle (Trendstärke)</label><input type="number" step="1" min="0" id="sr_adx_threshold"></div>
+
+  <div data-mode="st_rsi_signal"><label>Volumen-Filter (relatives Volumen)</label>
+    <select class="cfg" id="sr_volume_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_volume_filter_enabled"><label>Volumen-Durchschnitt Länge</label><input type="number" step="1" min="1" id="sr_volume_length"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_volume_filter_enabled"><label>Volumen-Schwelle (x Durchschnitt)</label><input type="number" step="0.1" min="0.1" id="sr_volume_mult"></div>
+
+  <div data-mode="st_rsi_signal"><label>MTF-Trend%-Filter (wie bei Pieki Algo)</label>
+    <select class="cfg" id="sr_mtf_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% Zeiteinheit 1</label>
+    <select class="cfg" id="sr_mtf_tf1">
+      <option value="off">Aus</option>
+      <option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option>
+      <option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% Zeiteinheit 2</label>
+    <select class="cfg" id="sr_mtf_tf2">
+      <option value="off">Aus</option>
+      <option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option>
+      <option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% Zeiteinheit 3</label>
+    <select class="cfg" id="sr_mtf_tf3">
+      <option value="off">Aus</option>
+      <option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option>
+      <option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="sr_mtf_long_threshold"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="sr_mtf_short_threshold"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="sr_mtf_fast_len"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="sr_mtf_slow_len"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="sr_mtf_atr_len"></div>
+
+  <div data-mode="st_rsi_signal"><label>Z-Score-Filter</label>
+    <select class="cfg" id="sr_zscore_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_zscore_filter_enabled"><label>Z-Score Lookback</label><input type="number" step="1" min="2" id="sr_zscore_lookback"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_zscore_filter_enabled"><label>Z-Score Glättung</label><input type="number" step="1" min="1" id="sr_zscore_smooth"></div>
+
+  <div data-mode="st_rsi_signal"><label>Stop-Loss (fester $-Betrag)</label>
+    <select class="cfg" id="sr_sl_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_sl_enabled"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="sr_sl_manual_usd"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_sl_enabled"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="sr_sl_cooldown_seconds"></div>
+  <div data-mode="st_rsi_signal"><label>Take-Profit (fester $-Betrag)</label>
+    <select class="cfg" id="sr_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="sr_tp_manual_usd"></div>
 
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
@@ -5162,6 +5291,35 @@ async function refresh() {
     document.getElementById('mv_sl_cooldown_seconds').value = data.config.mv_sl_cooldown_seconds;
     document.getElementById('mv_tp_enabled').value = String(data.config.mv_tp_enabled);
     document.getElementById('mv_tp_manual_usd').value = data.config.mv_tp_manual_usd;
+    setResolutionField('sr_resolution', data.config.sr_resolution);
+    document.getElementById('sr_st_atr_period').value = data.config.sr_st_atr_period;
+    document.getElementById('sr_st_multiplier').value = data.config.sr_st_multiplier;
+    document.getElementById('sr_rsi_period').value = data.config.sr_rsi_period;
+    document.getElementById('sr_rsi_midline').value = data.config.sr_rsi_midline;
+    document.getElementById('sr_direction_mode').value = data.config.sr_direction_mode;
+    document.getElementById('sr_adx_filter_enabled').value = String(data.config.sr_adx_filter_enabled);
+    document.getElementById('sr_adx_length').value = data.config.sr_adx_length;
+    document.getElementById('sr_adx_threshold').value = data.config.sr_adx_threshold;
+    document.getElementById('sr_volume_filter_enabled').value = String(data.config.sr_volume_filter_enabled);
+    document.getElementById('sr_volume_length').value = data.config.sr_volume_length;
+    document.getElementById('sr_volume_mult').value = data.config.sr_volume_mult;
+    document.getElementById('sr_mtf_filter_enabled').value = String(data.config.sr_mtf_filter_enabled);
+    setResolutionField('sr_mtf_tf1', data.config.sr_mtf_tf1);
+    setResolutionField('sr_mtf_tf2', data.config.sr_mtf_tf2);
+    setResolutionField('sr_mtf_tf3', data.config.sr_mtf_tf3);
+    document.getElementById('sr_mtf_long_threshold').value = data.config.sr_mtf_long_threshold;
+    document.getElementById('sr_mtf_short_threshold').value = data.config.sr_mtf_short_threshold;
+    document.getElementById('sr_mtf_fast_len').value = data.config.sr_mtf_fast_len;
+    document.getElementById('sr_mtf_slow_len').value = data.config.sr_mtf_slow_len;
+    document.getElementById('sr_mtf_atr_len').value = data.config.sr_mtf_atr_len;
+    document.getElementById('sr_zscore_filter_enabled').value = String(data.config.sr_zscore_filter_enabled);
+    document.getElementById('sr_zscore_lookback').value = data.config.sr_zscore_lookback;
+    document.getElementById('sr_zscore_smooth').value = data.config.sr_zscore_smooth;
+    document.getElementById('sr_sl_enabled').value = String(data.config.sr_sl_enabled);
+    document.getElementById('sr_sl_manual_usd').value = data.config.sr_sl_manual_usd;
+    document.getElementById('sr_sl_cooldown_seconds').value = data.config.sr_sl_cooldown_seconds;
+    document.getElementById('sr_tp_enabled').value = String(data.config.sr_tp_enabled);
+    document.getElementById('sr_tp_manual_usd').value = data.config.sr_tp_manual_usd;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -5669,6 +5827,35 @@ function buildConfigPayload() {
     mv_sl_cooldown_seconds: parseFloat(document.getElementById('mv_sl_cooldown_seconds').value),
     mv_tp_enabled: document.getElementById('mv_tp_enabled').value === 'true',
     mv_tp_manual_usd: parseFloat(document.getElementById('mv_tp_manual_usd').value),
+    sr_resolution: getResolutionField('sr_resolution'),
+    sr_st_atr_period: parseInt(document.getElementById('sr_st_atr_period').value),
+    sr_st_multiplier: parseFloat(document.getElementById('sr_st_multiplier').value),
+    sr_rsi_period: parseInt(document.getElementById('sr_rsi_period').value),
+    sr_rsi_midline: parseFloat(document.getElementById('sr_rsi_midline').value),
+    sr_direction_mode: document.getElementById('sr_direction_mode').value,
+    sr_adx_filter_enabled: document.getElementById('sr_adx_filter_enabled').value === 'true',
+    sr_adx_length: parseInt(document.getElementById('sr_adx_length').value),
+    sr_adx_threshold: parseFloat(document.getElementById('sr_adx_threshold').value),
+    sr_volume_filter_enabled: document.getElementById('sr_volume_filter_enabled').value === 'true',
+    sr_volume_length: parseInt(document.getElementById('sr_volume_length').value),
+    sr_volume_mult: parseFloat(document.getElementById('sr_volume_mult').value),
+    sr_mtf_filter_enabled: document.getElementById('sr_mtf_filter_enabled').value === 'true',
+    sr_mtf_tf1: getResolutionField('sr_mtf_tf1'),
+    sr_mtf_tf2: getResolutionField('sr_mtf_tf2'),
+    sr_mtf_tf3: getResolutionField('sr_mtf_tf3'),
+    sr_mtf_long_threshold: parseFloat(document.getElementById('sr_mtf_long_threshold').value),
+    sr_mtf_short_threshold: parseFloat(document.getElementById('sr_mtf_short_threshold').value),
+    sr_mtf_fast_len: parseInt(document.getElementById('sr_mtf_fast_len').value),
+    sr_mtf_slow_len: parseInt(document.getElementById('sr_mtf_slow_len').value),
+    sr_mtf_atr_len: parseInt(document.getElementById('sr_mtf_atr_len').value),
+    sr_zscore_filter_enabled: document.getElementById('sr_zscore_filter_enabled').value === 'true',
+    sr_zscore_lookback: parseInt(document.getElementById('sr_zscore_lookback').value),
+    sr_zscore_smooth: parseInt(document.getElementById('sr_zscore_smooth').value),
+    sr_sl_enabled: document.getElementById('sr_sl_enabled').value === 'true',
+    sr_sl_manual_usd: parseFloat(document.getElementById('sr_sl_manual_usd').value),
+    sr_sl_cooldown_seconds: parseFloat(document.getElementById('sr_sl_cooldown_seconds').value),
+    sr_tp_enabled: document.getElementById('sr_tp_enabled').value === 'true',
+    sr_tp_manual_usd: parseFloat(document.getElementById('sr_tp_manual_usd').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -5963,6 +6150,14 @@ async def handle_config_update(request):
                 "mv_use_volume_enabled", "mv_vol_len", "mv_vol_mult", "mv_direction_mode", "mv_invert_direction",
                 "mv_sl_mode", "mv_sl_enabled", "mv_sl_manual_usd", "mv_sl_cooldown_seconds",
                 "mv_tp_enabled", "mv_tp_manual_usd",
+                "sr_resolution", "sr_st_atr_period", "sr_st_multiplier", "sr_rsi_period", "sr_rsi_midline",
+                "sr_direction_mode", "sr_adx_filter_enabled", "sr_adx_length", "sr_adx_threshold",
+                "sr_volume_filter_enabled", "sr_volume_length", "sr_volume_mult",
+                "sr_mtf_filter_enabled", "sr_mtf_tf1", "sr_mtf_tf2", "sr_mtf_tf3",
+                "sr_mtf_fast_len", "sr_mtf_slow_len", "sr_mtf_atr_len",
+                "sr_mtf_long_threshold", "sr_mtf_short_threshold",
+                "sr_zscore_filter_enabled", "sr_zscore_lookback", "sr_zscore_smooth",
+                "sr_sl_enabled", "sr_sl_manual_usd", "sr_tp_enabled", "sr_tp_manual_usd", "sr_sl_cooldown_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
