@@ -2962,9 +2962,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div data-mode="st_rsi_signal"><label>Zeiteinheit</label>
     <select class="cfg" id="sr_resolution">
-      <option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option>
-      <option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="sr_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_volume_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    ⚠️ Der Volumen-Filter braucht echtes Handelsvolumen, das gibt es nur für normale Binance-
+    Minuten-/Stunden-Kerzen - bei Sekunden-Auflösungen oder "Eigene Minuten" bleibt der Filter
+    dann wirkungslos (keine Kerzen erhalten, Bot bleibt inaktiv).
   </div>
   <div data-mode="st_rsi_signal"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="sr_st_atr_period"></div>
   <div data-mode="st_rsi_signal"><label>SuperTrend Multiplikator</label><input type="number" step="0.1" min="0.1" id="sr_st_multiplier"></div>
@@ -3010,23 +3026,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% Zeiteinheit 1</label>
     <select class="cfg" id="sr_mtf_tf1">
       <option value="off">Aus</option>
-      <option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option>
-      <option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="sr_mtf_tf1_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% Zeiteinheit 2</label>
     <select class="cfg" id="sr_mtf_tf2">
       <option value="off">Aus</option>
-      <option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option>
-      <option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="sr_mtf_tf2_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% Zeiteinheit 3</label>
     <select class="cfg" id="sr_mtf_tf3">
       <option value="off">Aus</option>
-      <option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option>
-      <option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="sr_mtf_tf3_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="sr_mtf_long_threshold"></div>
   <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="sr_mtf_short_threshold"></div>
@@ -4094,7 +4137,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_mtf_tf1, #sr_mtf_tf2, #sr_mtf_tf3').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
