@@ -3966,14 +3966,15 @@ async def fr_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
-def compute_vw_avdev_bands(closes, volumes, length, mult):
+def compute_vw_avdev(closes, volumes, length):
     """Portiert aus '[Hoss] VWAP Deviation' (pine_vwmean + pine_vwavdev, 'Average Deviation'
     ist dort fest kodiert, 'Standard Deviation' ist im Original toter Code): volumengewichteter
     gleitender Mittelwert (VWMA) ueber die letzten 'length' Kerzen plus volumengewichtete
-    durchschnittliche Abweichung davon. upper/lower = Mittelwert +/- Abweichung*mult (mult=2
-    entspricht der Original-"Upper/Lower dev 2"-Linie, dem roten/gruenen Band). Bewusst OHNE
-    Log-Space-Option (im Original per Toggle 'ls' waehlbar) - hier immer im normalen Preis-Raum,
-    haelt die Konfiguration einfach."""
+    durchschnittliche Abweichung davon. Gibt (vwmean, dev) OHNE Bandmultiplikator zurueck - die
+    Baender (siehe vwap_bands_from_dev) werden mit unterschiedlichen Multiplikatoren daraus
+    abgeleitet (Bestaetigungs-Band vs. SL-Band/"Ende der Wolke"), ohne vwmean/dev doppelt zu
+    berechnen. Bewusst OHNE Log-Space-Option (im Original per Toggle 'ls' waehlbar) - hier immer
+    im normalen Preis-Raum, haelt die Konfiguration einfach."""
     n = len(closes)
     vwmean = [0.0] * n
     dev = [0.0] * n
@@ -3989,9 +3990,17 @@ def compute_vw_avdev_bands(closes, volumes, length, mult):
         m = sum(cc * vv for cc, vv in zip(window_c, window_v)) / w_sum
         vwmean[i] = m
         dev[i] = sum(abs(cc - m) * vv for cc, vv in zip(window_c, window_v)) / w_sum
+    return vwmean, dev
+
+
+def vwap_bands_from_dev(vwmean, dev, mult):
+    """upper/lower = Mittelwert +/- Abweichung*mult (mult=2 entspricht der Original-"Upper/Lower
+    dev 2"-Linie/dem inneren Rand der roten/gruenen Wolke, mult=3 dem AEUSSEREN Rand - "Ende der
+    Wolke", siehe sr_vwap_sl_mult)."""
+    n = len(vwmean)
     upper = [vwmean[i] + dev[i] * mult for i in range(n)]
     lower = [vwmean[i] - dev[i] * mult for i in range(n)]
-    return vwmean, dev, upper, lower
+    return upper, lower
 
 
 def compute_vwap_dev_arm(closes, upper, lower):
@@ -4030,22 +4039,38 @@ def _align_generic_series(base_ts, htf_ts, htf_vals, default=None):
     return out
 
 
-async def _build_vwap_dev_arm_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix):
-    """Holt die historischen Kerzen MIT Volumen (wie beim Volumen-Filter, siehe
-    _build_volume_ok_series_for_backtest) auf dem eigenen Handels-Zeitrahmen, berechnet die
-    VWAP-Deviation-Baender und daraus den Arm-Zustand je Kerze, bildet ihn per Forward-Fill auf
-    die Zeitstempel der Einstiegs-Kerzen ab. Gibt (arm, error) zurueck."""
+async def _build_vwap_dev_data_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix, need_arm, need_sl_bands):
+    """Holt die historischen Kerzen MIT Volumen EINMAL (wie beim frueheren Volumen-Filter, siehe
+    fetch_historical_candles_binance_vol) auf dem eigenen Handels-Zeitrahmen und liefert je nach
+    Bedarf den Bestaetigungs-Zustand (need_arm, siehe compute_vwap_dev_arm) und/oder die
+    SL-Baender der aeusseren Wolke (need_sl_bands, siehe sr_vwap_sl_mult) daraus ab - EIN Fetch
+    fuer beides, kein doppelter API-Call, wenn beide gleichzeitig aktiv sind. Alles per
+    Forward-Fill auf die Zeitstempel der Einstiegs-Kerzen ausgerichtet. Gibt
+    (arm_oder_None, sl_lower_oder_None, sl_upper_oder_None, error) zurueck."""
     length = cfg.get(f"{prefix}_vwap_dev_length", 60)
-    mult = cfg.get(f"{prefix}_vwap_dev_mult", 2.0)
+    dev_mult = cfg.get(f"{prefix}_vwap_dev_mult", 2.0)
+    sl_mult = cfg.get(f"{prefix}_vwap_sl_mult", 3.0)
     tf_candles, err = await fetch_historical_candles_binance_vol(symbol, primary_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
     if err:
-        return None, f"VWAP-Deviation-Zeiteinheit ({primary_resolution}): {err}"
+        return None, None, None, f"VWAP-Deviation-Zeiteinheit ({primary_resolution}): {err}"
     if not tf_candles or len(tf_candles[4]) < length + 5:
-        return None, "Zu wenig historische Kerzen (mit Volumen) für den VWAP-Deviation-Filter erhalten."
+        return None, None, None, "Zu wenig historische Kerzen (mit Volumen) für VWAP-Deviation erhalten."
     t_ts, t_o, t_h, t_l, t_c, t_v = tf_candles
-    _, _, upper, lower = compute_vw_avdev_bands(t_c, t_v, length, mult)
-    arm_htf = compute_vwap_dev_arm(t_c, upper, lower)
-    return _align_generic_series(base_ts, t_ts, arm_htf, default=None), None
+    vwmean, dev = compute_vw_avdev(t_c, t_v, length)
+
+    arm_aligned = None
+    if need_arm:
+        upper_dev, lower_dev = vwap_bands_from_dev(vwmean, dev, dev_mult)
+        arm_htf = compute_vwap_dev_arm(t_c, upper_dev, lower_dev)
+        arm_aligned = _align_generic_series(base_ts, t_ts, arm_htf, default=None)
+
+    sl_lower_aligned = sl_upper_aligned = None
+    if need_sl_bands:
+        upper_sl, lower_sl = vwap_bands_from_dev(vwmean, dev, sl_mult)
+        sl_lower_aligned = _align_generic_series(base_ts, t_ts, lower_sl, default=None)
+        sl_upper_aligned = _align_generic_series(base_ts, t_ts, upper_sl, default=None)
+
+    return arm_aligned, sl_lower_aligned, sl_upper_aligned, None
 
 
 def compute_sr_signals(highs, lows, closes, atr_period, multiplier, rsi_period):
@@ -4066,8 +4091,31 @@ def compute_sr_signals(highs, lows, closes, atr_period, multiplier, rsi_period):
     return bull, bear, rsi, st_line
 
 
-def _sr_set_sl_tp(st, cfg, direction, entry_price):
-    """Fester SL/TP (fester $-Betrag, wie bei UT-Bot+Hull/Pieki Algo/Fractals)."""
+def _sr_set_sl_tp(st, cfg, direction, entry_price, cloud_sl_lower=None, cloud_sl_upper=None):
+    """Zwei SL/TP-Varianten (per sr_sl_tp_mode): 'fixed' = fester $-Betrag (wie bei UT-Bot+Hull/
+    Pieki Algo/Fractals). 'vwap_cloud' (nach Nutzer-Vorgabe): SL am AEUSSEREN Rand der VWAP-
+    Wolke ("Ende der Wolke", cloud_sl_lower/cloud_sl_upper - siehe sr_vwap_sl_mult), TP als
+    einstellbares Risk-Reward-Vielfaches (sr_vwap_tp_rr, z.B. 1.0 = 1:1, 1.5 = 1:1,5) des
+    daraus resultierenden SL-Abstands vom Einstieg."""
+    mode = cfg.get("sr_sl_tp_mode", "fixed")
+    if mode == "vwap_cloud":
+        cloud_sl = cloud_sl_lower if direction == "long" else cloud_sl_upper
+        if cloud_sl is not None:
+            rr = cfg.get("sr_vwap_tp_rr", 1.5)
+            if direction == "long":
+                risk = entry_price - cloud_sl
+                st["sr_sl_price"] = cloud_sl
+                st["sr_tp_price"] = entry_price + risk * rr if risk > 0 else None
+            else:
+                risk = cloud_sl - entry_price
+                st["sr_sl_price"] = cloud_sl
+                st["sr_tp_price"] = entry_price - risk * rr if risk > 0 else None
+            return
+        # Kein Wolken-Wert verfuegbar (z.B. zu wenig Kerzen fuer VWAP-Deviation) - kein SL/TP
+        st["sr_sl_price"] = None
+        st["sr_tp_price"] = None
+        return
+
     size = st.get("total_coin_size") or 0
     if cfg.get("sr_sl_enabled", True) and size > 0:
         dist_sl = cfg.get("sr_sl_manual_usd", 5.0) / size
@@ -4111,16 +4159,17 @@ async def check_sr_sl_tp(symbol, price):
             st["sr_tp_price"] = None
 
 
-async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, zscore=None, trend_pct=None, volume_ok=None, vwap_arm=None):
+async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None):
     """Kernsignal (nach Nutzer-Vorgabe): SuperTrend dreht bullisch UND RSI > Mittellinie -> Long.
-    SuperTrend dreht baerisch UND RSI < Mittellinie -> Short. Zusaetzlich fuenf unabhaengig
+    SuperTrend dreht baerisch UND RSI < Mittellinie -> Short. Zusaetzlich zwei unabhaengig
     voneinander zuschaltbare Filter (wie bei UT-Bot+Hull/Fractals/Kerzen-DNA/Range Filter):
-    ADX/DI-Trendfilter, Volumen-Filter (relatives Volumen), MTF-Trend%-Filter (wie bei Pieki
-    Algo), Z-Score-Filter, VWAP-Deviation-Bestaetigung (vwap_arm: 'upper' -> Short erlaubt,
-    'lower' -> Long erlaubt, siehe compute_vwap_dev_arm - wird VOR dieser Kerze ausgewertet,
-    "vorher im Band geschlossen"). Bei offener Position dreht ein Gegen-Signal die Position
-    IMMER (Flip) - ausser Richtungsmodus oder ein aktiver Filter blockieren die Gegenrichtung,
-    dann wird nur glattgestellt (identisches Prinzip zu check_uh_signal bei UT-Bot+Hull)."""
+    ADX/DI-Trendfilter, VWAP-Deviation-Bestaetigung (vwap_arm: 'upper' -> Short erlaubt, 'lower'
+    -> Long erlaubt, siehe compute_vwap_dev_arm - wird VOR dieser Kerze ausgewertet, "vorher im
+    Band geschlossen"). Bei offener Position dreht ein Gegen-Signal die Position IMMER (Flip) -
+    ausser Richtungsmodus oder ein aktiver Filter blockieren die Gegenrichtung, dann wird nur
+    glattgestellt (identisches Prinzip zu check_uh_signal bei UT-Bot+Hull). cloud_sl_lower/
+    cloud_sl_upper werden nur bei sr_sl_tp_mode='vwap_cloud' fuer den SL gebraucht (siehe
+    _sr_set_sl_tp)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None or rsi_val is None:
@@ -4130,11 +4179,6 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
 
     direction_mode = cfg.get("sr_direction_mode", "both")
     rsi_midline = cfg.get("sr_rsi_midline", 50)
-    mtf_enabled = cfg.get("sr_mtf_filter_enabled", False)
-    long_thr = cfg.get("sr_mtf_long_threshold", 0.5)
-    short_thr = cfg.get("sr_mtf_short_threshold", -0.5)
-    zscore_enabled = cfg.get("sr_zscore_filter_enabled", False)
-    volume_enabled = cfg.get("sr_volume_filter_enabled", False)
     adx_enabled = cfg.get("sr_adx_filter_enabled", False)
     adx_threshold = cfg.get("sr_adx_threshold", 20)
     adx_missing = adx is None or plus_di is None or minus_di is None
@@ -4144,16 +4188,10 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
 
     long_ok = (direction_mode != "short_only"
                and rsi_val > rsi_midline
-               and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
-               and (not zscore_enabled or zscore is None or zscore > 0)
-               and (not volume_enabled or volume_ok is None or volume_ok)
                and (not vwap_dev_enabled or vwap_arm == "lower")
                and adx_long_ok)
     short_ok = (direction_mode != "long_only"
                 and rsi_val < rsi_midline
-                and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
-                and (not zscore_enabled or zscore is None or zscore < 0)
-                and (not volume_enabled or volume_ok is None or volume_ok)
                 and (not vwap_dev_enabled or vwap_arm == "upper")
                 and adx_short_ok)
     pos = st["position"]
@@ -4163,12 +4201,12 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
             debug_log(f"📡 [{symbol}] SuperTrend+RSI Ersteinstieg: LONG @ {price} (RSI={round(rsi_val, 1)})")
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "long", price)
+                _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper)
         elif bear_i and short_ok:
             debug_log(f"📡 [{symbol}] SuperTrend+RSI Ersteinstieg: SHORT @ {price} (RSI={round(rsi_val, 1)})")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "short", price)
+                _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper)
         return
 
     if pos == "long" and bear_i:
@@ -4177,12 +4215,6 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
         elif not short_ok:
             if not (rsi_val < rsi_midline):
                 reason = "SR-EXIT-RSI"
-            elif mtf_enabled and not (trend_pct is None or trend_pct < short_thr):
-                reason = "SR-EXIT-MTF"
-            elif zscore_enabled and not (zscore is None or zscore < 0):
-                reason = "SR-EXIT-ZSCORE"
-            elif volume_enabled and not (volume_ok is None or volume_ok):
-                reason = "SR-EXIT-VOLUME"
             elif vwap_dev_enabled and vwap_arm != "upper":
                 reason = "SR-EXIT-VWAP"
             else:
@@ -4199,19 +4231,13 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
             await execute_exit(symbol, price, "SR-FLIP")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "short", price)
+                _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper)
     elif pos == "short" and bull_i:
         if direction_mode == "short_only":
             reason = "SR-EXIT-DIR"
         elif not long_ok:
             if not (rsi_val > rsi_midline):
                 reason = "SR-EXIT-RSI"
-            elif mtf_enabled and not (trend_pct is None or trend_pct > long_thr):
-                reason = "SR-EXIT-MTF"
-            elif zscore_enabled and not (zscore is None or zscore > 0):
-                reason = "SR-EXIT-ZSCORE"
-            elif volume_enabled and not (volume_ok is None or volume_ok):
-                reason = "SR-EXIT-VOLUME"
             elif vwap_dev_enabled and vwap_arm != "lower":
                 reason = "SR-EXIT-VWAP"
             else:
@@ -4228,17 +4254,15 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
             await execute_exit(symbol, price, "SR-FLIP")
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "long", price)
+                _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper)
 
 
 async def sr_poll_loop(symbol):
     """SuperTrend(ATR-Periode, Multiplikator)+RSI, nach Nutzer-Vorgabe. Geruest identisch zu
     pk_poll_loop/fr_poll_loop (Kerzen holen, neue abgeschlossene Kerzen seit dem letzten
-    Durchlauf verarbeiten). MTF-Trend%-Filter wie bei Pieki Algo (bis zu 3 Zeiteinheiten,
-    einmal pro Durchlauf berechnet und fuer alle in diesem Durchlauf neuen Kerzen konstant
-    verwendet - identische vereinfachte Behandlung wie bei Pieki Algo). ADX/Z-Score/Volumen-
-    Filter werden bewusst NUR auf dem eigenen Handels-Zeitrahmen berechnet (kein eigenes
-    Zeiteinheit-Feld dafuer, anders als beim MTF-Filter - haelt die Konfiguration einfacher)."""
+    Durchlauf verarbeiten). ADX-Filter/VWAP-Deviation werden bewusst NUR auf dem eigenen
+    Handels-Zeitrahmen berechnet (kein eigenes Zeiteinheit-Feld dafuer, haelt die Konfiguration
+    einfach)."""
     b = BOTS[symbol]
     last_processed_ts = None
     last_heartbeat = 0.0
@@ -4251,25 +4275,19 @@ async def sr_poll_loop(symbol):
                 atr_period = cfg.get("sr_st_atr_period", 10)
                 multiplier = cfg.get("sr_st_multiplier", 2.0)
                 rsi_period = cfg.get("sr_rsi_period", 9)
-                volume_enabled = cfg.get("sr_volume_filter_enabled", False)
-                volume_len = cfg.get("sr_volume_length", 20)
-                zscore_enabled = cfg.get("sr_zscore_filter_enabled", False)
-                zscore_lookback = cfg.get("sr_zscore_lookback", 20)
-                zscore_smooth = cfg.get("sr_zscore_smooth", 3)
                 adx_enabled = cfg.get("sr_adx_filter_enabled", False)
                 adx_length = cfg.get("sr_adx_length", 14)
-                mtf_enabled = cfg.get("sr_mtf_filter_enabled", False)
-                mtf_fast = cfg.get("sr_mtf_fast_len", 5)
-                mtf_slow_len = cfg.get("sr_mtf_slow_len", 9)
-                mtf_atr_len = cfg.get("sr_mtf_atr_len", 14)
                 vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
                 vwap_dev_length = cfg.get("sr_vwap_dev_length", 60)
                 vwap_dev_mult = cfg.get("sr_vwap_dev_mult", 2.0)
-                min_needed = max(atr_period, rsi_period, volume_len, zscore_lookback, adx_length, mtf_slow_len, mtf_atr_len, vwap_dev_length, 5) + 5
+                sl_tp_mode = cfg.get("sr_sl_tp_mode", "fixed")
+                vwap_sl_mult = cfg.get("sr_vwap_sl_mult", 3.0)
+                need_vwap_data = vwap_dev_enabled or sl_tp_mode == "vwap_cloud"
+                min_needed = max(atr_period, rsi_period, adx_length, vwap_dev_length, 5) + 5
                 needed_bars = min(1000, max(min_needed * 2, 220))
                 st = b["state"]
 
-                if volume_enabled or vwap_dev_enabled:
+                if need_vwap_data:
                     data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
                     if data:
                         timestamps, opens, highs, lows, closes, volumes = data
@@ -4303,49 +4321,14 @@ async def sr_poll_loop(symbol):
                     if adx_enabled:
                         adx, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
 
-                    zscore = None
-                    if zscore_enabled:
-                        zscore = compute_rolling_zscore(closed_c, zscore_lookback, zscore_smooth)
-
-                    volume_ok = None
-                    if volume_enabled and closed_v:
-                        vol_ma = _sma_series(closed_v, volume_len)
-                        volume_mult = cfg.get("sr_volume_mult", 1.3)
-                        volume_ok = [closed_v[i] > vol_ma[i] * volume_mult for i in range(len(closed_v))]
-
-                    vwap_upper = vwap_lower = None
-                    if vwap_dev_enabled and closed_v:
-                        _, _, vwap_upper, vwap_lower = compute_vw_avdev_bands(closed_c, closed_v, vwap_dev_length, vwap_dev_mult)
-
-                    trend_pct_now = None
-                    if mtf_enabled:
-                        active_tfs = [cfg.get(f"sr_mtf_tf{i}", "off") for i in (1, 2, 3)]
-                        active_tfs = [tf for tf in active_tfs if tf not in (None, "", "off")]
-                        tf_values = []
-                        for tf in active_tfs:
-                            if tf == resolution:
-                                tf_h, tf_l, tf_c = closed_h, closed_l, closed_c
-                            else:
-                                mtf_needed = min(500, max(mtf_slow_len, mtf_atr_len, 5) * 3 + 20)
-                                if tf in SUB_MINUTE_RESOLUTIONS:
-                                    mtf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf], mtf_needed)
-                                    tf_h = mtf_local[2] if mtf_local else None
-                                    tf_l = mtf_local[3] if mtf_local else None
-                                    tf_c = mtf_local[4] if mtf_local else None
-                                else:
-                                    mtf_data = await fetch_candles_binance_multi(symbol, tf, count_back=mtf_needed, market_type=cfg.get("binance_market_type", "spot"))
-                                    if mtf_data:
-                                        _, _, tf_h, tf_l, tf_c = mtf_data
-                                        tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
-                                    else:
-                                        tf_h = tf_l = tf_c = None
-                            if tf_c and len(tf_c) > max(mtf_slow_len, mtf_atr_len):
-                                tf_trend = compute_pk_trend_percent(tf_h, tf_l, tf_c, mtf_fast, mtf_slow_len, mtf_atr_len)
-                                tf_values.append(tf_trend[-1])
-                        if tf_values:
-                            trend_pct_now = sum(tf_values) / len(tf_values)
-                        else:
-                            trend_pct_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow_len, mtf_atr_len)[-1]
+                    vwap_upper = vwap_lower = None  # Bestaetigungs-Band (dev_mult, "Wolke betreten")
+                    sl_lower = sl_upper = None  # SL-Band (vwap_sl_mult, "Ende der Wolke")
+                    if need_vwap_data and closed_v:
+                        vwmean, dev = compute_vw_avdev(closed_c, closed_v, vwap_dev_length)
+                        if vwap_dev_enabled:
+                            vwap_upper, vwap_lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
+                        if sl_tp_mode == "vwap_cloud":
+                            sl_upper, sl_lower = vwap_bands_from_dev(vwmean, dev, vwap_sl_mult)
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -4378,10 +4361,9 @@ async def sr_poll_loop(symbol):
                             adx=adx[idx] if adx is not None else None,
                             plus_di=plus_di[idx] if plus_di is not None else None,
                             minus_di=minus_di[idx] if minus_di is not None else None,
-                            zscore=zscore[idx] if zscore is not None else None,
-                            trend_pct=trend_pct_now,
-                            volume_ok=volume_ok[idx] if volume_ok is not None else None,
                             vwap_arm=vwap_arm_before,
+                            cloud_sl_lower=sl_lower[idx] if sl_lower is not None else None,
+                            cloud_sl_upper=sl_upper[idx] if sl_upper is not None else None,
                         )
 
                     await check_sr_sl_tp(symbol, price)
@@ -4419,8 +4401,8 @@ async def _build_volume_ok_series_for_backtest(symbol, cfg, days, base_ts, prima
 
 def backtest_sr_signal(candles, cfg):
     """Backtest-Pendant zu check_sr_signal/check_sr_sl_tp/sr_poll_loop - identische Logik, siehe
-    dort fuer Kommentare. ADX/Z-Score/Volumen/MTF-Trend%-Serien werden - falls die jeweiligen
-    Filter aktiv sind - von run_backtest VORAB async berechnet und unter cfg['_sr_*_precomputed']
+    dort fuer Kommentare. ADX/VWAP-Deviation-Serien werden - falls die jeweiligen Filter/Modi
+    aktiv sind - von run_backtest VORAB async berechnet und unter cfg['_sr_*_precomputed']
     uebergeben (diese Funktion selbst ist NICHT async, einheitliche BACKTEST_FUNCS-Signatur)."""
     ts, o, h, l, c = candles
     n = len(c)
@@ -4430,31 +4412,27 @@ def backtest_sr_signal(candles, cfg):
     rsi_period = cfg.get("sr_rsi_period", 9)
     rsi_midline = cfg.get("sr_rsi_midline", 50)
     direction_mode = cfg.get("sr_direction_mode", "both")
+    sl_tp_mode = cfg.get("sr_sl_tp_mode", "fixed")
     sl_enabled = cfg.get("sr_sl_enabled", True)
     tp_enabled = cfg.get("sr_tp_enabled", True)
     sl_usd = cfg.get("sr_sl_manual_usd", 5.0)
     tp_usd = cfg.get("sr_tp_manual_usd", 10.0)
+    vwap_tp_rr = cfg.get("sr_vwap_tp_rr", 1.5)
     sl_cooldown_ms = cfg.get("sr_sl_cooldown_seconds", 30) * 1000
 
-    mtf_enabled = cfg.get("sr_mtf_filter_enabled", False)
-    long_thr = cfg.get("sr_mtf_long_threshold", 0.5)
-    short_thr = cfg.get("sr_mtf_short_threshold", -0.5)
-    zscore_enabled = cfg.get("sr_zscore_filter_enabled", False)
-    volume_enabled = cfg.get("sr_volume_filter_enabled", False)
     adx_enabled = cfg.get("sr_adx_filter_enabled", False)
     adx_threshold = cfg.get("sr_adx_threshold", 20)
     vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
 
     bull, bear, rsi, st_line = compute_sr_signals(h, l, c, atr_period, multiplier, rsi_period)
 
-    trend_pct = cfg.get("_sr_trend_pct_precomputed") if mtf_enabled else None
-    zscore_series = cfg.get("_sr_zscore_precomputed") if zscore_enabled else None
     adx_data = cfg.get("_sr_adx_precomputed") if adx_enabled else None
     adx_series, plus_di_series, minus_di_series = adx_data if adx_data else (None, None, None)
-    volume_ok_series = cfg.get("_sr_volume_precomputed") if volume_enabled else None
     vwap_arm_series = cfg.get("_sr_vwap_arm_precomputed") if vwap_dev_enabled else None
+    sl_lower_series = cfg.get("_sr_vwap_sl_lower_precomputed") if sl_tp_mode == "vwap_cloud" else None
+    sl_upper_series = cfg.get("_sr_vwap_sl_upper_precomputed") if sl_tp_mode == "vwap_cloud" else None
 
-    warmup = max(atr_period, rsi_period, cfg.get("sr_mtf_slow_len", 9), cfg.get("sr_mtf_atr_len", 14), cfg.get("sr_zscore_lookback", 20), cfg.get("sr_adx_length", 14), cfg.get("sr_volume_length", 20), cfg.get("sr_vwap_dev_length", 60), 5) + 2
+    warmup = max(atr_period, rsi_period, cfg.get("sr_adx_length", 14), cfg.get("sr_vwap_dev_length", 60), 5) + 2
 
     def arm_before(i):
         """VWAP-Deviation-Zustand VOR Kerze i (siehe compute_vwap_dev_arm - 'vorher im Band
@@ -4469,20 +4447,35 @@ def backtest_sr_signal(candles, cfg):
             adx_ok = not adx_enabled or adx_missing or (adx_series[i] > adx_threshold and plus_di_series[i] > minus_di_series[i])
             return (direction_mode != "short_only"
                     and rsi[i] > rsi_midline
-                    and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr)
-                    and (not zscore_enabled or zscore_series is None or zscore_series[i] > 0)
-                    and (not volume_enabled or volume_ok_series is None or volume_ok_series[i])
                     and (not vwap_dev_enabled or arm_before(i) == "lower")
                     and adx_ok)
         else:
             adx_ok = not adx_enabled or adx_missing or (adx_series[i] > adx_threshold and minus_di_series[i] > plus_di_series[i])
             return (direction_mode != "long_only"
                     and rsi[i] < rsi_midline
-                    and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr)
-                    and (not zscore_enabled or zscore_series is None or zscore_series[i] < 0)
-                    and (not volume_enabled or volume_ok_series is None or volume_ok_series[i])
                     and (not vwap_dev_enabled or arm_before(i) == "upper")
                     and adx_ok)
+
+    def make_sl_tp(i, direction, entry_price):
+        """Zwei SL/TP-Varianten, siehe _sr_set_sl_tp (Live-Pendant) fuer Kommentare."""
+        if sl_tp_mode == "vwap_cloud":
+            cloud_sl = (sl_lower_series[i] if sl_lower_series is not None else None) if direction == "long" else (sl_upper_series[i] if sl_upper_series is not None else None)
+            if cloud_sl is None:
+                return None, None
+            if direction == "long":
+                risk = entry_price - cloud_sl
+                return (cloud_sl, entry_price + risk * vwap_tp_rr) if risk > 0 else (None, None)
+            else:
+                risk = cloud_sl - entry_price
+                return (cloud_sl, entry_price - risk * vwap_tp_rr) if risk > 0 else (None, None)
+        size = (margin * leverage) / entry_price
+        if direction == "long":
+            sl_price = (entry_price - sl_usd / size) if sl_enabled else None
+            tp_price = (entry_price + tp_usd / size) if tp_enabled else None
+        else:
+            sl_price = (entry_price + sl_usd / size) if sl_enabled else None
+            tp_price = (entry_price - tp_usd / size) if tp_enabled else None
+        return sl_price, tp_price
 
     position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
     trades = []
@@ -4510,13 +4503,11 @@ def backtest_sr_signal(candles, cfg):
                 continue
             if bull[i] and eval_ok(i, True):
                 size = (margin * leverage) / price
-                sl_price = (price - sl_usd / size) if sl_enabled else None
-                tp_price = (price + tp_usd / size) if tp_enabled else None
+                sl_price, tp_price = make_sl_tp(i, "long", price)
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
             elif bear[i] and eval_ok(i, False):
                 size = (margin * leverage) / price
-                sl_price = (price + sl_usd / size) if sl_enabled else None
-                tp_price = (price - tp_usd / size) if tp_enabled else None
+                sl_price, tp_price = make_sl_tp(i, "short", price)
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
             continue
 
@@ -4527,8 +4518,7 @@ def backtest_sr_signal(candles, cfg):
             else:
                 _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
                 size = (margin * leverage) / price
-                sl_price = (price + sl_usd / size) if sl_enabled else None
-                tp_price = (price - tp_usd / size) if tp_enabled else None
+                sl_price, tp_price = make_sl_tp(i, "short", price)
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
         elif position["dir"] == "short" and bull[i]:
             if direction_mode == "short_only" or not eval_ok(i, True):
@@ -4537,8 +4527,7 @@ def backtest_sr_signal(candles, cfg):
             else:
                 _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
                 size = (margin * leverage) / price
-                sl_price = (price - sl_usd / size) if sl_enabled else None
-                tp_price = (price + tp_usd / size) if tp_enabled else None
+                sl_price, tp_price = make_sl_tp(i, "long", price)
                 position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
 
     if position is not None:
@@ -9447,31 +9436,20 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         cfg["_rf_zscore_precomputed"] = zscore  # von backtest_range_filter gelesen (nicht async, siehe dort)
     elif entry_mode == "st_rsi_signal":
         cfg = dict(cfg)
-        if cfg.get("sr_mtf_filter_enabled", False):
-            trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, prefix="sr")
-            if mtf_err:
-                return {"error": mtf_err}
-            cfg["_sr_trend_pct_precomputed"] = trend_pct  # von backtest_sr_signal gelesen (nicht async, siehe dort)
-        if cfg.get("sr_zscore_filter_enabled", False):
-            zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "sr")
-            if zs_err:
-                return {"error": zs_err}
-            cfg["_sr_zscore_precomputed"] = zscore  # von backtest_sr_signal gelesen (nicht async, siehe dort)
         if cfg.get("sr_adx_filter_enabled", False):
             adx, plus_di, minus_di, adx_err = await _build_adx_series_for_backtest(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, "sr")
             if adx_err:
                 return {"error": adx_err}
             cfg["_sr_adx_precomputed"] = (adx, plus_di, minus_di)  # von backtest_sr_signal gelesen (nicht async, siehe dort)
-        if cfg.get("sr_volume_filter_enabled", False):
-            volume_ok, vol_err = await _build_volume_ok_series_for_backtest(symbol, cfg, days, candles[0], resolution, "sr")
-            if vol_err:
-                return {"error": vol_err}
-            cfg["_sr_volume_precomputed"] = volume_ok  # von backtest_sr_signal gelesen (nicht async, siehe dort)
-        if cfg.get("sr_vwap_dev_filter_enabled", False):
-            vwap_arm, vwap_err = await _build_vwap_dev_arm_for_backtest(symbol, cfg, days, candles[0], resolution, "sr")
+        need_arm = cfg.get("sr_vwap_dev_filter_enabled", False)
+        need_sl_bands = cfg.get("sr_sl_tp_mode", "fixed") == "vwap_cloud"
+        if need_arm or need_sl_bands:
+            vwap_arm, sl_lower, sl_upper, vwap_err = await _build_vwap_dev_data_for_backtest(symbol, cfg, days, candles[0], resolution, "sr", need_arm, need_sl_bands)
             if vwap_err:
                 return {"error": vwap_err}
             cfg["_sr_vwap_arm_precomputed"] = vwap_arm  # von backtest_sr_signal gelesen (nicht async, siehe dort)
+            cfg["_sr_vwap_sl_lower_precomputed"] = sl_lower
+            cfg["_sr_vwap_sl_upper_precomputed"] = sl_upper
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades, exclude_top_n)
