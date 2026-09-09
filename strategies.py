@@ -4165,11 +4165,12 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
     voneinander zuschaltbare Filter (wie bei UT-Bot+Hull/Fractals/Kerzen-DNA/Range Filter):
     ADX/DI-Trendfilter, VWAP-Deviation-Bestaetigung (vwap_arm: 'upper' -> Short erlaubt, 'lower'
     -> Long erlaubt, siehe compute_vwap_dev_arm - wird VOR dieser Kerze ausgewertet, "vorher im
-    Band geschlossen"). Bei offener Position dreht ein Gegen-Signal die Position IMMER (Flip) -
-    ausser Richtungsmodus oder ein aktiver Filter blockieren die Gegenrichtung, dann wird nur
-    glattgestellt (identisches Prinzip zu check_uh_signal bei UT-Bot+Hull). cloud_sl_lower/
-    cloud_sl_upper werden nur bei sr_sl_tp_mode='vwap_cloud' fuer den SL gebraucht (siehe
-    _sr_set_sl_tp)."""
+    Band geschlossen"). Ein Gegen-Signal ist NUR gueltig, wenn ALLE Bedingungen (Richtungsmodus,
+    RSI, ADX, VWAP-Deviation) fuer die Gegenrichtung erfuellt sind - dann wird gedreht (Flip).
+    Sind sie es nicht, passiert GAR NICHTS (nach Nutzer-Vorgabe: kein Exit bei jedem beliebigen
+    SuperTrend-Wechsel, die Position bleibt unangetastet offen und kann nur ueber SL/TP oder ein
+    spaeteres GUELTIGES Gegen-Signal beendet werden). cloud_sl_lower/cloud_sl_upper werden nur
+    bei sr_sl_tp_mode='vwap_cloud' fuer den SL gebraucht (siehe _sr_set_sl_tp)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None or rsi_val is None:
@@ -4209,52 +4210,19 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
                 _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper)
         return
 
-    if pos == "long" and bear_i:
-        if direction_mode == "long_only":
-            reason = "SR-EXIT-DIR"
-        elif not short_ok:
-            if not (rsi_val < rsi_midline):
-                reason = "SR-EXIT-RSI"
-            elif vwap_dev_enabled and vwap_arm != "upper":
-                reason = "SR-EXIT-VWAP"
-            else:
-                reason = "SR-EXIT-ADX"
-        else:
-            reason = None
-        if reason is not None:
-            debug_log(f"🚪 [{symbol}] SuperTrend+RSI Exit ({reason}): LONG @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["sr_sl_price"] = None
-            st["sr_tp_price"] = None
-        else:
-            debug_log(f"🔄 [{symbol}] SuperTrend+RSI Flip: LONG -> SHORT @ {price}")
-            await execute_exit(symbol, price, "SR-FLIP")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper)
-    elif pos == "short" and bull_i:
-        if direction_mode == "short_only":
-            reason = "SR-EXIT-DIR"
-        elif not long_ok:
-            if not (rsi_val > rsi_midline):
-                reason = "SR-EXIT-RSI"
-            elif vwap_dev_enabled and vwap_arm != "lower":
-                reason = "SR-EXIT-VWAP"
-            else:
-                reason = "SR-EXIT-ADX"
-        else:
-            reason = None
-        if reason is not None:
-            debug_log(f"🚪 [{symbol}] SuperTrend+RSI Exit ({reason}): SHORT @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["sr_sl_price"] = None
-            st["sr_tp_price"] = None
-        else:
-            debug_log(f"🔄 [{symbol}] SuperTrend+RSI Flip: SHORT -> LONG @ {price}")
-            await execute_exit(symbol, price, "SR-FLIP")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper)
+    if pos == "long" and bear_i and short_ok:
+        debug_log(f"🔄 [{symbol}] SuperTrend+RSI Flip: LONG -> SHORT @ {price}")
+        await execute_exit(symbol, price, "SR-FLIP")
+        await execute_entry(symbol, "short", price, is_add_on=False)
+        if st["position"] is not None:
+            _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper)
+    elif pos == "short" and bull_i and long_ok:
+        debug_log(f"🔄 [{symbol}] SuperTrend+RSI Flip: SHORT -> LONG @ {price}")
+        await execute_exit(symbol, price, "SR-FLIP")
+        await execute_entry(symbol, "long", price, is_add_on=False)
+        if st["position"] is not None:
+            _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper)
+    # Gegen-Signal kam, aber Bedingungen nicht erfuellt -> bewusst KEINE Aktion (siehe Docstring)
 
 
 async def sr_poll_loop(symbol):
@@ -4511,24 +4479,18 @@ def backtest_sr_signal(candles, cfg):
                 position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
             continue
 
-        if position["dir"] == "long" and bear[i]:
-            if direction_mode == "long_only" or not eval_ok(i, False):
-                _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "SR-EXIT", ts=ts)
-                position = None
-            else:
-                _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
-                size = (margin * leverage) / price
-                sl_price, tp_price = make_sl_tp(i, "short", price)
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
-        elif position["dir"] == "short" and bull[i]:
-            if direction_mode == "short_only" or not eval_ok(i, True):
-                _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "SR-EXIT", ts=ts)
-                position = None
-            else:
-                _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
-                size = (margin * leverage) / price
-                sl_price, tp_price = make_sl_tp(i, "long", price)
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+        if position["dir"] == "long" and bear[i] and eval_ok(i, False):
+            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
+            size = (margin * leverage) / price
+            sl_price, tp_price = make_sl_tp(i, "short", price)
+            position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+        elif position["dir"] == "short" and bull[i] and eval_ok(i, True):
+            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
+            size = (margin * leverage) / price
+            sl_price, tp_price = make_sl_tp(i, "long", price)
+            position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+        # Gegen-Signal kam, aber Bedingungen nicht erfuellt -> bewusst KEINE Aktion (siehe
+        # check_sr_signal-Docstring, identische Logik)
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
