@@ -583,6 +583,9 @@ def default_config():
         "sr_tp_enabled": os.getenv("SR_TP_ENABLED", "true").lower() == "true",
         "sr_tp_manual_usd": float(os.getenv("SR_TP_MANUAL_USD", "10.0")),
         "sr_sl_cooldown_seconds": float(os.getenv("SR_SL_COOLDOWN_SECONDS", "30")),
+        "sr_vwap_dev_filter_enabled": os.getenv("SR_VWAP_DEV_FILTER_ENABLED", "false").lower() == "true",
+        "sr_vwap_dev_length": int(os.getenv("SR_VWAP_DEV_LENGTH", "60")),
+        "sr_vwap_dev_mult": float(os.getenv("SR_VWAP_DEV_MULT", "2.0")),
     }
 
 
@@ -3077,6 +3080,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="sr_mtf_slow_len"></div>
   <div data-mode="st_rsi_signal" data-requires="sr_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="sr_mtf_atr_len"></div>
 
+  <div data-mode="st_rsi_signal"><label>VWAP-Deviation-Bestätigung (nach "[Hoss] VWAP Deviation")</label>
+    <select class="cfg" id="sr_vwap_dev_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_vwap_dev_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Schließt eine Kerze ÜBER dem oberen Band (rote Wolke) -> Short ab jetzt erlaubt (Long
+    gesperrt), bis eine Kerze UNTER dem unteren Band (grüne Wolke) schließt - das hebt den
+    Short-Zustand sofort auf und erlaubt stattdessen Long. Ohne neuen Bandkontakt bleibt der
+    letzte Zustand unbegrenzt bestehen (kein fester Lookback). Braucht Handelsvolumen wie der
+    Volumen-Filter oben - bei Sekunden-Auflösungen/"Eigene Minuten" daher wirkungslos.
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_vwap_dev_filter_enabled"><label>VWAP-Deviation Länge</label><input type="number" step="1" min="2" id="sr_vwap_dev_length"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_vwap_dev_filter_enabled"><label>Band-Multiplikator (2 = "dev 2"-Linie)</label><input type="number" step="0.1" min="0.1" id="sr_vwap_dev_mult"></div>
+
   <div data-mode="st_rsi_signal"><label>Z-Score-Filter</label>
     <select class="cfg" id="sr_zscore_filter_enabled">
       <option value="false">Aus</option>
@@ -5361,6 +5380,9 @@ async function refresh() {
     document.getElementById('sr_sl_enabled').value = String(data.config.sr_sl_enabled);
     document.getElementById('sr_sl_manual_usd').value = data.config.sr_sl_manual_usd;
     document.getElementById('sr_sl_cooldown_seconds').value = data.config.sr_sl_cooldown_seconds;
+    document.getElementById('sr_vwap_dev_filter_enabled').value = String(data.config.sr_vwap_dev_filter_enabled);
+    document.getElementById('sr_vwap_dev_length').value = data.config.sr_vwap_dev_length;
+    document.getElementById('sr_vwap_dev_mult').value = data.config.sr_vwap_dev_mult;
     document.getElementById('sr_tp_enabled').value = String(data.config.sr_tp_enabled);
     document.getElementById('sr_tp_manual_usd').value = data.config.sr_tp_manual_usd;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
@@ -5897,6 +5919,9 @@ function buildConfigPayload() {
     sr_sl_enabled: document.getElementById('sr_sl_enabled').value === 'true',
     sr_sl_manual_usd: parseFloat(document.getElementById('sr_sl_manual_usd').value),
     sr_sl_cooldown_seconds: parseFloat(document.getElementById('sr_sl_cooldown_seconds').value),
+    sr_vwap_dev_filter_enabled: document.getElementById('sr_vwap_dev_filter_enabled').value === 'true',
+    sr_vwap_dev_length: parseInt(document.getElementById('sr_vwap_dev_length').value),
+    sr_vwap_dev_mult: parseFloat(document.getElementById('sr_vwap_dev_mult').value),
     sr_tp_enabled: document.getElementById('sr_tp_enabled').value === 'true',
     sr_tp_manual_usd: parseFloat(document.getElementById('sr_tp_manual_usd').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
@@ -6201,6 +6226,7 @@ async def handle_config_update(request):
                 "sr_mtf_long_threshold", "sr_mtf_short_threshold",
                 "sr_zscore_filter_enabled", "sr_zscore_lookback", "sr_zscore_smooth",
                 "sr_sl_enabled", "sr_sl_manual_usd", "sr_tp_enabled", "sr_tp_manual_usd", "sr_sl_cooldown_seconds",
+                "sr_vwap_dev_filter_enabled", "sr_vwap_dev_length", "sr_vwap_dev_mult",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

@@ -3966,6 +3966,88 @@ async def fr_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+def compute_vw_avdev_bands(closes, volumes, length, mult):
+    """Portiert aus '[Hoss] VWAP Deviation' (pine_vwmean + pine_vwavdev, 'Average Deviation'
+    ist dort fest kodiert, 'Standard Deviation' ist im Original toter Code): volumengewichteter
+    gleitender Mittelwert (VWMA) ueber die letzten 'length' Kerzen plus volumengewichtete
+    durchschnittliche Abweichung davon. upper/lower = Mittelwert +/- Abweichung*mult (mult=2
+    entspricht der Original-"Upper/Lower dev 2"-Linie, dem roten/gruenen Band). Bewusst OHNE
+    Log-Space-Option (im Original per Toggle 'ls' waehlbar) - hier immer im normalen Preis-Raum,
+    haelt die Konfiguration einfach."""
+    n = len(closes)
+    vwmean = [0.0] * n
+    dev = [0.0] * n
+    for i in range(n):
+        lo = max(0, i - length + 1)
+        window_c = closes[lo:i + 1]
+        window_v = volumes[lo:i + 1]
+        w_sum = sum(window_v)
+        if w_sum <= 0:
+            vwmean[i] = closes[i]
+            dev[i] = 0.0
+            continue
+        m = sum(cc * vv for cc, vv in zip(window_c, window_v)) / w_sum
+        vwmean[i] = m
+        dev[i] = sum(abs(cc - m) * vv for cc, vv in zip(window_c, window_v)) / w_sum
+    upper = [vwmean[i] + dev[i] * mult for i in range(n)]
+    lower = [vwmean[i] - dev[i] * mult for i in range(n)]
+    return vwmean, dev, upper, lower
+
+
+def compute_vwap_dev_arm(closes, upper, lower):
+    """Zustandsmaschine (nach Nutzer-Vorgabe, kein fester Lookback): schliesst eine Kerze ÜBER
+    dem oberen Band (rote Wolke) -> Zustand 'upper' (Short vorbereitet). Schliesst eine Kerze
+    UNTER dem unteren Band (gruene Wolke) -> Zustand 'lower' (Long vorbereitet) - das hebt einen
+    vorher gesetzten 'upper'-Zustand SOFORT auf, egal wie viele Kerzen seitdem vergangen sind.
+    Ohne neuen Bandkontakt bleibt der letzte Zustand unbegrenzt bestehen. Gibt pro Kerze den
+    Zustand ZUM SCHLUSS dieser Kerze zurueck - fuer die Signalpruefung an Kerze i zaehlt der
+    Zustand VOR dieser Kerze (arm[i-1]), siehe check_sr_signal/backtest_sr_signal."""
+    n = len(closes)
+    arm = [None] * n
+    state = None
+    for i in range(n):
+        if closes[i] > upper[i]:
+            state = "upper"
+        elif closes[i] < lower[i]:
+            state = "lower"
+        arm[i] = state
+    return arm
+
+
+def _align_generic_series(base_ts, htf_ts, htf_vals, default=None):
+    """Wie _align_htf_series, aber mit frei waehlbarem Default-Wert (statt fest 0.0) - noetig
+    fuer Nicht-Zahlen-Serien wie den VWAP-Dev-Zustand ('upper'/'lower'/None)."""
+    n = len(base_ts)
+    m = len(htf_ts)
+    out = [default] * n
+    j = 0
+    last_val = default
+    for i in range(n):
+        while j < m and htf_ts[j] <= base_ts[i]:
+            last_val = htf_vals[j]
+            j += 1
+        out[i] = last_val
+    return out
+
+
+async def _build_vwap_dev_arm_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix):
+    """Holt die historischen Kerzen MIT Volumen (wie beim Volumen-Filter, siehe
+    _build_volume_ok_series_for_backtest) auf dem eigenen Handels-Zeitrahmen, berechnet die
+    VWAP-Deviation-Baender und daraus den Arm-Zustand je Kerze, bildet ihn per Forward-Fill auf
+    die Zeitstempel der Einstiegs-Kerzen ab. Gibt (arm, error) zurueck."""
+    length = cfg.get(f"{prefix}_vwap_dev_length", 60)
+    mult = cfg.get(f"{prefix}_vwap_dev_mult", 2.0)
+    tf_candles, err = await fetch_historical_candles_binance_vol(symbol, primary_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return None, f"VWAP-Deviation-Zeiteinheit ({primary_resolution}): {err}"
+    if not tf_candles or len(tf_candles[4]) < length + 5:
+        return None, "Zu wenig historische Kerzen (mit Volumen) für den VWAP-Deviation-Filter erhalten."
+    t_ts, t_o, t_h, t_l, t_c, t_v = tf_candles
+    _, _, upper, lower = compute_vw_avdev_bands(t_c, t_v, length, mult)
+    arm_htf = compute_vwap_dev_arm(t_c, upper, lower)
+    return _align_generic_series(base_ts, t_ts, arm_htf, default=None), None
+
+
 def compute_sr_signals(highs, lows, closes, atr_period, multiplier, rsi_period):
     """SuperTrend(ATR-Periode, Multiplikator) + RSI - nach Nutzer-Vorgabe (kein Pine-Script-Port,
     eigene Kombination). Nutzt denselben SuperTrend-Kernbaustein wie Diamond Algo/Pieki Algo
@@ -4029,14 +4111,16 @@ async def check_sr_sl_tp(symbol, price):
             st["sr_tp_price"] = None
 
 
-async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, zscore=None, trend_pct=None, volume_ok=None):
+async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, zscore=None, trend_pct=None, volume_ok=None, vwap_arm=None):
     """Kernsignal (nach Nutzer-Vorgabe): SuperTrend dreht bullisch UND RSI > Mittellinie -> Long.
-    SuperTrend dreht baerisch UND RSI < Mittellinie -> Short. Zusaetzlich vier unabhaengig
+    SuperTrend dreht baerisch UND RSI < Mittellinie -> Short. Zusaetzlich fuenf unabhaengig
     voneinander zuschaltbare Filter (wie bei UT-Bot+Hull/Fractals/Kerzen-DNA/Range Filter):
     ADX/DI-Trendfilter, Volumen-Filter (relatives Volumen), MTF-Trend%-Filter (wie bei Pieki
-    Algo), Z-Score-Filter. Bei offener Position dreht ein Gegen-Signal die Position IMMER (Flip) -
-    ausser Richtungsmodus oder ein aktiver Filter blockieren die Gegenrichtung, dann wird nur
-    glattgestellt (identisches Prinzip zu check_uh_signal bei UT-Bot+Hull)."""
+    Algo), Z-Score-Filter, VWAP-Deviation-Bestaetigung (vwap_arm: 'upper' -> Short erlaubt,
+    'lower' -> Long erlaubt, siehe compute_vwap_dev_arm - wird VOR dieser Kerze ausgewertet,
+    "vorher im Band geschlossen"). Bei offener Position dreht ein Gegen-Signal die Position
+    IMMER (Flip) - ausser Richtungsmodus oder ein aktiver Filter blockieren die Gegenrichtung,
+    dann wird nur glattgestellt (identisches Prinzip zu check_uh_signal bei UT-Bot+Hull)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None or rsi_val is None:
@@ -4056,18 +4140,21 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
     adx_missing = adx is None or plus_di is None or minus_di is None
     adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
     adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
+    vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
 
     long_ok = (direction_mode != "short_only"
                and rsi_val > rsi_midline
                and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
                and (not zscore_enabled or zscore is None or zscore > 0)
                and (not volume_enabled or volume_ok is None or volume_ok)
+               and (not vwap_dev_enabled or vwap_arm == "lower")
                and adx_long_ok)
     short_ok = (direction_mode != "long_only"
                 and rsi_val < rsi_midline
                 and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
                 and (not zscore_enabled or zscore is None or zscore < 0)
                 and (not volume_enabled or volume_ok is None or volume_ok)
+                and (not vwap_dev_enabled or vwap_arm == "upper")
                 and adx_short_ok)
     pos = st["position"]
 
@@ -4096,6 +4183,8 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
                 reason = "SR-EXIT-ZSCORE"
             elif volume_enabled and not (volume_ok is None or volume_ok):
                 reason = "SR-EXIT-VOLUME"
+            elif vwap_dev_enabled and vwap_arm != "upper":
+                reason = "SR-EXIT-VWAP"
             else:
                 reason = "SR-EXIT-ADX"
         else:
@@ -4123,6 +4212,8 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
                 reason = "SR-EXIT-ZSCORE"
             elif volume_enabled and not (volume_ok is None or volume_ok):
                 reason = "SR-EXIT-VOLUME"
+            elif vwap_dev_enabled and vwap_arm != "lower":
+                reason = "SR-EXIT-VWAP"
             else:
                 reason = "SR-EXIT-ADX"
         else:
@@ -4171,11 +4262,14 @@ async def sr_poll_loop(symbol):
                 mtf_fast = cfg.get("sr_mtf_fast_len", 5)
                 mtf_slow_len = cfg.get("sr_mtf_slow_len", 9)
                 mtf_atr_len = cfg.get("sr_mtf_atr_len", 14)
-                min_needed = max(atr_period, rsi_period, volume_len, zscore_lookback, adx_length, mtf_slow_len, mtf_atr_len, 5) + 5
+                vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
+                vwap_dev_length = cfg.get("sr_vwap_dev_length", 60)
+                vwap_dev_mult = cfg.get("sr_vwap_dev_mult", 2.0)
+                min_needed = max(atr_period, rsi_period, volume_len, zscore_lookback, adx_length, mtf_slow_len, mtf_atr_len, vwap_dev_length, 5) + 5
                 needed_bars = min(1000, max(min_needed * 2, 220))
                 st = b["state"]
 
-                if volume_enabled:
+                if volume_enabled or vwap_dev_enabled:
                     data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
                     if data:
                         timestamps, opens, highs, lows, closes, volumes = data
@@ -4218,6 +4312,10 @@ async def sr_poll_loop(symbol):
                         vol_ma = _sma_series(closed_v, volume_len)
                         volume_mult = cfg.get("sr_volume_mult", 1.3)
                         volume_ok = [closed_v[i] > vol_ma[i] * volume_mult for i in range(len(closed_v))]
+
+                    vwap_upper = vwap_lower = None
+                    if vwap_dev_enabled and closed_v:
+                        _, _, vwap_upper, vwap_lower = compute_vw_avdev_bands(closed_c, closed_v, vwap_dev_length, vwap_dev_mult)
 
                     trend_pct_now = None
                     if mtf_enabled:
@@ -4267,6 +4365,14 @@ async def sr_poll_loop(symbol):
                             continue
                         price_i = closed_c[idx]
                         last_processed_ts = closed_ts[idx]
+
+                        vwap_arm_before = st.get("sr_vwap_arm") if vwap_dev_enabled else None
+                        if vwap_dev_enabled and vwap_upper is not None:
+                            if closed_c[idx] > vwap_upper[idx]:
+                                st["sr_vwap_arm"] = "upper"
+                            elif closed_c[idx] < vwap_lower[idx]:
+                                st["sr_vwap_arm"] = "lower"
+
                         await check_sr_signal(
                             symbol, bull[idx], bear[idx], price_i, rsi[idx],
                             adx=adx[idx] if adx is not None else None,
@@ -4275,6 +4381,7 @@ async def sr_poll_loop(symbol):
                             zscore=zscore[idx] if zscore is not None else None,
                             trend_pct=trend_pct_now,
                             volume_ok=volume_ok[idx] if volume_ok is not None else None,
+                            vwap_arm=vwap_arm_before,
                         )
 
                     await check_sr_sl_tp(symbol, price)
@@ -4336,6 +4443,7 @@ def backtest_sr_signal(candles, cfg):
     volume_enabled = cfg.get("sr_volume_filter_enabled", False)
     adx_enabled = cfg.get("sr_adx_filter_enabled", False)
     adx_threshold = cfg.get("sr_adx_threshold", 20)
+    vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
 
     bull, bear, rsi, st_line = compute_sr_signals(h, l, c, atr_period, multiplier, rsi_period)
 
@@ -4344,8 +4452,16 @@ def backtest_sr_signal(candles, cfg):
     adx_data = cfg.get("_sr_adx_precomputed") if adx_enabled else None
     adx_series, plus_di_series, minus_di_series = adx_data if adx_data else (None, None, None)
     volume_ok_series = cfg.get("_sr_volume_precomputed") if volume_enabled else None
+    vwap_arm_series = cfg.get("_sr_vwap_arm_precomputed") if vwap_dev_enabled else None
 
-    warmup = max(atr_period, rsi_period, cfg.get("sr_mtf_slow_len", 9), cfg.get("sr_mtf_atr_len", 14), cfg.get("sr_zscore_lookback", 20), cfg.get("sr_adx_length", 14), cfg.get("sr_volume_length", 20), 5) + 2
+    warmup = max(atr_period, rsi_period, cfg.get("sr_mtf_slow_len", 9), cfg.get("sr_mtf_atr_len", 14), cfg.get("sr_zscore_lookback", 20), cfg.get("sr_adx_length", 14), cfg.get("sr_volume_length", 20), cfg.get("sr_vwap_dev_length", 60), 5) + 2
+
+    def arm_before(i):
+        """VWAP-Deviation-Zustand VOR Kerze i (siehe compute_vwap_dev_arm - 'vorher im Band
+        geschlossen')."""
+        if vwap_arm_series is None or i < 1:
+            return None
+        return vwap_arm_series[i - 1]
 
     def eval_ok(i, want_long):
         adx_missing = adx_series is None or plus_di_series is None or minus_di_series is None
@@ -4356,6 +4472,7 @@ def backtest_sr_signal(candles, cfg):
                     and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr)
                     and (not zscore_enabled or zscore_series is None or zscore_series[i] > 0)
                     and (not volume_enabled or volume_ok_series is None or volume_ok_series[i])
+                    and (not vwap_dev_enabled or arm_before(i) == "lower")
                     and adx_ok)
         else:
             adx_ok = not adx_enabled or adx_missing or (adx_series[i] > adx_threshold and minus_di_series[i] > plus_di_series[i])
@@ -4364,6 +4481,7 @@ def backtest_sr_signal(candles, cfg):
                     and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr)
                     and (not zscore_enabled or zscore_series is None or zscore_series[i] < 0)
                     and (not volume_enabled or volume_ok_series is None or volume_ok_series[i])
+                    and (not vwap_dev_enabled or arm_before(i) == "upper")
                     and adx_ok)
 
     position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
@@ -9349,6 +9467,11 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             if vol_err:
                 return {"error": vol_err}
             cfg["_sr_volume_precomputed"] = volume_ok  # von backtest_sr_signal gelesen (nicht async, siehe dort)
+        if cfg.get("sr_vwap_dev_filter_enabled", False):
+            vwap_arm, vwap_err = await _build_vwap_dev_arm_for_backtest(symbol, cfg, days, candles[0], resolution, "sr")
+            if vwap_err:
+                return {"error": vwap_err}
+            cfg["_sr_vwap_arm_precomputed"] = vwap_arm  # von backtest_sr_signal gelesen (nicht async, siehe dort)
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades, exclude_top_n)
