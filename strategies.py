@@ -4209,12 +4209,16 @@ def compute_sr_signals(highs, lows, closes, atr_period, multiplier, rsi_period):
     return bull, bear, rsi, st_line
 
 
-def _sr_set_sl_tp(st, cfg, direction, entry_price, cloud_sl_lower=None, cloud_sl_upper=None):
-    """Zwei SL/TP-Varianten (per sr_sl_tp_mode): 'fixed' = fester $-Betrag (wie bei UT-Bot+Hull/
+def _sr_set_sl_tp(st, cfg, direction, entry_price, cloud_sl_lower=None, cloud_sl_upper=None, st_line_val=None):
+    """Drei SL/TP-Varianten (per sr_sl_tp_mode): 'fixed' = fester $-Betrag (wie bei UT-Bot+Hull/
     Pieki Algo/Fractals). 'vwap_cloud' (nach Nutzer-Vorgabe): SL am AEUSSEREN Rand der VWAP-
     Wolke ("Ende der Wolke", cloud_sl_lower/cloud_sl_upper - siehe sr_vwap_sl_mult), TP als
     einstellbares Risk-Reward-Vielfaches (sr_vwap_tp_rr, z.B. 1.0 = 1:1, 1.5 = 1:1,5) des
-    daraus resultierenden SL-Abstands vom Einstieg."""
+    daraus resultierenden SL-Abstands vom Einstieg. 'supertrend' (nach Nutzer-Vorgabe): SL auf
+    der SuperTrend-Linie SELBST zum Einstiegszeitpunkt (st_line_val - bei Long liegt sie als
+    Unterstuetzung unter dem Kurs, bei Short als Widerstand darueber, da der Einstieg ja genau
+    beim Ueberqueren dieser Linie ausgeloest wurde), TP ebenfalls als einstellbares Risk-Reward-
+    Vielfaches (sr_st_tp_rr) des SL-Abstands."""
     mode = cfg.get("sr_sl_tp_mode", "fixed")
     if mode == "vwap_cloud":
         cloud_sl = cloud_sl_lower if direction == "long" else cloud_sl_upper
@@ -4230,6 +4234,22 @@ def _sr_set_sl_tp(st, cfg, direction, entry_price, cloud_sl_lower=None, cloud_sl
                 st["sr_tp_price"] = entry_price - risk * rr if risk > 0 else None
             return
         # Kein Wolken-Wert verfuegbar (z.B. zu wenig Kerzen fuer VWAP-Deviation) - kein SL/TP
+        st["sr_sl_price"] = None
+        st["sr_tp_price"] = None
+        return
+
+    if mode == "supertrend":
+        if st_line_val is not None:
+            rr = cfg.get("sr_st_tp_rr", 1.5)
+            if direction == "long":
+                risk = entry_price - st_line_val
+                st["sr_sl_price"] = st_line_val
+                st["sr_tp_price"] = entry_price + risk * rr if risk > 0 else None
+            else:
+                risk = st_line_val - entry_price
+                st["sr_sl_price"] = st_line_val
+                st["sr_tp_price"] = entry_price - risk * rr if risk > 0 else None
+            return
         st["sr_sl_price"] = None
         st["sr_tp_price"] = None
         return
@@ -4277,7 +4297,7 @@ async def check_sr_sl_tp(symbol, price):
             st["sr_tp_price"] = None
 
 
-async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None, ema_val=None, rsi_arm=None, vwap_midline_ok=None):
+async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None, ema_val=None, rsi_arm=None, vwap_midline_ok=None, st_line_val=None):
     """Kernsignal (nach Nutzer-Vorgabe): SuperTrend dreht bullisch UND RSI-Bedingung erfuellt ->
     Long. SuperTrend dreht baerisch UND RSI-Bedingung erfuellt -> Short. RSI-Bedingung ist
     ueber sr_rsi_mode waehlbar: 'midline' (Standard) = RSI > Mittellinie fuer Long / < Mittellinie
@@ -4344,12 +4364,12 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
             debug_log(f"📡 [{symbol}] SuperTrend+RSI Ersteinstieg: LONG @ {price} (RSI={round(rsi_val, 1)})")
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper)
+                _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper, st_line_val)
         elif bear_i and short_ok:
             debug_log(f"📡 [{symbol}] SuperTrend+RSI Ersteinstieg: SHORT @ {price} (RSI={round(rsi_val, 1)})")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper)
+                _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper, st_line_val)
         return
 
     if pos == "long" and bear_i and short_ok:
@@ -4357,13 +4377,13 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
         await execute_exit(symbol, price, "SR-FLIP")
         await execute_entry(symbol, "short", price, is_add_on=False)
         if st["position"] is not None:
-            _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper)
+            _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper, st_line_val)
     elif pos == "short" and bull_i and long_ok:
         debug_log(f"🔄 [{symbol}] SuperTrend+RSI Flip: SHORT -> LONG @ {price}")
         await execute_exit(symbol, price, "SR-FLIP")
         await execute_entry(symbol, "long", price, is_add_on=False)
         if st["position"] is not None:
-            _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper)
+            _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper, st_line_val)
     # Gegen-Signal kam, aber Bedingungen nicht erfuellt -> bewusst KEINE Aktion (siehe Docstring)
 
 
@@ -4502,6 +4522,7 @@ async def sr_poll_loop(symbol):
                             ema_val=ema[idx] if ema is not None else None,
                             rsi_arm=rsi_arm_before,
                             vwap_midline_ok=midline_ok[idx] if midline_ok is not None else None,
+                            st_line_val=st_line[idx],
                         )
 
                     await check_sr_sl_tp(symbol, price)
@@ -4561,6 +4582,7 @@ def backtest_sr_signal(candles, cfg):
     sl_usd = cfg.get("sr_sl_manual_usd", 5.0)
     tp_usd = cfg.get("sr_tp_manual_usd", 10.0)
     vwap_tp_rr = cfg.get("sr_vwap_tp_rr", 1.5)
+    st_tp_rr = cfg.get("sr_st_tp_rr", 1.5)
     sl_cooldown_ms = cfg.get("sr_sl_cooldown_seconds", 30) * 1000
 
     adx_enabled = cfg.get("sr_adx_filter_enabled", False)
@@ -4626,7 +4648,7 @@ def backtest_sr_signal(candles, cfg):
                     and adx_ok)
 
     def make_sl_tp(i, direction, entry_price):
-        """Zwei SL/TP-Varianten, siehe _sr_set_sl_tp (Live-Pendant) fuer Kommentare."""
+        """Drei SL/TP-Varianten, siehe _sr_set_sl_tp (Live-Pendant) fuer Kommentare."""
         if sl_tp_mode == "vwap_cloud":
             cloud_sl = (sl_lower_series[i] if sl_lower_series is not None else None) if direction == "long" else (sl_upper_series[i] if sl_upper_series is not None else None)
             if cloud_sl is None:
@@ -4637,6 +4659,14 @@ def backtest_sr_signal(candles, cfg):
             else:
                 risk = cloud_sl - entry_price
                 return (cloud_sl, entry_price - risk * vwap_tp_rr) if risk > 0 else (None, None)
+        if sl_tp_mode == "supertrend":
+            st_sl = st_line[i]
+            if direction == "long":
+                risk = entry_price - st_sl
+                return (st_sl, entry_price + risk * st_tp_rr) if risk > 0 else (None, None)
+            else:
+                risk = st_sl - entry_price
+                return (st_sl, entry_price - risk * st_tp_rr) if risk > 0 else (None, None)
         size = (margin * leverage) / entry_price
         if direction == "long":
             sl_price = (entry_price - sl_usd / size) if sl_enabled else None
