@@ -559,6 +559,11 @@ def default_config():
         "sr_st_multiplier": float(os.getenv("SR_ST_MULTIPLIER", "2.0")),
         "sr_rsi_period": int(os.getenv("SR_RSI_PERIOD", "9")),
         "sr_rsi_midline": float(os.getenv("SR_RSI_MIDLINE", "50")),
+        "sr_rsi_mode": os.getenv("SR_RSI_MODE", "midline"),  # "midline" | "extreme_arm"
+        "sr_rsi_overbought": float(os.getenv("SR_RSI_OVERBOUGHT", "70")),
+        "sr_rsi_oversold": float(os.getenv("SR_RSI_OVERSOLD", "30")),
+        "sr_ema_filter_enabled": os.getenv("SR_EMA_FILTER_ENABLED", "false").lower() == "true",
+        "sr_ema_length": int(os.getenv("SR_EMA_LENGTH", "200")),
         "sr_direction_mode": os.getenv("SR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
         "sr_adx_filter_enabled": os.getenv("SR_ADX_FILTER_ENABLED", "false").lower() == "true",
         "sr_adx_length": int(os.getenv("SR_ADX_LENGTH", "14")),
@@ -2980,7 +2985,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="st_rsi_signal"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="sr_st_atr_period"></div>
   <div data-mode="st_rsi_signal"><label>SuperTrend Multiplikator</label><input type="number" step="0.1" min="0.1" id="sr_st_multiplier"></div>
   <div data-mode="st_rsi_signal"><label>RSI-Periode</label><input type="number" step="1" min="1" id="sr_rsi_period"></div>
-  <div data-mode="st_rsi_signal"><label>RSI-Mittellinie (Long über / Short unter diesem Wert)</label><input type="number" step="1" id="sr_rsi_midline"></div>
+  <div data-mode="st_rsi_signal"><label>RSI-Modus</label>
+    <select class="cfg" id="sr_rsi_mode">
+      <option value="midline">Mittellinie (RSI über/unter Wert AN dieser Kerze)</option>
+      <option value="extreme_arm">Extremwert vorher (RSI muss vorher über/unter Schwelle gewesen sein)</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_rsi_mode" data-requires-value="midline"><label>RSI-Mittellinie (Long über / Short unter diesem Wert)</label><input type="number" step="1" id="sr_rsi_midline"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_rsi_mode" data-requires-value="extreme_arm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    RSI steigt über die Überkauft-Schwelle -> Short ab jetzt erlaubt (Long gesperrt), bis RSI
+    unter die Überverkauft-Schwelle fällt - das hebt den Short-Zustand sofort auf und erlaubt
+    stattdessen Long. Ohne neuen Extremwert-Kontakt bleibt der letzte Zustand unbegrenzt bestehen
+    (kein fester Lookback, identisches Prinzip wie die VWAP-Deviation-Bestätigung unten).
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_rsi_mode" data-requires-value="extreme_arm"><label>Überkauft-Schwelle (für Short)</label><input type="number" step="1" id="sr_rsi_overbought"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_rsi_mode" data-requires-value="extreme_arm"><label>Überverkauft-Schwelle (für Long)</label><input type="number" step="1" id="sr_rsi_oversold"></div>
   <div data-mode="st_rsi_signal"><label>Richtung</label>
     <select class="cfg" id="sr_direction_mode">
       <option value="both">Beide (Long + Short)</option>
@@ -2992,6 +3011,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     Bei offener Position dreht ein Gegen-Signal (SuperTrend-Flip) die Position immer (Flip) -
     außer Richtung oder ein aktiver Filter unten blockiert die Gegenrichtung, dann wird nur
     glattgestellt statt gedreht.
+  </div>
+
+  <div data-mode="st_rsi_signal"><label>EMA-Trendfilter</label>
+    <select class="cfg" id="sr_ema_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_ema_filter_enabled"><label>EMA-Länge</label><input type="number" step="1" min="1" id="sr_ema_length"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_ema_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Long nur, wenn der Kurs ÜBER der EMA liegt - Short nur, wenn er DARUNTER liegt (Standard 200,
+    klassischer Trendfilter).
   </div>
 
   <div data-mode="st_rsi_signal"><label>ADX/DI-Trendfilter</label>
@@ -5297,6 +5328,11 @@ async function refresh() {
     document.getElementById('sr_st_multiplier').value = data.config.sr_st_multiplier;
     document.getElementById('sr_rsi_period').value = data.config.sr_rsi_period;
     document.getElementById('sr_rsi_midline').value = data.config.sr_rsi_midline;
+    document.getElementById('sr_rsi_mode').value = data.config.sr_rsi_mode;
+    document.getElementById('sr_rsi_overbought').value = data.config.sr_rsi_overbought;
+    document.getElementById('sr_rsi_oversold').value = data.config.sr_rsi_oversold;
+    document.getElementById('sr_ema_filter_enabled').value = String(data.config.sr_ema_filter_enabled);
+    document.getElementById('sr_ema_length').value = data.config.sr_ema_length;
     document.getElementById('sr_direction_mode').value = data.config.sr_direction_mode;
     document.getElementById('sr_adx_filter_enabled').value = String(data.config.sr_adx_filter_enabled);
     document.getElementById('sr_adx_length').value = data.config.sr_adx_length;
@@ -5827,6 +5863,11 @@ function buildConfigPayload() {
     sr_st_multiplier: parseFloat(document.getElementById('sr_st_multiplier').value),
     sr_rsi_period: parseInt(document.getElementById('sr_rsi_period').value),
     sr_rsi_midline: parseFloat(document.getElementById('sr_rsi_midline').value),
+    sr_rsi_mode: document.getElementById('sr_rsi_mode').value,
+    sr_rsi_overbought: parseFloat(document.getElementById('sr_rsi_overbought').value),
+    sr_rsi_oversold: parseFloat(document.getElementById('sr_rsi_oversold').value),
+    sr_ema_filter_enabled: document.getElementById('sr_ema_filter_enabled').value === 'true',
+    sr_ema_length: parseInt(document.getElementById('sr_ema_length').value),
     sr_direction_mode: document.getElementById('sr_direction_mode').value,
     sr_adx_filter_enabled: document.getElementById('sr_adx_filter_enabled').value === 'true',
     sr_adx_length: parseInt(document.getElementById('sr_adx_length').value),
@@ -6140,6 +6181,8 @@ async def handle_config_update(request):
                 "mv_sl_mode", "mv_sl_enabled", "mv_sl_manual_usd", "mv_sl_cooldown_seconds",
                 "mv_tp_enabled", "mv_tp_manual_usd",
                 "sr_resolution", "sr_st_atr_period", "sr_st_multiplier", "sr_rsi_period", "sr_rsi_midline",
+                "sr_rsi_mode", "sr_rsi_overbought", "sr_rsi_oversold",
+                "sr_ema_filter_enabled", "sr_ema_length",
                 "sr_direction_mode", "sr_adx_filter_enabled", "sr_adx_length", "sr_adx_threshold",
                 "sr_zscore_filter_enabled", "sr_zscore_lookback", "sr_zscore_smooth",
                 "sr_sl_tp_mode",

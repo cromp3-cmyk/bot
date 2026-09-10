@@ -4163,6 +4163,27 @@ async def _build_vwap_dev_data_for_backtest(symbol, cfg, days, base_ts, primary_
     return arm_aligned, sl_lower_aligned, sl_upper_aligned, None
 
 
+def compute_rsi_arm(rsi, overbought, oversold):
+    """Zustandsmaschine fuer den RSI-Extremwert-Modus (nach Nutzer-Vorgabe, identisches Prinzip
+    zu compute_vwap_dev_arm - kein fester Lookback): steigt RSI ueber 'overbought' (Standard 70)
+    -> Zustand 'short_ready' (Short ab jetzt erlaubt). Faellt RSI unter 'oversold' (Standard 30)
+    -> Zustand 'long_ready' (Long ab jetzt erlaubt) - hebt einen vorher gesetzten 'short_ready'-
+    Zustand SOFORT auf, egal wie viele Kerzen seitdem vergangen sind. Ohne neuen Extremwert-
+    Kontakt bleibt der letzte Zustand unbegrenzt bestehen. Gibt pro Kerze den Zustand ZUM SCHLUSS
+    dieser Kerze zurueck - fuer die Signalpruefung an Kerze i zaehlt der Zustand VOR dieser Kerze
+    (arm[i-1]), siehe check_sr_signal/backtest_sr_signal."""
+    n = len(rsi)
+    arm = [None] * n
+    state = None
+    for i in range(n):
+        if rsi[i] > overbought:
+            state = "short_ready"
+        elif rsi[i] < oversold:
+            state = "long_ready"
+        arm[i] = state
+    return arm
+
+
 def compute_sr_signals(highs, lows, closes, atr_period, multiplier, rsi_period):
     """SuperTrend(ATR-Periode, Multiplikator) + RSI - nach Nutzer-Vorgabe (kein Pine-Script-Port,
     eigene Kombination). Nutzt denselben SuperTrend-Kernbaustein wie Diamond Algo/Pieki Algo
@@ -4249,14 +4270,20 @@ async def check_sr_sl_tp(symbol, price):
             st["sr_tp_price"] = None
 
 
-async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None):
-    """Kernsignal (nach Nutzer-Vorgabe): SuperTrend dreht bullisch UND RSI > Mittellinie -> Long.
-    SuperTrend dreht baerisch UND RSI < Mittellinie -> Short. Zusaetzlich zwei unabhaengig
-    voneinander zuschaltbare Filter (wie bei UT-Bot+Hull/Fractals/Kerzen-DNA/Range Filter):
-    ADX/DI-Trendfilter, VWAP-Deviation-Bestaetigung (vwap_arm: 'upper' -> Short erlaubt, 'lower'
-    -> Long erlaubt, siehe compute_vwap_dev_arm - wird VOR dieser Kerze ausgewertet, "vorher im
-    Band geschlossen"). Ein Gegen-Signal ist NUR gueltig, wenn ALLE Bedingungen (Richtungsmodus,
-    RSI, ADX, VWAP-Deviation) fuer die Gegenrichtung erfuellt sind - dann wird gedreht (Flip).
+async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None, ema_val=None, rsi_arm=None):
+    """Kernsignal (nach Nutzer-Vorgabe): SuperTrend dreht bullisch UND RSI-Bedingung erfuellt ->
+    Long. SuperTrend dreht baerisch UND RSI-Bedingung erfuellt -> Short. RSI-Bedingung ist
+    ueber sr_rsi_mode waehlbar: 'midline' (Standard) = RSI > Mittellinie fuer Long / < Mittellinie
+    fuer Short (Wert an DIESER Kerze). 'extreme_arm' = RSI muss VORHER ueber sr_rsi_overbought
+    (Standard 70) gewesen sein fuer Short bzw. VORHER unter sr_rsi_oversold (Standard 30) fuer
+    Long (rsi_arm, siehe compute_rsi_arm - identisches Zustandsmaschine-Prinzip wie beim
+    VWAP-Deviation-Filter, kein fester Lookback). Zusaetzlich drei unabhaengig voneinander
+    zuschaltbare Filter (wie bei UT-Bot+Hull/Fractals/Kerzen-DNA/Range Filter): ADX/DI-
+    Trendfilter, EMA-Trendfilter (ema_val: Long nur ueber der EMA, Short nur darunter),
+    VWAP-Deviation-Bestaetigung (vwap_arm: 'upper' -> Short erlaubt, 'lower' -> Long erlaubt,
+    siehe compute_vwap_dev_arm - wird VOR dieser Kerze ausgewertet, "vorher im Band
+    geschlossen"). Ein Gegen-Signal ist NUR gueltig, wenn ALLE Bedingungen (Richtungsmodus, RSI,
+    ADX, EMA, VWAP-Deviation) fuer die Gegenrichtung erfuellt sind - dann wird gedreht (Flip).
     Sind sie es nicht, passiert GAR NICHTS (nach Nutzer-Vorgabe: kein Exit bei jedem beliebigen
     SuperTrend-Wechsel, die Position bleibt unangetastet offen und kann nur ueber SL/TP oder ein
     spaeteres GUELTIGES Gegen-Signal beendet werden). cloud_sl_lower/cloud_sl_upper werden nur
@@ -4269,21 +4296,33 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
         return
 
     direction_mode = cfg.get("sr_direction_mode", "both")
+    rsi_mode = cfg.get("sr_rsi_mode", "midline")
     rsi_midline = cfg.get("sr_rsi_midline", 50)
+    if rsi_mode == "extreme_arm":
+        rsi_long_ok = rsi_arm == "long_ready"
+        rsi_short_ok = rsi_arm == "short_ready"
+    else:
+        rsi_long_ok = rsi_val > rsi_midline
+        rsi_short_ok = rsi_val < rsi_midline
     adx_enabled = cfg.get("sr_adx_filter_enabled", False)
     adx_threshold = cfg.get("sr_adx_threshold", 20)
     adx_missing = adx is None or plus_di is None or minus_di is None
     adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
     adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
     vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
+    ema_enabled = cfg.get("sr_ema_filter_enabled", False)
+    ema_long_ok = not ema_enabled or ema_val is None or price > ema_val
+    ema_short_ok = not ema_enabled or ema_val is None or price < ema_val
 
     long_ok = (direction_mode != "short_only"
-               and rsi_val > rsi_midline
+               and rsi_long_ok
                and (not vwap_dev_enabled or vwap_arm == "lower")
+               and ema_long_ok
                and adx_long_ok)
     short_ok = (direction_mode != "long_only"
-                and rsi_val < rsi_midline
+                and rsi_short_ok
                 and (not vwap_dev_enabled or vwap_arm == "upper")
+                and ema_short_ok
                 and adx_short_ok)
     pos = st["position"]
 
@@ -4341,7 +4380,12 @@ async def sr_poll_loop(symbol):
                 sl_tp_mode = cfg.get("sr_sl_tp_mode", "fixed")
                 vwap_sl_mult = cfg.get("sr_vwap_sl_mult", 3.0)
                 need_vwap_data = vwap_dev_enabled or sl_tp_mode == "vwap_cloud"
-                min_needed = max(atr_period, rsi_period, adx_length, vwap_dev_length, 5) + 5
+                ema_enabled = cfg.get("sr_ema_filter_enabled", False)
+                ema_length = cfg.get("sr_ema_length", 200)
+                rsi_mode = cfg.get("sr_rsi_mode", "midline")
+                rsi_overbought = cfg.get("sr_rsi_overbought", 70)
+                rsi_oversold = cfg.get("sr_rsi_oversold", 30)
+                min_needed = max(atr_period, rsi_period, adx_length, vwap_dev_length, ema_length if ema_enabled else 0, 5) + 5
                 needed_bars = min(1000, max(min_needed * 2, 220))
                 st = b["state"]
 
@@ -4379,6 +4423,14 @@ async def sr_poll_loop(symbol):
                     if adx_enabled:
                         adx, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
 
+                    ema = None
+                    if ema_enabled:
+                        ema = _ema_series(closed_c, ema_length)
+
+                    rsi_arm_series = None
+                    if rsi_mode == "extreme_arm":
+                        rsi_arm_series = compute_rsi_arm(rsi, rsi_overbought, rsi_oversold)
+
                     vwap_upper = vwap_lower = None  # Bestaetigungs-Band (dev_mult, "Wolke betreten")
                     sl_lower = sl_upper = None  # SL-Band (vwap_sl_mult, "Ende der Wolke")
                     if need_vwap_data and closed_v:
@@ -4414,6 +4466,13 @@ async def sr_poll_loop(symbol):
                             elif closed_c[idx] < vwap_lower[idx]:
                                 st["sr_vwap_arm"] = "lower"
 
+                        rsi_arm_before = st.get("sr_rsi_arm") if rsi_mode == "extreme_arm" else None
+                        if rsi_mode == "extreme_arm" and rsi_arm_series is not None:
+                            if rsi[idx] > rsi_overbought:
+                                st["sr_rsi_arm"] = "short_ready"
+                            elif rsi[idx] < rsi_oversold:
+                                st["sr_rsi_arm"] = "long_ready"
+
                         await check_sr_signal(
                             symbol, bull[idx], bear[idx], price_i, rsi[idx],
                             adx=adx[idx] if adx is not None else None,
@@ -4422,6 +4481,8 @@ async def sr_poll_loop(symbol):
                             vwap_arm=vwap_arm_before,
                             cloud_sl_lower=sl_lower[idx] if sl_lower is not None else None,
                             cloud_sl_upper=sl_upper[idx] if sl_upper is not None else None,
+                            ema_val=ema[idx] if ema is not None else None,
+                            rsi_arm=rsi_arm_before,
                         )
 
                     await check_sr_sl_tp(symbol, price)
@@ -4461,7 +4522,9 @@ def backtest_sr_signal(candles, cfg):
     """Backtest-Pendant zu check_sr_signal/check_sr_sl_tp/sr_poll_loop - identische Logik, siehe
     dort fuer Kommentare. ADX/VWAP-Deviation-Serien werden - falls die jeweiligen Filter/Modi
     aktiv sind - von run_backtest VORAB async berechnet und unter cfg['_sr_*_precomputed']
-    uebergeben (diese Funktion selbst ist NICHT async, einheitliche BACKTEST_FUNCS-Signatur)."""
+    uebergeben (EMA/RSI-Extremwert-Zustand brauchen kein async Precompute, da sie direkt aus
+    Preis/RSI berechenbar sind, siehe _ema_series/compute_rsi_arm). Diese Funktion selbst ist
+    NICHT async, einheitliche BACKTEST_FUNCS-Signatur."""
     ts, o, h, l, c = candles
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
@@ -4469,6 +4532,9 @@ def backtest_sr_signal(candles, cfg):
     multiplier = cfg.get("sr_st_multiplier", 2.0)
     rsi_period = cfg.get("sr_rsi_period", 9)
     rsi_midline = cfg.get("sr_rsi_midline", 50)
+    rsi_mode = cfg.get("sr_rsi_mode", "midline")
+    rsi_overbought = cfg.get("sr_rsi_overbought", 70)
+    rsi_oversold = cfg.get("sr_rsi_oversold", 30)
     direction_mode = cfg.get("sr_direction_mode", "both")
     sl_tp_mode = cfg.get("sr_sl_tp_mode", "fixed")
     sl_enabled = cfg.get("sr_sl_enabled", True)
@@ -4481,6 +4547,8 @@ def backtest_sr_signal(candles, cfg):
     adx_enabled = cfg.get("sr_adx_filter_enabled", False)
     adx_threshold = cfg.get("sr_adx_threshold", 20)
     vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
+    ema_enabled = cfg.get("sr_ema_filter_enabled", False)
+    ema_length = cfg.get("sr_ema_length", 200)
 
     bull, bear, rsi, st_line = compute_sr_signals(h, l, c, atr_period, multiplier, rsi_period)
 
@@ -4489,8 +4557,10 @@ def backtest_sr_signal(candles, cfg):
     vwap_arm_series = cfg.get("_sr_vwap_arm_precomputed") if vwap_dev_enabled else None
     sl_lower_series = cfg.get("_sr_vwap_sl_lower_precomputed") if sl_tp_mode == "vwap_cloud" else None
     sl_upper_series = cfg.get("_sr_vwap_sl_upper_precomputed") if sl_tp_mode == "vwap_cloud" else None
+    ema_series = _ema_series(c, ema_length) if ema_enabled else None
+    rsi_arm_series = compute_rsi_arm(rsi, rsi_overbought, rsi_oversold) if rsi_mode == "extreme_arm" else None
 
-    warmup = max(atr_period, rsi_period, cfg.get("sr_adx_length", 14), cfg.get("sr_vwap_dev_length", 60), 5) + 2
+    warmup = max(atr_period, rsi_period, cfg.get("sr_adx_length", 14), cfg.get("sr_vwap_dev_length", 60), ema_length if ema_enabled else 0, 5) + 2
 
     def arm_before(i):
         """VWAP-Deviation-Zustand VOR Kerze i (siehe compute_vwap_dev_arm - 'vorher im Band
@@ -4499,19 +4569,32 @@ def backtest_sr_signal(candles, cfg):
             return None
         return vwap_arm_series[i - 1]
 
+    def rsi_arm_before(i):
+        """RSI-Extremwert-Zustand VOR Kerze i (siehe compute_rsi_arm - 'vorher ueber 70/unter
+        30 gewesen')."""
+        if rsi_arm_series is None or i < 1:
+            return None
+        return rsi_arm_series[i - 1]
+
     def eval_ok(i, want_long):
         adx_missing = adx_series is None or plus_di_series is None or minus_di_series is None
         if want_long:
+            rsi_ok = (rsi_arm_before(i) == "long_ready") if rsi_mode == "extreme_arm" else (rsi[i] > rsi_midline)
+            ema_ok = not ema_enabled or ema_series is None or c[i] > ema_series[i]
             adx_ok = not adx_enabled or adx_missing or (adx_series[i] > adx_threshold and plus_di_series[i] > minus_di_series[i])
             return (direction_mode != "short_only"
-                    and rsi[i] > rsi_midline
+                    and rsi_ok
                     and (not vwap_dev_enabled or arm_before(i) == "lower")
+                    and ema_ok
                     and adx_ok)
         else:
+            rsi_ok = (rsi_arm_before(i) == "short_ready") if rsi_mode == "extreme_arm" else (rsi[i] < rsi_midline)
+            ema_ok = not ema_enabled or ema_series is None or c[i] < ema_series[i]
             adx_ok = not adx_enabled or adx_missing or (adx_series[i] > adx_threshold and minus_di_series[i] > plus_di_series[i])
             return (direction_mode != "long_only"
-                    and rsi[i] < rsi_midline
+                    and rsi_ok
                     and (not vwap_dev_enabled or arm_before(i) == "upper")
+                    and ema_ok
                     and adx_ok)
 
     def make_sl_tp(i, direction, entry_price):
