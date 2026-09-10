@@ -582,6 +582,7 @@ def default_config():
         "sr_vwap_dev_mult": float(os.getenv("SR_VWAP_DEV_MULT", "2.0")),
         "sr_vwap_midline_filter_enabled": os.getenv("SR_VWAP_MIDLINE_FILTER_ENABLED", "false").lower() == "true",
         "sr_vwap_midline_mult": float(os.getenv("SR_VWAP_MIDLINE_MULT", "0.3")),  # Mindestabstand von der VWAP-Basislinie (Vielfaches der Abweichung), sonst zaehlt der Einstieg nicht
+        "sr_vwap_midline_breakeven_enabled": os.getenv("SR_VWAP_MIDLINE_BREAKEVEN_ENABLED", "false").lower() == "true",
         "sr_vwap_sl_mult": float(os.getenv("SR_VWAP_SL_MULT", "3.0")),  # "Ende der Wolke" - aeusserer Rand fuer den SL bei sl_tp_mode="vwap_cloud"
         "sr_vwap_tp_rr": float(os.getenv("SR_VWAP_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands (1.0 = 1:1, 1.5 = 1:1,5, ...)
         "sr_st_tp_rr": float(os.getenv("SR_ST_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands bei sl_tp_mode="supertrend"
@@ -3065,6 +3066,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="st_rsi_signal" data-requires="sr_vwap_midline_filter_enabled"><label>Mindestabstand von der Basislinie (Vielfaches der Abweichung, z.B. 0.3)</label><input type="number" step="0.05" min="0" id="sr_vwap_midline_mult"></div>
 
+  <div data-mode="st_rsi_signal"><label>SL auf Einstieg bei Mittellinien-Berührung (Breakeven)</label>
+    <select class="cfg" id="sr_vwap_midline_breakeven_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_vwap_midline_breakeven_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Sobald der Kurs die VWAP-Basislinie erreicht (bei Long: Kurs steigt bis zur/über die
+    Mittellinie, bei Short: fällt bis zur/unter die Mittellinie), wird der SL auf den
+    Einstiegspreis gezogen - einmalig pro Position, unabhängig von der gewählten SL/TP-Variante
+    oben (Fest/VWAP-Wolke/SuperTrend-Band) nutzbar. Verbessert den SL nur, verschlechtert ihn nie.
+  </div>
+
   <div data-mode="st_rsi_signal"><label>Z-Score-Filter</label>
     <select class="cfg" id="sr_zscore_filter_enabled">
       <option value="false">Aus</option>
@@ -5374,6 +5388,7 @@ async function refresh() {
     document.getElementById('sr_vwap_dev_mult').value = data.config.sr_vwap_dev_mult;
     document.getElementById('sr_vwap_midline_filter_enabled').value = String(data.config.sr_vwap_midline_filter_enabled);
     document.getElementById('sr_vwap_midline_mult').value = data.config.sr_vwap_midline_mult;
+    document.getElementById('sr_vwap_midline_breakeven_enabled').value = String(data.config.sr_vwap_midline_breakeven_enabled);
     document.getElementById('sr_vwap_sl_mult').value = data.config.sr_vwap_sl_mult;
     document.getElementById('sr_vwap_tp_rr').value = data.config.sr_vwap_tp_rr;
     document.getElementById('sr_st_tp_rr').value = data.config.sr_st_tp_rr;
@@ -5912,6 +5927,7 @@ function buildConfigPayload() {
     sr_vwap_dev_mult: parseFloat(document.getElementById('sr_vwap_dev_mult').value),
     sr_vwap_midline_filter_enabled: document.getElementById('sr_vwap_midline_filter_enabled').value === 'true',
     sr_vwap_midline_mult: parseFloat(document.getElementById('sr_vwap_midline_mult').value),
+    sr_vwap_midline_breakeven_enabled: document.getElementById('sr_vwap_midline_breakeven_enabled').value === 'true',
     sr_vwap_sl_mult: parseFloat(document.getElementById('sr_vwap_sl_mult').value),
     sr_vwap_tp_rr: parseFloat(document.getElementById('sr_vwap_tp_rr').value),
     sr_st_tp_rr: parseFloat(document.getElementById('sr_st_tp_rr').value),
@@ -6219,7 +6235,7 @@ async def handle_config_update(request):
                 "sr_sl_tp_mode",
                 "sr_sl_enabled", "sr_sl_manual_usd", "sr_tp_enabled", "sr_tp_manual_usd", "sr_sl_cooldown_seconds",
                 "sr_vwap_dev_filter_enabled", "sr_vwap_dev_length", "sr_vwap_dev_mult",
-                "sr_vwap_midline_filter_enabled", "sr_vwap_midline_mult",
+                "sr_vwap_midline_filter_enabled", "sr_vwap_midline_mult", "sr_vwap_midline_breakeven_enabled",
                 "sr_vwap_sl_mult", "sr_vwap_tp_rr", "sr_st_tp_rr",
                 "quad_stoch_resolution"]:
         if key in body:

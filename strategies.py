@@ -4129,24 +4129,26 @@ def _align_generic_series(base_ts, htf_ts, htf_vals, default=None):
     return out
 
 
-async def _build_vwap_dev_data_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix, need_arm, need_sl_bands, need_midline):
+async def _build_vwap_dev_data_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix, need_arm, need_sl_bands, need_midline, need_midline_series):
     """Holt die historischen Kerzen MIT Volumen EINMAL (wie beim frueheren Volumen-Filter, siehe
     fetch_historical_candles_binance_vol) auf dem eigenen Handels-Zeitrahmen und liefert je nach
     Bedarf den Bestaetigungs-Zustand (need_arm, siehe compute_vwap_dev_arm), die SL-Baender der
-    aeusseren Wolke (need_sl_bands, siehe sr_vwap_sl_mult) und/oder die Mittellinien-Totzone
-    (need_midline, siehe sr_vwap_midline_mult - blockiert Einstiege zu nah an der VWAP-Basislinie)
-    daraus ab - EIN Fetch fuer alles, kein doppelter API-Call. Alles per Forward-Fill auf die
-    Zeitstempel der Einstiegs-Kerzen ausgerichtet. Gibt (arm_oder_None, sl_lower_oder_None,
-    sl_upper_oder_None, midline_ok_oder_None, error) zurueck."""
+    aeusseren Wolke (need_sl_bands, siehe sr_vwap_sl_mult), die Mittellinien-Totzone (need_midline,
+    siehe sr_vwap_midline_mult - blockiert Einstiege zu nah an der VWAP-Basislinie) und/oder die
+    ROHE Mittellinie selbst (need_midline_series, fuer den Breakeven-bei-Mittellinien-Beruehrung -
+    siehe sr_vwap_midline_breakeven_enabled) daraus ab - EIN Fetch fuer alles, kein doppelter
+    API-Call. Alles per Forward-Fill auf die Zeitstempel der Einstiegs-Kerzen ausgerichtet. Gibt
+    (arm_oder_None, sl_lower_oder_None, sl_upper_oder_None, midline_ok_oder_None,
+    midline_series_oder_None, error) zurueck."""
     length = cfg.get(f"{prefix}_vwap_dev_length", 60)
     dev_mult = cfg.get(f"{prefix}_vwap_dev_mult", 2.0)
     sl_mult = cfg.get(f"{prefix}_vwap_sl_mult", 3.0)
     midline_mult = cfg.get(f"{prefix}_vwap_midline_mult", 0.3)
     tf_candles, err = await fetch_historical_candles_binance_vol(symbol, primary_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
     if err:
-        return None, None, None, None, f"VWAP-Deviation-Zeiteinheit ({primary_resolution}): {err}"
+        return None, None, None, None, None, f"VWAP-Deviation-Zeiteinheit ({primary_resolution}): {err}"
     if not tf_candles or len(tf_candles[4]) < length + 5:
-        return None, None, None, None, "Zu wenig historische Kerzen (mit Volumen) für VWAP-Deviation erhalten."
+        return None, None, None, None, None, "Zu wenig historische Kerzen (mit Volumen) für VWAP-Deviation erhalten."
     t_ts, t_o, t_h, t_l, t_c, t_v = tf_candles
     vwmean, dev = compute_vw_avdev(t_c, t_v, length)
 
@@ -4167,7 +4169,11 @@ async def _build_vwap_dev_data_for_backtest(symbol, cfg, days, base_ts, primary_
         midline_ok_htf = [abs(t_c[i] - vwmean[i]) >= dev[i] * midline_mult for i in range(len(t_c))]
         midline_ok_aligned = _align_generic_series(base_ts, t_ts, midline_ok_htf, default=None)
 
-    return arm_aligned, sl_lower_aligned, sl_upper_aligned, midline_ok_aligned, None
+    midline_series_aligned = None
+    if need_midline_series:
+        midline_series_aligned = _align_generic_series(base_ts, t_ts, vwmean, default=None)
+
+    return arm_aligned, sl_lower_aligned, sl_upper_aligned, midline_ok_aligned, midline_series_aligned, None
 
 
 def compute_rsi_arm(rsi, overbought, oversold):
@@ -4218,7 +4224,10 @@ def _sr_set_sl_tp(st, cfg, direction, entry_price, cloud_sl_lower=None, cloud_sl
     der SuperTrend-Linie SELBST zum Einstiegszeitpunkt (st_line_val - bei Long liegt sie als
     Unterstuetzung unter dem Kurs, bei Short als Widerstand darueber, da der Einstieg ja genau
     beim Ueberqueren dieser Linie ausgeloest wurde), TP ebenfalls als einstellbares Risk-Reward-
-    Vielfaches (sr_st_tp_rr) des SL-Abstands."""
+    Vielfaches (sr_st_tp_rr) des SL-Abstands. sr_vwap_breakeven_done wird bei JEDEM Neueinstieg
+    zurueckgesetzt (siehe check_sr_sl_tp fuer den VWAP-Mittellinien-Breakeven, unabhaengig von
+    der hier gewaehlten SL/TP-Variante nutzbar)."""
+    st["sr_vwap_breakeven_done"] = False
     mode = cfg.get("sr_sl_tp_mode", "fixed")
     if mode == "vwap_cloud":
         cloud_sl = cloud_sl_lower if direction == "long" else cloud_sl_upper
@@ -4267,24 +4276,44 @@ def _sr_set_sl_tp(st, cfg, direction, entry_price, cloud_sl_lower=None, cloud_sl
         st["sr_tp_price"] = None
 
 
-async def check_sr_sl_tp(symbol, price):
-    """Optionaler fester SL/TP (fester $-Betrag) - wie bei UT-Bot+Hull geht die Position bei
-    Treffer GLATT (nicht sofort in die Gegenrichtung); SL hat einen kurzen Cooldown, TP nicht."""
+async def check_sr_sl_tp(symbol, price, vwap_midline_now=None):
+    """Optionaler fester SL/TP (fester $-Betrag/VWAP-Wolke/SuperTrend-Band) - wie bei UT-Bot+Hull
+    geht die Position bei Treffer GLATT (nicht sofort in die Gegenrichtung); SL hat einen kurzen
+    Cooldown, TP nicht. VWAP-Mittellinien-Breakeven (nach Nutzer-Vorgabe, unabhaengig von der
+    SL/TP-Variante zuschaltbar): sobald der Kurs die VWAP-Basislinie beruehrt (bei Long: Kurs
+    steigt bis zur/uber die Mittellinie, bei Short: Kurs faellt bis zur/unter die Mittellinie),
+    wird der SL auf den Einstiegspreis gezogen - EINMALIG pro Position, verbessert den SL nur
+    (nie verschlechtern), identisches Prinzip wie der ELTE-Smart-Prozent-Breakeven."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if st["position"] is None or price is None:
         return
     pos = st["position"]
 
+    if cfg.get("sr_vwap_midline_breakeven_enabled", False) and not st.get("sr_vwap_breakeven_done") and vwap_midline_now is not None:
+        entry = st.get("avg_entry_price")
+        if entry is not None:
+            touched = (pos == "long" and price >= vwap_midline_now) or (pos == "short" and price <= vwap_midline_now)
+            if touched:
+                current_sl = st.get("sr_sl_price")
+                if current_sl is None or (pos == "long" and entry > current_sl) or (pos == "short" and entry < current_sl):
+                    st["sr_sl_price"] = entry
+                    debug_log(f"📡 [{symbol}] SuperTrend+RSI VWAP-Mittellinien-Breakeven ausgelöst - SL auf Einstieg ({round(entry, 4)}) gesetzt")
+                st["sr_vwap_breakeven_done"] = True
+
     sl_price = st.get("sr_sl_price")
     if sl_price is not None:
         hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
         if hit_sl:
-            debug_log(f"🚪 [{symbol}] SuperTrend+RSI SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-            await execute_exit(symbol, price, "SL")
+            entry = st.get("avg_entry_price")
+            reason = "BREAKEVEN" if st.get("sr_vwap_breakeven_done") and entry is not None and abs(sl_price - entry) < 1e-9 else "SL"
+            debug_log(f"🚪 [{symbol}] SuperTrend+RSI {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+            await execute_exit(symbol, price, reason)
             st["sr_sl_price"] = None
             st["sr_tp_price"] = None
-            st["sr_sl_cooldown_until"] = time.time() + cfg.get("sr_sl_cooldown_seconds", 30)
+            st["sr_vwap_breakeven_done"] = False
+            if reason == "SL":
+                st["sr_sl_cooldown_until"] = time.time() + cfg.get("sr_sl_cooldown_seconds", 30)
             return
 
     tp_price = st.get("sr_tp_price")
@@ -4294,6 +4323,7 @@ async def check_sr_sl_tp(symbol, price):
             debug_log(f"🎯 [{symbol}] SuperTrend+RSI TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
             await execute_exit(symbol, price, "TP")
             st["sr_sl_price"] = None
+            st["sr_vwap_breakeven_done"] = False
             st["sr_tp_price"] = None
 
 
@@ -4414,7 +4444,8 @@ async def sr_poll_loop(symbol):
                 vwap_sl_mult = cfg.get("sr_vwap_sl_mult", 3.0)
                 vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
                 vwap_midline_mult = cfg.get("sr_vwap_midline_mult", 0.3)
-                need_vwap_data = vwap_dev_enabled or sl_tp_mode == "vwap_cloud" or vwap_midline_enabled
+                vwap_breakeven_enabled = cfg.get("sr_vwap_midline_breakeven_enabled", False)
+                need_vwap_data = vwap_dev_enabled or sl_tp_mode == "vwap_cloud" or vwap_midline_enabled or vwap_breakeven_enabled
                 ema_enabled = cfg.get("sr_ema_filter_enabled", False)
                 ema_length = cfg.get("sr_ema_length", 200)
                 rsi_mode = cfg.get("sr_rsi_mode", "midline")
@@ -4469,8 +4500,10 @@ async def sr_poll_loop(symbol):
                     vwap_upper = vwap_lower = None  # Bestaetigungs-Band (dev_mult, "Wolke betreten")
                     sl_lower = sl_upper = None  # SL-Band (vwap_sl_mult, "Ende der Wolke")
                     midline_ok = None  # Mittellinien-Totzone (midline_mult, "zu nah an der Basislinie")
+                    vwmean_now = None  # Rohe Mittellinie (fuer VWAP-Mittellinien-Breakeven)
                     if need_vwap_data and closed_v:
                         vwmean, dev = compute_vw_avdev(closed_c, closed_v, vwap_dev_length)
+                        vwmean_now = vwmean[-1]
                         if vwap_dev_enabled:
                             vwap_upper, vwap_lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
                         if sl_tp_mode == "vwap_cloud":
@@ -4525,7 +4558,7 @@ async def sr_poll_loop(symbol):
                             st_line_val=st_line[idx],
                         )
 
-                    await check_sr_sl_tp(symbol, price)
+                    await check_sr_sl_tp(symbol, price, vwap_midline_now=vwmean_now)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -4591,6 +4624,7 @@ def backtest_sr_signal(candles, cfg):
     ema_enabled = cfg.get("sr_ema_filter_enabled", False)
     ema_length = cfg.get("sr_ema_length", 200)
     vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
+    vwap_breakeven_enabled = cfg.get("sr_vwap_midline_breakeven_enabled", False)
 
     bull, bear, rsi, st_line = compute_sr_signals(h, l, c, atr_period, multiplier, rsi_period)
 
@@ -4602,6 +4636,7 @@ def backtest_sr_signal(candles, cfg):
     ema_series = _ema_series(c, ema_length) if ema_enabled else None
     rsi_arm_series = compute_rsi_arm(rsi, rsi_overbought, rsi_oversold) if rsi_mode == "extreme_arm" else None
     midline_ok_series = cfg.get("_sr_vwap_midline_precomputed") if vwap_midline_enabled else None
+    midline_series = cfg.get("_sr_vwap_midline_series_precomputed") if vwap_breakeven_enabled else None
 
     warmup = max(atr_period, rsi_period, cfg.get("sr_adx_length", 14), cfg.get("sr_vwap_dev_length", 60), ema_length if ema_enabled else 0, 5) + 2
 
@@ -4676,7 +4711,7 @@ def backtest_sr_signal(candles, cfg):
             tp_price = (entry_price - tp_usd / size) if tp_enabled else None
         return sl_price, tp_price
 
-    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price","breakeven_done"}
     trades = []
     sl_cooldown_until_ts = None
 
@@ -4684,13 +4719,25 @@ def backtest_sr_signal(candles, cfg):
         price = c[i]
 
         if position is not None:
+            if vwap_breakeven_enabled and not position["breakeven_done"] and midline_series is not None and midline_series[i] is not None:
+                mid = midline_series[i]
+                touched = (position["dir"] == "long" and h[i] >= mid) or (position["dir"] == "short" and l[i] <= mid)
+                if touched:
+                    entry = position["entry"]
+                    current_sl = position["sl_price"]
+                    if current_sl is None or (position["dir"] == "long" and entry > current_sl) or (position["dir"] == "short" and entry < current_sl):
+                        position["sl_price"] = entry
+                    position["breakeven_done"] = True
+
             sl_price, tp_price = position["sl_price"], position["tp_price"]
             hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
             hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
             if hit_sl:
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                reason = "BREAKEVEN" if position["breakeven_done"] and abs(sl_price - position["entry"]) < 1e-9 else "SL"
+                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+                if reason == "SL":
+                    sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
             elif hit_tp:
                 _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
                 position = None
@@ -4703,23 +4750,23 @@ def backtest_sr_signal(candles, cfg):
             if bull[i] and eval_ok(i, True):
                 size = (margin * leverage) / price
                 sl_price, tp_price = make_sl_tp(i, "long", price)
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
             elif bear[i] and eval_ok(i, False):
                 size = (margin * leverage) / price
                 sl_price, tp_price = make_sl_tp(i, "short", price)
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
             continue
 
         if position["dir"] == "long" and bear[i] and eval_ok(i, False):
             _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
             size = (margin * leverage) / price
             sl_price, tp_price = make_sl_tp(i, "short", price)
-            position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+            position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
         elif position["dir"] == "short" and bull[i] and eval_ok(i, True):
             _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
             size = (margin * leverage) / price
             sl_price, tp_price = make_sl_tp(i, "long", price)
-            position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+            position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
         # Gegen-Signal kam, aber Bedingungen nicht erfuellt -> bewusst KEINE Aktion (siehe
         # check_sr_signal-Docstring, identische Logik)
 
@@ -9637,14 +9684,16 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         need_arm = cfg.get("sr_vwap_dev_filter_enabled", False)
         need_sl_bands = cfg.get("sr_sl_tp_mode", "fixed") == "vwap_cloud"
         need_midline = cfg.get("sr_vwap_midline_filter_enabled", False)
-        if need_arm or need_sl_bands or need_midline:
-            vwap_arm, sl_lower, sl_upper, midline_ok, vwap_err = await _build_vwap_dev_data_for_backtest(symbol, cfg, days, candles[0], resolution, "sr", need_arm, need_sl_bands, need_midline)
+        need_midline_series = cfg.get("sr_vwap_midline_breakeven_enabled", False)
+        if need_arm or need_sl_bands or need_midline or need_midline_series:
+            vwap_arm, sl_lower, sl_upper, midline_ok, midline_series, vwap_err = await _build_vwap_dev_data_for_backtest(symbol, cfg, days, candles[0], resolution, "sr", need_arm, need_sl_bands, need_midline, need_midline_series)
             if vwap_err:
                 return {"error": vwap_err}
             cfg["_sr_vwap_arm_precomputed"] = vwap_arm  # von backtest_sr_signal gelesen (nicht async, siehe dort)
             cfg["_sr_vwap_sl_lower_precomputed"] = sl_lower
             cfg["_sr_vwap_sl_upper_precomputed"] = sl_upper
             cfg["_sr_vwap_midline_precomputed"] = midline_ok
+            cfg["_sr_vwap_midline_series_precomputed"] = midline_series
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades, exclude_top_n)
