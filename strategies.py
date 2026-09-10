@@ -4129,22 +4129,24 @@ def _align_generic_series(base_ts, htf_ts, htf_vals, default=None):
     return out
 
 
-async def _build_vwap_dev_data_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix, need_arm, need_sl_bands):
+async def _build_vwap_dev_data_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix, need_arm, need_sl_bands, need_midline):
     """Holt die historischen Kerzen MIT Volumen EINMAL (wie beim frueheren Volumen-Filter, siehe
     fetch_historical_candles_binance_vol) auf dem eigenen Handels-Zeitrahmen und liefert je nach
-    Bedarf den Bestaetigungs-Zustand (need_arm, siehe compute_vwap_dev_arm) und/oder die
-    SL-Baender der aeusseren Wolke (need_sl_bands, siehe sr_vwap_sl_mult) daraus ab - EIN Fetch
-    fuer beides, kein doppelter API-Call, wenn beide gleichzeitig aktiv sind. Alles per
-    Forward-Fill auf die Zeitstempel der Einstiegs-Kerzen ausgerichtet. Gibt
-    (arm_oder_None, sl_lower_oder_None, sl_upper_oder_None, error) zurueck."""
+    Bedarf den Bestaetigungs-Zustand (need_arm, siehe compute_vwap_dev_arm), die SL-Baender der
+    aeusseren Wolke (need_sl_bands, siehe sr_vwap_sl_mult) und/oder die Mittellinien-Totzone
+    (need_midline, siehe sr_vwap_midline_mult - blockiert Einstiege zu nah an der VWAP-Basislinie)
+    daraus ab - EIN Fetch fuer alles, kein doppelter API-Call. Alles per Forward-Fill auf die
+    Zeitstempel der Einstiegs-Kerzen ausgerichtet. Gibt (arm_oder_None, sl_lower_oder_None,
+    sl_upper_oder_None, midline_ok_oder_None, error) zurueck."""
     length = cfg.get(f"{prefix}_vwap_dev_length", 60)
     dev_mult = cfg.get(f"{prefix}_vwap_dev_mult", 2.0)
     sl_mult = cfg.get(f"{prefix}_vwap_sl_mult", 3.0)
+    midline_mult = cfg.get(f"{prefix}_vwap_midline_mult", 0.3)
     tf_candles, err = await fetch_historical_candles_binance_vol(symbol, primary_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
     if err:
-        return None, None, None, f"VWAP-Deviation-Zeiteinheit ({primary_resolution}): {err}"
+        return None, None, None, None, f"VWAP-Deviation-Zeiteinheit ({primary_resolution}): {err}"
     if not tf_candles or len(tf_candles[4]) < length + 5:
-        return None, None, None, "Zu wenig historische Kerzen (mit Volumen) für VWAP-Deviation erhalten."
+        return None, None, None, None, "Zu wenig historische Kerzen (mit Volumen) für VWAP-Deviation erhalten."
     t_ts, t_o, t_h, t_l, t_c, t_v = tf_candles
     vwmean, dev = compute_vw_avdev(t_c, t_v, length)
 
@@ -4160,7 +4162,12 @@ async def _build_vwap_dev_data_for_backtest(symbol, cfg, days, base_ts, primary_
         sl_lower_aligned = _align_generic_series(base_ts, t_ts, lower_sl, default=None)
         sl_upper_aligned = _align_generic_series(base_ts, t_ts, upper_sl, default=None)
 
-    return arm_aligned, sl_lower_aligned, sl_upper_aligned, None
+    midline_ok_aligned = None
+    if need_midline:
+        midline_ok_htf = [abs(t_c[i] - vwmean[i]) >= dev[i] * midline_mult for i in range(len(t_c))]
+        midline_ok_aligned = _align_generic_series(base_ts, t_ts, midline_ok_htf, default=None)
+
+    return arm_aligned, sl_lower_aligned, sl_upper_aligned, midline_ok_aligned, None
 
 
 def compute_rsi_arm(rsi, overbought, oversold):
@@ -4270,24 +4277,26 @@ async def check_sr_sl_tp(symbol, price):
             st["sr_tp_price"] = None
 
 
-async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None, ema_val=None, rsi_arm=None):
+async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None, ema_val=None, rsi_arm=None, vwap_midline_ok=None):
     """Kernsignal (nach Nutzer-Vorgabe): SuperTrend dreht bullisch UND RSI-Bedingung erfuellt ->
     Long. SuperTrend dreht baerisch UND RSI-Bedingung erfuellt -> Short. RSI-Bedingung ist
     ueber sr_rsi_mode waehlbar: 'midline' (Standard) = RSI > Mittellinie fuer Long / < Mittellinie
     fuer Short (Wert an DIESER Kerze). 'extreme_arm' = RSI muss VORHER ueber sr_rsi_overbought
     (Standard 70) gewesen sein fuer Short bzw. VORHER unter sr_rsi_oversold (Standard 30) fuer
     Long (rsi_arm, siehe compute_rsi_arm - identisches Zustandsmaschine-Prinzip wie beim
-    VWAP-Deviation-Filter, kein fester Lookback). Zusaetzlich drei unabhaengig voneinander
+    VWAP-Deviation-Filter, kein fester Lookback). Zusaetzlich vier unabhaengig voneinander
     zuschaltbare Filter (wie bei UT-Bot+Hull/Fractals/Kerzen-DNA/Range Filter): ADX/DI-
     Trendfilter, EMA-Trendfilter (ema_val: Long nur ueber der EMA, Short nur darunter),
     VWAP-Deviation-Bestaetigung (vwap_arm: 'upper' -> Short erlaubt, 'lower' -> Long erlaubt,
     siehe compute_vwap_dev_arm - wird VOR dieser Kerze ausgewertet, "vorher im Band
-    geschlossen"). Ein Gegen-Signal ist NUR gueltig, wenn ALLE Bedingungen (Richtungsmodus, RSI,
-    ADX, EMA, VWAP-Deviation) fuer die Gegenrichtung erfuellt sind - dann wird gedreht (Flip).
-    Sind sie es nicht, passiert GAR NICHTS (nach Nutzer-Vorgabe: kein Exit bei jedem beliebigen
-    SuperTrend-Wechsel, die Position bleibt unangetastet offen und kann nur ueber SL/TP oder ein
-    spaeteres GUELTIGES Gegen-Signal beendet werden). cloud_sl_lower/cloud_sl_upper werden nur
-    bei sr_sl_tp_mode='vwap_cloud' fuer den SL gebraucht (siehe _sr_set_sl_tp)."""
+    geschlossen"), VWAP-Mittellinien-Totzone (nach Nutzer-Vorgabe: vwap_midline_ok=False blockiert
+    BEIDE Richtungen, wenn der Kurs zu nah an der VWAP-Basislinie liegt - siehe
+    sr_vwap_midline_mult). Ein Gegen-Signal ist NUR gueltig, wenn ALLE Bedingungen fuer die
+    Gegenrichtung erfuellt sind - dann wird gedreht (Flip). Sind sie es nicht, passiert GAR
+    NICHTS (nach Nutzer-Vorgabe: kein Exit bei jedem beliebigen SuperTrend-Wechsel, die Position
+    bleibt unangetastet offen und kann nur ueber SL/TP oder ein spaeteres GUELTIGES Gegen-Signal
+    beendet werden). cloud_sl_lower/cloud_sl_upper werden nur bei sr_sl_tp_mode='vwap_cloud' fuer
+    den SL gebraucht (siehe _sr_set_sl_tp)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None or rsi_val is None:
@@ -4313,16 +4322,20 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
     ema_enabled = cfg.get("sr_ema_filter_enabled", False)
     ema_long_ok = not ema_enabled or ema_val is None or price > ema_val
     ema_short_ok = not ema_enabled or ema_val is None or price < ema_val
+    vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
+    midline_ok = not vwap_midline_enabled or vwap_midline_ok is None or vwap_midline_ok
 
     long_ok = (direction_mode != "short_only"
                and rsi_long_ok
                and (not vwap_dev_enabled or vwap_arm == "lower")
                and ema_long_ok
+               and midline_ok
                and adx_long_ok)
     short_ok = (direction_mode != "long_only"
                 and rsi_short_ok
                 and (not vwap_dev_enabled or vwap_arm == "upper")
                 and ema_short_ok
+                and midline_ok
                 and adx_short_ok)
     pos = st["position"]
 
@@ -4379,7 +4392,9 @@ async def sr_poll_loop(symbol):
                 vwap_dev_mult = cfg.get("sr_vwap_dev_mult", 2.0)
                 sl_tp_mode = cfg.get("sr_sl_tp_mode", "fixed")
                 vwap_sl_mult = cfg.get("sr_vwap_sl_mult", 3.0)
-                need_vwap_data = vwap_dev_enabled or sl_tp_mode == "vwap_cloud"
+                vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
+                vwap_midline_mult = cfg.get("sr_vwap_midline_mult", 0.3)
+                need_vwap_data = vwap_dev_enabled or sl_tp_mode == "vwap_cloud" or vwap_midline_enabled
                 ema_enabled = cfg.get("sr_ema_filter_enabled", False)
                 ema_length = cfg.get("sr_ema_length", 200)
                 rsi_mode = cfg.get("sr_rsi_mode", "midline")
@@ -4433,12 +4448,15 @@ async def sr_poll_loop(symbol):
 
                     vwap_upper = vwap_lower = None  # Bestaetigungs-Band (dev_mult, "Wolke betreten")
                     sl_lower = sl_upper = None  # SL-Band (vwap_sl_mult, "Ende der Wolke")
+                    midline_ok = None  # Mittellinien-Totzone (midline_mult, "zu nah an der Basislinie")
                     if need_vwap_data and closed_v:
                         vwmean, dev = compute_vw_avdev(closed_c, closed_v, vwap_dev_length)
                         if vwap_dev_enabled:
                             vwap_upper, vwap_lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
                         if sl_tp_mode == "vwap_cloud":
                             sl_upper, sl_lower = vwap_bands_from_dev(vwmean, dev, vwap_sl_mult)
+                        if vwap_midline_enabled:
+                            midline_ok = [abs(closed_c[i] - vwmean[i]) >= dev[i] * vwap_midline_mult for i in range(len(closed_c))]
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -4483,6 +4501,7 @@ async def sr_poll_loop(symbol):
                             cloud_sl_upper=sl_upper[idx] if sl_upper is not None else None,
                             ema_val=ema[idx] if ema is not None else None,
                             rsi_arm=rsi_arm_before,
+                            vwap_midline_ok=midline_ok[idx] if midline_ok is not None else None,
                         )
 
                     await check_sr_sl_tp(symbol, price)
@@ -4549,6 +4568,7 @@ def backtest_sr_signal(candles, cfg):
     vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
     ema_enabled = cfg.get("sr_ema_filter_enabled", False)
     ema_length = cfg.get("sr_ema_length", 200)
+    vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
 
     bull, bear, rsi, st_line = compute_sr_signals(h, l, c, atr_period, multiplier, rsi_period)
 
@@ -4559,6 +4579,7 @@ def backtest_sr_signal(candles, cfg):
     sl_upper_series = cfg.get("_sr_vwap_sl_upper_precomputed") if sl_tp_mode == "vwap_cloud" else None
     ema_series = _ema_series(c, ema_length) if ema_enabled else None
     rsi_arm_series = compute_rsi_arm(rsi, rsi_overbought, rsi_oversold) if rsi_mode == "extreme_arm" else None
+    midline_ok_series = cfg.get("_sr_vwap_midline_precomputed") if vwap_midline_enabled else None
 
     warmup = max(atr_period, rsi_period, cfg.get("sr_adx_length", 14), cfg.get("sr_vwap_dev_length", 60), ema_length if ema_enabled else 0, 5) + 2
 
@@ -4576,6 +4597,11 @@ def backtest_sr_signal(candles, cfg):
             return None
         return rsi_arm_series[i - 1]
 
+    def midline_ok(i):
+        """VWAP-Mittellinien-Totzone AN Kerze i (nach Nutzer-Vorgabe - blockiert BEIDE Richtungen
+        gleichermassen, siehe sr_vwap_midline_mult)."""
+        return midline_ok_series is None or midline_ok_series[i] is None or midline_ok_series[i]
+
     def eval_ok(i, want_long):
         adx_missing = adx_series is None or plus_di_series is None or minus_di_series is None
         if want_long:
@@ -4586,6 +4612,7 @@ def backtest_sr_signal(candles, cfg):
                     and rsi_ok
                     and (not vwap_dev_enabled or arm_before(i) == "lower")
                     and ema_ok
+                    and midline_ok(i)
                     and adx_ok)
         else:
             rsi_ok = (rsi_arm_before(i) == "short_ready") if rsi_mode == "extreme_arm" else (rsi[i] < rsi_midline)
@@ -4595,6 +4622,7 @@ def backtest_sr_signal(candles, cfg):
                     and rsi_ok
                     and (not vwap_dev_enabled or arm_before(i) == "upper")
                     and ema_ok
+                    and midline_ok(i)
                     and adx_ok)
 
     def make_sl_tp(i, direction, entry_price):
@@ -9578,13 +9606,15 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             cfg["_sr_adx_precomputed"] = (adx, plus_di, minus_di)  # von backtest_sr_signal gelesen (nicht async, siehe dort)
         need_arm = cfg.get("sr_vwap_dev_filter_enabled", False)
         need_sl_bands = cfg.get("sr_sl_tp_mode", "fixed") == "vwap_cloud"
-        if need_arm or need_sl_bands:
-            vwap_arm, sl_lower, sl_upper, vwap_err = await _build_vwap_dev_data_for_backtest(symbol, cfg, days, candles[0], resolution, "sr", need_arm, need_sl_bands)
+        need_midline = cfg.get("sr_vwap_midline_filter_enabled", False)
+        if need_arm or need_sl_bands or need_midline:
+            vwap_arm, sl_lower, sl_upper, midline_ok, vwap_err = await _build_vwap_dev_data_for_backtest(symbol, cfg, days, candles[0], resolution, "sr", need_arm, need_sl_bands, need_midline)
             if vwap_err:
                 return {"error": vwap_err}
             cfg["_sr_vwap_arm_precomputed"] = vwap_arm  # von backtest_sr_signal gelesen (nicht async, siehe dort)
             cfg["_sr_vwap_sl_lower_precomputed"] = sl_lower
             cfg["_sr_vwap_sl_upper_precomputed"] = sl_upper
+            cfg["_sr_vwap_midline_precomputed"] = midline_ok
     backtest_fn = BACKTEST_FUNCS[entry_mode]
     trades = backtest_fn(candles, cfg)
     stats = summarize_backtest_trades(trades, exclude_top_n)
