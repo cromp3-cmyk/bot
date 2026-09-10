@@ -301,18 +301,27 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
 
 async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_candles, market_type="spot"):
     """Wie fetch_historical_candles_binance, liefert zusaetzlich das Handelsvolumen - fuer MO7
-    (braucht MFI). Bewusst eine eigene, einfachere Variante statt die grosse Funktion umzubauen:
-    NUR native Binance-Intervalle werden unterstuetzt (kein 2m/10s/15s/30s/45s/custom - die
-    muessten sonst auch volumen-bewusst nachgebaut werden, was den Umfang stark aufblaeht).
-    MO7 auf 1m/3m/5m/15m/30m/1h/2h/4h einzuschraenken ist dafuer ein vertretbarer Kompromiss."""
+    (braucht MFI) und VWAP-Deviation (SuperTrend+RSI). Unterstuetzt wie die normale Variante
+    auch synthetische Aufloesungen (2m, eigene Minuten, 10s/15s/30s/45s - siehe
+    resolve_synthetic_resolution), das Volumen wird beim Zusammenfassen pro Bucket aufsummiert
+    (siehe resample_candles_with_volume/_resample_seconds_candles_with_volume)."""
     pair = BINANCE_SYMBOL_MAP.get(symbol)
     if not pair:
         return None, "Coin nicht auf Binance verfügbar"
+
+    synth = resolve_synthetic_resolution(resolution)
+    base_resolution = synth[0] if synth else resolution
+    fetch_factor = synth[1] if synth else 1
     total_ms = days * 24 * 60 * 60 * 1000
     end_time = int(time.time() * 1000)
     start_time = end_time - total_ms
-    hard_candle_cap = max_candles + 2000
-    base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
+    hard_candle_cap = max_candles * fetch_factor + 2000
+    effective_market_type = "spot" if base_resolution == "1s" and market_type == "futures" else market_type
+    if symbol in BINANCE_FUTURES_ONLY_SYMBOLS:
+        effective_market_type = "futures"
+        if base_resolution == "1s":
+            return None, "Sekunden-Auflösungen (10s/15s/30s/45s) sind für XAU/XAG nicht möglich - Binance bietet dafür weder ein Spot-Paar noch 1-Sekunden-Futures-Kerzen an."
+    base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
 
     all_rows = []
     cursor = end_time
@@ -320,16 +329,16 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
     try:
         async with aiohttp.ClientSession() as session:
             while cursor > start_time and len(all_rows) < hard_candle_cap:
-                if _binance_is_banned(market_type):
-                    wait_s = max(0, (_binance_ban_until_ms.get(market_type, 0.0) - time.time() * 1000) / 1000)
+                if _binance_is_banned(effective_market_type):
+                    wait_s = max(0, (_binance_ban_until_ms.get(effective_market_type, 0.0) - time.time() * 1000) / 1000)
                     return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
-                url = f"{base_url}?symbol={pair}&interval={resolution}&limit=1000&endTime={cursor}"
+                url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
                 await _binance_throttle()
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status in (418, 429):
                         body = await resp.text()
-                        _binance_register_ban(market_type, symbol, resp.status, body)
-                        wait_s = max(0, (_binance_ban_until_ms.get(market_type, 0.0) - time.time() * 1000) / 1000)
+                        _binance_register_ban(effective_market_type, symbol, resp.status, body)
+                        wait_s = max(0, (_binance_ban_until_ms.get(effective_market_type, 0.0) - time.time() * 1000) / 1000)
                         return None, f"Binance-Ratelimit erreicht (IP-Bann für ca. {round(wait_s)}s) - bitte warten und erneut versuchen."
                     if resp.status != 200:
                         batch = None
@@ -359,6 +368,12 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
     closes = [float(r[4]) for r in all_rows]
     volumes = [float(r[5]) for r in all_rows]
 
+    if synth:
+        if base_resolution == "1s":
+            timestamps, opens, highs, lows, closes, volumes = _resample_seconds_candles_with_volume((timestamps, opens, highs, lows, closes, volumes), synth[1])
+        else:
+            timestamps, opens, highs, lows, closes, volumes = resample_candles_with_volume((timestamps, opens, highs, lows, closes, volumes), synth[1])
+
     if len(closes) > max_candles:
         timestamps, opens, highs, lows, closes, volumes = (
             timestamps[-max_candles:], opens[-max_candles:], highs[-max_candles:],
@@ -369,25 +384,33 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
 
 async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
     """Wie fetch_candles_binance, liefert zusaetzlich das Handelsvolumen pro Kerze -
-    fuer Strategien wie BLSH-Composite, die Volumen brauchen (z.B. MFI). Bewusst
-    eine eigene Funktion statt die bestehende zu erweitern, um nicht die vielen
-    bestehenden Aufrufer (die ein 5er-Tupel erwarten) zu gefaehrden."""
+    fuer Strategien wie BLSH-Composite, die Volumen brauchen (z.B. MFI), und fuer
+    VWAP-Deviation (SuperTrend+RSI). Unterstuetzt wie die Backtest-Variante auch
+    synthetische Aufloesungen (2m, eigene Minuten, 10s/15s/30s/45s - siehe
+    resolve_synthetic_resolution): der WS-Cache deckt nur native Intervalle ab (siehe
+    binance_ws.CACHEABLE_INTERVALS), fuer alles andere wird die Basis-Aufloesung per REST
+    geholt und das Volumen beim Zusammenfassen pro Bucket aufsummiert."""
     pair = BINANCE_SYMBOL_MAP.get(symbol)
     if not pair:
         return None
 
-    binance_ws.ensure_subscribed("spot", pair, resolution)
-    cached = binance_ws.get_cached_candles("spot", pair, resolution, count_back)
-    if cached is not None:
-        ts, o, h, l, c, v = cached
-        if ts:
-            return ts, o, h, l, c, v
+    synth = resolve_synthetic_resolution(resolution)
+    if not synth:
+        binance_ws.ensure_subscribed("spot", pair, resolution)
+        cached = binance_ws.get_cached_candles("spot", pair, resolution, count_back)
+        if cached is not None:
+            ts, o, h, l, c, v = cached
+            if ts:
+                return ts, o, h, l, c, v
+
+    base_resolution, factor = synth if synth else (resolution, 1)
+    fetch_limit = min(1000, count_back * factor + factor + 5)
 
     if _binance_is_banned("spot"):
         return None  # aktiver Bann - keine Anfrage stellen, das wuerde ihn nur verlaengern
     try:
         await _binance_throttle()
-        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
+        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={base_resolution}&limit={fetch_limit}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status in (418, 429):
@@ -413,6 +436,17 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
         lows.append(float(k[3]))
         closes.append(float(k[4]))
         volumes.append(float(k[5]))
+
+    if synth:
+        if base_resolution == "1s":
+            timestamps, opens, highs, lows, closes, volumes = _resample_seconds_candles_with_volume((timestamps, opens, highs, lows, closes, volumes), factor)
+        else:
+            timestamps, opens, highs, lows, closes, volumes = resample_candles_with_volume((timestamps, opens, highs, lows, closes, volumes), factor)
+        if len(closes) > count_back:
+            timestamps, opens, highs, lows, closes, volumes = (
+                timestamps[-count_back:], opens[-count_back:], highs[-count_back:],
+                lows[-count_back:], closes[-count_back:], volumes[-count_back:])
+
     return timestamps, opens, highs, lows, closes, volumes
 
 
@@ -493,6 +527,62 @@ def _resample_seconds_candles(data, seconds):
             out_c.append(closes[j - 1])
         i = j
     return out_ts, out_o, out_h, out_l, out_c
+
+
+def resample_candles_with_volume(data, factor):
+    """Wie resample_candles(), aber fuer 6er-Tupel MIT Volumen (Volumen wird pro Bucket
+    aufsummiert) - noetig, damit synthetische Aufloesungen (2m, eigene Minuten) auch dort
+    funktionieren, wo echtes Handelsvolumen gebraucht wird (VWAP-Deviation, SuperTrend+RSI-
+    Volumen-Filter historisch)."""
+    timestamps, opens, highs, lows, closes, volumes = data
+    n = len(closes)
+    if n == 0:
+        return [], [], [], [], [], []
+    bucket_ms = factor * 60_000
+    out_ts, out_o, out_h, out_l, out_c, out_v = [], [], [], [], [], []
+    i = 0
+    while i < n:
+        bucket = timestamps[i] // bucket_ms
+        j = i
+        while j < n and timestamps[j] // bucket_ms == bucket:
+            j += 1
+        if j - i == factor:
+            out_ts.append(timestamps[i])
+            out_o.append(opens[i])
+            out_h.append(max(highs[i:j]))
+            out_l.append(min(lows[i:j]))
+            out_c.append(closes[j - 1])
+            out_v.append(sum(volumes[i:j]))
+        i = j
+    return out_ts, out_o, out_h, out_l, out_c, out_v
+
+
+def _resample_seconds_candles_with_volume(data, seconds):
+    """Wie _resample_seconds_candles(), aber fuer 6er-Tupel MIT Volumen (siehe
+    resample_candles_with_volume fuer den Grund)."""
+    timestamps, opens, highs, lows, closes, volumes = data
+    n = len(closes)
+    if n == 0:
+        return [], [], [], [], [], []
+    bucket_ms = seconds * 1000
+    out_ts, out_o, out_h, out_l, out_c, out_v = [], [], [], [], [], []
+    i = 0
+    while i < n:
+        bucket = timestamps[i] // bucket_ms
+        j = i
+        while j < n and timestamps[j] // bucket_ms == bucket:
+            j += 1
+        is_last_bucket = j == n
+        complete_enough = (j - i == seconds) if is_last_bucket else (j - i >= 1)
+        if complete_enough:
+            out_ts.append(timestamps[i])
+            out_o.append(opens[i])
+            out_h.append(max(highs[i:j]))
+            out_l.append(min(lows[i:j]))
+            out_c.append(closes[j - 1])
+            out_v.append(sum(volumes[i:j]))
+        i = j
+    return out_ts, out_o, out_h, out_l, out_c, out_v
 
 
 def get_seconds_candles(state, seconds, needed_bars):
