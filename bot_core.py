@@ -3338,9 +3338,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     nicht Tick-für-Tick wie live. Lighter ist gebührenfrei, es werden also keine Gebühren simuliert.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="backtest-days" value="30" style="width:100px;"></div>
+    <div><label>Zeitraum</label>
+      <div style="display:flex; gap:6px;">
+        <input type="number" step="0.1" min="0.1" id="backtest-period" value="30" style="width:90px;">
+        <select class="cfg" id="backtest-period-unit" style="width:100px;">
+          <option value="days">Tage</option>
+          <option value="hours">Stunden</option>
+        </select>
+      </div>
+    </div>
     <div><label>Robustheits-Check: beste N Trades ausschließen</label><input type="number" step="1" min="0" id="backtest-exclude-top-n" value="1" style="width:100px;"></div>
     <button id="btn-backtest" style="padding:12px 24px;">▶️ Backtest starten</button>
+  </div>
+  <div style="font-size:12px; color:var(--text-dim); margin-top:-10px; margin-bottom:16px;">
+    "Stunden" eignet sich für kleine Zeiteinheiten (Sekunden-Auflösungen, 1-3 Minuten) - so lässt
+    sich z.B. gezielt "die letzten 6 Stunden" statt zwangsweise ganzer Tage testen.
   </div>
   <div id="backtest-status" style="color:var(--text-dim); font-size:13px;"></div>
   <div id="backtest-results" style="display:none; margin-top:16px;">
@@ -4059,7 +4071,9 @@ async function manualTrade(direction) {
 // dynamisch per innerHTML erzeugt werden (Teil der verschiebbaren Pocket-Trading-Kachel)
 
 document.getElementById('btn-backtest').addEventListener('click', async () => {
-  const days = parseInt(document.getElementById('backtest-days').value) || 30;
+  const period = parseFloat(document.getElementById('backtest-period').value) || 30;
+  const unit = document.getElementById('backtest-period-unit').value;
+  const days = unit === 'hours' ? period / 24 : period;
   const excludeTopN = parseInt(document.getElementById('backtest-exclude-top-n').value) || 0;
   const btn = document.getElementById('btn-backtest');
   const statusEl = document.getElementById('backtest-status');
@@ -4077,10 +4091,11 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `${data.cache_used ? '⚡ aus Cache' : '📡 neu von Binance geladen'} - ${data.candles_processed} Kerzen verarbeitet (${data.actual_days_covered} Tage, Zeitrahmen ${data.resolution})` +
+      const coveredLabel = unit === 'hours' ? `${(data.actual_days_covered * 24).toFixed(1)} Stunden` : `${data.actual_days_covered} Tage`;
+      statusEl.innerText = `${data.cache_used ? '⚡ aus Cache' : '📡 neu von Binance geladen'} - ${data.candles_processed} Kerzen verarbeitet (${coveredLabel}, Zeitrahmen ${data.resolution})` +
         (data.candles_processed >= data.candle_cap ? ` - auf ${data.candle_cap} Kerzen begrenzt (Performance-Schutz)` : '');
       document.getElementById('bt-candles').innerText = data.candles_processed;
-      document.getElementById('bt-days').innerText = data.actual_days_covered;
+      document.getElementById('bt-days').innerText = coveredLabel;
       document.getElementById('bt-trades').innerText = data.stats.trades;
       document.getElementById('bt-fills').innerText = data.stats.fills ?? data.stats.trades;
       document.getElementById('bt-winrate').innerText = data.stats.win_rate_pct + '%';
@@ -6330,7 +6345,7 @@ async def handle_backtest(request):
     body = await request.json()
     days = body.get("days", 30)
     try:
-        days = max(1, min(365, int(days)))
+        days = max(1 / 24, min(365, float(days)))  # Untergrenze 1 Stunde statt 1 Tag - fuer kleine Zeiteinheiten per "Zeitraum-Einheit: Stunden" im Formular
     except (TypeError, ValueError):
         days = 30
     try:
