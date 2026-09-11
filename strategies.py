@@ -4424,7 +4424,14 @@ async def sr_poll_loop(symbol):
     pk_poll_loop/fr_poll_loop (Kerzen holen, neue abgeschlossene Kerzen seit dem letzten
     Durchlauf verarbeiten). ADX-Filter/VWAP-Deviation werden bewusst NUR auf dem eigenen
     Handels-Zeitrahmen berechnet (kein eigenes Zeiteinheit-Feld dafuer, haelt die Konfiguration
-    einfach)."""
+    einfach). sr_immediate_signal_enabled (nach Nutzer-Vorgabe, optional): Standardmaessig wird
+    das Kernsignal nur auf ABGESCHLOSSENEN Kerzen ausgewertet (verzoegert um bis zu eine
+    Kerzenlaenge, aber ohne Repainting-Risiko). Mit dieser Option wird zusaetzlich JEDEN
+    Poll-Durchlauf (alle 5 Sekunden) die GERADE LAUFENDE Kerze live geprueft - Kernsignal
+    (SuperTrend-Flip+RSI) und SuperTrend-Band-SL reagieren dann sofort auf den aktuellen Kurs
+    statt erst beim Kerzenschluss, die anderen Filter (ADX/EMA/VWAP-Arm/Mittellinien) nutzen
+    dabei noch die Werte der letzten abgeschlossenen Kerze als Naeherung. Bei Sekunden-
+    Aufloesungen nicht verfuegbar (keine 'laufende' Kerze zum Anzapfen)."""
     b = BOTS[symbol]
     last_processed_ts = None
     last_heartbeat = 0.0
@@ -4453,15 +4460,19 @@ async def sr_poll_loop(symbol):
                 rsi_mode = cfg.get("sr_rsi_mode", "midline")
                 rsi_overbought = cfg.get("sr_rsi_overbought", 70)
                 rsi_oversold = cfg.get("sr_rsi_oversold", 30)
+                immediate_enabled = cfg.get("sr_immediate_signal_enabled", False)
                 min_needed = max(atr_period, rsi_period, adx_length, vwap_dev_length, ema_length if ema_enabled else 0, 5) + 5
                 needed_bars = min(1000, max(min_needed * 2, 220))
                 st = b["state"]
+                live_h_raw = live_l_raw = live_c_raw = None  # aktuell noch laufende (nicht geschlossene) Kerze - nur fuer "Sofort ausloesen"
 
                 if need_vwap_data:
                     data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
                     if data:
                         timestamps, opens, highs, lows, closes, volumes = data
                         closed_ts, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                        if immediate_enabled and highs:
+                            live_h_raw, live_l_raw, live_c_raw = highs[-1], lows[-1], closes[-1]
                     else:
                         closed_ts = closed_h = closed_l = closed_c = closed_v = None
                 elif resolution in SUB_MINUTE_RESOLUTIONS:
@@ -4471,11 +4482,16 @@ async def sr_poll_loop(symbol):
                     else:
                         closed_ts = closed_h = closed_l = closed_c = None
                     closed_v = None
+                    # "Sofort ausloesen" wird bei Sekunden-Aufloesungen bewusst NICHT unterstuetzt
+                    # (get_seconds_candles liefert nur bereits abgeschlossene, synthetisch
+                    # zusammengesetzte Kerzen - keine "gerade laufende" Kerze zum Anzapfen).
                 else:
                     data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
                     if data:
                         timestamps, opens, highs, lows, closes = data
                         closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
+                        if immediate_enabled and highs:
+                            live_h_raw, live_l_raw, live_c_raw = highs[-1], lows[-1], closes[-1]
                     else:
                         closed_ts = closed_h = closed_l = closed_c = None
                     closed_v = None
@@ -4603,6 +4619,35 @@ async def sr_poll_loop(symbol):
                         )
 
                     await check_sr_sl_tp(symbol, price, vwap_midline_now=vwmean_now)
+
+                    if immediate_enabled and live_c_raw is not None:
+                        live_price = st["last_price"] if st["last_price"] is not None else live_c_raw
+                        live_h_val = max(live_h_raw, live_price) if live_h_raw is not None else live_price
+                        live_l_val = min(live_l_raw, live_price) if live_l_raw is not None else live_price
+                        probe_h = closed_h + [live_h_val]
+                        probe_l = closed_l + [live_l_val]
+                        probe_c = closed_c + [live_price]
+                        live_bull, live_bear, live_rsi, live_st_line = compute_sr_signals(probe_h, probe_l, probe_c, atr_period, multiplier, rsi_period)
+                        live_idx = len(probe_c) - 1
+                        if live_bull[live_idx] or live_bear[live_idx]:
+                            # Filter (ADX/EMA/VWAP-Arm/Mittellinien-Totzone) nutzen bewusst noch die
+                            # Werte der letzten ABGESCHLOSSENEN Kerze (Naeherung) - nur das Kernsignal
+                            # (SuperTrend-Flip+RSI) und der SuperTrend-Band-SL reagieren live auf die
+                            # gerade laufende Kerze, das war der eigentliche Zweck dieser Option.
+                            await check_sr_signal(
+                                symbol, live_bull[live_idx], live_bear[live_idx], live_price, live_rsi[live_idx],
+                                adx=adx[-1] if adx is not None else None,
+                                plus_di=plus_di[-1] if plus_di is not None else None,
+                                minus_di=minus_di[-1] if minus_di is not None else None,
+                                vwap_arm=st.get("sr_vwap_arm") if vwap_dev_enabled else None,
+                                cloud_sl_lower=sl_lower[-1] if sl_lower is not None else None,
+                                cloud_sl_upper=sl_upper[-1] if sl_upper is not None else None,
+                                ema_val=ema[-1] if ema is not None else None,
+                                rsi_arm=st.get("sr_rsi_arm") if rsi_mode == "extreme_arm" else None,
+                                vwap_midline_ok=midline_ok[-1] if midline_ok is not None else None,
+                                st_line_val=live_st_line[live_idx],
+                            )
+                            await check_sr_sl_tp(symbol, live_price, vwap_midline_now=vwmean_now)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:

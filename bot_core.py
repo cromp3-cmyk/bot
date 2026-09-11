@@ -571,6 +571,7 @@ def default_config():
         "sr_adx_threshold": float(os.getenv("SR_ADX_THRESHOLD", "20")),
         "sr_adx_resolution": os.getenv("SR_ADX_RESOLUTION", "same"),
         "sr_adx_invert_enabled": os.getenv("SR_ADX_INVERT_ENABLED", "false").lower() == "true",  # normal: ADX ueber Schwelle noetig (starker Trend). Invertiert: ADX UNTER Schwelle noetig (schwacher Trend/Seitwaerts)
+        "sr_immediate_signal_enabled": os.getenv("SR_IMMEDIATE_SIGNAL_ENABLED", "false").lower() == "true",  # Kernsignal+SuperTrend-Band-SL reagieren live auf die laufende Kerze statt erst beim Kerzenschluss
         "sr_zscore_filter_enabled": os.getenv("SR_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
         "sr_zscore_lookback": int(os.getenv("SR_ZSCORE_LOOKBACK", "20")),
         "sr_zscore_smooth": int(os.getenv("SR_ZSCORE_SMOOTH", "3")),
@@ -3020,6 +3021,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     glattgestellt statt gedreht.
   </div>
 
+  <div data-mode="st_rsi_signal"><label>Sofort auslösen (nicht erst bei Kerzenschluss)</label>
+    <select class="cfg" id="sr_immediate_signal_enabled">
+      <option value="false">Aus (Standard: nur abgeschlossene Kerzen)</option>
+      <option value="true">An (reagiert live auf die laufende Kerze)</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_immediate_signal_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Standardmäßig wertet der Bot das Signal erst aus, wenn die Kerze fertig geschlossen ist -
+    das kostet bis zu eine Kerzenlänge Reaktionszeit. Mit dieser Option prüft der Bot zusätzlich
+    bei jedem Durchlauf (alle 5 Sek.) die GERADE LAUFENDE Kerze: SuperTrend-Flip+RSI und der
+    SuperTrend-Band-SL reagieren dann sofort auf den aktuellen Kurs. Die anderen Filter
+    (ADX/EMA/VWAP) nutzen dabei noch den Stand der letzten abgeschlossenen Kerze. Bei
+    Sekunden-Auflösungen nicht verfügbar.
+  </div>
+
   <div data-mode="st_rsi_signal"><label>EMA-Trendfilter</label>
     <select class="cfg" id="sr_ema_filter_enabled">
       <option value="false">Aus</option>
@@ -5418,6 +5434,7 @@ async function refresh() {
     setResolutionField('sr_adx_resolution', data.config.sr_adx_resolution);
     document.getElementById('sr_adx_threshold').value = data.config.sr_adx_threshold;
     document.getElementById('sr_adx_invert_enabled').value = String(data.config.sr_adx_invert_enabled);
+    document.getElementById('sr_immediate_signal_enabled').value = String(data.config.sr_immediate_signal_enabled);
     document.getElementById('sr_zscore_filter_enabled').value = String(data.config.sr_zscore_filter_enabled);
     document.getElementById('sr_zscore_lookback').value = data.config.sr_zscore_lookback;
     document.getElementById('sr_zscore_smooth').value = data.config.sr_zscore_smooth;
@@ -5960,6 +5977,7 @@ function buildConfigPayload() {
     sr_adx_resolution: getResolutionField('sr_adx_resolution'),
     sr_adx_threshold: parseFloat(document.getElementById('sr_adx_threshold').value),
     sr_adx_invert_enabled: document.getElementById('sr_adx_invert_enabled').value === 'true',
+    sr_immediate_signal_enabled: document.getElementById('sr_immediate_signal_enabled').value === 'true',
     sr_zscore_filter_enabled: document.getElementById('sr_zscore_filter_enabled').value === 'true',
     sr_zscore_lookback: parseInt(document.getElementById('sr_zscore_lookback').value),
     sr_zscore_smooth: parseInt(document.getElementById('sr_zscore_smooth').value),
@@ -6276,6 +6294,7 @@ async def handle_config_update(request):
                 "sr_rsi_mode", "sr_rsi_overbought", "sr_rsi_oversold",
                 "sr_ema_filter_enabled", "sr_ema_length", "sr_ema_resolution",
                 "sr_direction_mode", "sr_adx_filter_enabled", "sr_adx_length", "sr_adx_threshold", "sr_adx_resolution", "sr_adx_invert_enabled",
+                "sr_immediate_signal_enabled",
                 "sr_zscore_filter_enabled", "sr_zscore_lookback", "sr_zscore_smooth",
                 "sr_sl_tp_mode",
                 "sr_sl_enabled", "sr_sl_manual_usd", "sr_tp_enabled", "sr_tp_manual_usd", "sr_sl_cooldown_seconds",
