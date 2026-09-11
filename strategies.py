@@ -4487,11 +4487,53 @@ async def sr_poll_loop(symbol):
 
                     adx = plus_di = minus_di = None
                     if adx_enabled:
-                        adx, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
+                        adx_resolution = cfg.get("sr_adx_resolution", "same")
+                        if adx_resolution in (None, "", "same") or adx_resolution == resolution:
+                            adx, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
+                        else:
+                            adx_needed = min(500, adx_length * 5 + 20)
+                            if adx_resolution in SUB_MINUTE_RESOLUTIONS:
+                                adx_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[adx_resolution], adx_needed)
+                                adx_h = adx_local[2] if adx_local else None
+                                adx_l = adx_local[3] if adx_local else None
+                                adx_c = adx_local[4] if adx_local else None
+                            else:
+                                adx_data = await fetch_candles_binance_multi(symbol, adx_resolution, count_back=adx_needed, market_type=cfg.get("binance_market_type", "spot"))
+                                if adx_data:
+                                    _, _, adx_h, adx_l, adx_c = adx_data
+                                    adx_h, adx_l, adx_c = adx_h[:-1], adx_l[:-1], adx_c[:-1]
+                                else:
+                                    adx_h = adx_l = adx_c = None
+                            if adx_c and len(adx_c) > adx_length:
+                                adx_now, plus_di_now, minus_di_now = compute_adx(adx_h, adx_l, adx_c, adx_length)
+                                adx = [adx_now[-1]] * len(closed_c)
+                                plus_di = [plus_di_now[-1]] * len(closed_c)
+                                minus_di = [minus_di_now[-1]] * len(closed_c)
+                            else:
+                                adx, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)  # Fallback, falls (noch) keine Daten
 
                     ema = None
                     if ema_enabled:
-                        ema = _ema_series(closed_c, ema_length)
+                        ema_resolution = cfg.get("sr_ema_resolution", "same")
+                        if ema_resolution in (None, "", "same") or ema_resolution == resolution:
+                            ema = _ema_series(closed_c, ema_length)
+                        else:
+                            ema_needed = min(500, ema_length * 3 + 20)
+                            if ema_resolution in SUB_MINUTE_RESOLUTIONS:
+                                ema_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[ema_resolution], ema_needed)
+                                ema_c = ema_local[4] if ema_local else None
+                            else:
+                                ema_data = await fetch_candles_binance_multi(symbol, ema_resolution, count_back=ema_needed, market_type=cfg.get("binance_market_type", "spot"))
+                                if ema_data:
+                                    _, _, _, _, ema_c = ema_data
+                                    ema_c = ema_c[:-1]
+                                else:
+                                    ema_c = None
+                            if ema_c and len(ema_c) > ema_length:
+                                ema_now = _ema_series(ema_c, ema_length)
+                                ema = [ema_now[-1]] * len(closed_c)
+                            else:
+                                ema = _ema_series(closed_c, ema_length)  # Fallback, falls (noch) keine Daten
 
                     rsi_arm_series = None
                     if rsi_mode == "extreme_arm":
@@ -4633,7 +4675,7 @@ def backtest_sr_signal(candles, cfg):
     vwap_arm_series = cfg.get("_sr_vwap_arm_precomputed") if vwap_dev_enabled else None
     sl_lower_series = cfg.get("_sr_vwap_sl_lower_precomputed") if sl_tp_mode == "vwap_cloud" else None
     sl_upper_series = cfg.get("_sr_vwap_sl_upper_precomputed") if sl_tp_mode == "vwap_cloud" else None
-    ema_series = _ema_series(c, ema_length) if ema_enabled else None
+    ema_series = cfg.get("_sr_ema_precomputed") if ema_enabled else None
     rsi_arm_series = compute_rsi_arm(rsi, rsi_overbought, rsi_oversold) if rsi_mode == "extreme_arm" else None
     midline_ok_series = cfg.get("_sr_vwap_midline_precomputed") if vwap_midline_enabled else None
     midline_series = cfg.get("_sr_vwap_midline_series_precomputed") if vwap_breakeven_enabled else None
@@ -9371,6 +9413,24 @@ async def _build_zscore_series_for_backtest(symbol, cfg, days, base_ts, base_c, 
     return _align_htf_series(base_ts, t_ts, zscore_htf), None
 
 
+async def _build_ema_series_for_backtest(symbol, cfg, days, base_ts, base_c, primary_resolution, prefix):
+    """Baut den EMA-Filter-Wert fuer eine ABWEICHENDE Zeiteinheit (<prefix>_ema_resolution) fuer
+    den Backtest - identisches Muster zu _build_zscore_series_for_backtest. Bei 'same'/eigenem
+    Handels-Zeitrahmen wird direkt auf den eigenen Kerzen gerechnet. Gibt (ema, error) zurueck."""
+    resolution = cfg.get(f"{prefix}_ema_resolution", "same")
+    length = cfg.get(f"{prefix}_ema_length", 200)
+    if resolution in (None, "", "same") or resolution == primary_resolution:
+        return _ema_series(base_c, length), None
+    tf_candles, err, _ = await _fetch_cached_backtest_candles(symbol, resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return None, f"EMA-Zeiteinheit ({resolution}): {err}"
+    if not tf_candles or len(tf_candles[4]) < length + 5:
+        return None, f"Zu wenig historische Kerzen für die EMA-Zeiteinheit ({resolution}) erhalten."
+    t_ts, t_o, t_h, t_l, t_c = tf_candles
+    ema_htf = _ema_series(t_c, length)
+    return _align_htf_series(base_ts, t_ts, ema_htf), None
+
+
 async def _build_adx_series_for_backtest(symbol, cfg, days, base_ts, base_h, base_l, base_c, primary_resolution, prefix):
     """Baut ADX/+DI/-DI fuer eine ABWEICHENDE Zeiteinheit (<prefix>_adx_resolution) fuer den
     Backtest - identisches Muster zu _build_zscore_series_for_backtest, nur fuer drei Serien
@@ -9681,6 +9741,11 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             if adx_err:
                 return {"error": adx_err}
             cfg["_sr_adx_precomputed"] = (adx, plus_di, minus_di)  # von backtest_sr_signal gelesen (nicht async, siehe dort)
+        if cfg.get("sr_ema_filter_enabled", False):
+            ema, ema_err = await _build_ema_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "sr")
+            if ema_err:
+                return {"error": ema_err}
+            cfg["_sr_ema_precomputed"] = ema  # von backtest_sr_signal gelesen (nicht async, siehe dort)
         need_arm = cfg.get("sr_vwap_dev_filter_enabled", False)
         need_sl_bands = cfg.get("sr_sl_tp_mode", "fixed") == "vwap_cloud"
         need_midline = cfg.get("sr_vwap_midline_filter_enabled", False)

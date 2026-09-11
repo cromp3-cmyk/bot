@@ -564,10 +564,12 @@ def default_config():
         "sr_rsi_oversold": float(os.getenv("SR_RSI_OVERSOLD", "30")),
         "sr_ema_filter_enabled": os.getenv("SR_EMA_FILTER_ENABLED", "false").lower() == "true",
         "sr_ema_length": int(os.getenv("SR_EMA_LENGTH", "200")),
+        "sr_ema_resolution": os.getenv("SR_EMA_RESOLUTION", "same"),
         "sr_direction_mode": os.getenv("SR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
         "sr_adx_filter_enabled": os.getenv("SR_ADX_FILTER_ENABLED", "false").lower() == "true",
         "sr_adx_length": int(os.getenv("SR_ADX_LENGTH", "14")),
         "sr_adx_threshold": float(os.getenv("SR_ADX_THRESHOLD", "20")),
+        "sr_adx_resolution": os.getenv("SR_ADX_RESOLUTION", "same"),
         "sr_zscore_filter_enabled": os.getenv("SR_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
         "sr_zscore_lookback": int(os.getenv("SR_ZSCORE_LOOKBACK", "20")),
         "sr_zscore_smooth": int(os.getenv("SR_ZSCORE_SMOOTH", "3")),
@@ -3024,6 +3026,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="st_rsi_signal" data-requires="sr_ema_filter_enabled"><label>EMA-Länge</label><input type="number" step="1" min="1" id="sr_ema_length"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_ema_filter_enabled"><label>EMA-Zeiteinheit</label>
+    <select class="cfg" id="sr_ema_resolution">
+      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+      <option value="1m">1 Minute</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="sr_ema_resolution_custom_minutes" placeholder="z.B. 3" style="display:none; margin-top:6px; width:140px;">
+  </div>
   <div data-mode="st_rsi_signal" data-requires="sr_ema_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Long nur, wenn der Kurs ÜBER der EMA liegt - Short nur, wenn er DARUNTER liegt (Standard 200,
     klassischer Trendfilter).
@@ -3036,6 +3053,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="1" id="sr_adx_length"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX-Zeiteinheit</label>
+    <select class="cfg" id="sr_adx_resolution">
+      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+      <option value="1m">1 Minute</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="sr_adx_resolution_custom_minutes" placeholder="z.B. 3" style="display:none; margin-top:6px; width:140px;">
+  </div>
   <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX-Schwelle (Trendstärke)</label><input type="number" step="1" min="0" id="sr_adx_threshold"></div>
 
   <div data-mode="st_rsi_signal"><label>VWAP-Deviation-Bestätigung (nach "[Hoss] VWAP Deviation")</label>
@@ -4165,7 +4197,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -5372,9 +5404,11 @@ async function refresh() {
     document.getElementById('sr_rsi_oversold').value = data.config.sr_rsi_oversold;
     document.getElementById('sr_ema_filter_enabled').value = String(data.config.sr_ema_filter_enabled);
     document.getElementById('sr_ema_length').value = data.config.sr_ema_length;
+    setResolutionField('sr_ema_resolution', data.config.sr_ema_resolution);
     document.getElementById('sr_direction_mode').value = data.config.sr_direction_mode;
     document.getElementById('sr_adx_filter_enabled').value = String(data.config.sr_adx_filter_enabled);
     document.getElementById('sr_adx_length').value = data.config.sr_adx_length;
+    setResolutionField('sr_adx_resolution', data.config.sr_adx_resolution);
     document.getElementById('sr_adx_threshold').value = data.config.sr_adx_threshold;
     document.getElementById('sr_zscore_filter_enabled').value = String(data.config.sr_zscore_filter_enabled);
     document.getElementById('sr_zscore_lookback').value = data.config.sr_zscore_lookback;
@@ -5911,9 +5945,11 @@ function buildConfigPayload() {
     sr_rsi_oversold: parseFloat(document.getElementById('sr_rsi_oversold').value),
     sr_ema_filter_enabled: document.getElementById('sr_ema_filter_enabled').value === 'true',
     sr_ema_length: parseInt(document.getElementById('sr_ema_length').value),
+    sr_ema_resolution: getResolutionField('sr_ema_resolution'),
     sr_direction_mode: document.getElementById('sr_direction_mode').value,
     sr_adx_filter_enabled: document.getElementById('sr_adx_filter_enabled').value === 'true',
     sr_adx_length: parseInt(document.getElementById('sr_adx_length').value),
+    sr_adx_resolution: getResolutionField('sr_adx_resolution'),
     sr_adx_threshold: parseFloat(document.getElementById('sr_adx_threshold').value),
     sr_zscore_filter_enabled: document.getElementById('sr_zscore_filter_enabled').value === 'true',
     sr_zscore_lookback: parseInt(document.getElementById('sr_zscore_lookback').value),
@@ -6229,8 +6265,8 @@ async def handle_config_update(request):
                 "mv_tp_enabled", "mv_tp_manual_usd",
                 "sr_resolution", "sr_st_atr_period", "sr_st_multiplier", "sr_rsi_period", "sr_rsi_midline",
                 "sr_rsi_mode", "sr_rsi_overbought", "sr_rsi_oversold",
-                "sr_ema_filter_enabled", "sr_ema_length",
-                "sr_direction_mode", "sr_adx_filter_enabled", "sr_adx_length", "sr_adx_threshold",
+                "sr_ema_filter_enabled", "sr_ema_length", "sr_ema_resolution",
+                "sr_direction_mode", "sr_adx_filter_enabled", "sr_adx_length", "sr_adx_threshold", "sr_adx_resolution",
                 "sr_zscore_filter_enabled", "sr_zscore_lookback", "sr_zscore_smooth",
                 "sr_sl_tp_mode",
                 "sr_sl_enabled", "sr_sl_manual_usd", "sr_tp_enabled", "sr_tp_manual_usd", "sr_sl_cooldown_seconds",
