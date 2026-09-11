@@ -4223,10 +4223,12 @@ def _sr_set_sl_tp(st, cfg, direction, entry_price, cloud_sl_lower=None, cloud_sl
     daraus resultierenden SL-Abstands vom Einstieg. 'supertrend' (nach Nutzer-Vorgabe): SL auf
     der SuperTrend-Linie SELBST zum Einstiegszeitpunkt (st_line_val - bei Long liegt sie als
     Unterstuetzung unter dem Kurs, bei Short als Widerstand darueber, da der Einstieg ja genau
-    beim Ueberqueren dieser Linie ausgeloest wurde), TP ebenfalls als einstellbares Risk-Reward-
-    Vielfaches (sr_st_tp_rr) des SL-Abstands. sr_vwap_breakeven_done wird bei JEDEM Neueinstieg
-    zurueckgesetzt (siehe check_sr_sl_tp fuer den VWAP-Mittellinien-Breakeven, unabhaengig von
-    der hier gewaehlten SL/TP-Variante nutzbar)."""
+    beim Ueberqueren dieser Linie ausgeloest wurde) PLUS einem optionalen zusaetzlichen
+    $-Puffer (sr_st_sl_buffer_usd, nach Nutzer-Vorgabe - mehr Abstand/Sicherheitsmarge, damit der
+    SL nicht exakt auf der Linie selbst liegt), TP ebenfalls als einstellbares Risk-Reward-
+    Vielfaches (sr_st_tp_rr) des daraus resultierenden SL-Abstands. sr_vwap_breakeven_done wird
+    bei JEDEM Neueinstieg zurueckgesetzt (siehe check_sr_sl_tp fuer den VWAP-Mittellinien-
+    Breakeven, unabhaengig von der hier gewaehlten SL/TP-Variante nutzbar)."""
     st["sr_vwap_breakeven_done"] = False
     mode = cfg.get("sr_sl_tp_mode", "fixed")
     if mode == "vwap_cloud":
@@ -4250,13 +4252,18 @@ def _sr_set_sl_tp(st, cfg, direction, entry_price, cloud_sl_lower=None, cloud_sl
     if mode == "supertrend":
         if st_line_val is not None:
             rr = cfg.get("sr_st_tp_rr", 1.5)
+            buffer_usd = cfg.get("sr_st_sl_buffer_usd", 0.0)
+            size = st.get("total_coin_size") or 0
+            buffer_dist = (buffer_usd / size) if buffer_usd and size > 0 else 0.0
             if direction == "long":
-                risk = entry_price - st_line_val
-                st["sr_sl_price"] = st_line_val
+                sl_price = st_line_val - buffer_dist
+                risk = entry_price - sl_price
+                st["sr_sl_price"] = sl_price
                 st["sr_tp_price"] = entry_price + risk * rr if risk > 0 else None
             else:
-                risk = st_line_val - entry_price
-                st["sr_sl_price"] = st_line_val
+                sl_price = st_line_val + buffer_dist
+                risk = sl_price - entry_price
+                st["sr_sl_price"] = sl_price
                 st["sr_tp_price"] = entry_price - risk * rr if risk > 0 else None
             return
         st["sr_sl_price"] = None
@@ -4705,6 +4712,7 @@ def backtest_sr_signal(candles, cfg):
     tp_usd = cfg.get("sr_tp_manual_usd", 10.0)
     vwap_tp_rr = cfg.get("sr_vwap_tp_rr", 1.5)
     st_tp_rr = cfg.get("sr_st_tp_rr", 1.5)
+    st_sl_buffer_usd = cfg.get("sr_st_sl_buffer_usd", 0.0)
     sl_cooldown_ms = cfg.get("sr_sl_cooldown_seconds", 30) * 1000
 
     adx_enabled = cfg.get("sr_adx_filter_enabled", False)
@@ -4787,12 +4795,16 @@ def backtest_sr_signal(candles, cfg):
                 return (cloud_sl, entry_price - risk * vwap_tp_rr) if risk > 0 else (None, None)
         if sl_tp_mode == "supertrend":
             st_sl = st_line[i]
+            size = (margin * leverage) / entry_price
+            buffer_dist = (st_sl_buffer_usd / size) if st_sl_buffer_usd and size > 0 else 0.0
             if direction == "long":
-                risk = entry_price - st_sl
-                return (st_sl, entry_price + risk * st_tp_rr) if risk > 0 else (None, None)
+                sl_price = st_sl - buffer_dist
+                risk = entry_price - sl_price
+                return (sl_price, entry_price + risk * st_tp_rr) if risk > 0 else (None, None)
             else:
-                risk = st_sl - entry_price
-                return (st_sl, entry_price - risk * st_tp_rr) if risk > 0 else (None, None)
+                sl_price = st_sl + buffer_dist
+                risk = sl_price - entry_price
+                return (sl_price, entry_price - risk * st_tp_rr) if risk > 0 else (None, None)
         size = (margin * leverage) / entry_price
         if direction == "long":
             sl_price = (entry_price - sl_usd / size) if sl_enabled else None
