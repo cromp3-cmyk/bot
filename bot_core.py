@@ -587,6 +587,10 @@ def default_config():
         "sr_vwap_midline_filter_enabled": os.getenv("SR_VWAP_MIDLINE_FILTER_ENABLED", "false").lower() == "true",
         "sr_vwap_midline_mult": float(os.getenv("SR_VWAP_MIDLINE_MULT", "0.3")),  # Mindestabstand von der VWAP-Basislinie (Vielfaches der Abweichung), sonst zaehlt der Einstieg nicht
         "sr_vwap_midline_breakeven_enabled": os.getenv("SR_VWAP_MIDLINE_BREAKEVEN_ENABLED", "false").lower() == "true",
+        "sr_mo7_filter_enabled": os.getenv("SR_MO7_FILTER_ENABLED", "false").lower() == "true",
+        "sr_mo7_mode": os.getenv("SR_MO7_MODE", "arm"),  # "arm" (empfohlen) | "instant"
+        "sr_mo7_buy_threshold": float(os.getenv("SR_MO7_BUY_THRESHOLD", "35")),  # MO7 muss darunter liegen fuer Long
+        "sr_mo7_sell_threshold": float(os.getenv("SR_MO7_SELL_THRESHOLD", "75")),  # MO7 muss darueber liegen fuer Short
         "sr_vwap_sl_mult": float(os.getenv("SR_VWAP_SL_MULT", "3.0")),  # "Ende der Wolke" - aeusserer Rand fuer den SL bei sl_tp_mode="vwap_cloud"
         "sr_vwap_tp_rr": float(os.getenv("SR_VWAP_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands (1.0 = 1:1, 1.5 = 1:1,5, ...)
         "sr_st_tp_rr": float(os.getenv("SR_ST_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands bei sl_tp_mode="supertrend"
@@ -3144,6 +3148,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="st_rsi_signal" data-requires="sr_zscore_filter_enabled"><label>Z-Score Lookback</label><input type="number" step="1" min="2" id="sr_zscore_lookback"></div>
   <div data-mode="st_rsi_signal" data-requires="sr_zscore_filter_enabled"><label>Z-Score Glättung</label><input type="number" step="1" min="1" id="sr_zscore_smooth"></div>
 
+  <div data-mode="st_rsi_signal"><label>MO7-Extremwert-Filter (Pullback-/Erschöpfungsfilter)</label>
+    <select class="cfg" id="sr_mo7_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mo7_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    MO7 ist ein Composite-Oszillator aus RSI, Stochastic, Williams %R, MACD, ROC und Percent-Rank
+    (0-100, wie beim MO7-Scalp). Nutzt dieselben MO7-Unterparameter (RSI-/Stoch-/WPR-/MFI-Länge,
+    MACD) wie die MO7-Strategie selbst.
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mo7_filter_enabled"><label>MO7-Modus</label>
+    <select class="cfg" id="sr_mo7_mode">
+      <option value="arm">Vorher erreicht (empfohlen - wie RSI-Extremwert-Modus)</option>
+      <option value="instant">Genau an dieser Kerze</option>
+    </select>
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mo7_mode" data-requires-value="arm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    MO7 muss VORHER unter die Kauf-Schwelle gefallen sein (Pullback/Überverkauft) -> Long ab jetzt
+    erlaubt, bis MO7 über die Verkauf-Schwelle steigt - das hebt den Long-Zustand sofort auf und
+    erlaubt Short. Kein fester Lookback, identisches Prinzip wie beim RSI-Extremwert-Modus.
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mo7_mode" data-requires-value="instant" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    ⚠️ MO7 muss GENAU an der Signal-Kerze unter/über der Schwelle liegen. Das trifft mit einem
+    frischen SuperTrend-Flip fast nie gleichzeitig zu (ein Flip passiert meist schon bei stärkerem
+    Momentum) - kann in der Praxis zu sehr wenigen oder gar keinen Trades führen.
+  </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mo7_filter_enabled"><label>Kauf-Schwelle (Long nur darunter/vorher darunter)</label><input type="number" step="1" min="0" max="100" id="sr_mo7_buy_threshold"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_mo7_filter_enabled"><label>Verkauf-Schwelle (Short nur darüber/vorher darüber)</label><input type="number" step="1" min="0" max="100" id="sr_mo7_sell_threshold"></div>
+
   <div data-mode="st_rsi_signal"><label>SL/TP-Variante</label>
     <select class="cfg" id="sr_sl_tp_mode">
       <option value="fixed">Fest ($-Betrag)</option>
@@ -5455,6 +5489,10 @@ async function refresh() {
     document.getElementById('sr_zscore_filter_enabled').value = String(data.config.sr_zscore_filter_enabled);
     document.getElementById('sr_zscore_lookback').value = data.config.sr_zscore_lookback;
     document.getElementById('sr_zscore_smooth').value = data.config.sr_zscore_smooth;
+    document.getElementById('sr_mo7_filter_enabled').value = String(data.config.sr_mo7_filter_enabled);
+    document.getElementById('sr_mo7_mode').value = data.config.sr_mo7_mode;
+    document.getElementById('sr_mo7_buy_threshold').value = data.config.sr_mo7_buy_threshold;
+    document.getElementById('sr_mo7_sell_threshold').value = data.config.sr_mo7_sell_threshold;
     document.getElementById('sr_sl_tp_mode').value = data.config.sr_sl_tp_mode;
     document.getElementById('sr_sl_enabled').value = String(data.config.sr_sl_enabled);
     document.getElementById('sr_sl_manual_usd').value = data.config.sr_sl_manual_usd;
@@ -5999,6 +6037,10 @@ function buildConfigPayload() {
     sr_zscore_filter_enabled: document.getElementById('sr_zscore_filter_enabled').value === 'true',
     sr_zscore_lookback: parseInt(document.getElementById('sr_zscore_lookback').value),
     sr_zscore_smooth: parseInt(document.getElementById('sr_zscore_smooth').value),
+    sr_mo7_filter_enabled: document.getElementById('sr_mo7_filter_enabled').value === 'true',
+    sr_mo7_mode: document.getElementById('sr_mo7_mode').value,
+    sr_mo7_buy_threshold: parseFloat(document.getElementById('sr_mo7_buy_threshold').value),
+    sr_mo7_sell_threshold: parseFloat(document.getElementById('sr_mo7_sell_threshold').value),
     sr_sl_tp_mode: document.getElementById('sr_sl_tp_mode').value,
     sr_sl_enabled: document.getElementById('sr_sl_enabled').value === 'true',
     sr_sl_manual_usd: parseFloat(document.getElementById('sr_sl_manual_usd').value),
@@ -6315,6 +6357,7 @@ async def handle_config_update(request):
                 "sr_direction_mode", "sr_adx_filter_enabled", "sr_adx_length", "sr_adx_threshold", "sr_adx_resolution", "sr_adx_invert_enabled",
                 "sr_immediate_signal_enabled",
                 "sr_zscore_filter_enabled", "sr_zscore_lookback", "sr_zscore_smooth",
+                "sr_mo7_filter_enabled", "sr_mo7_mode", "sr_mo7_buy_threshold", "sr_mo7_sell_threshold",
                 "sr_sl_tp_mode",
                 "sr_sl_enabled", "sr_sl_manual_usd", "sr_tp_enabled", "sr_tp_manual_usd", "sr_sl_cooldown_seconds",
                 "sr_vwap_dev_filter_enabled", "sr_vwap_dev_length", "sr_vwap_dev_mult",

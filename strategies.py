@@ -4334,26 +4334,34 @@ async def check_sr_sl_tp(symbol, price, vwap_midline_now=None):
             st["sr_tp_price"] = None
 
 
-async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None, ema_val=None, rsi_arm=None, vwap_midline_ok=None, st_line_val=None):
+async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None, ema_val=None, rsi_arm=None, vwap_midline_ok=None, st_line_val=None, mo7_val=None, mo7_arm=None):
     """Kernsignal (nach Nutzer-Vorgabe): SuperTrend dreht bullisch UND RSI-Bedingung erfuellt ->
     Long. SuperTrend dreht baerisch UND RSI-Bedingung erfuellt -> Short. RSI-Bedingung ist
     ueber sr_rsi_mode waehlbar: 'midline' (Standard) = RSI > Mittellinie fuer Long / < Mittellinie
     fuer Short (Wert an DIESER Kerze). 'extreme_arm' = RSI muss VORHER ueber sr_rsi_overbought
     (Standard 70) gewesen sein fuer Short bzw. VORHER unter sr_rsi_oversold (Standard 30) fuer
     Long (rsi_arm, siehe compute_rsi_arm - identisches Zustandsmaschine-Prinzip wie beim
-    VWAP-Deviation-Filter, kein fester Lookback). Zusaetzlich vier unabhaengig voneinander
+    VWAP-Deviation-Filter, kein fester Lookback). Zusaetzlich fuenf unabhaengig voneinander
     zuschaltbare Filter (wie bei UT-Bot+Hull/Fractals/Kerzen-DNA/Range Filter): ADX/DI-
     Trendfilter, EMA-Trendfilter (ema_val: Long nur ueber der EMA, Short nur darunter),
     VWAP-Deviation-Bestaetigung (vwap_arm: 'upper' -> Short erlaubt, 'lower' -> Long erlaubt,
     siehe compute_vwap_dev_arm - wird VOR dieser Kerze ausgewertet, "vorher im Band
     geschlossen"), VWAP-Mittellinien-Totzone (nach Nutzer-Vorgabe: vwap_midline_ok=False blockiert
     BEIDE Richtungen, wenn der Kurs zu nah an der VWAP-Basislinie liegt - siehe
-    sr_vwap_midline_mult). Ein Gegen-Signal ist NUR gueltig, wenn ALLE Bedingungen fuer die
-    Gegenrichtung erfuellt sind - dann wird gedreht (Flip). Sind sie es nicht, passiert GAR
-    NICHTS (nach Nutzer-Vorgabe: kein Exit bei jedem beliebigen SuperTrend-Wechsel, die Position
-    bleibt unangetastet offen und kann nur ueber SL/TP oder ein spaeteres GUELTIGES Gegen-Signal
-    beendet werden). cloud_sl_lower/cloud_sl_upper werden nur bei sr_sl_tp_mode='vwap_cloud' fuer
-    den SL gebraucht (siehe _sr_set_sl_tp)."""
+    sr_vwap_midline_mult), MO7-Extremwert-Bestaetigung (nach Nutzer-Vorgabe, wie eine Art
+    Pullback-/Erschoepfungsfilter - siehe compute_mo7_series_novolume). sr_mo7_mode waehlbar:
+    'arm' (Standard, empfohlen) = MO7 muss VORHER unter sr_mo7_buy_threshold gewesen sein fuer
+    Long bzw. VORHER ueber sr_mo7_sell_threshold fuer Short (mo7_arm, identisches Zustandsmaschine-
+    Prinzip wie bei RSI-Extremwert/VWAP-Deviation - kein fester Lookback). 'instant' = MO7 muss
+    AN DIESER Kerze unter/ueber der Schwelle liegen (praktisch fast nie gleichzeitig mit einem
+    frischen SuperTrend-Flip erfuellt, da ein Flip meist schon bei staerkerem Momentum passiert -
+    bewusst als Option belassen, 'arm' ist aber der sinnvollere Standard).
+    Ein Gegen-Signal ist NUR gueltig, wenn ALLE Bedingungen fuer die Gegenrichtung erfuellt sind -
+    dann wird gedreht (Flip). Sind sie es nicht, passiert GAR NICHTS (nach Nutzer-Vorgabe: kein
+    Exit bei jedem beliebigen SuperTrend-Wechsel, die Position bleibt unangetastet offen und kann
+    nur ueber SL/TP oder ein spaeteres GUELTIGES Gegen-Signal beendet werden). cloud_sl_lower/
+    cloud_sl_upper werden nur bei sr_sl_tp_mode='vwap_cloud' fuer den SL gebraucht (siehe
+    _sr_set_sl_tp)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None or rsi_val is None:
@@ -4383,18 +4391,30 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
     ema_short_ok = not ema_enabled or ema_val is None or price < ema_val
     vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
     midline_ok = not vwap_midline_enabled or vwap_midline_ok is None or vwap_midline_ok
+    mo7_enabled = cfg.get("sr_mo7_filter_enabled", False)
+    mo7_mode = cfg.get("sr_mo7_mode", "arm")
+    mo7_buy_threshold = cfg.get("sr_mo7_buy_threshold", 35)
+    mo7_sell_threshold = cfg.get("sr_mo7_sell_threshold", 75)
+    if mo7_mode == "arm":
+        mo7_long_ok = not mo7_enabled or mo7_arm == "long_ready"
+        mo7_short_ok = not mo7_enabled or mo7_arm == "short_ready"
+    else:
+        mo7_long_ok = not mo7_enabled or mo7_val is None or mo7_val < mo7_buy_threshold
+        mo7_short_ok = not mo7_enabled or mo7_val is None or mo7_val > mo7_sell_threshold
 
     long_ok = (direction_mode != "short_only"
                and rsi_long_ok
                and (not vwap_dev_enabled or vwap_arm == "lower")
                and ema_long_ok
                and midline_ok
+               and mo7_long_ok
                and adx_long_ok)
     short_ok = (direction_mode != "long_only"
                 and rsi_short_ok
                 and (not vwap_dev_enabled or vwap_arm == "upper")
                 and ema_short_ok
                 and midline_ok
+                and mo7_short_ok
                 and adx_short_ok)
     pos = st["position"]
 
@@ -4468,8 +4488,12 @@ async def sr_poll_loop(symbol):
                 rsi_overbought = cfg.get("sr_rsi_overbought", 70)
                 rsi_oversold = cfg.get("sr_rsi_oversold", 30)
                 immediate_enabled = cfg.get("sr_immediate_signal_enabled", False)
+                mo7_enabled = cfg.get("sr_mo7_filter_enabled", False)
+                mo7_mode = cfg.get("sr_mo7_mode", "arm")
+                mo7_buy_threshold = cfg.get("sr_mo7_buy_threshold", 35)
+                mo7_sell_threshold = cfg.get("sr_mo7_sell_threshold", 75)
                 min_needed = max(atr_period, rsi_period, adx_length, vwap_dev_length, ema_length if ema_enabled else 0, 5) + 5
-                needed_bars = min(1000, max(min_needed * 2, 220))
+                needed_bars = min(1000, max(min_needed * 2, 220, 500 if mo7_enabled else 0))
                 st = b["state"]
                 live_h_raw = live_l_raw = live_c_raw = None  # aktuell noch laufende (nicht geschlossene) Kerze - nur fuer "Sofort ausloesen"
 
@@ -4564,6 +4588,10 @@ async def sr_poll_loop(symbol):
                     if rsi_mode == "extreme_arm":
                         rsi_arm_series = compute_rsi_arm(rsi, rsi_overbought, rsi_oversold)
 
+                    mo7 = None
+                    if mo7_enabled:
+                        mo7 = compute_mo7_series_novolume(closed_h, closed_l, closed_c, cfg)
+
                     vwap_upper = vwap_lower = None  # Bestaetigungs-Band (dev_mult, "Wolke betreten")
                     sl_lower = sl_upper = None  # SL-Band (vwap_sl_mult, "Ende der Wolke")
                     midline_ok = None  # Mittellinien-Totzone (midline_mult, "zu nah an der Basislinie")
@@ -4611,6 +4639,13 @@ async def sr_poll_loop(symbol):
                             elif rsi[idx] < rsi_oversold:
                                 st["sr_rsi_arm"] = "long_ready"
 
+                        mo7_arm_before = st.get("sr_mo7_arm") if (mo7_enabled and mo7_mode == "arm") else None
+                        if mo7_enabled and mo7_mode == "arm" and mo7 is not None:
+                            if mo7[idx] > mo7_sell_threshold:
+                                st["sr_mo7_arm"] = "short_ready"
+                            elif mo7[idx] < mo7_buy_threshold:
+                                st["sr_mo7_arm"] = "long_ready"
+
                         await check_sr_signal(
                             symbol, bull[idx], bear[idx], price_i, rsi[idx],
                             adx=adx[idx] if adx is not None else None,
@@ -4623,6 +4658,8 @@ async def sr_poll_loop(symbol):
                             rsi_arm=rsi_arm_before,
                             vwap_midline_ok=midline_ok[idx] if midline_ok is not None else None,
                             st_line_val=st_line[idx],
+                            mo7_val=mo7[idx] if mo7 is not None else None,
+                            mo7_arm=mo7_arm_before,
                         )
 
                     await check_sr_sl_tp(symbol, price, vwap_midline_now=vwmean_now)
@@ -4653,6 +4690,8 @@ async def sr_poll_loop(symbol):
                                 rsi_arm=st.get("sr_rsi_arm") if rsi_mode == "extreme_arm" else None,
                                 vwap_midline_ok=midline_ok[-1] if midline_ok is not None else None,
                                 st_line_val=live_st_line[live_idx],
+                                mo7_val=mo7[-1] if mo7 is not None else None,
+                                mo7_arm=st.get("sr_mo7_arm") if (mo7_enabled and mo7_mode == "arm") else None,
                             )
                             await check_sr_sl_tp(symbol, live_price, vwap_midline_now=vwmean_now)
                 elif due_heartbeat:
@@ -4723,6 +4762,10 @@ def backtest_sr_signal(candles, cfg):
     ema_length = cfg.get("sr_ema_length", 200)
     vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
     vwap_breakeven_enabled = cfg.get("sr_vwap_midline_breakeven_enabled", False)
+    mo7_enabled = cfg.get("sr_mo7_filter_enabled", False)
+    mo7_mode = cfg.get("sr_mo7_mode", "arm")
+    mo7_buy_threshold = cfg.get("sr_mo7_buy_threshold", 35)
+    mo7_sell_threshold = cfg.get("sr_mo7_sell_threshold", 75)
 
     bull, bear, rsi, st_line = compute_sr_signals(h, l, c, atr_period, multiplier, rsi_period)
 
@@ -4735,8 +4778,10 @@ def backtest_sr_signal(candles, cfg):
     rsi_arm_series = compute_rsi_arm(rsi, rsi_overbought, rsi_oversold) if rsi_mode == "extreme_arm" else None
     midline_ok_series = cfg.get("_sr_vwap_midline_precomputed") if vwap_midline_enabled else None
     midline_series = cfg.get("_sr_vwap_midline_series_precomputed") if vwap_breakeven_enabled else None
+    mo7_series = compute_mo7_series_novolume(h, l, c, cfg) if mo7_enabled else None
+    mo7_arm_series = compute_rsi_arm(mo7_series, mo7_sell_threshold, mo7_buy_threshold) if (mo7_enabled and mo7_mode == "arm" and mo7_series is not None) else None
 
-    warmup = max(atr_period, rsi_period, cfg.get("sr_adx_length", 14), cfg.get("sr_vwap_dev_length", 60), ema_length if ema_enabled else 0, 5) + 2
+    warmup = max(atr_period, rsi_period, cfg.get("sr_adx_length", 14), cfg.get("sr_vwap_dev_length", 60), ema_length if ema_enabled else 0, 500 if mo7_enabled else 0, 5) + 2
 
     def arm_before(i):
         """VWAP-Deviation-Zustand VOR Kerze i (siehe compute_vwap_dev_arm - 'vorher im Band
@@ -4752,6 +4797,13 @@ def backtest_sr_signal(candles, cfg):
             return None
         return rsi_arm_series[i - 1]
 
+    def mo7_arm_before(i):
+        """MO7-Extremwert-Zustand VOR Kerze i (siehe compute_rsi_arm - 'vorher unter/ueber der
+        Schwelle gewesen')."""
+        if mo7_arm_series is None or i < 1:
+            return None
+        return mo7_arm_series[i - 1]
+
     def midline_ok(i):
         """VWAP-Mittellinien-Totzone AN Kerze i (nach Nutzer-Vorgabe - blockiert BEIDE Richtungen
         gleichermassen, siehe sr_vwap_midline_mult)."""
@@ -4760,6 +4812,12 @@ def backtest_sr_signal(candles, cfg):
     def eval_ok(i, want_long):
         adx_missing = adx_series is None or plus_di_series is None or minus_di_series is None
         adx_strength_ok = False if adx_missing else ((adx_series[i] < adx_threshold) if adx_invert else (adx_series[i] > adx_threshold))
+        if not mo7_enabled:
+            mo7_ok = True
+        elif mo7_mode == "arm":
+            mo7_ok = (mo7_arm_before(i) == "long_ready") if want_long else (mo7_arm_before(i) == "short_ready")
+        else:
+            mo7_ok = mo7_series is None or (mo7_series[i] < mo7_buy_threshold if want_long else mo7_series[i] > mo7_sell_threshold)
         if want_long:
             rsi_ok = (rsi_arm_before(i) == "long_ready") if rsi_mode == "extreme_arm" else (rsi[i] > rsi_midline)
             ema_ok = not ema_enabled or ema_series is None or c[i] > ema_series[i]
@@ -4769,6 +4827,7 @@ def backtest_sr_signal(candles, cfg):
                     and (not vwap_dev_enabled or arm_before(i) == "lower")
                     and ema_ok
                     and midline_ok(i)
+                    and mo7_ok
                     and adx_ok)
         else:
             rsi_ok = (rsi_arm_before(i) == "short_ready") if rsi_mode == "extreme_arm" else (rsi[i] < rsi_midline)
@@ -4779,6 +4838,7 @@ def backtest_sr_signal(candles, cfg):
                     and (not vwap_dev_enabled or arm_before(i) == "upper")
                     and ema_ok
                     and midline_ok(i)
+                    and mo7_ok
                     and adx_ok)
 
     def make_sl_tp(i, direction, entry_price):
