@@ -590,6 +590,7 @@ def default_config():
         "sr_vwap_sl_mult": float(os.getenv("SR_VWAP_SL_MULT", "3.0")),  # "Ende der Wolke" - aeusserer Rand fuer den SL bei sl_tp_mode="vwap_cloud"
         "sr_vwap_tp_rr": float(os.getenv("SR_VWAP_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands (1.0 = 1:1, 1.5 = 1:1,5, ...)
         "sr_st_tp_rr": float(os.getenv("SR_ST_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands bei sl_tp_mode="supertrend"
+        "sr_st_sl_buffer_usd": float(os.getenv("SR_ST_SL_BUFFER_USD", "0.0")),  # zusaetzlicher $-Puffer auf den SuperTrend-Band-SL (mehr Abstand/Sicherheitsmarge)
     }
 
 
@@ -3180,9 +3181,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="supertrend" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     SL sitzt genau auf der SuperTrend-Linie zum Zeitpunkt des Einstiegs (bei Long als Unterstützung
     unter dem Kurs, bei Short als Widerstand darüber - dort wo der Einstieg ja gerade ausgelöst
-    wurde). TP ist ein einstellbares Risk-Reward-Vielfaches des daraus resultierenden SL-Abstands
-    vom Einstieg.
+    wurde) PLUS optional einem zusätzlichen $-Puffer für mehr Abstand/Sicherheitsmarge. TP ist ein
+    einstellbares Risk-Reward-Vielfaches des daraus resultierenden SL-Abstands vom Einstieg.
   </div>
+  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="supertrend"><label>Zusätzlicher SL-Puffer ($, 0 = genau auf der Linie)</label><input type="number" step="0.5" min="0" id="sr_st_sl_buffer_usd"></div>
   <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="supertrend"><label>TP Risk-Reward (1 zu X, z.B. 1.5 = 1:1,5)</label><input type="number" step="0.1" min="0.1" id="sr_st_tp_rr"></div>
 
   <div data-mode="grid"><label>Richtung</label>
@@ -5466,6 +5468,7 @@ async function refresh() {
     document.getElementById('sr_vwap_sl_mult').value = data.config.sr_vwap_sl_mult;
     document.getElementById('sr_vwap_tp_rr').value = data.config.sr_vwap_tp_rr;
     document.getElementById('sr_st_tp_rr').value = data.config.sr_st_tp_rr;
+    document.getElementById('sr_st_sl_buffer_usd').value = data.config.sr_st_sl_buffer_usd;
     document.getElementById('sr_tp_enabled').value = String(data.config.sr_tp_enabled);
     document.getElementById('sr_tp_manual_usd').value = data.config.sr_tp_manual_usd;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
@@ -6009,6 +6012,7 @@ function buildConfigPayload() {
     sr_vwap_sl_mult: parseFloat(document.getElementById('sr_vwap_sl_mult').value),
     sr_vwap_tp_rr: parseFloat(document.getElementById('sr_vwap_tp_rr').value),
     sr_st_tp_rr: parseFloat(document.getElementById('sr_st_tp_rr').value),
+    sr_st_sl_buffer_usd: parseFloat(document.getElementById('sr_st_sl_buffer_usd').value),
     sr_tp_enabled: document.getElementById('sr_tp_enabled').value === 'true',
     sr_tp_manual_usd: parseFloat(document.getElementById('sr_tp_manual_usd').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
@@ -6315,7 +6319,7 @@ async def handle_config_update(request):
                 "sr_sl_enabled", "sr_sl_manual_usd", "sr_tp_enabled", "sr_tp_manual_usd", "sr_sl_cooldown_seconds",
                 "sr_vwap_dev_filter_enabled", "sr_vwap_dev_length", "sr_vwap_dev_mult",
                 "sr_vwap_midline_filter_enabled", "sr_vwap_midline_mult", "sr_vwap_midline_breakeven_enabled",
-                "sr_vwap_sl_mult", "sr_vwap_tp_rr", "sr_st_tp_rr",
+                "sr_vwap_sl_mult", "sr_vwap_tp_rr", "sr_st_tp_rr", "sr_st_sl_buffer_usd",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
