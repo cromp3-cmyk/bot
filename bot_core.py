@@ -570,6 +570,7 @@ def default_config():
         "sr_adx_length": int(os.getenv("SR_ADX_LENGTH", "14")),
         "sr_adx_threshold": float(os.getenv("SR_ADX_THRESHOLD", "20")),
         "sr_adx_resolution": os.getenv("SR_ADX_RESOLUTION", "same"),
+        "sr_adx_invert_enabled": os.getenv("SR_ADX_INVERT_ENABLED", "false").lower() == "true",  # normal: ADX ueber Schwelle noetig (starker Trend). Invertiert: ADX UNTER Schwelle noetig (schwacher Trend/Seitwaerts)
         "sr_zscore_filter_enabled": os.getenv("SR_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
         "sr_zscore_lookback": int(os.getenv("SR_ZSCORE_LOOKBACK", "20")),
         "sr_zscore_smooth": int(os.getenv("SR_ZSCORE_SMOOTH", "3")),
@@ -3069,6 +3070,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <input type="number" step="1" min="1" id="sr_adx_resolution_custom_minutes" placeholder="z.B. 3" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX-Schwelle (Trendstärke)</label><input type="number" step="1" min="0" id="sr_adx_threshold"></div>
+  <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX invertiert</label>
+    <select class="cfg" id="sr_adx_invert_enabled">
+      <option value="false">Aus (normal: ADX über Schwelle nötig - starker Trend)</option>
+      <option value="true">An (invertiert: ADX unter Schwelle nötig - schwacher Trend/Seitwärts)</option>
+    </select>
+  </div>
 
   <div data-mode="st_rsi_signal"><label>VWAP-Deviation-Bestätigung (nach "[Hoss] VWAP Deviation")</label>
     <select class="cfg" id="sr_vwap_dev_filter_enabled">
@@ -5410,6 +5417,7 @@ async function refresh() {
     document.getElementById('sr_adx_length').value = data.config.sr_adx_length;
     setResolutionField('sr_adx_resolution', data.config.sr_adx_resolution);
     document.getElementById('sr_adx_threshold').value = data.config.sr_adx_threshold;
+    document.getElementById('sr_adx_invert_enabled').value = String(data.config.sr_adx_invert_enabled);
     document.getElementById('sr_zscore_filter_enabled').value = String(data.config.sr_zscore_filter_enabled);
     document.getElementById('sr_zscore_lookback').value = data.config.sr_zscore_lookback;
     document.getElementById('sr_zscore_smooth').value = data.config.sr_zscore_smooth;
@@ -5951,6 +5959,7 @@ function buildConfigPayload() {
     sr_adx_length: parseInt(document.getElementById('sr_adx_length').value),
     sr_adx_resolution: getResolutionField('sr_adx_resolution'),
     sr_adx_threshold: parseFloat(document.getElementById('sr_adx_threshold').value),
+    sr_adx_invert_enabled: document.getElementById('sr_adx_invert_enabled').value === 'true',
     sr_zscore_filter_enabled: document.getElementById('sr_zscore_filter_enabled').value === 'true',
     sr_zscore_lookback: parseInt(document.getElementById('sr_zscore_lookback').value),
     sr_zscore_smooth: parseInt(document.getElementById('sr_zscore_smooth').value),
@@ -6266,7 +6275,7 @@ async def handle_config_update(request):
                 "sr_resolution", "sr_st_atr_period", "sr_st_multiplier", "sr_rsi_period", "sr_rsi_midline",
                 "sr_rsi_mode", "sr_rsi_overbought", "sr_rsi_oversold",
                 "sr_ema_filter_enabled", "sr_ema_length", "sr_ema_resolution",
-                "sr_direction_mode", "sr_adx_filter_enabled", "sr_adx_length", "sr_adx_threshold", "sr_adx_resolution",
+                "sr_direction_mode", "sr_adx_filter_enabled", "sr_adx_length", "sr_adx_threshold", "sr_adx_resolution", "sr_adx_invert_enabled",
                 "sr_zscore_filter_enabled", "sr_zscore_lookback", "sr_zscore_smooth",
                 "sr_sl_tp_mode",
                 "sr_sl_enabled", "sr_sl_manual_usd", "sr_tp_enabled", "sr_tp_manual_usd", "sr_sl_cooldown_seconds",

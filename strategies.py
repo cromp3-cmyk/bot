@@ -4365,9 +4365,11 @@ async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus
         rsi_short_ok = rsi_val < rsi_midline
     adx_enabled = cfg.get("sr_adx_filter_enabled", False)
     adx_threshold = cfg.get("sr_adx_threshold", 20)
+    adx_invert = cfg.get("sr_adx_invert_enabled", False)
     adx_missing = adx is None or plus_di is None or minus_di is None
-    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
-    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
+    adx_strength_ok = False if adx_missing else ((adx < adx_threshold) if adx_invert else (adx > adx_threshold))
+    adx_long_ok = not adx_enabled or adx_missing or (adx_strength_ok and plus_di > minus_di)
+    adx_short_ok = not adx_enabled or adx_missing or (adx_strength_ok and minus_di > plus_di)
     vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
     ema_enabled = cfg.get("sr_ema_filter_enabled", False)
     ema_long_ok = not ema_enabled or ema_val is None or price > ema_val
@@ -4662,6 +4664,7 @@ def backtest_sr_signal(candles, cfg):
 
     adx_enabled = cfg.get("sr_adx_filter_enabled", False)
     adx_threshold = cfg.get("sr_adx_threshold", 20)
+    adx_invert = cfg.get("sr_adx_invert_enabled", False)
     vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
     ema_enabled = cfg.get("sr_ema_filter_enabled", False)
     ema_length = cfg.get("sr_ema_length", 200)
@@ -4703,10 +4706,11 @@ def backtest_sr_signal(candles, cfg):
 
     def eval_ok(i, want_long):
         adx_missing = adx_series is None or plus_di_series is None or minus_di_series is None
+        adx_strength_ok = False if adx_missing else ((adx_series[i] < adx_threshold) if adx_invert else (adx_series[i] > adx_threshold))
         if want_long:
             rsi_ok = (rsi_arm_before(i) == "long_ready") if rsi_mode == "extreme_arm" else (rsi[i] > rsi_midline)
             ema_ok = not ema_enabled or ema_series is None or c[i] > ema_series[i]
-            adx_ok = not adx_enabled or adx_missing or (adx_series[i] > adx_threshold and plus_di_series[i] > minus_di_series[i])
+            adx_ok = not adx_enabled or adx_missing or (adx_strength_ok and plus_di_series[i] > minus_di_series[i])
             return (direction_mode != "short_only"
                     and rsi_ok
                     and (not vwap_dev_enabled or arm_before(i) == "lower")
@@ -4716,7 +4720,7 @@ def backtest_sr_signal(candles, cfg):
         else:
             rsi_ok = (rsi_arm_before(i) == "short_ready") if rsi_mode == "extreme_arm" else (rsi[i] < rsi_midline)
             ema_ok = not ema_enabled or ema_series is None or c[i] < ema_series[i]
-            adx_ok = not adx_enabled or adx_missing or (adx_series[i] > adx_threshold and minus_di_series[i] > plus_di_series[i])
+            adx_ok = not adx_enabled or adx_missing or (adx_strength_ok and minus_di_series[i] > plus_di_series[i])
             return (direction_mode != "long_only"
                     and rsi_ok
                     and (not vwap_dev_enabled or arm_before(i) == "upper")
