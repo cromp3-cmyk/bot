@@ -4957,7 +4957,7 @@ def backtest_sr_signal(candles, cfg):
     return trades
 
 
-def compute_hvd_arm(closes, upper, lower, rsi, overbought, oversold):
+def compute_hvd_arm(closes, highs, lows, upper, lower, rsi, overbought, oversold, touch_mode=False):
     """Scharfschaltung fuer '[Hoss] VWAP+RSI+Hull+DI' (nach Nutzer-Vorgabe gelockert): Band-
     Beruehrung und RSI-Extremwert muessen NICHT mehr auf derselben Kerze passieren - stattdessen
     werden zwei UNABHAENGIGE Zustaende gefuehrt (band_state: zuletzt oberes oder unteres Band
@@ -4969,16 +4969,26 @@ def compute_hvd_arm(closes, upper, lower, rsi, overbought, oversold):
     faellt die Scharfschaltung sofort weg. Kein fester Lookback, kein Reset nach einem
     ausgefuehrten Trade (nach Nutzer-Vorgabe: 'bleibt scharf bis es dreht') - der Bot kann also
     mehrfach hintereinander in dieselbe Richtung feuern, solange die Gegenbedingung nicht
-    eintritt."""
+    eintritt. touch_mode (nach Nutzer-Vorgabe, optional): standardmaessig (False) muss eine Kerze
+    ueber/unter dem Band SCHLIESSEN (close); mit touch_mode=True reicht schon eine reine
+    Docht-Beruehrung (high >= oberes Band bzw. low <= unteres Band), auch ohne dass die Kerze
+    darueber/darunter schliesst."""
     n = len(closes)
     arm = [0] * n
     band_state = 0  # 1 = zuletzt oberes Band beruehrt, -1 = zuletzt unteres Band beruehrt
     rsi_state = 0   # 1 = zuletzt ueberkauft, -1 = zuletzt ueberverkauft
     state = 0
     for i in range(n):
-        if closes[i] > upper[i]:
+        if touch_mode:
+            red_touched = highs[i] >= upper[i]
+            green_touched = lows[i] <= lower[i]
+        else:
+            red_touched = closes[i] > upper[i]
+            green_touched = closes[i] < lower[i]
+
+        if red_touched:
             band_state = 1
-        elif closes[i] < lower[i]:
+        elif green_touched:
             band_state = -1
 
         if rsi[i] > overbought:
@@ -5162,7 +5172,7 @@ async def hvd_poll_loop(symbol):
                     rsi = compute_rsi(obv, rsi_length)
                     vwmean, dev = compute_vw_avdev(closed_c, closed_v, vwap_length)
                     upper, lower = vwap_bands_from_dev(vwmean, dev, cfg.get("hvd_vwap_dev_mult", 2.0))
-                    arm = compute_hvd_arm(closed_c, upper, lower, rsi, cfg.get("hvd_rsi_overbought", 70), cfg.get("hvd_rsi_oversold", 30))
+                    arm = compute_hvd_arm(closed_c, closed_h, closed_l, upper, lower, rsi, cfg.get("hvd_rsi_overbought", 70), cfg.get("hvd_rsi_oversold", 30), cfg.get("hvd_touch_arm_enabled", False))
                     _adx_series, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
                     atr = compute_atr(closed_h, closed_l, closed_c, atr_period)
 
@@ -5318,7 +5328,7 @@ def backtest_hvd_signal(candles, cfg):
     rsi = compute_rsi(obv, rsi_length)
     vwmean, dev = compute_vw_avdev(c, v, vwap_length)
     upper, lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
-    arm = compute_hvd_arm(c, upper, lower, rsi, rsi_overbought, rsi_oversold)
+    arm = compute_hvd_arm(c, h, l, upper, lower, rsi, rsi_overbought, rsi_oversold, cfg.get("hvd_touch_arm_enabled", False))
     _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
     atr = compute_atr(h, l, c, atr_period)
 
@@ -5379,7 +5389,7 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
     rsi = compute_rsi(obv, rsi_length)
     vwmean, dev = compute_vw_avdev(c, v, vwap_length)
     upper, lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
-    arm = compute_hvd_arm(c, upper, lower, rsi, rsi_overbought, rsi_oversold)
+    arm = compute_hvd_arm(c, h, l, upper, lower, rsi, rsi_overbought, rsi_oversold, cfg.get("hvd_touch_arm_enabled", False))
     _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
     atr = compute_atr(h, l, c, atr_period)
 

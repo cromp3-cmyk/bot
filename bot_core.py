@@ -610,6 +610,7 @@ def default_config():
         "hvd_sl_cooldown_seconds": float(os.getenv("HVD_SL_COOLDOWN_SECONDS", "30")),
         "hvd_immediate_signal_enabled": os.getenv("HVD_IMMEDIATE_SIGNAL_ENABLED", "false").lower() == "true",  # Hull-Flip+DI reagieren live auf die laufende Kerze statt erst beim Kerzenschluss
         "hvd_flip_exit_enabled": os.getenv("HVD_FLIP_EXIT_ENABLED", "false").lower() == "true",  # optional: Hull-Farbwechsel GEGEN die Positionsrichtung beendet die Position sofort (unabhaengig von Arm/DI)
+        "hvd_touch_arm_enabled": os.getenv("HVD_TOUCH_ARM_ENABLED", "false").lower() == "true",  # optional: Docht-Beruehrung (high/low) reicht zur Band-Scharfschaltung, statt Kerzenschluss (close) ueber/unter dem Band zu verlangen
     }
 
 
@@ -3293,6 +3294,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An (Hull-Farbwechsel gegen die Position beendet sie sofort)</option>
     </select>
   </div>
+  <div data-mode="hvd_signal"><label>Band-Scharfschaltung bei Docht-Berührung (statt Kerzenschluss)</label>
+    <select class="cfg" id="hvd_touch_arm_enabled">
+      <option value="false">Aus (Kerze muss über/unter dem Band schließen)</option>
+      <option value="true">An (Docht-Berührung reicht schon)</option>
+    </select>
+  </div>
 
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
@@ -5716,6 +5723,7 @@ async function refresh() {
     document.getElementById('hvd_sl_cooldown_seconds').value = data.config.hvd_sl_cooldown_seconds;
     document.getElementById('hvd_immediate_signal_enabled').value = String(data.config.hvd_immediate_signal_enabled);
     document.getElementById('hvd_flip_exit_enabled').value = String(data.config.hvd_flip_exit_enabled);
+    document.getElementById('hvd_touch_arm_enabled').value = String(data.config.hvd_touch_arm_enabled);
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -6279,6 +6287,7 @@ function buildConfigPayload() {
     hvd_sl_cooldown_seconds: parseFloat(document.getElementById('hvd_sl_cooldown_seconds').value),
     hvd_immediate_signal_enabled: document.getElementById('hvd_immediate_signal_enabled').value === 'true',
     hvd_flip_exit_enabled: document.getElementById('hvd_flip_exit_enabled').value === 'true',
+    hvd_touch_arm_enabled: document.getElementById('hvd_touch_arm_enabled').value === 'true',
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -6589,6 +6598,7 @@ async def handle_config_update(request):
                 "hvd_rsi_length", "hvd_rsi_overbought", "hvd_rsi_oversold", "hvd_adx_length",
                 "hvd_direction_mode", "hvd_atr_period", "hvd_atr_min_mult", "hvd_risk_reward",
                 "hvd_sl_cooldown_seconds", "hvd_immediate_signal_enabled", "hvd_flip_exit_enabled",
+                "hvd_touch_arm_enabled",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
