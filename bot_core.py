@@ -608,6 +608,8 @@ def default_config():
         "hvd_atr_min_mult": float(os.getenv("HVD_ATR_MIN_MULT", "1.0")),  # Mindestabstand fuer den SL (ATR * Multiplikator), falls Hull naeher am Kurs liegt
         "hvd_risk_reward": float(os.getenv("HVD_RISK_REWARD", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands
         "hvd_sl_cooldown_seconds": float(os.getenv("HVD_SL_COOLDOWN_SECONDS", "30")),
+        "hvd_immediate_signal_enabled": os.getenv("HVD_IMMEDIATE_SIGNAL_ENABLED", "false").lower() == "true",  # Hull-Flip+DI reagieren live auf die laufende Kerze statt erst beim Kerzenschluss
+        "hvd_flip_exit_enabled": os.getenv("HVD_FLIP_EXIT_ENABLED", "false").lower() == "true",  # optional: Hull-Farbwechsel GEGEN die Positionsrichtung beendet die Position sofort (unabhaengig von Arm/DI)
     }
 
 
@@ -3279,6 +3281,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="hvd_signal"><label>ATR-Multiplikator (Mindestabstand für SL)</label><input type="number" step="0.1" min="0" id="hvd_atr_min_mult"></div>
   <div data-mode="hvd_signal"><label>Risk:Reward (1 zu X, z.B. 1.5 = 1:1,5)</label><input type="number" step="0.1" min="0.1" id="hvd_risk_reward"></div>
   <div data-mode="hvd_signal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="hvd_sl_cooldown_seconds"></div>
+  <div data-mode="hvd_signal"><label>Sofort auslösen (Hull-Flip+DI reagieren live auf die laufende Kerze)</label>
+    <select class="cfg" id="hvd_immediate_signal_enabled">
+      <option value="false">Aus (erst bei Kerzenschluss)</option>
+      <option value="true">An (sofort auf der laufenden Kerze)</option>
+    </select>
+  </div>
+  <div data-mode="hvd_signal"><label>Flip-Exit bei Hull-Farbwechsel (optional, sonst nur SL/TP)</label>
+    <select class="cfg" id="hvd_flip_exit_enabled">
+      <option value="false">Aus (nur SL/TP beendet die Position)</option>
+      <option value="true">An (Hull-Farbwechsel gegen die Position beendet sie sofort)</option>
+    </select>
+  </div>
 
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
@@ -5700,6 +5714,8 @@ async function refresh() {
     document.getElementById('hvd_atr_min_mult').value = data.config.hvd_atr_min_mult;
     document.getElementById('hvd_risk_reward').value = data.config.hvd_risk_reward;
     document.getElementById('hvd_sl_cooldown_seconds').value = data.config.hvd_sl_cooldown_seconds;
+    document.getElementById('hvd_immediate_signal_enabled').value = String(data.config.hvd_immediate_signal_enabled);
+    document.getElementById('hvd_flip_exit_enabled').value = String(data.config.hvd_flip_exit_enabled);
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -6261,6 +6277,8 @@ function buildConfigPayload() {
     hvd_atr_min_mult: parseFloat(document.getElementById('hvd_atr_min_mult').value),
     hvd_risk_reward: parseFloat(document.getElementById('hvd_risk_reward').value),
     hvd_sl_cooldown_seconds: parseFloat(document.getElementById('hvd_sl_cooldown_seconds').value),
+    hvd_immediate_signal_enabled: document.getElementById('hvd_immediate_signal_enabled').value === 'true',
+    hvd_flip_exit_enabled: document.getElementById('hvd_flip_exit_enabled').value === 'true',
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -6570,7 +6588,7 @@ async def handle_config_update(request):
                 "hvd_resolution", "hvd_hull_length", "hvd_vwap_length", "hvd_vwap_dev_mult",
                 "hvd_rsi_length", "hvd_rsi_overbought", "hvd_rsi_oversold", "hvd_adx_length",
                 "hvd_direction_mode", "hvd_atr_period", "hvd_atr_min_mult", "hvd_risk_reward",
-                "hvd_sl_cooldown_seconds",
+                "hvd_sl_cooldown_seconds", "hvd_immediate_signal_enabled", "hvd_flip_exit_enabled",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
