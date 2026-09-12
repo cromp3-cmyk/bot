@@ -15,14 +15,14 @@ from bot_core import (
     handle_config_update, handle_control, handle_close_position, handle_reset,
     handle_manual_trade, handle_backtest, handle_ht_sweep, handle_da_sweep, handle_es_sensitivity_sweep,
     handle_mo7_sum_sweep,
-    handle_utb_param_sweep, handle_pk_sensitivity_sweep, handle_rf_sweep,
+    handle_utb_param_sweep, handle_pk_sensitivity_sweep, handle_rf_sweep, handle_hvd_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
     trading_loop, fib_reversal_poll_loop, binance_1s_poll_loop,
     ht_poll_loop, oms_rsi_poll_loop, scalp_board_poll_loop, quad_stoch_poll_loop,
     da_poll_loop, es_poll_loop, cp_poll_loop, mo7_poll_loop, utb_poll_loop, wtc_poll_loop, pk_poll_loop, fr_poll_loop, cd_poll_loop, rf_poll_loop, mv_poll_loop,
-    sr_poll_loop,
+    sr_poll_loop, hvd_poll_loop,
 )
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
@@ -52,6 +52,7 @@ async def start_web_server():
     app.router.add_post("/api/utb_param_sweep", handle_utb_param_sweep)
     app.router.add_post("/api/pk_sensitivity_sweep", handle_pk_sensitivity_sweep)
     app.router.add_post("/api/rf_sweep", handle_rf_sweep)
+    app.router.add_post("/api/hvd_sweep", handle_hvd_sweep)
     app.router.add_get("/api/global_settings", handle_global_settings_get)
     app.router.add_post("/api/global_settings", handle_global_settings_update)
     app.router.add_post("/api/reset", handle_reset)
@@ -115,6 +116,7 @@ async def main():
         *[rf_poll_loop(s) for s in SYMBOLS],
         *[mv_poll_loop(s) for s in SYMBOLS],
         *[sr_poll_loop(s) for s in SYMBOLS],
+        *[hvd_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),

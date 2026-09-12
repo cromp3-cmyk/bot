@@ -964,6 +964,24 @@ def compute_hull_ma(closes, period):
     return hma
 
 
+def compute_obv(closes, volumes):
+    """On-Balance-Volume (Pine's ta.cum mit vorzeichenbehaftetem Volumen): kumulierte Summe des
+    Volumens, positiv bei steigendem, negativ bei fallendem Schlusskurs, unveraendert bei
+    Gleichstand. Basis fuer den OBV-RSI von '[Hoss] VWAP+RSI+Hull+DI' - der RSI wird NICHT auf
+    dem Preis, sondern auf dieser Volumen-Kurve berechnet (siehe compute_rsi, generisch genug
+    fuer jede Eingabeserie)."""
+    n = len(closes)
+    obv = [0.0] * n
+    for i in range(1, n):
+        if closes[i] > closes[i - 1]:
+            obv[i] = obv[i - 1] + volumes[i]
+        elif closes[i] < closes[i - 1]:
+            obv[i] = obv[i - 1] - volumes[i]
+        else:
+            obv[i] = obv[i - 1]
+    return obv
+
+
 def compute_ut_bot(opens, highs, lows, closes, atr_period, sensitivity, use_heikin_ashi=False):
     """UT Bot Alerts (weit verbreitetes Pine-Script): ATR-Trailing-Stop-Linie, BUY wenn der Kurs
     (bzw. Heikin-Ashi-Kurs) von unten nach oben ueber die Stop-Linie kreuzt, SELL umgekehrt.
@@ -4937,6 +4955,390 @@ def backtest_sr_signal(candles, cfg):
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
 
     return trades
+
+
+def compute_hvd_arm(closes, upper, lower, rsi, overbought, oversold):
+    """Scharfschaltung fuer '[Hoss] VWAP+RSI+Hull+DI' (nach Nutzer-Vorgabe, 1:1 aus seinem
+    eigenen Pine-Script portiert): schliesst eine Kerze UEBER dem oberen VWAP-Band UND der
+    OBV-RSI ist AN DERSELBEN Kerze ueber 'overbought' -> Zustand 1 (nur Short erlaubt). Schliesst
+    eine Kerze UNTER dem unteren Band UND OBV-RSI ist AN DERSELBEN Kerze unter 'oversold' ->
+    Zustand -1 (nur Long erlaubt) - hebt einen vorher gesetzten Short-Zustand SOFORT auf. Anders
+    als bei compute_vwap_dev_arm/compute_rsi_arm (dort zwei UNABHAENGIGE Zustandsmaschinen, die
+    erst in check_sr_signal per UND verknuepft werden) muessen Band-Beruehrung und RSI-Extremwert
+    hier auf DERSELBEN Kerze zusammentreffen. Kein fester Lookback, kein Reset nach einem
+    ausgefuehrten Trade (nach Nutzer-Vorgabe: 'bleibt scharf bis es dreht') - der Bot kann also
+    mehrfach hintereinander in dieselbe Richtung feuern, solange die Gegenbedingung nicht
+    eintritt."""
+    n = len(closes)
+    arm = [0] * n
+    state = 0
+    for i in range(n):
+        if closes[i] > upper[i] and rsi[i] > overbought:
+            state = 1
+        elif closes[i] < lower[i] and rsi[i] < oversold:
+            state = -1
+        arm[i] = state
+    return arm
+
+
+def _hvd_make_sl_tp(hull_val, atr_val, direction, entry_price, atr_min_mult, risk_reward):
+    """SL = aktueller Hull-Wert - AUSSER er liegt naeher am Einstieg als der ATR-basierte
+    Mindestabstand (atr_val * atr_min_mult), dann wird stattdessen dieser Mindestabstand
+    verwendet (nach Nutzer-Vorgabe: verhindert einen zu enges/wertloses SL, wenn Hull gerade sehr
+    nah am Kurs liegt). TP als einstellbares Risk-Reward-Vielfaches des daraus resultierenden
+    SL-Abstands (1.0 = 1:1, 1.5 = 1:1,5, ...). Gibt (None, None) zurueck, wenn kein Hull-Wert
+    oder kein positiver Risikoabstand vorliegt (z.B. ganz am Anfang der Serie)."""
+    if hull_val is None:
+        return None, None
+    min_distance = (atr_val or 0.0) * atr_min_mult
+    if direction == "long":
+        hull_distance = entry_price - hull_val
+        sl_price = entry_price - min_distance if hull_distance < min_distance else hull_val
+        risk = entry_price - sl_price
+        return (sl_price, entry_price + risk * risk_reward) if risk > 0 else (None, None)
+    else:
+        hull_distance = hull_val - entry_price
+        sl_price = entry_price + min_distance if hull_distance < min_distance else hull_val
+        risk = sl_price - entry_price
+        return (sl_price, entry_price - risk * risk_reward) if risk > 0 else (None, None)
+
+
+def _hvd_set_sl_tp(st, cfg, direction, entry_price, hull_val, atr_val):
+    """Live-Pendant zu _hvd_make_sl_tp - schreibt SL/TP direkt in den Bot-State."""
+    atr_min_mult = cfg.get("hvd_atr_min_mult", 1.0)
+    risk_reward = cfg.get("hvd_risk_reward", 1.5)
+    sl_price, tp_price = _hvd_make_sl_tp(hull_val, atr_val, direction, entry_price, atr_min_mult, risk_reward)
+    st["hvd_sl_price"] = sl_price
+    st["hvd_tp_price"] = tp_price
+
+
+async def check_hvd_sl_tp(symbol, price):
+    """Kein Flip-Exit (nach Nutzer-Vorgabe) - eine offene Position wird ausschliesslich von SL
+    oder TP beendet, analog zu UT-Bot+Hull/Fractals fester SL/TP, aber hier IMMER aktiv (kein
+    Ein-/Ausschalter, da SL/TP hier die einzige Exit-Moeglichkeit ueberhaupt sind)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+
+    sl_price = st.get("hvd_sl_price")
+    if sl_price is not None:
+        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+        if hit_sl:
+            debug_log(f"🚪 [{symbol}] Hoss VWAP+RSI+Hull+DI SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+            await execute_exit(symbol, price, "SL")
+            st["hvd_sl_price"] = None
+            st["hvd_tp_price"] = None
+            st["hvd_sl_cooldown_until"] = time.time() + cfg.get("hvd_sl_cooldown_seconds", 30)
+            return
+
+    tp_price = st.get("hvd_tp_price")
+    if tp_price is not None:
+        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
+        if hit_tp:
+            debug_log(f"🎯 [{symbol}] Hoss VWAP+RSI+Hull+DI TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+            await execute_exit(symbol, price, "TP")
+            st["hvd_sl_price"] = None
+            st["hvd_tp_price"] = None
+
+
+async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus_di_i, minus_di_i, hull_i, atr_i):
+    """Kernsignal (1:1 aus dem Nutzer-Pine-Script '[Hoss] VWAP+RSI+Hull+DI System' portiert):
+    Hull-Farbwechsel auf gruen + Zustand -1 (siehe compute_hvd_arm - vorher gruenes Band UND
+    OBV-RSI ueberverkauft) + DI+ > DI- -> Long. Hull-Farbwechsel auf rot + Zustand 1 (vorher
+    rotes Band UND OBV-RSI ueberkauft) + DI- > DI+ -> Short. Nur EIN Einstieg auf einmal (nach
+    Nutzer-Vorgabe kein Nachkauf/Pyramiding) - ist bereits eine Position offen, wird ein neues
+    Signal ignoriert, es kann nur ueber SL/TP beendet werden (siehe check_hvd_sl_tp, kein
+    Flip-Exit bei Gegen-Signal)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None or st["position"] is not None:
+        return
+    if time.time() < st.get("hvd_sl_cooldown_until", 0.0):
+        return
+
+    direction_mode = cfg.get("hvd_direction_mode", "both")
+    long_ok = direction_mode != "short_only" and arm_i == -1 and plus_di_i > minus_di_i
+    short_ok = direction_mode != "long_only" and arm_i == 1 and minus_di_i > plus_di_i
+
+    if long_flip_i and long_ok:
+        debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: LONG @ {price}")
+        await execute_entry(symbol, "long", price, is_add_on=False)
+        if st["position"] is not None:
+            _hvd_set_sl_tp(st, cfg, "long", price, hull_i, atr_i)
+    elif short_flip_i and short_ok:
+        debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: SHORT @ {price}")
+        await execute_entry(symbol, "short", price, is_add_on=False)
+        if st["position"] is not None:
+            _hvd_set_sl_tp(st, cfg, "short", price, hull_i, atr_i)
+
+
+async def hvd_poll_loop(symbol):
+    """'[Hoss] VWAP+RSI+Hull+DI' als eigene Strategie (Nutzer-Idee, 1:1 aus dessen eigenem
+    Pine-Script portiert - siehe compute_hvd_arm/check_hvd_signal/check_hvd_sl_tp). Braucht wie
+    MO7/Maverick Edge echtes Handelsvolumen (VWAP-Deviation + OBV), holt deshalb IMMER per
+    fetch_candles_binance_vol - anders als bei SuperTrend+RSI (zwei getrennte Fetches fuer
+    Kern-Zeitrahmen und VWAP-Zeitrahmen) reicht hier EIN Fetch auf dem Handels-Zeitrahmen fuer
+    alle Bausteine (Hull/VWAP-Baender/OBV-RSI/DI/ATR), da alles auf demselben Zeitrahmen laeuft."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "hvd_signal" and cfg["bot_active"]:
+                resolution = cfg.get("hvd_resolution", "1m")
+                hull_length = cfg.get("hvd_hull_length", 88)
+                vwap_length = cfg.get("hvd_vwap_length", 60)
+                adx_length = cfg.get("hvd_adx_length", 14)
+                atr_period = cfg.get("hvd_atr_period", 14)
+                rsi_length = cfg.get("hvd_rsi_length", 5)
+                needed_bars = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 50
+                st = b["state"]
+
+                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
+                if data:
+                    timestamps, opens, highs, lows, closes, volumes = data
+                    closed_ts, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                else:
+                    closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > max(20, hull_length // 2 + 2):
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+                    n = len(closed_c)
+
+                    hull = compute_hull_ma(closed_c, hull_length)
+                    hull_green = [None] * n
+                    for i in range(1, n):
+                        if hull[i] is None or hull[i - 1] is None:
+                            continue
+                        hull_green[i] = hull[i] > hull[i - 1]
+                    long_flip, short_flip = compute_ut_hull_flip_signals([False] * n, [False] * n, hull_green, {"utb_flip_trigger": "hull_color"})
+
+                    obv = compute_obv(closed_c, closed_v)
+                    rsi = compute_rsi(obv, rsi_length)
+                    vwmean, dev = compute_vw_avdev(closed_c, closed_v, vwap_length)
+                    upper, lower = vwap_bands_from_dev(vwmean, dev, cfg.get("hvd_vwap_dev_mult", 2.0))
+                    arm = compute_hvd_arm(closed_c, upper, lower, rsi, cfg.get("hvd_rsi_overbought", 70), cfg.get("hvd_rsi_oversold", 30))
+                    _adx_series, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
+                    atr = compute_atr(closed_h, closed_l, closed_c, atr_period)
+
+                    st["hvd_last_hull"] = hull[-1]
+                    st["hvd_last_arm"] = arm[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] Hoss VWAP+RSI+Hull+DI aktiv: Preis={closed_c[-1]}, "
+                                  f"Hull={round(hull[-1], 4) if hull[-1] is not None else None}, ArmState={arm[-1]}, "
+                                  f"Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 2:
+                            continue
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        await check_hvd_signal(symbol, price_i, long_flip[idx], short_flip[idx], arm[idx],
+                                                plus_di[idx], minus_di[idx], hull[idx], atr[idx])
+
+                    await check_hvd_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    debug_log(f"⏳ [{symbol}] Hoss VWAP+RSI+Hull+DI wartet: keine/zu wenig Kerzen erhalten (Auflösung {resolution})")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Hoss VWAP+RSI+Hull+DI-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
+                          margin, leverage, direction_mode, atr_min_mult, risk_reward, sl_cooldown_ms, warmup):
+    """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp - identische Logik, siehe dort fuer
+    Kommentare. Von backtest_hvd_signal UND run_hvd_sweep genutzt (wie _simulate_mo7_trades bei
+    MO7), damit der Sweep nicht Hull/VWAP/OBV-RSI/DI/ATR-unabhaengige Berechnungen dupliziert."""
+    n = len(c)
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            sl_price, tp_price = position["sl_price"], position["tp_price"]
+            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
+            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
+            if hit_sl:
+                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif hit_tp:
+                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+
+        in_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+
+        if position is None:
+            if in_cooldown:
+                continue
+            long_ok = direction_mode != "short_only" and arm[i] == -1 and plus_di[i] > minus_di[i]
+            short_ok = direction_mode != "long_only" and arm[i] == 1 and minus_di[i] > plus_di[i]
+            if long_flip[i] and long_ok:
+                sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "long", price, atr_min_mult, risk_reward)
+                if sl_price is not None:
+                    size = (margin * leverage) / price
+                    position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+            elif short_flip[i] and short_ok:
+                sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "short", price, atr_min_mult, risk_reward)
+                if sl_price is not None:
+                    size = (margin * leverage) / price
+                    position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_hvd_signal(candles, cfg):
+    """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp/hvd_poll_loop. 'candles' ist hier
+    (anders als die generische BACKTEST_FUNCS-Signatur) ein 6er-Tupel MIT Volumen (ts,o,h,l,c,v)
+    wie bei MO7/Maverick Edge, deshalb in run_backtest als Sonderfall behandelt statt ueber den
+    generischen 5er-Tupel-Dispatch."""
+    ts, o, h, l, c, v = candles
+    hull_length = cfg.get("hvd_hull_length", 88)
+    vwap_length = cfg.get("hvd_vwap_length", 60)
+    vwap_dev_mult = cfg.get("hvd_vwap_dev_mult", 2.0)
+    rsi_length = cfg.get("hvd_rsi_length", 5)
+    rsi_overbought = cfg.get("hvd_rsi_overbought", 70)
+    rsi_oversold = cfg.get("hvd_rsi_oversold", 30)
+    adx_length = cfg.get("hvd_adx_length", 14)
+    atr_period = cfg.get("hvd_atr_period", 14)
+    atr_min_mult = cfg.get("hvd_atr_min_mult", 1.0)
+    risk_reward = cfg.get("hvd_risk_reward", 1.5)
+    direction_mode = cfg.get("hvd_direction_mode", "both")
+    sl_cooldown_ms = cfg.get("hvd_sl_cooldown_seconds", 30) * 1000
+    n = len(c)
+
+    hull = compute_hull_ma(c, hull_length)
+    hull_green = [None] * n
+    for i in range(1, n):
+        if hull[i] is None or hull[i - 1] is None:
+            continue
+        hull_green[i] = hull[i] > hull[i - 1]
+    long_flip, short_flip = compute_ut_hull_flip_signals([False] * n, [False] * n, hull_green, {"utb_flip_trigger": "hull_color"})
+
+    obv = compute_obv(c, v)
+    rsi = compute_rsi(obv, rsi_length)
+    vwmean, dev = compute_vw_avdev(c, v, vwap_length)
+    upper, lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
+    arm = compute_hvd_arm(c, upper, lower, rsi, rsi_overbought, rsi_oversold)
+    _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
+    atr = compute_atr(h, l, c, atr_period)
+
+    warmup = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 5
+    return _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
+                                 cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, risk_reward,
+                                 sl_cooldown_ms, warmup)
+
+
+HVD_SWEEP_MAX_COMBOS = 500
+HVD_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min, rr_max, rr_step, exclude_top_n=1):
+    """'Monte-Carlo'-Parametersweep fuer '[Hoss] VWAP+RSI+Hull+DI' (Nutzer-Vorgabe): testet einen
+    Bereich von Hull-Laenge und Risk:Reward gegeneinander. VWAP-Deviation/OBV-RSI/ADX-DI/ATR
+    haengen NICHT von der Hull-Laenge ab und werden nur EINMAL berechnet und fuer alle
+    Kombinationen wiederverwendet (wie der MO7-Score bei run_mo7_sum_sweep) - nur die Hull-Linie
+    selbst und die Trade-Simulation (_simulate_hvd_trades) laufen pro Kombination neu."""
+    max_candles = BACKTEST_MAX_CANDLES.get("hvd_signal", 100_000)
+    resolution = cfg.get("hvd_resolution", "1m")
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    if not candles or len(candles[4]) < max(hull_max, cfg.get("hvd_vwap_length", 60)) + 20:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
+    ts, o, h, l, c, v = candles
+    n = len(c)
+
+    hull_lengths = sorted(set(int(round(hull_min + i * hull_step))
+                               for i in range(int((hull_max - hull_min) / max(hull_step, 1e-9)) + 1)
+                               if hull_min + i * hull_step <= hull_max + 1e-9))
+    hull_lengths = [x for x in hull_lengths if x >= 2]
+    risk_rewards = sorted(set(round(rr_min + i * rr_step, 2)
+                               for i in range(int((rr_max - rr_min) / max(rr_step, 1e-9)) + 1)
+                               if rr_min + i * rr_step <= rr_max + 1e-9))
+    risk_rewards = [x for x in risk_rewards if x > 0]
+
+    total_combos = len(hull_lengths) * len(risk_rewards)
+    if total_combos == 0:
+        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
+    if total_combos > HVD_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {HVD_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+
+    vwap_length = cfg.get("hvd_vwap_length", 60)
+    vwap_dev_mult = cfg.get("hvd_vwap_dev_mult", 2.0)
+    rsi_length = cfg.get("hvd_rsi_length", 5)
+    rsi_overbought = cfg.get("hvd_rsi_overbought", 70)
+    rsi_oversold = cfg.get("hvd_rsi_oversold", 30)
+    adx_length = cfg.get("hvd_adx_length", 14)
+    atr_period = cfg.get("hvd_atr_period", 14)
+    atr_min_mult = cfg.get("hvd_atr_min_mult", 1.0)
+    direction_mode = cfg.get("hvd_direction_mode", "both")
+    sl_cooldown_ms = cfg.get("hvd_sl_cooldown_seconds", 30) * 1000
+
+    obv = compute_obv(c, v)
+    rsi = compute_rsi(obv, rsi_length)
+    vwmean, dev = compute_vw_avdev(c, v, vwap_length)
+    upper, lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
+    arm = compute_hvd_arm(c, upper, lower, rsi, rsi_overbought, rsi_oversold)
+    _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
+    atr = compute_atr(h, l, c, atr_period)
+
+    results = []
+    for hull_length in hull_lengths:
+        hull = compute_hull_ma(c, hull_length)
+        hull_green = [None] * n
+        for i in range(1, n):
+            if hull[i] is None or hull[i - 1] is None:
+                continue
+            hull_green[i] = hull[i] > hull[i - 1]
+        long_flip, short_flip = compute_ut_hull_flip_signals([False] * n, [False] * n, hull_green, {"utb_flip_trigger": "hull_color"})
+        warmup = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 5
+
+        for rr in risk_rewards:
+            trades = _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
+                                           cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, rr,
+                                           sl_cooldown_ms, warmup)
+            stats = summarize_backtest_trades(trades, exclude_top_n)
+            results.append({"hvd_hull_length": hull_length, "hvd_risk_reward": rr, **stats})
+
+    best_sorted = sorted(results, key=lambda r: (r["trades"] >= HVD_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(c),
+        "min_reliable_trades": HVD_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": total_combos,
+        "results": best_sorted[:30],
+        "worst_results": worst_sorted[:20],
+    }
 
 
 def compute_candle_dna(opens, highs, lows, closes, rejection_mult):
@@ -9702,6 +10104,7 @@ BACKTEST_MAX_CANDLES = {
     "range_filter": 100_000,
     "maverick_edge": 100_000,
     "st_rsi_signal": 100_000,
+    "hvd_signal": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -9769,8 +10172,31 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "trades": trades[-50:],
         }
 
+    if entry_mode == "hvd_signal":
+        max_candles = BACKTEST_MAX_CANDLES.get("hvd_signal", 100_000)
+        resolution = cfg.get("hvd_resolution", "1m")
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        min_needed = max(cfg.get("hvd_hull_length", 88), cfg.get("hvd_vwap_length", 60), cfg.get("hvd_adx_length", 14), cfg.get("hvd_atr_period", 14)) + 20
+        if not candles or len(candles[4]) < min_needed:
+            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+        n_candles = len(candles[4])
+        trades = backtest_hvd_signal(candles, cfg)
+        stats = summarize_backtest_trades(trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
+
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge, st_rsi_signal - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge, st_rsi_signal, hvd_signal - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 

@@ -595,6 +595,19 @@ def default_config():
         "sr_vwap_tp_rr": float(os.getenv("SR_VWAP_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands (1.0 = 1:1, 1.5 = 1:1,5, ...)
         "sr_st_tp_rr": float(os.getenv("SR_ST_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands bei sl_tp_mode="supertrend"
         "sr_st_sl_buffer_usd": float(os.getenv("SR_ST_SL_BUFFER_USD", "0.0")),  # zusaetzlicher $-Puffer auf den SuperTrend-Band-SL (mehr Abstand/Sicherheitsmarge)
+        "hvd_resolution": os.getenv("HVD_RESOLUTION", "1m"),
+        "hvd_hull_length": int(os.getenv("HVD_HULL_LENGTH", "88")),
+        "hvd_vwap_length": int(os.getenv("HVD_VWAP_LENGTH", "60")),
+        "hvd_vwap_dev_mult": float(os.getenv("HVD_VWAP_DEV_MULT", "2.0")),
+        "hvd_rsi_length": int(os.getenv("HVD_RSI_LENGTH", "5")),
+        "hvd_rsi_overbought": float(os.getenv("HVD_RSI_OVERBOUGHT", "70")),
+        "hvd_rsi_oversold": float(os.getenv("HVD_RSI_OVERSOLD", "30")),
+        "hvd_adx_length": int(os.getenv("HVD_ADX_LENGTH", "14")),
+        "hvd_direction_mode": os.getenv("HVD_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
+        "hvd_atr_period": int(os.getenv("HVD_ATR_PERIOD", "14")),
+        "hvd_atr_min_mult": float(os.getenv("HVD_ATR_MIN_MULT", "1.0")),  # Mindestabstand fuer den SL (ATR * Multiplikator), falls Hull naeher am Kurs liegt
+        "hvd_risk_reward": float(os.getenv("HVD_RISK_REWARD", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands
+        "hvd_sl_cooldown_seconds": float(os.getenv("HVD_SL_COOLDOWN_SECONDS", "30")),
     }
 
 
@@ -1483,6 +1496,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="range_filter">Range Filter (DonovanWall, nachziehende Glättungslinie, immer im Markt, optionaler fester SL/TP)</option>
       <option value="maverick_edge">Maverick Edge (Trend-EMA + Guide-Linie + Kerzenstärke, reiner Signal-Einstieg, SL fest oder Guide-Linie als Trail-Stop, fester TP)</option>
       <option value="st_rsi_signal">SuperTrend+RSI (SuperTrend 10/2-Flip + RSI 9-Bestätigung, immer Flip bei Gegensignal, optional ADX/Volumen/MTF%/Z-Score-Filter, fester SL+TP)</option>
+      <option value="hvd_signal">[Hoss] VWAP+RSI+Hull+DI (Hull-Farbwechsel + DI-Bestätigung, scharf durch VWAP-Band+OBV-RSI-Extrem am selben Balken, SL=Hull mit ATR-Mindestabstand, TP=Risk-Reward, kein Flip-Exit)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -3221,6 +3235,51 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="supertrend"><label>Zusätzlicher SL-Puffer ($, 0 = genau auf der Linie)</label><input type="number" step="0.5" min="0" id="sr_st_sl_buffer_usd"></div>
   <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="supertrend"><label>TP Risk-Reward (1 zu X, z.B. 1.5 = 1:1,5)</label><input type="number" step="0.1" min="0.1" id="sr_st_tp_rr"></div>
 
+  <div data-mode="hvd_signal"><label>Zeiteinheit</label>
+    <select class="cfg" id="hvd_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="hvd_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="hvd_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Portiert aus dem eigenen Pine-Script "[Hoss] VWAP+RSI+Hull+DI System": scharf geschaltet wird,
+    sobald eine Kerze über dem oberen VWAP-Band UND der OBV-RSI über der Überkauft-Schwelle
+    AM SELBEN Balken geschlossen hat (nur Short erlaubt) - bzw. unter dem unteren Band UND
+    OBV-RSI unter der Überverkauft-Schwelle (nur Long erlaubt). Das bleibt so bestehen, bis die
+    jeweils andere Bedingung eintritt (kein Reset nach einem Trade). Ausgelöst wird beim nächsten
+    Hull-Farbwechsel UND passender DI+/DI--Bestätigung. Kein Flip-Exit und kein Nachkauf - eine
+    offene Position wird ausschließlich von SL/TP beendet.
+  </div>
+  <div data-mode="hvd_signal"><label>Hull-Länge</label><input type="number" step="1" min="2" id="hvd_hull_length"></div>
+  <div data-mode="hvd_signal"><label>VWAP-Deviation Länge</label><input type="number" step="1" min="2" id="hvd_vwap_length"></div>
+  <div data-mode="hvd_signal"><label>VWAP-Band-Multiplikator (2 = "dev 2"-Linie)</label><input type="number" step="0.1" min="0.1" id="hvd_vwap_dev_mult"></div>
+  <div data-mode="hvd_signal"><label>OBV-RSI-Länge</label><input type="number" step="1" min="1" id="hvd_rsi_length"></div>
+  <div data-mode="hvd_signal"><label>Überkauft-Schwelle (Short-Scharfschaltung)</label><input type="number" step="1" id="hvd_rsi_overbought"></div>
+  <div data-mode="hvd_signal"><label>Überverkauft-Schwelle (Long-Scharfschaltung)</label><input type="number" step="1" id="hvd_rsi_oversold"></div>
+  <div data-mode="hvd_signal"><label>DI-Länge (ADX/DI-Bestätigung)</label><input type="number" step="1" min="1" id="hvd_adx_length"></div>
+  <div data-mode="hvd_signal"><label>Richtung</label>
+    <select class="cfg" id="hvd_direction_mode">
+      <option value="both">Beide</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="hvd_signal"><label>ATR-Periode (Mindestabstand für SL)</label><input type="number" step="1" min="1" id="hvd_atr_period"></div>
+  <div data-mode="hvd_signal"><label>ATR-Multiplikator (Mindestabstand für SL)</label><input type="number" step="0.1" min="0" id="hvd_atr_min_mult"></div>
+  <div data-mode="hvd_signal"><label>Risk:Reward (1 zu X, z.B. 1.5 = 1:1,5)</label><input type="number" step="0.1" min="0.1" id="hvd_risk_reward"></div>
+  <div data-mode="hvd_signal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="hvd_sl_cooldown_seconds"></div>
+
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
       <option value="both">Beide (Long unter Anker, Short über Anker)</option>
@@ -3748,6 +3807,61 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="utb_sensitivity">Sensitivity ⇅</th>
       <th class="sortable" data-key="utb_mtf_long_threshold">Long-Schwelle ⇅</th>
       <th class="sortable" data-key="utb_mtf_short_threshold">Short-Schwelle ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<div data-mode-section="hvd_signal" style="display:none;">
+<h2 class="section-title">🎲 [Hoss] VWAP+RSI+Hull+DI Parameter-Sweep (Hull-Länge × Risk:Reward)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet alle Kombinationen aus Hull-Länge und Risk:Reward gegeneinander. VWAP-Deviation,
+    OBV-RSI, ADX/DI und ATR hängen nicht von der Hull-Länge ab und werden nur EINMAL berechnet
+    und für alle Kombinationen wiederverwendet - nur die Hull-Linie selbst und die
+    Trade-Simulation laufen pro Kombination neu.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="hvd-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="hvd-sweep-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Hull-Länge von</label><input type="number" step="1" id="hvd-sweep-hull-min" value="50" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="1" id="hvd-sweep-hull-max" value="150" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" id="hvd-sweep-hull-step" value="5" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Risk:Reward von</label><input type="number" step="0.1" id="hvd-sweep-rr-min" value="1.0" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" id="hvd-sweep-rr-max" value="5.0" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.1" id="hvd-sweep-rr-step" value="0.5" style="width:90px;"></div>
+    <button id="btn-hvd-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="hvd-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <table id="hvd-sweep-results-table" style="display:none; margin-top:12px;">
+    <thead><tr>
+      <th class="sortable" data-key="hvd_hull_length">Hull-Länge ⇅</th>
+      <th class="sortable" data-key="hvd_risk_reward">Risk:Reward ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="hvd-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="hvd-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="hvd_hull_length">Hull-Länge ⇅</th>
+      <th class="sortable" data-key="hvd_risk_reward">Risk:Reward ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -4768,6 +4882,70 @@ const utbSweepRowHtml = (r) => `
 const renderUtbSweepResults = makeSortableTable('utb-sweep-results-table', () => window.utbSweepResultsData, utbSweepRowHtml);
 const renderUtbSweepWorst = makeSortableTable('utb-sweep-worst-table', () => window.utbSweepWorstData, utbSweepRowHtml);
 
+document.getElementById('btn-hvd-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-hvd-sweep');
+  const statusEl = document.getElementById('hvd-sweep-status');
+  const tableEl = document.getElementById('hvd-sweep-results-table');
+  const worstTableEl = document.getElementById('hvd-sweep-worst-table');
+  const worstTitleEl = document.getElementById('hvd-sweep-worst-title');
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('hvd-sweep-days').value) || 30,
+    hull_min: parseInt(document.getElementById('hvd-sweep-hull-min').value),
+    hull_max: parseInt(document.getElementById('hvd-sweep-hull-max').value),
+    hull_step: parseInt(document.getElementById('hvd-sweep-hull-step').value),
+    rr_min: parseFloat(document.getElementById('hvd-sweep-rr-min').value),
+    rr_max: parseFloat(document.getElementById('hvd-sweep-rr-max').value),
+    rr_step: parseFloat(document.getElementById('hvd-sweep-rr-step').value),
+    exclude_top_n: parseInt(document.getElementById('hvd-sweep-exclude-top-n').value) || 0,
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  tableEl.style.display = 'none';
+  worstTableEl.style.display = 'none';
+  worstTitleEl.style.display = 'none';
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Werten etwas dauern.`;
+  try {
+    const res = await fetch(`/api/hvd_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
+      window.hvdSweepResultsData = data.results || [];
+      window.hvdSweepWorstData = data.worst_results || [];
+      renderHvdSweepResults();
+      renderHvdSweepWorst();
+      tableEl.style.display = '';
+      worstTableEl.style.display = '';
+      worstTitleEl.style.display = '';
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.hvdSweepResultsData = [];
+window.hvdSweepWorstData = [];
+const hvdSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.hvd_hull_length}</td>
+    <td>${r.hvd_risk_reward}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderHvdSweepResults = makeSortableTable('hvd-sweep-results-table', () => window.hvdSweepResultsData, hvdSweepRowHtml);
+const renderHvdSweepWorst = makeSortableTable('hvd-sweep-worst-table', () => window.hvdSweepWorstData, hvdSweepRowHtml);
+
 
 
 
@@ -5509,6 +5687,19 @@ async function refresh() {
     document.getElementById('sr_st_sl_buffer_usd').value = data.config.sr_st_sl_buffer_usd;
     document.getElementById('sr_tp_enabled').value = String(data.config.sr_tp_enabled);
     document.getElementById('sr_tp_manual_usd').value = data.config.sr_tp_manual_usd;
+    setResolutionField('hvd_resolution', data.config.hvd_resolution);
+    document.getElementById('hvd_hull_length').value = data.config.hvd_hull_length;
+    document.getElementById('hvd_vwap_length').value = data.config.hvd_vwap_length;
+    document.getElementById('hvd_vwap_dev_mult').value = data.config.hvd_vwap_dev_mult;
+    document.getElementById('hvd_rsi_length').value = data.config.hvd_rsi_length;
+    document.getElementById('hvd_rsi_overbought').value = data.config.hvd_rsi_overbought;
+    document.getElementById('hvd_rsi_oversold').value = data.config.hvd_rsi_oversold;
+    document.getElementById('hvd_adx_length').value = data.config.hvd_adx_length;
+    document.getElementById('hvd_direction_mode').value = data.config.hvd_direction_mode;
+    document.getElementById('hvd_atr_period').value = data.config.hvd_atr_period;
+    document.getElementById('hvd_atr_min_mult').value = data.config.hvd_atr_min_mult;
+    document.getElementById('hvd_risk_reward').value = data.config.hvd_risk_reward;
+    document.getElementById('hvd_sl_cooldown_seconds').value = data.config.hvd_sl_cooldown_seconds;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -6057,6 +6248,19 @@ function buildConfigPayload() {
     sr_st_sl_buffer_usd: parseFloat(document.getElementById('sr_st_sl_buffer_usd').value),
     sr_tp_enabled: document.getElementById('sr_tp_enabled').value === 'true',
     sr_tp_manual_usd: parseFloat(document.getElementById('sr_tp_manual_usd').value),
+    hvd_resolution: getResolutionField('hvd_resolution'),
+    hvd_hull_length: parseInt(document.getElementById('hvd_hull_length').value),
+    hvd_vwap_length: parseInt(document.getElementById('hvd_vwap_length').value),
+    hvd_vwap_dev_mult: parseFloat(document.getElementById('hvd_vwap_dev_mult').value),
+    hvd_rsi_length: parseInt(document.getElementById('hvd_rsi_length').value),
+    hvd_rsi_overbought: parseFloat(document.getElementById('hvd_rsi_overbought').value),
+    hvd_rsi_oversold: parseFloat(document.getElementById('hvd_rsi_oversold').value),
+    hvd_adx_length: parseInt(document.getElementById('hvd_adx_length').value),
+    hvd_direction_mode: document.getElementById('hvd_direction_mode').value,
+    hvd_atr_period: parseInt(document.getElementById('hvd_atr_period').value),
+    hvd_atr_min_mult: parseFloat(document.getElementById('hvd_atr_min_mult').value),
+    hvd_risk_reward: parseFloat(document.getElementById('hvd_risk_reward').value),
+    hvd_sl_cooldown_seconds: parseFloat(document.getElementById('hvd_sl_cooldown_seconds').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -6363,6 +6567,10 @@ async def handle_config_update(request):
                 "sr_vwap_dev_filter_enabled", "sr_vwap_dev_length", "sr_vwap_dev_mult",
                 "sr_vwap_midline_filter_enabled", "sr_vwap_midline_mult", "sr_vwap_midline_breakeven_enabled",
                 "sr_vwap_sl_mult", "sr_vwap_tp_rr", "sr_st_tp_rr", "sr_st_sl_buffer_usd",
+                "hvd_resolution", "hvd_hull_length", "hvd_vwap_length", "hvd_vwap_dev_mult",
+                "hvd_rsi_length", "hvd_rsi_overbought", "hvd_rsi_oversold", "hvd_adx_length",
+                "hvd_direction_mode", "hvd_atr_period", "hvd_atr_min_mult", "hvd_risk_reward",
+                "hvd_sl_cooldown_seconds",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
@@ -6626,6 +6834,40 @@ async def handle_utb_param_sweep(request):
                                         sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n,
                                         long_threshold_min, long_threshold_max, long_threshold_step,
                                         short_threshold_min, short_threshold_max, short_threshold_step)
+    return web.json_response(result)
+
+
+async def handle_hvd_sweep(request):
+    """'Monte-Carlo'-Parametersweep fuer [Hoss] VWAP+RSI+Hull+DI: testet einen Bereich von
+    Hull-Laenge und Risk:Reward gegeneinander (VWAP-Deviation/OBV-RSI/ADX-DI/ATR werden nur
+    einmal berechnet und fuer alle Kombinationen wiederverwendet, siehe run_hvd_sweep)."""
+    from strategies import run_hvd_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        hull_min = max(2, int(body.get("hull_min", 50)))
+        hull_max = max(hull_min, int(body.get("hull_max", 150)))
+        hull_step = max(1, int(body.get("hull_step", 5)))
+        rr_min = max(0.01, float(body.get("rr_min", 1.0)))
+        rr_max = max(rr_min, float(body.get("rr_max", 5.0)))
+        rr_step = max(0.01, float(body.get("rr_step", 0.5)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step,
+                                  rr_min, rr_max, rr_step, exclude_top_n)
     return web.json_response(result)
 
 
