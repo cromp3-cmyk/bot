@@ -5004,6 +5004,26 @@ def compute_hvd_arm(closes, highs, lows, upper, lower, rsi, overbought, oversold
     return arm
 
 
+def _hvd_arm_flip_series(arm):
+    """Erkennt PRO KERZE, ob der Arm-Zustand genau JETZT auf 1 (Short-Konfirmation) bzw. -1
+    (Long-Konfirmation) NEU gewechselt ist (nach Nutzer-Vorgabe: 'eine neue Konfirmation
+    aktiviert' - der Uebergangsmoment, nicht der Dauerzustand). Basis fuer den optionalen
+    Arm-Flip-Exit (siehe check_hvd_signal/_simulate_hvd_trades): ist z.B. eine Short-Position
+    offen und just jetzt kippt der Arm auf Long-Konfirmation, wird die Short-Position sofort
+    beendet - unabhaengig vom Hull-Farbwechsel."""
+    n = len(arm)
+    flip_to_short = [False] * n
+    flip_to_long = [False] * n
+    prev = 0
+    for i in range(n):
+        if arm[i] == 1 and prev != 1:
+            flip_to_short[i] = True
+        elif arm[i] == -1 and prev != -1:
+            flip_to_long[i] = True
+        prev = arm[i]
+    return flip_to_short, flip_to_long
+
+
 def _hvd_make_sl_tp(hull_val, atr_val, direction, entry_price, atr_min_mult, risk_reward):
     """SL = aktueller Hull-Wert - AUSSER er liegt naeher am Einstieg als der ATR-basierte
     Mindestabstand (atr_val * atr_min_mult), dann wird stattdessen dieser Mindestabstand
@@ -5066,17 +5086,23 @@ async def check_hvd_sl_tp(symbol, price):
             st["hvd_tp_price"] = None
 
 
-async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus_di_i, minus_di_i, hull_i, atr_i):
+async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus_di_i, minus_di_i, hull_i, atr_i,
+                            arm_flip_to_short_i=False, arm_flip_to_long_i=False):
     """Kernsignal (1:1 aus dem Nutzer-Pine-Script '[Hoss] VWAP+RSI+Hull+DI System' portiert):
     Hull-Farbwechsel auf gruen + Zustand -1 (siehe compute_hvd_arm - vorher gruenes Band UND
     OBV-RSI ueberverkauft) + DI+ > DI- -> Long. Hull-Farbwechsel auf rot + Zustand 1 (vorher
     rotes Band UND OBV-RSI ueberkauft) + DI- > DI+ -> Short. Nur EIN Einstieg auf einmal (nach
     Nutzer-Vorgabe kein Nachkauf/Pyramiding) - ist bereits eine Position offen, wird ein neues
-    Signal ignoriert. hvd_flip_exit_enabled (nach Nutzer-Vorgabe, optional, Standard aus): wechselt
-    die Hull-Linie waehrend einer offenen Position die Farbe GEGEN die Positionsrichtung (Long +
-    Hull wird rot / Short + Hull wird gruen), wird sofort glatt gestellt - UNABHAENGIG von
-    Arm-Zustand/DI, reiner Hull-Farbwechsel reicht. Ohne diese Option (Standard) beendet
-    ausschliesslich SL/TP eine offene Position (siehe check_hvd_sl_tp)."""
+    Signal ignoriert. Zwei unabhaengige, optionale Exit-Schalter (Standard beide aus - ohne sie
+    beendet ausschliesslich SL/TP eine offene Position, siehe check_hvd_sl_tp):
+    - hvd_flip_exit_enabled: wechselt die Hull-Linie waehrend einer offenen Position die Farbe
+      GEGEN die Positionsrichtung, wird sofort glatt gestellt - unabhaengig von Arm-Zustand/DI.
+    - hvd_arm_flip_exit_enabled (nach Nutzer-Vorgabe): aktiviert sich waehrend einer offenen
+      Position eine NEUE Gegen-Konfirmation (der Arm-Zustand wechselt frisch auf die andere
+      Richtung, siehe _hvd_arm_flip_series), wird sofort glatt gestellt - unabhaengig vom
+      Hull-Farbwechsel. Ist z.B. eine Short-Position offen und der Arm kippt gerade neu auf
+      Long-Konfirmation (gruenes Band + OBV-RSI ueberverkauft im selben Zyklus), wird die Short-
+      Position sofort beendet - und symmetrisch andersrum bei einer offenen Long-Position."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -5084,9 +5110,14 @@ async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus
 
     pos = st["position"]
     if pos is not None:
+        exit_reason = None
         if cfg.get("hvd_flip_exit_enabled", False) and ((pos == "long" and short_flip_i) or (pos == "short" and long_flip_i)):
-            debug_log(f"🔄 [{symbol}] Hoss VWAP+RSI+Hull+DI Hull-Flip-Exit: {pos.upper()} @ {price}")
-            await execute_exit(symbol, price, "HULL-FLIP-EXIT")
+            exit_reason = "HULL-FLIP-EXIT"
+        elif cfg.get("hvd_arm_flip_exit_enabled", False) and ((pos == "long" and arm_flip_to_short_i) or (pos == "short" and arm_flip_to_long_i)):
+            exit_reason = "ARM-FLIP-EXIT"
+        if exit_reason is not None:
+            debug_log(f"🔄 [{symbol}] Hoss VWAP+RSI+Hull+DI {exit_reason}: {pos.upper()} @ {price}")
+            await execute_exit(symbol, price, exit_reason)
             st["hvd_sl_price"] = None
             st["hvd_tp_price"] = None
         return
@@ -5173,6 +5204,7 @@ async def hvd_poll_loop(symbol):
                     vwmean, dev = compute_vw_avdev(closed_c, closed_v, vwap_length)
                     upper, lower = vwap_bands_from_dev(vwmean, dev, cfg.get("hvd_vwap_dev_mult", 2.0))
                     arm = compute_hvd_arm(closed_c, closed_h, closed_l, upper, lower, rsi, cfg.get("hvd_rsi_overbought", 70), cfg.get("hvd_rsi_oversold", 30), cfg.get("hvd_touch_arm_enabled", False))
+                    arm_flip_to_short, arm_flip_to_long = _hvd_arm_flip_series(arm)
                     _adx_series, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
                     atr = compute_atr(closed_h, closed_l, closed_c, atr_period)
 
@@ -5200,7 +5232,8 @@ async def hvd_poll_loop(symbol):
                         price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
                         await check_hvd_signal(symbol, price_i, long_flip[idx], short_flip[idx], arm[idx],
-                                                plus_di[idx], minus_di[idx], hull[idx], atr[idx])
+                                                plus_di[idx], minus_di[idx], hull[idx], atr[idx],
+                                                arm_flip_to_short[idx], arm_flip_to_long[idx])
 
                     await check_hvd_sl_tp(symbol, price)
 
@@ -5241,13 +5274,16 @@ async def hvd_poll_loop(symbol):
 
 def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
                           margin, leverage, direction_mode, atr_min_mult, risk_reward, sl_cooldown_ms, warmup,
-                          flip_exit_enabled=False):
+                          flip_exit_enabled=False, arm_flip_exit_enabled=False, arm_flip_to_short=None, arm_flip_to_long=None):
     """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp - identische Logik, siehe dort fuer
     Kommentare. Von backtest_hvd_signal UND run_hvd_sweep genutzt (wie _simulate_mo7_trades bei
     MO7), damit der Sweep nicht Hull/VWAP/OBV-RSI/DI/ATR-unabhaengige Berechnungen dupliziert.
     flip_exit_enabled (nach Nutzer-Vorgabe, optional): wechselt die Hull-Linie waehrend einer
     offenen Position die Farbe GEGEN die Positionsrichtung, wird sofort glatt gestellt -
-    unabhaengig von Arm-Zustand/DI, siehe check_hvd_signal."""
+    unabhaengig von Arm-Zustand/DI. arm_flip_exit_enabled (nach Nutzer-Vorgabe, optional):
+    aktiviert sich waehrend einer offenen Position eine NEUE Gegen-Konfirmation (arm_flip_to_short/
+    arm_flip_to_long, siehe _hvd_arm_flip_series), wird sofort glatt gestellt - unabhaengig vom
+    Hull-Farbwechsel. Beide Exits siehe check_hvd_signal fuer identische Live-Logik."""
     n = len(c)
     position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
     trades = []
@@ -5260,6 +5296,10 @@ def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di,
             sl_price, tp_price = position["sl_price"], position["tp_price"]
             hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
             hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
+            hit_arm_flip = arm_flip_exit_enabled and (
+                (position["dir"] == "long" and arm_flip_to_short is not None and arm_flip_to_short[i]) or
+                (position["dir"] == "short" and arm_flip_to_long is not None and arm_flip_to_long[i])
+            )
             if hit_sl:
                 _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
                 position = None
@@ -5269,6 +5309,9 @@ def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di,
                 position = None
             elif flip_exit_enabled and ((position["dir"] == "long" and short_flip[i]) or (position["dir"] == "short" and long_flip[i])):
                 _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "HULL-FLIP-EXIT", ts=ts)
+                position = None
+            elif hit_arm_flip:
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ARM-FLIP-EXIT", ts=ts)
                 position = None
 
         in_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
@@ -5314,6 +5357,7 @@ def backtest_hvd_signal(candles, cfg):
     direction_mode = cfg.get("hvd_direction_mode", "both")
     sl_cooldown_ms = cfg.get("hvd_sl_cooldown_seconds", 30) * 1000
     flip_exit_enabled = cfg.get("hvd_flip_exit_enabled", False)
+    arm_flip_exit_enabled = cfg.get("hvd_arm_flip_exit_enabled", False)
     n = len(c)
 
     hull = compute_hull_ma(c, hull_length)
@@ -5329,13 +5373,15 @@ def backtest_hvd_signal(candles, cfg):
     vwmean, dev = compute_vw_avdev(c, v, vwap_length)
     upper, lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
     arm = compute_hvd_arm(c, h, l, upper, lower, rsi, rsi_overbought, rsi_oversold, cfg.get("hvd_touch_arm_enabled", False))
+    arm_flip_to_short, arm_flip_to_long = _hvd_arm_flip_series(arm)
     _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
     atr = compute_atr(h, l, c, atr_period)
 
     warmup = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 5
     return _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
                                  cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, risk_reward,
-                                 sl_cooldown_ms, warmup, flip_exit_enabled)
+                                 sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
+                                 arm_flip_to_short, arm_flip_to_long)
 
 
 HVD_SWEEP_MAX_COMBOS = 500
@@ -5384,12 +5430,14 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
     direction_mode = cfg.get("hvd_direction_mode", "both")
     sl_cooldown_ms = cfg.get("hvd_sl_cooldown_seconds", 30) * 1000
     flip_exit_enabled = cfg.get("hvd_flip_exit_enabled", False)
+    arm_flip_exit_enabled = cfg.get("hvd_arm_flip_exit_enabled", False)
 
     obv = compute_obv(c, v)
     rsi = compute_rsi(obv, rsi_length)
     vwmean, dev = compute_vw_avdev(c, v, vwap_length)
     upper, lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
     arm = compute_hvd_arm(c, h, l, upper, lower, rsi, rsi_overbought, rsi_oversold, cfg.get("hvd_touch_arm_enabled", False))
+    arm_flip_to_short, arm_flip_to_long = _hvd_arm_flip_series(arm)
     _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
     atr = compute_atr(h, l, c, atr_period)
 
@@ -5407,7 +5455,8 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
         for rr in risk_rewards:
             trades = _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
                                            cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, rr,
-                                           sl_cooldown_ms, warmup, flip_exit_enabled)
+                                           sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
+                                           arm_flip_to_short, arm_flip_to_long)
             stats = summarize_backtest_trades(trades, exclude_top_n)
             results.append({"hvd_hull_length": hull_length, "hvd_risk_reward": rr, **stats})
 
