@@ -4958,24 +4958,37 @@ def backtest_sr_signal(candles, cfg):
 
 
 def compute_hvd_arm(closes, upper, lower, rsi, overbought, oversold):
-    """Scharfschaltung fuer '[Hoss] VWAP+RSI+Hull+DI' (nach Nutzer-Vorgabe, 1:1 aus seinem
-    eigenen Pine-Script portiert): schliesst eine Kerze UEBER dem oberen VWAP-Band UND der
-    OBV-RSI ist AN DERSELBEN Kerze ueber 'overbought' -> Zustand 1 (nur Short erlaubt). Schliesst
-    eine Kerze UNTER dem unteren Band UND OBV-RSI ist AN DERSELBEN Kerze unter 'oversold' ->
-    Zustand -1 (nur Long erlaubt) - hebt einen vorher gesetzten Short-Zustand SOFORT auf. Anders
-    als bei compute_vwap_dev_arm/compute_rsi_arm (dort zwei UNABHAENGIGE Zustandsmaschinen, die
-    erst in check_sr_signal per UND verknuepft werden) muessen Band-Beruehrung und RSI-Extremwert
-    hier auf DERSELBEN Kerze zusammentreffen. Kein fester Lookback, kein Reset nach einem
+    """Scharfschaltung fuer '[Hoss] VWAP+RSI+Hull+DI' (nach Nutzer-Vorgabe gelockert): Band-
+    Beruehrung und RSI-Extremwert muessen NICHT mehr auf derselben Kerze passieren - stattdessen
+    werden zwei UNABHAENGIGE Zustaende gefuehrt (band_state: zuletzt oberes oder unteres Band
+    beruehrt; rsi_state: zuletzt ueberkauft oder ueberverkauft), die jeweils bestehen bleiben, bis
+    die Gegenseite eintritt. Der Arm-Zustand ist scharf, SOLANGE beide Zustaende gleichzeitig auf
+    derselben Seite stehen ('im selben Zyklus da sein', nach Nutzer-Vorgabe) - z.B. Band beruehrt
+    ueber dem oberen VWAP-Band, danach (auch mehrere Kerzen spaeter) wird OBV-RSI > 'overbought' ->
+    Zustand 1 (nur Short erlaubt). Sobald EINER der beiden Zustaende auf die Gegenseite wechselt,
+    faellt die Scharfschaltung sofort weg. Kein fester Lookback, kein Reset nach einem
     ausgefuehrten Trade (nach Nutzer-Vorgabe: 'bleibt scharf bis es dreht') - der Bot kann also
     mehrfach hintereinander in dieselbe Richtung feuern, solange die Gegenbedingung nicht
     eintritt."""
     n = len(closes)
     arm = [0] * n
+    band_state = 0  # 1 = zuletzt oberes Band beruehrt, -1 = zuletzt unteres Band beruehrt
+    rsi_state = 0   # 1 = zuletzt ueberkauft, -1 = zuletzt ueberverkauft
     state = 0
     for i in range(n):
-        if closes[i] > upper[i] and rsi[i] > overbought:
+        if closes[i] > upper[i]:
+            band_state = 1
+        elif closes[i] < lower[i]:
+            band_state = -1
+
+        if rsi[i] > overbought:
+            rsi_state = 1
+        elif rsi[i] < oversold:
+            rsi_state = -1
+
+        if band_state == 1 and rsi_state == 1:
             state = 1
-        elif closes[i] < lower[i] and rsi[i] < oversold:
+        elif band_state == -1 and rsi_state == -1:
             state = -1
         arm[i] = state
     return arm
