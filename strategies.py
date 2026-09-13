@@ -3179,16 +3179,21 @@ async def check_wtc_signal(symbol, buy_i, sell_i, price):
         return
     direction_mode = cfg.get("wtc_direction_mode", "both")
     always_in_market = cfg.get("wtc_always_in_market", False)
-    if direction_mode == "long_only":
-        sell_i = False
-    elif direction_mode == "short_only":
-        buy_i = False
+    # BUG GEFUNDEN+GEFIXT (live beobachtet: bei long_only kam im Backtest genau EIN Trade
+    # heraus): der Richtungsfilter hat sell_i/buy_i frueher GLOBAL ausgeknipst. sell_i ist
+    # aber nicht nur das Short-EINSTIEGSsignal, sondern weiter unten auch das AUSSTIEGS-
+    # signal einer Long-Position (Flip-Exit). Bei long_only war der Ausstieg damit tot, die
+    # erste Long-Position blieb fuer immer offen - und weil der feste SL in der Praxis nie
+    # ausloest, gab es nie einen zweiten Trade. Fix: Filter NUR auf die Einstiege anwenden,
+    # der Flip-Block unten arbeitet weiter mit den ungefilterten buy_i/sell_i.
+    entry_buy = buy_i and direction_mode != "short_only"
+    entry_sell = sell_i and direction_mode != "long_only"
     pos = st["position"]
 
     if pos is None:
-        if not (buy_i or sell_i):
+        if not (entry_buy or entry_sell):
             return
-        direction = "long" if buy_i else "short"
+        direction = "long" if entry_buy else "short"
         debug_log(f"📡 [{symbol}] WaveTrend-Cross Signal: {direction.upper()} @ {price}")
         await execute_entry(symbol, direction, price, is_add_on=False)
         if st["position"] is not None:
@@ -3197,20 +3202,29 @@ async def check_wtc_signal(symbol, buy_i, sell_i, price):
         return
 
     if always_in_market:
-        if pos == "long" and sell_i:
+        if pos == "long" and sell_i and direction_mode != "long_only":
             debug_log(f"🔄 [{symbol}] WaveTrend-Cross Flip: LONG -> SHORT @ {price}")
             await execute_exit(symbol, price, "WTC-FLIP")
             await execute_entry(symbol, "short", price, is_add_on=False)
             if st["position"] is not None:
                 _wtc_reset_state(st)
                 _wtc_set_sl_tp(st, cfg, "short", price)
-        elif pos == "short" and buy_i:
+        elif pos == "short" and buy_i and direction_mode != "short_only":
             debug_log(f"🔄 [{symbol}] WaveTrend-Cross Flip: SHORT -> LONG @ {price}")
             await execute_exit(symbol, price, "WTC-FLIP")
             await execute_entry(symbol, "long", price, is_add_on=False)
             if st["position"] is not None:
                 _wtc_reset_state(st)
                 _wtc_set_sl_tp(st, cfg, "long", price)
+        elif (pos == "long" and sell_i) or (pos == "short" and buy_i):
+            # Gegen-Signal, aber die Gegenrichtung ist per direction_mode gesperrt.
+            # Nicht drehen (das waere ein verbotener Short/Long), sondern schliessen
+            # und flach auf das naechste erlaubte Signal warten. Ohne diesen Zweig
+            # bliebe die Position bei long_only/short_only ewig offen.
+            debug_log(f"\U0001f6aa [{symbol}] WaveTrend-Cross Exit: {pos.upper()} @ {price} "
+                      f"(Gegen-Signal, Drehen durch {direction_mode} gesperrt)")
+            await execute_exit(symbol, price, "WTC-FLIP-EXIT")
+            _wtc_reset_state(st)
     else:
         if not cfg.get("wtc_flip_exit_enabled", True):
             return
