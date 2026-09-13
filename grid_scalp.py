@@ -51,6 +51,8 @@ GRID_SCALP_STATE_KEYS = {
     "gs_cooldown_until": 0.0,
     "gs_tag_map": {},        # tag -> client_order_index
     "gs_last_error": None,
+    "gs_last_heartbeat": 0.0,
+    "gs_last_error_log": 0.0,
 }
 
 
@@ -97,16 +99,70 @@ async def _auth_token(client):
     return token
 
 
+_sig_cache = {}
+
+
+def _resolve_kwargs(func, wanted):
+    """Baut die Kwargs aus dem, was die Funktion TATSAECHLICH akzeptiert.
+
+    Grund: die Parameternamen der Lighter-SDK haben sich zwischen Versionen geaendert
+    (auth / authorization, market_id / market_index). Hart verdrahtete Namen brechen
+    dann bei jedem SDK-Update. wanted ist {kandidat_name: wert} - jeder Kandidat wird
+    nur uebernommen, wenn die Signatur ihn kennt. Akzeptiert die Funktion **kwargs,
+    wird alles durchgereicht.
+
+    Nicht untergebrachte Werte kommen als zweiter Rueckgabewert zurueck, damit der
+    Aufrufer entscheiden kann (z.B. Auth stattdessen als Header setzen).
+    """
+    import inspect
+    key = f"{func.__module__}.{func.__qualname__}"
+    if key not in _sig_cache:
+        try:
+            params = inspect.signature(func).parameters
+            _sig_cache[key] = (
+                set(params.keys()),
+                any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()),
+            )
+            debug_log(f"\U0001f50e SDK-Signatur erkannt: {func.__qualname__}",
+                      {"parameter": sorted(_sig_cache[key][0])})
+        except (TypeError, ValueError):
+            _sig_cache[key] = (set(), True)
+
+    known, has_varkw = _sig_cache[key]
+    kwargs, uebrig = {}, {}
+    for gruppe, wert in wanted.items():
+        untergebracht = False
+        for name in gruppe.split("|"):
+            if name in known or has_varkw:
+                kwargs[name] = wert
+                untergebracht = True
+                break
+        if not untergebracht:
+            uebrig[gruppe] = wert
+    return kwargs, uebrig
+
+
 async def read_open_orders(client, market_index):
     """Gibt Liste von Dicts zurueck: coi, is_ask, price, size, reduce_only."""
     import lighter
     order_api = lighter.OrderApi(client.api_client)
     token = await _auth_token(client)
-    resp = await order_api.account_active_orders(
-        account_index=client.account_index,
-        market_id=market_index,
-        auth=token,
-    )
+
+    kwargs, uebrig = _resolve_kwargs(order_api.account_active_orders, {
+        "account_index": client.account_index,
+        "market_id|market_index": market_index,
+        "auth|authorization": token,
+    })
+
+    # Kennt die Signatur gar keinen Auth-Parameter, erwartet die SDK-Version den Token
+    # als Header. Beides einmal versuchen ist billiger als es falsch zu raten.
+    if "auth|authorization" in uebrig:
+        try:
+            client.api_client.default_headers["Authorization"] = token
+        except Exception:
+            pass
+
+    resp = await order_api.account_active_orders(**kwargs)
     out = []
     for o in (getattr(resp, "orders", None) or []):
         try:
@@ -303,14 +359,18 @@ async def grid_scalp_tick(client, symbol):
     #    wieder aufbaut und aus einem -25$-Tag einen -200$-Tag macht
     if time.time() < float(st.get("gs_cooldown_until") or 0.0):
         if pos_size == 0:
+            rest_min = (float(st["gs_cooldown_until"]) - time.time()) / 60
+            debug_log(f"\u23f8\ufe0f [{symbol}] Grid-Scalp pausiert (Cooldown), noch {round(rest_min,1)} Min.")
             for o in await read_open_orders(client, market_index):
                 await cancel_order(client, market_index, o["coi"])
-                st.get("gs_tag_map", {}).clear()
+            st.setdefault("gs_tag_map", {}).clear()
             return
 
     if not cfg.get("bot_active", True):
+        debug_log(f"\u26d4 [{symbol}] Grid-Scalp: bot_active=False - raeume Orders ab und warte")
         for o in await read_open_orders(client, market_index):
             await cancel_order(client, market_index, o["coi"])
+        st.setdefault("gs_tag_map", {}).clear()
         return
 
     # 3) Anker setzen / nachfuehren - NUR wenn flat. Mit offener Position wuerdest
@@ -376,17 +436,43 @@ async def grid_scalp_tick(client, symbol):
             client, market_index, symbol, d["is_ask"], base_amount,
             d["price"], coi, reduce_only=d["reduce_only"])
         if err:
-            # Post-Only, das gekreuzt haette, wird verworfen - erwartetes Verhalten
+            # Post-Only, das gekreuzt haette, wird verworfen - erwartetes Verhalten.
+            # Haeuft es sich aber, stimmt was anderes nicht (Groesse, Margin, Auth),
+            # deshalb alle 60s einmal ins Log statt komplett stumm.
             st["gs_last_error"] = str(err)
+            if time.time() - float(st.get("gs_last_error_log") or 0) >= 60:
+                st["gs_last_error_log"] = time.time()
+                debug_log(f"\u26a0\ufe0f [{symbol}] Grid-Scalp: Order abgelehnt ({d['tag']})",
+                          {"error": str(err), "preis": d["price"], "groesse": round(d["size"], 6)})
             continue
         tag_map[d["tag"]] = coi
 
     st["gs_open_orders"] = len(desired)
 
+    # Heartbeat - gedrosselt auf alle 30s, damit das Log nicht zulaeuft. Ohne den
+    # sieht "Loop laeuft, postet aber nichts" genauso aus wie "Loop laeuft gar nicht".
+    now = time.time()
+    if now - float(st.get("gs_last_heartbeat") or 0) >= 30:
+        st["gs_last_heartbeat"] = now
+        pos_txt = f"{round(pos_size,6)} @ {avg_entry}" if pos_size else "flat"
+        debug_log(f"\U0001f493 [{symbol}] Grid-Scalp Heartbeat", {
+            "mid": round(mid, 6),
+            "bid/ask": f"{best_bid}/{best_ask}",
+            "spread_pct": round((best_ask - best_bid) / mid * 100, 5),
+            "position": pos_txt,
+            "soll_orders": len(desired),
+            "ist_orders": len(live),
+            "dry_run": cfg["dry_run"],
+            "letzter_fehler": st.get("gs_last_error"),
+        })
+
 
 async def grid_scalp_poll_loop(symbol):
     """In main.py's asyncio.gather einhaengen."""
     client = None
+    last_idle_log = 0.0
+    debug_log(f"\U0001f680 [{symbol}] Grid-Scalp Loop gestartet "
+              f"(aktueller entry_mode: {BOTS[symbol]['config'].get('entry_mode')})")
     while True:
         cfg = BOTS[symbol]["config"]
         if cfg.get("entry_mode") != "grid_scalp":
@@ -396,6 +482,12 @@ async def grid_scalp_poll_loop(symbol):
                 except Exception:
                     pass
                 client = None
+            # Alle 5 Minuten melden, WARUM nichts passiert. Sonst ist "Strategie nicht
+            # aktiv" im Log nicht von "Loop laeuft gar nicht" zu unterscheiden.
+            if time.time() - last_idle_log >= 300:
+                last_idle_log = time.time()
+                debug_log(f"\U0001f4a4 [{symbol}] Grid-Scalp inaktiv "
+                          f"(entry_mode ist '{cfg.get('entry_mode')}', erwartet 'grid_scalp')")
             await asyncio.sleep(5)
             continue
 
