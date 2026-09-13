@@ -5087,14 +5087,18 @@ async def check_hvd_sl_tp(symbol, price):
 
 
 async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus_di_i, minus_di_i, hull_i, atr_i,
-                            arm_flip_to_short_i=False, arm_flip_to_long_i=False):
+                            arm_flip_to_short_i=False, arm_flip_to_long_i=False, adx_filter_ok_i=True):
     """Kernsignal (1:1 aus dem Nutzer-Pine-Script '[Hoss] VWAP+RSI+Hull+DI System' portiert):
     Hull-Farbwechsel auf gruen + Zustand -1 (siehe compute_hvd_arm - vorher gruenes Band UND
     OBV-RSI ueberverkauft) + DI+ > DI- -> Long. Hull-Farbwechsel auf rot + Zustand 1 (vorher
     rotes Band UND OBV-RSI ueberkauft) + DI- > DI+ -> Short. Nur EIN Einstieg auf einmal (nach
     Nutzer-Vorgabe kein Nachkauf/Pyramiding) - ist bereits eine Position offen, wird ein neues
-    Signal ignoriert. Zwei unabhaengige, optionale Exit-Schalter (Standard beide aus - ohne sie
-    beendet ausschliesslich SL/TP eine offene Position, siehe check_hvd_sl_tp):
+    Signal ignoriert. adx_filter_ok_i (nach Nutzer-Vorgabe, optional, siehe hvd_adx_filter_enabled):
+    zusaetzlicher Seitwaerts-Filter, UNABHAENGIG von den DI-Werten fuer die Richtungsbestaetigung -
+    ein eigener ADX-Wert (eigene Laenge/Zeiteinheit) muss ueber einer Schwelle liegen, sonst wird
+    KEIN Einstieg ausgeloest (Default True = Filter aus/nicht relevant). Zwei unabhaengige,
+    optionale Exit-Schalter (Standard beide aus - ohne sie beendet ausschliesslich SL/TP eine
+    offene Position, siehe check_hvd_sl_tp):
     - hvd_flip_exit_enabled: wechselt die Hull-Linie waehrend einer offenen Position die Farbe
       GEGEN die Positionsrichtung, wird sofort glatt gestellt - unabhaengig von Arm-Zustand/DI.
     - hvd_arm_flip_exit_enabled (nach Nutzer-Vorgabe): aktiviert sich waehrend einer offenen
@@ -5126,8 +5130,8 @@ async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus
         return
 
     direction_mode = cfg.get("hvd_direction_mode", "both")
-    long_ok = direction_mode != "short_only" and arm_i == -1 and plus_di_i > minus_di_i
-    short_ok = direction_mode != "long_only" and arm_i == 1 and minus_di_i > plus_di_i
+    long_ok = direction_mode != "short_only" and arm_i == -1 and plus_di_i > minus_di_i and adx_filter_ok_i
+    short_ok = direction_mode != "long_only" and arm_i == 1 and minus_di_i > plus_di_i and adx_filter_ok_i
 
     if long_flip_i and long_ok:
         debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: LONG @ {price}")
@@ -5208,6 +5212,33 @@ async def hvd_poll_loop(symbol):
                     _adx_series, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
                     atr = compute_atr(closed_h, closed_l, closed_c, atr_period)
 
+                    # Optionaler Seitwaerts-Filter (nach Nutzer-Vorgabe): eigener ADX-Wert (eigene
+                    # Laenge/Zeiteinheit, unabhaengig von hvd_adx_length der DI-Bestaetigung) muss
+                    # ueber einer Schwelle liegen. Gleiches "letzten Wert breitstreuen"-Muster wie
+                    # bei SuperTrend+RSI's ADX-Filter fuer eine ABWEICHENDE Zeiteinheit.
+                    adx_filter_enabled = cfg.get("hvd_adx_filter_enabled", False)
+                    adx_filter_ok_series = None
+                    if adx_filter_enabled:
+                        filter_length = cfg.get("hvd_adx_filter_length", 14)
+                        filter_threshold = cfg.get("hvd_adx_filter_threshold", 20)
+                        filter_resolution = cfg.get("hvd_adx_filter_resolution", "same")
+                        if filter_resolution in (None, "", "same") or filter_resolution == resolution:
+                            filter_adx, _fpd, _fmd = compute_adx(closed_h, closed_l, closed_c, filter_length)
+                            adx_filter_ok_series = [v is not None and v > filter_threshold for v in filter_adx]
+                        else:
+                            filter_needed = min(500, filter_length * 5 + 20)
+                            filter_data = await fetch_candles_binance_multi(symbol, filter_resolution, count_back=filter_needed, market_type=cfg.get("binance_market_type", "spot"))
+                            if filter_data:
+                                _, _, filter_h, filter_l, filter_c = filter_data
+                                filter_h, filter_l, filter_c = filter_h[:-1], filter_l[:-1], filter_c[:-1]
+                            else:
+                                filter_h = filter_l = filter_c = None
+                            if filter_c and len(filter_c) > filter_length:
+                                filter_adx_now, _fpd, _fmd = compute_adx(filter_h, filter_l, filter_c, filter_length)
+                                adx_filter_ok_series = [filter_adx_now[-1] is not None and filter_adx_now[-1] > filter_threshold] * n
+                            else:
+                                adx_filter_ok_series = [True] * n  # Fallback, falls (noch) keine Daten
+
                     st["hvd_last_hull"] = hull[-1]
                     st["hvd_last_arm"] = arm[-1]
 
@@ -5231,9 +5262,10 @@ async def hvd_poll_loop(symbol):
                             continue
                         price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
+                        adx_filter_ok_i = True if adx_filter_ok_series is None else adx_filter_ok_series[idx]
                         await check_hvd_signal(symbol, price_i, long_flip[idx], short_flip[idx], arm[idx],
                                                 plus_di[idx], minus_di[idx], hull[idx], atr[idx],
-                                                arm_flip_to_short[idx], arm_flip_to_long[idx])
+                                                arm_flip_to_short[idx], arm_flip_to_long[idx], adx_filter_ok_i)
 
                     await check_hvd_sl_tp(symbol, price)
 
@@ -5259,9 +5291,11 @@ async def hvd_poll_loop(symbol):
                             # Hull-Flip und DI+/DI- reagieren live auf die laufende Kerze - das war
                             # der eigentliche Zweck dieser Option.
                             _adx_probe, plus_di_probe, minus_di_probe = compute_adx(probe_h, probe_l, probe_c, adx_length)
+                            frozen_adx_filter_ok = True if adx_filter_ok_series is None else adx_filter_ok_series[-1]
                             await check_hvd_signal(symbol, live_price, probe_long_flip[probe_idx], probe_short_flip[probe_idx],
                                                     st.get("hvd_last_arm", 0), plus_di_probe[probe_idx], minus_di_probe[probe_idx],
-                                                    probe_hull[probe_idx], atr[-1] if atr else None)
+                                                    probe_hull[probe_idx], atr[-1] if atr else None,
+                                                    False, False, frozen_adx_filter_ok)
                             await check_hvd_sl_tp(symbol, live_price)
                 elif due_heartbeat:
                     last_heartbeat = now
@@ -5274,7 +5308,8 @@ async def hvd_poll_loop(symbol):
 
 def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
                           margin, leverage, direction_mode, atr_min_mult, risk_reward, sl_cooldown_ms, warmup,
-                          flip_exit_enabled=False, arm_flip_exit_enabled=False, arm_flip_to_short=None, arm_flip_to_long=None):
+                          flip_exit_enabled=False, arm_flip_exit_enabled=False, arm_flip_to_short=None, arm_flip_to_long=None,
+                          adx_filter_ok=None):
     """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp - identische Logik, siehe dort fuer
     Kommentare. Von backtest_hvd_signal UND run_hvd_sweep genutzt (wie _simulate_mo7_trades bei
     MO7), damit der Sweep nicht Hull/VWAP/OBV-RSI/DI/ATR-unabhaengige Berechnungen dupliziert.
@@ -5283,7 +5318,10 @@ def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di,
     unabhaengig von Arm-Zustand/DI. arm_flip_exit_enabled (nach Nutzer-Vorgabe, optional):
     aktiviert sich waehrend einer offenen Position eine NEUE Gegen-Konfirmation (arm_flip_to_short/
     arm_flip_to_long, siehe _hvd_arm_flip_series), wird sofort glatt gestellt - unabhaengig vom
-    Hull-Farbwechsel. Beide Exits siehe check_hvd_signal fuer identische Live-Logik."""
+    Hull-Farbwechsel. adx_filter_ok (nach Nutzer-Vorgabe, optional): Liste - True/False pro Kerze,
+    ob der zusaetzliche Seitwaerts-Filter (eigener ADX-Wert ueber Schwelle, siehe
+    hvd_adx_filter_enabled) einen Einstieg an dieser Stelle erlaubt; None = Filter aus (alles
+    erlaubt). Beide Exits siehe check_hvd_signal fuer identische Live-Logik."""
     n = len(c)
     position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
     trades = []
@@ -5319,8 +5357,9 @@ def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di,
         if position is None:
             if in_cooldown:
                 continue
-            long_ok = direction_mode != "short_only" and arm[i] == -1 and plus_di[i] > minus_di[i]
-            short_ok = direction_mode != "long_only" and arm[i] == 1 and minus_di[i] > plus_di[i]
+            filter_ok = adx_filter_ok is None or adx_filter_ok[i]
+            long_ok = direction_mode != "short_only" and arm[i] == -1 and plus_di[i] > minus_di[i] and filter_ok
+            short_ok = direction_mode != "long_only" and arm[i] == 1 and minus_di[i] > plus_di[i] and filter_ok
             if long_flip[i] and long_ok:
                 sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "long", price, atr_min_mult, risk_reward)
                 if sl_price is not None:
@@ -5338,11 +5377,14 @@ def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di,
     return trades
 
 
-def backtest_hvd_signal(candles, cfg):
+def backtest_hvd_signal(candles, cfg, adx_filter_ok=None):
     """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp/hvd_poll_loop. 'candles' ist hier
     (anders als die generische BACKTEST_FUNCS-Signatur) ein 6er-Tupel MIT Volumen (ts,o,h,l,c,v)
     wie bei MO7/Maverick Edge, deshalb in run_backtest als Sonderfall behandelt statt ueber den
-    generischen 5er-Tupel-Dispatch."""
+    generischen 5er-Tupel-Dispatch. adx_filter_ok (optional): vorab berechnete Liste fuer den
+    Seitwaerts-Filter bei ABWEICHENDER Zeiteinheit (siehe run_backtest - dort async vorbereitet,
+    da diese Funktion selbst synchron bleibt); bei gleicher Zeiteinheit/deaktiviertem Filter wird
+    hier intern berechnet."""
     ts, o, h, l, c, v = candles
     hull_length = cfg.get("hvd_hull_length", 88)
     vwap_length = cfg.get("hvd_vwap_length", 60)
@@ -5377,11 +5419,20 @@ def backtest_hvd_signal(candles, cfg):
     _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
     atr = compute_atr(h, l, c, atr_period)
 
+    if adx_filter_ok is None and cfg.get("hvd_adx_filter_enabled", False):
+        filter_resolution = cfg.get("hvd_adx_filter_resolution", "same")
+        if filter_resolution in (None, "", "same"):
+            filter_length = cfg.get("hvd_adx_filter_length", 14)
+            filter_threshold = cfg.get("hvd_adx_filter_threshold", 20)
+            filter_adx, _fpd, _fmd = compute_adx(h, l, c, filter_length)
+            adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx]
+        # Bei ABWEICHENDER Zeiteinheit wird adx_filter_ok von run_backtest (async) uebergeben.
+
     warmup = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 5
     return _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
                                  cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, risk_reward,
                                  sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
-                                 arm_flip_to_short, arm_flip_to_long)
+                                 arm_flip_to_short, arm_flip_to_long, adx_filter_ok)
 
 
 HVD_SWEEP_MAX_COMBOS = 500
@@ -5441,6 +5492,25 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
     _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
     atr = compute_atr(h, l, c, atr_period)
 
+    adx_filter_ok = None
+    if cfg.get("hvd_adx_filter_enabled", False):
+        filter_resolution = cfg.get("hvd_adx_filter_resolution", "same")
+        filter_length = cfg.get("hvd_adx_filter_length", 14)
+        filter_threshold = cfg.get("hvd_adx_filter_threshold", 20)
+        if filter_resolution in (None, "", "same") or filter_resolution == resolution:
+            filter_adx, _fpd, _fmd = compute_adx(h, l, c, filter_length)
+            adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx]
+        else:
+            filter_candles, filter_err, _ = await _fetch_cached_backtest_candles(symbol, filter_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+            if filter_err:
+                return {"error": f"ADX-Filter-Zeiteinheit ({filter_resolution}): {filter_err}"}
+            if not filter_candles or len(filter_candles[4]) < filter_length + 5:
+                return {"error": f"Zu wenig historische Kerzen für die ADX-Filter-Zeiteinheit ({filter_resolution}) erhalten."}
+            ft_ts, ft_o, ft_h, ft_l, ft_c = filter_candles
+            filter_adx_htf, _fpd, _fmd = compute_adx(ft_h, ft_l, ft_c, filter_length)
+            filter_adx_aligned = _align_htf_series(ts, ft_ts, filter_adx_htf)
+            adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx_aligned]
+
     results = []
     for hull_length in hull_lengths:
         hull = compute_hull_ma(c, hull_length)
@@ -5456,7 +5526,7 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
             trades = _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
                                            cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, rr,
                                            sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
-                                           arm_flip_to_short, arm_flip_to_long)
+                                           arm_flip_to_short, arm_flip_to_long, adx_filter_ok)
             stats = summarize_backtest_trades(trades, exclude_top_n)
             results.append({"hvd_hull_length": hull_length, "hvd_risk_reward": rr, **stats})
 
@@ -10315,7 +10385,25 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         if not candles or len(candles[4]) < min_needed:
             return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
         n_candles = len(candles[4])
-        trades = backtest_hvd_signal(candles, cfg)
+
+        adx_filter_ok = None
+        if cfg.get("hvd_adx_filter_enabled", False):
+            filter_resolution = cfg.get("hvd_adx_filter_resolution", "same")
+            filter_length = cfg.get("hvd_adx_filter_length", 14)
+            filter_threshold = cfg.get("hvd_adx_filter_threshold", 20)
+            if not (filter_resolution in (None, "", "same") or filter_resolution == resolution):
+                filter_candles, filter_err, _ = await _fetch_cached_backtest_candles(symbol, filter_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+                if filter_err:
+                    return {"error": f"ADX-Filter-Zeiteinheit ({filter_resolution}): {filter_err}"}
+                if not filter_candles or len(filter_candles[4]) < filter_length + 5:
+                    return {"error": f"Zu wenig historische Kerzen für die ADX-Filter-Zeiteinheit ({filter_resolution}) erhalten."}
+                ft_ts, ft_o, ft_h, ft_l, ft_c = filter_candles
+                filter_adx_htf, _fpd, _fmd = compute_adx(ft_h, ft_l, ft_c, filter_length)
+                filter_adx_aligned = _align_htf_series(candles[0], ft_ts, filter_adx_htf)
+                adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx_aligned]
+            # Bei gleicher Zeiteinheit: bleibt None, backtest_hvd_signal berechnet es selbst intern.
+
+        trades = backtest_hvd_signal(candles, cfg, adx_filter_ok=adx_filter_ok)
         stats = summarize_backtest_trades(trades, exclude_top_n)
         stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
         stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)

@@ -612,6 +612,10 @@ def default_config():
         "hvd_flip_exit_enabled": os.getenv("HVD_FLIP_EXIT_ENABLED", "false").lower() == "true",  # optional: Hull-Farbwechsel GEGEN die Positionsrichtung beendet die Position sofort (unabhaengig von Arm/DI)
         "hvd_touch_arm_enabled": os.getenv("HVD_TOUCH_ARM_ENABLED", "false").lower() == "true",  # optional: Docht-Beruehrung (high/low) reicht zur Band-Scharfschaltung, statt Kerzenschluss (close) ueber/unter dem Band zu verlangen
         "hvd_arm_flip_exit_enabled": os.getenv("HVD_ARM_FLIP_EXIT_ENABLED", "false").lower() == "true",  # optional: aktiviert sich waehrend einer offenen Position eine NEUE Gegen-Konfirmation (Arm wechselt Richtung), wird sofort glatt gestellt
+        "hvd_adx_filter_enabled": os.getenv("HVD_ADX_FILTER_ENABLED", "false").lower() == "true",  # optionaler Seitwaerts-Filter: eigener ADX-Wert (eigene Laenge/Zeiteinheit) muss ueber der Schwelle liegen, sonst kein Einstieg
+        "hvd_adx_filter_length": int(os.getenv("HVD_ADX_FILTER_LENGTH", "14")),
+        "hvd_adx_filter_threshold": float(os.getenv("HVD_ADX_FILTER_THRESHOLD", "20")),
+        "hvd_adx_filter_resolution": os.getenv("HVD_ADX_FILTER_RESOLUTION", "same"),
     }
 
 
@@ -3307,6 +3311,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="true">An (neue Gegen-Konfirmation beendet die Position sofort)</option>
     </select>
   </div>
+  <div data-mode="hvd_signal"><label>Seitwärts-Filter (ADX-Trendfilter)</label>
+    <select class="cfg" id="hvd_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="hvd_signal" data-requires="hvd_adx_filter_enabled"><label>ADX-Filter-Länge</label><input type="number" step="1" min="1" id="hvd_adx_filter_length"></div>
+  <div data-mode="hvd_signal" data-requires="hvd_adx_filter_enabled"><label>ADX-Filter-Zeiteinheit</label>
+    <select class="cfg" id="hvd_adx_filter_resolution">
+      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+      <option value="1m">1 Minute</option>
+      <option value="3m">3 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="1d">1 Tag</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="hvd_adx_filter_resolution_custom_minutes" placeholder="z.B. 3" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="hvd_signal" data-requires="hvd_adx_filter_enabled"><label>ADX-Schwelle (Trendstärke, sonst Seitwärts = kein Einstieg)</label><input type="number" step="1" min="0" id="hvd_adx_filter_threshold"></div>
 
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
@@ -4413,7 +4440,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -5732,6 +5759,10 @@ async function refresh() {
     document.getElementById('hvd_flip_exit_enabled').value = String(data.config.hvd_flip_exit_enabled);
     document.getElementById('hvd_touch_arm_enabled').value = String(data.config.hvd_touch_arm_enabled);
     document.getElementById('hvd_arm_flip_exit_enabled').value = String(data.config.hvd_arm_flip_exit_enabled);
+    document.getElementById('hvd_adx_filter_enabled').value = String(data.config.hvd_adx_filter_enabled);
+    document.getElementById('hvd_adx_filter_length').value = data.config.hvd_adx_filter_length;
+    setResolutionField('hvd_adx_filter_resolution', data.config.hvd_adx_filter_resolution);
+    document.getElementById('hvd_adx_filter_threshold').value = data.config.hvd_adx_filter_threshold;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -6297,6 +6328,10 @@ function buildConfigPayload() {
     hvd_flip_exit_enabled: document.getElementById('hvd_flip_exit_enabled').value === 'true',
     hvd_touch_arm_enabled: document.getElementById('hvd_touch_arm_enabled').value === 'true',
     hvd_arm_flip_exit_enabled: document.getElementById('hvd_arm_flip_exit_enabled').value === 'true',
+    hvd_adx_filter_enabled: document.getElementById('hvd_adx_filter_enabled').value === 'true',
+    hvd_adx_filter_length: parseInt(document.getElementById('hvd_adx_filter_length').value),
+    hvd_adx_filter_resolution: getResolutionField('hvd_adx_filter_resolution'),
+    hvd_adx_filter_threshold: parseFloat(document.getElementById('hvd_adx_filter_threshold').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -6608,6 +6643,7 @@ async def handle_config_update(request):
                 "hvd_direction_mode", "hvd_atr_period", "hvd_atr_min_mult", "hvd_risk_reward",
                 "hvd_sl_cooldown_seconds", "hvd_immediate_signal_enabled", "hvd_flip_exit_enabled",
                 "hvd_touch_arm_enabled", "hvd_arm_flip_exit_enabled",
+                "hvd_adx_filter_enabled", "hvd_adx_filter_length", "hvd_adx_filter_resolution", "hvd_adx_filter_threshold",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
