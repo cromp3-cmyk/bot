@@ -187,6 +187,22 @@ def default_config():
         "grid_sl_manual_usd": float(os.getenv("GRID_SL_MANUAL_USD", "20.0")),
         "grid_anchor_follow_enabled": os.getenv("GRID_ANCHOR_FOLLOW_ENABLED", "false").lower() == "true",  # nur relevant bei long_only/short_only - siehe on_price_update
         "grid_anchor_follow_pct": float(os.getenv("GRID_ANCHOR_FOLLOW_PCT", "1.0")),  # ab wie viel % Abstand vom Anker (in der gesperrten Richtung) der Anker auf den aktuellen Kurs nachgezogen wird
+        "grid_sl_cooldown_min": float(os.getenv("GRID_SL_COOLDOWN_MIN", "0")),  # Pause nach Grid-SL; 0 = aus. Ohne das baut der Bot im Trend sofort dieselbe Position wieder auf.
+        # ===== Grid-Scalp (Maker-Only, entry_mode "grid_scalp") =====
+        # gs_step_notional_usd hat eine Obergrenze durch den SPREAD, nicht durchs Risiko:
+        # Kosten pro Round-Trip = Notional x Spread. Bei fixem 1$-TP frisst ein zu grosses
+        # Notional das Ziel komplett auf. probe_grid_scalp() misst den Spread und rechnet
+        # den passenden Wert aus - der Default hier ist nur eine Schaetzung.
+        "gs_step_notional_usd": float(os.getenv("GS_STEP_NOTIONAL_USD", "1000")),
+        "gs_max_levels": int(os.getenv("GS_MAX_LEVELS", "5")),
+        "gs_step_pct": float(os.getenv("GS_STEP_PCT", "0.10")),
+        "gs_tp_usd": float(os.getenv("GS_TP_USD", "1.0")),
+        "gs_flatten_usd": float(os.getenv("GS_FLATTEN_USD", "25.0")),
+        "gs_cooldown_min": float(os.getenv("GS_COOLDOWN_MIN", "30")),
+        "gs_anchor_follow_pct": float(os.getenv("GS_ANCHOR_FOLLOW_PCT", "1.0")),
+        "gs_requote_ticks": int(os.getenv("GS_REQUOTE_TICKS", "2")),
+        "gs_max_open_orders": int(os.getenv("GS_MAX_OPEN_ORDERS", "8")),
+        "gs_poll_seconds": float(os.getenv("GS_POLL_SECONDS", "2.0")),
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -631,6 +647,9 @@ def default_state():
         "obi_instant_armed_short": True, "obi_instant_armed_long": True,
         "obi_fast": None, "obi_medium": None, "obi_slow": None, "obi_history": [],
         "last_entry_price": None,
+        "gs_anchor": None, "gs_cooldown_until": 0.0, "gs_tag_map": {},
+        "gs_last_error": None, "gs_open_orders": 0,
+        "grid_sl_cooldown_until": 0.0,
         "obi_last_trade_time": 0.0, "obi_trend_ema": None, "obi_current": None,
         "obi_extreme_zone": None, "obi_extreme_value": None, "obi_prev_fast": None,
         "obi_spread_pct": None, "obi_recent_vol_pct": None,
@@ -795,6 +814,9 @@ async def load_bot_configs():
 PERSISTED_STATE_KEYS = [
     "position", "avg_entry_price", "total_coin_size", "entry_count", "anchor_price",
     "position_opened_at", "last_entry_price", "stats", "trade_log",
+    # gs_tag_map MUSS persistiert werden: sonst weiss der Bot nach einem Redeploy nicht
+    # mehr, welche offenen Orders im Buch seine eigenen sind, und cancelt sie als fremd.
+    "gs_anchor", "gs_cooldown_until", "gs_tag_map", "grid_sl_cooldown_until",
     "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
     "obi_breakeven_triggered",
     "ht_sl_price", "ht_tp1_price", "ht_tp2_price", "ht_tp3_price", "ht_tp1_done", "ht_tp2_done",
@@ -1488,6 +1510,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="entry_mode">
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
+      <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
       <option value="obi_scalp">OBI-Scalp (Orderbuch-Ungleichgewicht, symmetrisches TP/SL)</option>
       <option value="oms_scalp">OBI-Momentum-Scalp (OBI + CVD-Bestätigung + Funding-Filter, TP1+Trailing, Nachkauf)</option>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
@@ -3353,6 +3376,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid"><label>Grid-Stufe ($)</label><input type="number" step="any" id="grid_step_usd"></div>
   <div data-mode="grid"><label>TP-Stufe ($)</label><input type="number" step="any" id="tp_step_usd"></div>
   <div data-mode="grid"><label>Max. Nachkauf</label><input type="number" step="1" id="max_nachkauf"></div>
+  <div data-mode="grid"><label>Cooldown nach Grid-SL (Min., 0 = aus)</label><input type="number" step="any" id="grid_sl_cooldown_min"></div>
+  <div data-mode="grid_scalp"><label>Notional pro Stufe ($) - Obergrenze kommt vom Spread!</label><input type="number" step="any" id="gs_step_notional_usd"></div>
+  <div data-mode="grid_scalp"><label>Max. Stufen</label><input type="number" step="1" id="gs_max_levels"></div>
+  <div data-mode="grid_scalp"><label>Stufen-Abstand (%)</label><input type="number" step="any" id="gs_step_pct"></div>
+  <div data-mode="grid_scalp"><label>TP ($ echter Gewinn auf Gesamtposition)</label><input type="number" step="any" id="gs_tp_usd"></div>
+  <div data-mode="grid_scalp"><label>Notausstieg bei uPnL ($)</label><input type="number" step="any" id="gs_flatten_usd"></div>
+  <div data-mode="grid_scalp"><label>Cooldown nach Notausstieg (Min.)</label><input type="number" step="any" id="gs_cooldown_min"></div>
+  <div data-mode="grid_scalp"><label>Anker-Nachf&uuml;hrung ab (%)</label><input type="number" step="any" id="gs_anchor_follow_pct"></div>
+  <div data-mode="grid_scalp"><label>Requote-Drift (Ticks)</label><input type="number" step="1" id="gs_requote_ticks"></div>
+  <div data-mode="grid_scalp"><label>Max. offene Orders</label><input type="number" step="1" id="gs_max_open_orders"></div>
+  <div data-mode="grid_scalp"><label>Poll-Intervall (Sek.)</label><input type="number" step="any" id="gs_poll_seconds"></div>
   <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
     <select class="cfg" id="grid_sl_enabled">
       <option value="false">Aus (Standard)</option>
@@ -5773,6 +5807,17 @@ async function refresh() {
     document.getElementById('grid_sl_enabled').value = String(data.config.grid_sl_enabled);
     document.getElementById('grid_sl_manual_usd').value = data.config.grid_sl_manual_usd;
     document.getElementById('grid_anchor_follow_enabled').value = String(data.config.grid_anchor_follow_enabled);
+    document.getElementById('grid_sl_cooldown_min').value = data.config.grid_sl_cooldown_min;
+    document.getElementById('gs_step_notional_usd').value = data.config.gs_step_notional_usd;
+    document.getElementById('gs_max_levels').value = data.config.gs_max_levels;
+    document.getElementById('gs_step_pct').value = data.config.gs_step_pct;
+    document.getElementById('gs_tp_usd').value = data.config.gs_tp_usd;
+    document.getElementById('gs_flatten_usd').value = data.config.gs_flatten_usd;
+    document.getElementById('gs_cooldown_min').value = data.config.gs_cooldown_min;
+    document.getElementById('gs_anchor_follow_pct').value = data.config.gs_anchor_follow_pct;
+    document.getElementById('gs_requote_ticks').value = data.config.gs_requote_ticks;
+    document.getElementById('gs_max_open_orders').value = data.config.gs_max_open_orders;
+    document.getElementById('gs_poll_seconds').value = data.config.gs_poll_seconds;
     document.getElementById('grid_anchor_follow_pct').value = data.config.grid_anchor_follow_pct;
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('binance_market_type').value = data.config.binance_market_type;
@@ -6342,6 +6387,17 @@ function buildConfigPayload() {
     grid_sl_enabled: document.getElementById('grid_sl_enabled').value === 'true',
     grid_sl_manual_usd: parseFloat(document.getElementById('grid_sl_manual_usd').value),
     grid_anchor_follow_enabled: document.getElementById('grid_anchor_follow_enabled').value === 'true',
+    grid_sl_cooldown_min: parseFloat(document.getElementById('grid_sl_cooldown_min').value),
+    gs_step_notional_usd: parseFloat(document.getElementById('gs_step_notional_usd').value),
+    gs_max_levels: parseInt(document.getElementById('gs_max_levels').value),
+    gs_step_pct: parseFloat(document.getElementById('gs_step_pct').value),
+    gs_tp_usd: parseFloat(document.getElementById('gs_tp_usd').value),
+    gs_flatten_usd: parseFloat(document.getElementById('gs_flatten_usd').value),
+    gs_cooldown_min: parseFloat(document.getElementById('gs_cooldown_min').value),
+    gs_anchor_follow_pct: parseFloat(document.getElementById('gs_anchor_follow_pct').value),
+    gs_requote_ticks: parseInt(document.getElementById('gs_requote_ticks').value),
+    gs_max_open_orders: parseInt(document.getElementById('gs_max_open_orders').value),
+    gs_poll_seconds: parseFloat(document.getElementById('gs_poll_seconds').value),
     grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
@@ -6539,7 +6595,11 @@ async def handle_config_update(request):
     cfg = BOTS[symbol]["config"]
     for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_direction_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "grid_sl_enabled", "grid_sl_manual_usd",
-                "grid_anchor_follow_enabled", "grid_anchor_follow_pct", "dry_run", "auto_reverse", "binance_market_type",
+                "grid_anchor_follow_enabled", "grid_anchor_follow_pct", "grid_sl_cooldown_min",
+                "gs_step_notional_usd", "gs_max_levels", "gs_step_pct", "gs_tp_usd",
+                "gs_flatten_usd", "gs_cooldown_min", "gs_anchor_follow_pct",
+                "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
+                "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_manual_usd", "g2_anchor_follow_enabled", "g2_anchor_follow_pct",
                 "g2_auto_reverse", "g2_revisit_enabled", "g2_revisit_rearm_pct", "g2_double_enabled",

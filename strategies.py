@@ -7497,6 +7497,10 @@ async def on_price_update(symbol, price):
     if st["position"] is None:
         if not bot_active or cfg["entry_mode"] != "grid":
             return
+        # Cooldown nach Grid-SL: ohne das baut der Bot die gerade gerissene Position
+        # sofort wieder auf und macht im Trend aus einem -20$-Tag einen -200$-Tag.
+        if time.time() < float(st.get("grid_sl_cooldown_until") or 0.0):
+            return
         direction_mode = cfg.get("grid_direction_mode", "both")
 
         # Anker-Nachfuehrung (optional): in long_only/short_only kann der Kurs beliebig weit
@@ -7506,7 +7510,7 @@ async def on_price_update(symbol, price):
         # aktuellen Kurs nachgezogen, damit die Entry-Schwelle wieder in erreichbarer Naehe liegt.
         # Bewusst NUR fuer long_only/short_only - bei "both" bleibt irgendwann immer eine Seite
         # erreichbar, dort wuerde Nachfuehren nur unnoetig fruehe Entries erzeugen.
-        if cfg.get("grid_anchor_follow_enabled", False) and direction_mode != "both" and st["anchor_price"]:
+        if cfg.get("grid_anchor_follow_enabled", False) and st["anchor_price"]:
             old_anchor = st["anchor_price"]
             follow_abs = old_anchor * (cfg.get("grid_anchor_follow_pct", 1.0) / 100.0)
             if direction_mode == "long_only" and price > old_anchor + follow_abs:
@@ -7516,6 +7520,14 @@ async def on_price_update(symbol, price):
             elif direction_mode == "short_only" and price < old_anchor - follow_abs:
                 actual_pct = round((old_anchor - price) / old_anchor * 100, 2)
                 debug_log(f"⚓ [{symbol}] Grid-Anker nachgezogen (short_only): {round(old_anchor,4)} -> {price} (Kurs war {actual_pct}% unter dem Anker)")
+                st["anchor_price"] = price
+            elif direction_mode == "both" and abs(price - old_anchor) > follow_abs:
+                # Bei "both" ist zwar keine Richtung gesperrt, der Anker kann nach einem
+                # Trendtag trotzdem weit weg liegen. Symmetrisch nachziehen. Sicher, weil
+                # dieser ganze Block nur laeuft, wenn st["position"] is None - also nie
+                # unter einer offenen Position, wo das Raster wegrutschen wuerde.
+                actual_pct = round(abs(price - old_anchor) / old_anchor * 100, 2)
+                debug_log(f"⚓ [{symbol}] Grid-Anker nachgezogen (both): {round(old_anchor,4)} -> {price} (Abstand war {actual_pct}%)")
                 st["anchor_price"] = price
 
         grid_step_abs = compute_step_abs(st["anchor_price"], cfg, "grid")
@@ -7540,6 +7552,10 @@ async def on_price_update(symbol, price):
         if unrealized_pnl <= -sl_usd:
             debug_log(f"🚪 [{symbol}] Grid SL: {st['position'].upper()} @ {price} (unrealisierter Verlust {round(unrealized_pnl, 2)} $ erreicht -{sl_usd} $)")
             await execute_exit(symbol, price, "SL")
+            cd_min = float(cfg.get("grid_sl_cooldown_min", 0) or 0)
+            if cd_min > 0:
+                st["grid_sl_cooldown_until"] = time.time() + cd_min * 60
+                debug_log(f"⏸️ [{symbol}] Grid-Cooldown aktiv fuer {cd_min} Min. - kein Wiedereinstieg bis dahin")
             return
 
     tp_step_abs = compute_step_abs(st["avg_entry_price"], cfg, "tp")

@@ -32,6 +32,7 @@ from copytrade import (
     handle_ct_set_coin_setting, handle_ct_remove_coin_setting, handle_ct_set_trader_defaults,
 )
 from binance_ws import binance_ws_cache_loop
+from grid_scalp import grid_scalp_poll_loop
 
 
 async def start_web_server():
@@ -117,6 +118,7 @@ async def main():
         *[mv_poll_loop(s) for s in SYMBOLS],
         *[sr_poll_loop(s) for s in SYMBOLS],
         *[hvd_poll_loop(s) for s in SYMBOLS],
+        *[grid_scalp_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),
