@@ -81,6 +81,7 @@ MARKET_INDICES = {
     "EURUSD": 96, "GBPUSD": 97, "USDJPY": 98, "USDCHF": 99, "USDCAD": 100,
     "AUDUSD": 106, "NZDUSD": 107, "USDKRW": 105,
     "XAU": 92, "XAG": 93, "WTI": 145,
+    "LIT": 120,  # Lighters eigener Token - market_id per /api/v1/orderBooks bestätigt (2026-09-14)
     # ACHTUNG: "TON" wurde entfernt - market_id 12 gehoert auf Lighter inzwischen zu "GRAM",
     # nicht mehr zu TON. Falls TON weiterhin gehandelt werden soll, zuerst bei Lighter die
     # aktuelle market_id fuer TON pruefen (apidocs.lighter.xyz -> /api/v1/orderBooks) und hier
@@ -94,6 +95,7 @@ PRECISION_MAP = {
     "ADA": 10, "TRX": 10, "LTC": 1000, "BCH": 1000, "HBAR": 10, "ICP": 100, "HYPE": 100,
     "EURUSD": 10, "GBPUSD": 10, "USDJPY": 1000, "USDCHF": 10, "USDCAD": 10,
     "AUDUSD": 10, "NZDUSD": 10, "USDKRW": 10000, "XAU": 10000, "XAG": 100, "WTI": 1000,
+    "LIT": 100,
 }
 PRICE_DECIMALS_MAP = {
     "ETH": 2, "BTC": 1, "SOL": 3, "DOGE": 6, "XRP": 6, "LINK": 5, "AVAX": 4,
@@ -101,6 +103,7 @@ PRICE_DECIMALS_MAP = {
     "ADA": 5, "TRX": 5, "LTC": 3, "BCH": 3, "HBAR": 5, "ICP": 4, "HYPE": 4,
     "EURUSD": 5, "GBPUSD": 5, "USDJPY": 3, "USDCHF": 5, "USDCAD": 5,
     "AUDUSD": 5, "NZDUSD": 5, "USDKRW": 2, "XAU": 2, "XAG": 4, "WTI": 3,
+    "LIT": 4,
 }
 MIN_BASE_AMOUNT_MAP = {
     "ETH": 0.005, "BTC": 0.0001, "SOL": 0.1, "DOGE": 100.0, "XRP": 7.0, "LINK": 1.0, "AVAX": 1.0,
@@ -108,6 +111,7 @@ MIN_BASE_AMOUNT_MAP = {
     "ADA": 45.0, "TRX": 25.0, "LTC": 0.15, "BCH": 0.035, "HBAR": 100.0, "ICP": 3.5, "HYPE": 0.15,
     "EURUSD": 6.5, "GBPUSD": 5.5, "USDJPY": 0.05, "USDCHF": 8.0, "USDCAD": 5.5,
     "AUDUSD": 10.0, "NZDUSD": 10.0, "USDKRW": 0.005, "XAU": 0.002, "XAG": 0.15, "WTI": 0.1,
+    "LIT": 3.5,
 }
 
 

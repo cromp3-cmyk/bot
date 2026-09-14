@@ -28,10 +28,12 @@ BINANCE_SYMBOL_MAP = {
     "TRX": "TRXUSDT", "LTC": "LTCUSDT", "BCH": "BCHUSDT", "HBAR": "HBARUSDT", "ICP": "ICPUSDT",
     "XAU": "XAUUSDT", "XAG": "XAGUSDT",  # Seit Jan. 2026 auf Binance, aber NUR als USDT-Perpetual-
     # Future ("TradFi"-Kategorie) - es gibt dafuer KEIN Spot-Paar, siehe BINANCE_FUTURES_ONLY_SYMBOLS
+    "LIT": "LITUSDT",  # Seit 23.12.2025 auf Binance Futures (Pre-Market-Start), ebenfalls nur als
+    # USDT-Perpetual, kein Spot-Paar - siehe BINANCE_FUTURES_ONLY_SYMBOLS
     # HYPE und WTI/Forex (EURUSD, ...) gibt es weiterhin nicht auf Binance - dafuer greift der Lighter-Fallback
 }
 
-BINANCE_FUTURES_ONLY_SYMBOLS = {"XAU", "XAG"}  # existieren auf Binance NUR als Futures, kein Spot-Paar
+BINANCE_FUTURES_ONLY_SYMBOLS = {"XAU", "XAG", "LIT"}  # existieren auf Binance NUR als Futures, kein Spot-Paar
 
 
 # Globale Anfragen-Drossel: OHNE das feuern alle 7 Poll-Loops (binance_1s, da, es, ht,
