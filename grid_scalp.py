@@ -53,6 +53,11 @@ GRID_SCALP_STATE_KEYS = {
     "gs_last_error": None,
     "gs_last_heartbeat": 0.0,
     "gs_last_error_log": 0.0,
+    # Dry-Run-Simulation
+    "gs_sim_orders": [],
+    "gs_sim_pos": 0.0,
+    "gs_sim_avg": None,
+    "gs_sim_stats": {"trades": 0, "gewinne": 0, "verluste": 0, "pnl": 0.0},
 }
 
 
@@ -248,6 +253,107 @@ def _desired_orders(symbol, cfg, st, pos_size, avg_entry, best_bid, best_ask):
         d["price"] = round(round(d["price"] / tick) * tick, get_price_decimals(symbol))
 
     return out[: int(cfg.get("gs_max_open_orders", 8))]
+
+
+# ============================================================================
+# Dry-Run-Fill-Simulation
+#
+# WARUM DAS OPTIMISTISCH IST - bitte lesen, bevor du den Zahlen glaubst:
+# Ob eine Limit-Order fuellt, haengt an der QUEUE-POSITION. Auf deinem Preislevel
+# liegen andere Orders vor dir; du kommst erst dran, wenn die abgeraeumt sind.
+# Das laesst sich von aussen nicht nachbilden - die Boerse verraet nicht, wie viel
+# Groesse vor dir liegt und wie viel davon storniert statt gehandelt wird.
+#
+# Die Regel hier ist bewusst strenger als "Preis hat das Level beruehrt": der Markt
+# muss KOMPLETT durchgelaufen sein (fuer einen Kauf bei P muss der Brief-Kurs unter P
+# fallen, der Markt also mindestens den Spread weit durch dich durch). Trotzdem gilt:
+# die echte Fill-Rate wird NIEDRIGER sein als hier, nie hoeher. Nimm die Winrate als
+# Obergrenze, nicht als Prognose. Die einzige ehrliche Messung ist eine echte Order
+# im Buch - notfalls mit 200 $ Notional.
+# ============================================================================
+
+def _sim_reset(st):
+    st["gs_sim_orders"] = []
+    st["gs_sim_pos"] = 0.0
+    st["gs_sim_avg"] = None
+
+
+def _sim_stats(st):
+    stats = st.get("gs_sim_stats")
+    if not isinstance(stats, dict):
+        stats = {"trades": 0, "gewinne": 0, "verluste": 0, "pnl": 0.0}
+        st["gs_sim_stats"] = stats
+    return stats
+
+
+def _sim_process_fills(symbol, st, cfg, best_bid, best_ask):
+    """Prueft alle simulierten Orders auf Fill und verbucht sie.
+    Gibt (pos_size, avg_entry) nach den Fills zurueck."""
+    orders = st.setdefault("gs_sim_orders", [])
+    pos = float(st.get("gs_sim_pos") or 0.0)
+    avg = st.get("gs_sim_avg")
+    stats = _sim_stats(st)
+    verbleibend = []
+
+    for o in orders:
+        # Strenge Regel: der Markt muss durch das Level DURCH sein, nicht nur dran.
+        if o["is_ask"]:
+            gefuellt = best_bid > o["price"]
+        else:
+            gefuellt = best_ask < o["price"]
+
+        if not gefuellt:
+            verbleibend.append(o)
+            continue
+
+        menge = o["size"] * (-1 if o["is_ask"] else 1)
+
+        if o.get("reduce_only") or (pos != 0 and (pos > 0) != (menge > 0)):
+            # Schliessender Fill -> realisierter PnL
+            geschlossen = min(abs(pos), abs(menge))
+            if avg is not None:
+                pnl = (o["price"] - avg) * geschlossen * (1 if pos > 0 else -1)
+                stats["trades"] += 1
+                stats["pnl"] = round(stats["pnl"] + pnl, 4)
+                if pnl >= 0:
+                    stats["gewinne"] += 1
+                else:
+                    stats["verluste"] += 1
+                quote = round(stats["gewinne"] / stats["trades"] * 100, 1)
+                debug_log(
+                    f"\U0001f4b0 [{symbol}] SIM-TRADE #{stats['trades']}: "
+                    f"{'LONG' if pos > 0 else 'SHORT'} zu {o['price']} geschlossen | "
+                    f"PnL {round(pnl, 4)}$",
+                    {"gesamt_pnl": stats["pnl"], "winrate": f"{quote}%",
+                     "gewinne": stats["gewinne"], "verluste": stats["verluste"]})
+            pos += menge
+            if abs(pos) < 1e-12:
+                pos, avg = 0.0, None
+        else:
+            # Oeffnender/aufstockender Fill
+            if pos == 0 or avg is None:
+                pos, avg = menge, o["price"]
+            else:
+                gesamt = pos + menge
+                avg = (avg * pos + o["price"] * menge) / gesamt
+                pos = gesamt
+            debug_log(f"\u2705 [{symbol}] SIM-FILL {o['tag']}: "
+                      f"{'SELL' if o['is_ask'] else 'BUY'} {round(o['size'], 6)} @ {o['price']} "
+                      f"| Position {round(pos, 6)} @ {round(avg, 6)}")
+
+    st["gs_sim_orders"] = verbleibend
+    st["gs_sim_pos"] = pos
+    st["gs_sim_avg"] = avg
+
+    # Lokalen State spiegeln, damit das Dashboard die simulierte Position zeigt
+    st["position"] = None if pos == 0 else ("long" if pos > 0 else "short")
+    st["avg_entry_price"] = avg
+    st["total_coin_size"] = abs(pos)
+    return pos, avg
+
+
+def _sim_open_orders(st):
+    return [dict(o) for o in st.get("gs_sim_orders", [])]
 
 
 # ============================================================================
