@@ -3462,10 +3462,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_v2" data-requires="g2_sl_enabled"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="g2_sl_manual_usd"></div>
   <div data-mode="grid_v2" data-requires="g2_sl_enabled"><label>SL (%)</label><input type="number" step="0.1" id="g2_sl_pct"></div>
   <div data-mode="grid_v2" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Nur relevant bei "Nur Long"/"Nur Short": läuft der Kurs weit in die GESPERRTE Richtung weg,
+    Relevant bei "Nur Long"/"Nur Short" UND bei "Smart": läuft der Kurs weit in die aktuell NICHT
+    gehandelte Richtung weg (bei Smart: die Richtung, die der 24h-Trend gerade NICHT vorschlägt),
     würde der Bot sonst endlos auf eine Rückkehr in die alte Zone warten. Ist der Abstand größer
     als der eingestellte Prozentwert, wird der Anker auf den aktuellen Kurs nachgezogen. Bei
-    "Beide" ohne Wirkung.
+    "Beide" ohne Wirkung (dort bleibt immer irgendeine Seite erreichbar).
   </div>
   <div data-mode="grid_v2"><label>Anker-Nachführung</label>
     <select class="cfg" id="g2_anchor_follow_enabled">

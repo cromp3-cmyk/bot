@@ -7697,16 +7697,30 @@ async def check_grid_v2_tick(symbol, price):
             return
         direction_mode = cfg.get("g2_direction_mode", "both")
 
-        if cfg.get("g2_anchor_follow_enabled", False) and direction_mode in ("long_only", "short_only") and st["anchor_price"]:
+        # Anker-Nachfuehrung: bei long_only/short_only ist die "gesperrte" Richtung fix, bei
+        # "smart" wird sie alle 5 Min. neu vorgeschlagen (siehe get_smart_direction_g2) - in
+        # beiden Faellen kann der Kurs beliebig weit in die JEWEILS NICHT gehandelte Richtung
+        # weglaufen, ohne dass je ein Entry triggert. Deshalb hier einheitlich behandelt: die
+        # aktuell "gesperrte" Richtung wird ermittelt (fix bei long_only/short_only, dynamisch
+        # bei smart), und nur bei zu grossem Abstand in GENAU dieser Richtung nachgezogen.
+        effective_lock = None
+        if direction_mode == "long_only":
+            effective_lock = "long"
+        elif direction_mode == "short_only":
+            effective_lock = "short"
+        elif direction_mode == "smart":
+            effective_lock = await get_smart_direction_g2(symbol)  # kann None sein (Binance-Daten fehlen)
+
+        if cfg.get("g2_anchor_follow_enabled", False) and effective_lock and st["anchor_price"]:
             old_anchor = st["anchor_price"]
             follow_abs = old_anchor * (cfg.get("g2_anchor_follow_pct", 1.0) / 100.0)
-            if direction_mode == "long_only" and price > old_anchor + follow_abs:
+            if effective_lock == "long" and price > old_anchor + follow_abs:
                 actual_pct = round((price - old_anchor) / old_anchor * 100, 2)
-                debug_log(f"⚓ [{symbol}] Grid-2-Anker nachgezogen (long_only): {round(old_anchor,4)} -> {price} (Kurs war {actual_pct}% über dem Anker)")
+                debug_log(f"⚓ [{symbol}] Grid-2-Anker nachgezogen ({direction_mode}, aktuell long gesperrt): {round(old_anchor,4)} -> {price} (Kurs war {actual_pct}% über dem Anker)")
                 st["anchor_price"] = price
-            elif direction_mode == "short_only" and price < old_anchor - follow_abs:
+            elif effective_lock == "short" and price < old_anchor - follow_abs:
                 actual_pct = round((old_anchor - price) / old_anchor * 100, 2)
-                debug_log(f"⚓ [{symbol}] Grid-2-Anker nachgezogen (short_only): {round(old_anchor,4)} -> {price} (Kurs war {actual_pct}% unter dem Anker)")
+                debug_log(f"⚓ [{symbol}] Grid-2-Anker nachgezogen ({direction_mode}, aktuell short gesperrt): {round(old_anchor,4)} -> {price} (Kurs war {actual_pct}% unter dem Anker)")
                 st["anchor_price"] = price
 
         grid_step_abs = compute_step_abs_g2(st["anchor_price"], cfg, "grid")
@@ -7714,10 +7728,6 @@ async def check_grid_v2_tick(symbol, price):
         crossed_up = price >= st["anchor_price"] + grid_step_abs
 
         if direction_mode == "smart":
-            # Anker-Nachfuehrung greift bewusst NICHT im Smart-Modus - die Richtung kann sich
-            # alle 5 Min. aendern, ein nachgezogener Anker wuerde dann fuer die JEWEILS ANDERE
-            # Richtung wieder falsch stehen. Smart-Modus wartet stattdessen einfach, bis der
-            # Kurs von sich aus in die aktuell vorgeschlagene Richtung kreuzt.
             if crossed_down or crossed_up:
                 smart_dir = await get_smart_direction_g2(symbol)
                 if smart_dir == "long" and crossed_down:
