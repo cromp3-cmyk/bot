@@ -640,6 +640,10 @@ def default_config():
         "hvd_adx_filter_length": int(os.getenv("HVD_ADX_FILTER_LENGTH", "14")),
         "hvd_adx_filter_threshold": float(os.getenv("HVD_ADX_FILTER_THRESHOLD", "20")),
         "hvd_adx_filter_resolution": os.getenv("HVD_ADX_FILTER_RESOLUTION", "same"),
+        "hvd_trend_filter_enabled": os.getenv("HVD_TREND_FILTER_ENABLED", "false").lower() == "true",  # optionaler uebergeordneter SuperTrend-Filter (eigene, hoehere Zeiteinheit) - Long nur wenn Trend bullisch, Short nur wenn baerisch
+        "hvd_trend_filter_resolution": os.getenv("HVD_TREND_FILTER_RESOLUTION", "15m"),  # "1m" | "2m" | "5m" | "15m" | "1h"
+        "hvd_trend_filter_atr_period": int(os.getenv("HVD_TREND_FILTER_ATR_PERIOD", "10")),
+        "hvd_trend_filter_multiplier": float(os.getenv("HVD_TREND_FILTER_MULTIPLIER", "3.0")),
     }
 
 
@@ -3366,6 +3370,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="hvd_signal" data-requires="hvd_adx_filter_enabled"><label>ADX-Schwelle (Trendstärke, sonst Seitwärts = kein Einstieg)</label><input type="number" step="1" min="0" id="hvd_adx_filter_threshold"></div>
 
+  <div data-mode="hvd_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Übergeordneter SuperTrend-Filter (eigene, höhere Zeiteinheit): Long-Einstiege nur, wenn der
+    SuperTrend auf dieser höheren Zeiteinheit gerade bullisch ist (Kurs über der SuperTrend-Linie),
+    Short-Einstiege nur, wenn bärisch (Kurs darunter). Soll das häufige Gegentrend-Flackern der
+    kurzfristigen VWAP+RSI+Hull+DI-Signale reduzieren.
+  </div>
+  <div data-mode="hvd_signal"><label>SuperTrend-Trendfilter</label>
+    <select class="cfg" id="hvd_trend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
+    <select class="cfg" id="hvd_trend_filter_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="2m">2 Minuten</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="1h">1 Stunde</option>
+    </select>
+  </div>
+  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter ATR-Periode</label><input type="number" step="1" min="1" id="hvd_trend_filter_atr_period"></div>
+  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter Multiplikator</label><input type="number" step="0.1" min="0.1" id="hvd_trend_filter_multiplier"></div>
+
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
       <option value="both">Beide (Long unter Anker, Short über Anker)</option>
@@ -3960,6 +3988,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div><label>Risk:Reward von</label><input type="number" step="0.1" id="hvd-sweep-rr-min" value="1.0" style="width:90px;"></div>
     <div><label>bis</label><input type="number" step="0.1" id="hvd-sweep-rr-max" value="5.0" style="width:90px;"></div>
     <div><label>Schritt</label><input type="number" step="0.1" id="hvd-sweep-rr-step" value="0.5" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label><input type="checkbox" id="hvd-sweep-st-mult-enabled"> SuperTrend-Trendfilter-Multiplikator als 3. Sweep-Dimension</label></div>
+  </div>
+  <div id="hvd-sweep-st-mult-row" style="display:none; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Multiplikator von</label><input type="number" step="0.1" min="0.1" id="hvd-sweep-st-mult-min" value="1.0" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="hvd-sweep-st-mult-max" value="5.0" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.01" min="0.01" id="hvd-sweep-st-mult-step" value="0.1" style="width:90px;"></div>
+  </div>
+  <div style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0; margin-bottom:8px;">
+    ACHTUNG Laufzeit: aktiviert die dritte Dimension die Kombinationsanzahl (multipliziert sich mit
+    der Anzahl Multiplikator-Werte, Standard 41 bei 1.0-5.0 in 0.1-Schritten) - bei "zu viele
+    Kombinationen"-Fehler Hull-/Risk:Reward-Bereich verkleinern. ATR-Periode/Zeiteinheit des
+    Trendfilters bleiben fest auf dem oben im Strategie-Panel konfigurierten Wert, nur der
+    Multiplikator wird durchprobiert. Setzt außerdem voraus, dass der SuperTrend-Trendfilter oben
+    im Strategie-Panel aktiviert ist - sonst hat diese Sweep-Dimension keine Wirkung.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <button id="btn-hvd-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
   </div>
   <div id="hvd-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
@@ -3967,6 +4013,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <thead><tr>
       <th class="sortable" data-key="hvd_hull_length">Hull-Länge ⇅</th>
       <th class="sortable" data-key="hvd_risk_reward">Risk:Reward ⇅</th>
+      <th class="sortable" data-key="hvd_trend_filter_multiplier">ST-Multiplikator ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -3981,6 +4028,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <thead><tr>
       <th class="sortable" data-key="hvd_hull_length">Hull-Länge ⇅</th>
       <th class="sortable" data-key="hvd_risk_reward">Risk:Reward ⇅</th>
+      <th class="sortable" data-key="hvd_trend_filter_multiplier">ST-Multiplikator ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -5001,6 +5049,10 @@ const utbSweepRowHtml = (r) => `
 const renderUtbSweepResults = makeSortableTable('utb-sweep-results-table', () => window.utbSweepResultsData, utbSweepRowHtml);
 const renderUtbSweepWorst = makeSortableTable('utb-sweep-worst-table', () => window.utbSweepWorstData, utbSweepRowHtml);
 
+document.getElementById('hvd-sweep-st-mult-enabled').addEventListener('change', (e) => {
+  document.getElementById('hvd-sweep-st-mult-row').style.display = e.target.checked ? 'flex' : 'none';
+});
+
 document.getElementById('btn-hvd-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-hvd-sweep');
   const statusEl = document.getElementById('hvd-sweep-status');
@@ -5019,6 +5071,11 @@ document.getElementById('btn-hvd-sweep').addEventListener('click', async () => {
     exclude_top_n: parseInt(document.getElementById('hvd-sweep-exclude-top-n').value) || 0,
     config: buildConfigPayload(),
   };
+  if (document.getElementById('hvd-sweep-st-mult-enabled').checked) {
+    payload.st_mult_min = parseFloat(document.getElementById('hvd-sweep-st-mult-min').value);
+    payload.st_mult_max = parseFloat(document.getElementById('hvd-sweep-st-mult-max').value);
+    payload.st_mult_step = parseFloat(document.getElementById('hvd-sweep-st-mult-step').value);
+  }
   btn.disabled = true;
   tableEl.style.display = 'none';
   worstTableEl.style.display = 'none';
@@ -5055,6 +5112,7 @@ const hvdSweepRowHtml = (r) => `
   <tr>
     <td>${r.hvd_hull_length}</td>
     <td>${r.hvd_risk_reward}</td>
+    <td>${r.hvd_trend_filter_multiplier ?? '–'}</td>
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
@@ -5827,6 +5885,10 @@ async function refresh() {
     document.getElementById('hvd_adx_filter_length').value = data.config.hvd_adx_filter_length;
     setResolutionField('hvd_adx_filter_resolution', data.config.hvd_adx_filter_resolution);
     document.getElementById('hvd_adx_filter_threshold').value = data.config.hvd_adx_filter_threshold;
+    document.getElementById('hvd_trend_filter_enabled').value = String(data.config.hvd_trend_filter_enabled);
+    document.getElementById('hvd_trend_filter_resolution').value = data.config.hvd_trend_filter_resolution;
+    document.getElementById('hvd_trend_filter_atr_period').value = data.config.hvd_trend_filter_atr_period;
+    document.getElementById('hvd_trend_filter_multiplier').value = data.config.hvd_trend_filter_multiplier;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -6411,6 +6473,10 @@ function buildConfigPayload() {
     hvd_adx_filter_length: parseInt(document.getElementById('hvd_adx_filter_length').value),
     hvd_adx_filter_resolution: getResolutionField('hvd_adx_filter_resolution'),
     hvd_adx_filter_threshold: parseFloat(document.getElementById('hvd_adx_filter_threshold').value),
+    hvd_trend_filter_enabled: document.getElementById('hvd_trend_filter_enabled').value === 'true',
+    hvd_trend_filter_resolution: document.getElementById('hvd_trend_filter_resolution').value,
+    hvd_trend_filter_atr_period: parseInt(document.getElementById('hvd_trend_filter_atr_period').value),
+    hvd_trend_filter_multiplier: parseFloat(document.getElementById('hvd_trend_filter_multiplier').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -6744,6 +6810,7 @@ async def handle_config_update(request):
                 "hvd_sl_cooldown_seconds", "hvd_immediate_signal_enabled", "hvd_flip_exit_enabled",
                 "hvd_touch_arm_enabled", "hvd_arm_flip_exit_enabled",
                 "hvd_adx_filter_enabled", "hvd_adx_filter_length", "hvd_adx_filter_resolution", "hvd_adx_filter_threshold",
+                "hvd_trend_filter_enabled", "hvd_trend_filter_resolution", "hvd_trend_filter_atr_period", "hvd_trend_filter_multiplier",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
@@ -7013,7 +7080,15 @@ async def handle_utb_param_sweep(request):
 async def handle_hvd_sweep(request):
     """'Monte-Carlo'-Parametersweep fuer [Hoss] VWAP+RSI+Hull+DI: testet einen Bereich von
     Hull-Laenge und Risk:Reward gegeneinander (VWAP-Deviation/OBV-RSI/ADX-DI/ATR werden nur
-    einmal berechnet und fuer alle Kombinationen wiederverwendet, siehe run_hvd_sweep)."""
+    einmal berechnet und fuer alle Kombinationen wiederverwendet, siehe run_hvd_sweep).
+
+    Optionale dritte Dimension (SuperTrend-Trendfilter-Multiplikator, nach Nutzer-Vorgabe): wird
+    NUR aktiv, wenn sowohl st_mult_min als auch st_mult_max im Request-Body mitgeschickt werden -
+    sonst bleibt der Multiplikator konstant auf dem konfigurierten Wert (2D-Sweep wie bisher,
+    unveraenderte Geschwindigkeit). ACHTUNG Laufzeit: bei aktiver dritter Dimension multipliziert
+    sich die Kombinationsanzahl mit der Anzahl Multiplikator-Werte (Standard-Vorschlag 1.0-5.0 in
+    0.1-Schritten = 41 Werte) - HVD_SWEEP_MAX_COMBOS greift entsprechend strenger, ggf. Hull-/
+    Risk:Reward-Bereich verkleinern."""
     from strategies import run_hvd_sweep
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()
     if symbol not in BOTS:
@@ -7034,13 +7109,25 @@ async def handle_hvd_sweep(request):
     except (TypeError, ValueError):
         exclude_top_n = 1
 
+    st_mult_min = None
+    st_mult_max = None
+    st_mult_step = 0.1
+    if body.get("st_mult_min") not in (None, "") and body.get("st_mult_max") not in (None, ""):
+        try:
+            st_mult_min = max(0.1, float(body.get("st_mult_min")))
+            st_mult_max = max(st_mult_min, float(body.get("st_mult_max")))
+            st_mult_step = max(0.01, float(body.get("st_mult_step", 0.1)))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "Ungültige Zahlenwerte im SuperTrend-Multiplikator-Sweep-Bereich."}, status=400)
+
     cfg = dict(BOTS[symbol]["config"])
     overrides = body.get("config")
     if isinstance(overrides, dict):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
     result = await run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step,
-                                  rr_min, rr_max, rr_step, exclude_top_n)
+                                  rr_min, rr_max, rr_step, exclude_top_n,
+                                  st_mult_min, st_mult_max, st_mult_step)
     return web.json_response(result)
 
 

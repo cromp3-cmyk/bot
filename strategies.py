@@ -5143,7 +5143,8 @@ async def check_hvd_sl_tp(symbol, price):
 
 
 async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus_di_i, minus_di_i, hull_i, atr_i,
-                            arm_flip_to_short_i=False, arm_flip_to_long_i=False, adx_filter_ok_i=True):
+                            arm_flip_to_short_i=False, arm_flip_to_long_i=False, adx_filter_ok_i=True,
+                            trend_filter_long_ok_i=True, trend_filter_short_ok_i=True):
     """Kernsignal (1:1 aus dem Nutzer-Pine-Script '[Hoss] VWAP+RSI+Hull+DI System' portiert):
     Hull-Farbwechsel auf gruen + Zustand -1 (siehe compute_hvd_arm - vorher gruenes Band UND
     OBV-RSI ueberverkauft) + DI+ > DI- -> Long. Hull-Farbwechsel auf rot + Zustand 1 (vorher
@@ -5186,8 +5187,8 @@ async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus
         return
 
     direction_mode = cfg.get("hvd_direction_mode", "both")
-    long_ok = direction_mode != "short_only" and arm_i == -1 and plus_di_i > minus_di_i and adx_filter_ok_i
-    short_ok = direction_mode != "long_only" and arm_i == 1 and minus_di_i > plus_di_i and adx_filter_ok_i
+    long_ok = direction_mode != "short_only" and arm_i == -1 and plus_di_i > minus_di_i and adx_filter_ok_i and trend_filter_long_ok_i
+    short_ok = direction_mode != "long_only" and arm_i == 1 and minus_di_i > plus_di_i and adx_filter_ok_i and trend_filter_short_ok_i
 
     if long_flip_i and long_ok:
         debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: LONG @ {price}")
@@ -5295,6 +5296,39 @@ async def hvd_poll_loop(symbol):
                             else:
                                 adx_filter_ok_series = [True] * n  # Fallback, falls (noch) keine Daten
 
+                    # Optionaler uebergeordneter SuperTrend-Trendfilter (eigene, hoehere Zeiteinheit,
+                    # nach Nutzer-Vorgabe): Long nur wenn SuperTrend dort bullisch, Short nur wenn
+                    # baerisch. Gleiches "gleiche oder abweichende Zeiteinheit"-Muster wie beim
+                    # ADX-Filter oben - liefert aber ZWEI getrennte Serien (long_ok/short_ok), da
+                    # SuperTrend eine Richtung vorgibt statt nur eines generischen ok/nicht-ok.
+                    trend_filter_enabled = cfg.get("hvd_trend_filter_enabled", False)
+                    trend_filter_long_ok_series = None
+                    trend_filter_short_ok_series = None
+                    if trend_filter_enabled:
+                        tf_resolution = cfg.get("hvd_trend_filter_resolution", "15m")
+                        tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
+                        tf_multiplier = cfg.get("hvd_trend_filter_multiplier", 3.0)
+                        if tf_resolution == resolution:
+                            tf_st_line, _ = compute_diamond_supertrend(closed_h, closed_l, closed_c, tf_multiplier, tf_atr_period)
+                            trend_filter_long_ok_series = [tf_st_line[i] is not None and closed_c[i] > tf_st_line[i] for i in range(n)]
+                            trend_filter_short_ok_series = [tf_st_line[i] is not None and closed_c[i] < tf_st_line[i] for i in range(n)]
+                        else:
+                            tf_needed = min(500, tf_atr_period * 5 + 20)
+                            tf_data = await fetch_candles_binance_multi(symbol, tf_resolution, count_back=tf_needed, market_type=cfg.get("binance_market_type", "spot"))
+                            if tf_data:
+                                _, _, tf_h, tf_l, tf_c = tf_data
+                                tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
+                            else:
+                                tf_h = tf_l = tf_c = None
+                            if tf_c and len(tf_c) > tf_atr_period:
+                                tf_st_line_now, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
+                                tf_bullish_now = tf_st_line_now[-1] is not None and tf_c[-1] > tf_st_line_now[-1]
+                                trend_filter_long_ok_series = [tf_bullish_now] * n
+                                trend_filter_short_ok_series = [not tf_bullish_now] * n
+                            else:
+                                trend_filter_long_ok_series = [True] * n  # Fallback, falls (noch) keine Daten
+                                trend_filter_short_ok_series = [True] * n
+
                     st["hvd_last_hull"] = hull[-1]
                     st["hvd_last_arm"] = arm[-1]
 
@@ -5319,9 +5353,12 @@ async def hvd_poll_loop(symbol):
                         price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
                         adx_filter_ok_i = True if adx_filter_ok_series is None else adx_filter_ok_series[idx]
+                        trend_filter_long_ok_i = True if trend_filter_long_ok_series is None else trend_filter_long_ok_series[idx]
+                        trend_filter_short_ok_i = True if trend_filter_short_ok_series is None else trend_filter_short_ok_series[idx]
                         await check_hvd_signal(symbol, price_i, long_flip[idx], short_flip[idx], arm[idx],
                                                 plus_di[idx], minus_di[idx], hull[idx], atr[idx],
-                                                arm_flip_to_short[idx], arm_flip_to_long[idx], adx_filter_ok_i)
+                                                arm_flip_to_short[idx], arm_flip_to_long[idx], adx_filter_ok_i,
+                                                trend_filter_long_ok_i, trend_filter_short_ok_i)
 
                     await check_hvd_sl_tp(symbol, price)
 
@@ -5348,10 +5385,13 @@ async def hvd_poll_loop(symbol):
                             # der eigentliche Zweck dieser Option.
                             _adx_probe, plus_di_probe, minus_di_probe = compute_adx(probe_h, probe_l, probe_c, adx_length)
                             frozen_adx_filter_ok = True if adx_filter_ok_series is None else adx_filter_ok_series[-1]
+                            frozen_trend_filter_long_ok = True if trend_filter_long_ok_series is None else trend_filter_long_ok_series[-1]
+                            frozen_trend_filter_short_ok = True if trend_filter_short_ok_series is None else trend_filter_short_ok_series[-1]
                             await check_hvd_signal(symbol, live_price, probe_long_flip[probe_idx], probe_short_flip[probe_idx],
                                                     st.get("hvd_last_arm", 0), plus_di_probe[probe_idx], minus_di_probe[probe_idx],
                                                     probe_hull[probe_idx], atr[-1] if atr else None,
-                                                    False, False, frozen_adx_filter_ok)
+                                                    False, False, frozen_adx_filter_ok,
+                                                    frozen_trend_filter_long_ok, frozen_trend_filter_short_ok)
                             await check_hvd_sl_tp(symbol, live_price)
                 elif due_heartbeat:
                     last_heartbeat = now
@@ -5365,7 +5405,7 @@ async def hvd_poll_loop(symbol):
 def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
                           margin, leverage, direction_mode, atr_min_mult, risk_reward, sl_cooldown_ms, warmup,
                           flip_exit_enabled=False, arm_flip_exit_enabled=False, arm_flip_to_short=None, arm_flip_to_long=None,
-                          adx_filter_ok=None):
+                          adx_filter_ok=None, trend_filter_long_ok=None, trend_filter_short_ok=None):
     """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp - identische Logik, siehe dort fuer
     Kommentare. Von backtest_hvd_signal UND run_hvd_sweep genutzt (wie _simulate_mo7_trades bei
     MO7), damit der Sweep nicht Hull/VWAP/OBV-RSI/DI/ATR-unabhaengige Berechnungen dupliziert.
@@ -5414,8 +5454,10 @@ def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di,
             if in_cooldown:
                 continue
             filter_ok = adx_filter_ok is None or adx_filter_ok[i]
-            long_ok = direction_mode != "short_only" and arm[i] == -1 and plus_di[i] > minus_di[i] and filter_ok
-            short_ok = direction_mode != "long_only" and arm[i] == 1 and minus_di[i] > plus_di[i] and filter_ok
+            trend_long_ok = trend_filter_long_ok is None or trend_filter_long_ok[i]
+            trend_short_ok = trend_filter_short_ok is None or trend_filter_short_ok[i]
+            long_ok = direction_mode != "short_only" and arm[i] == -1 and plus_di[i] > minus_di[i] and filter_ok and trend_long_ok
+            short_ok = direction_mode != "long_only" and arm[i] == 1 and minus_di[i] > plus_di[i] and filter_ok and trend_short_ok
             if long_flip[i] and long_ok:
                 sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "long", price, atr_min_mult, risk_reward)
                 if sl_price is not None:
@@ -5433,7 +5475,7 @@ def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di,
     return trades
 
 
-def backtest_hvd_signal(candles, cfg, adx_filter_ok=None):
+def backtest_hvd_signal(candles, cfg, adx_filter_ok=None, trend_filter_long_ok=None, trend_filter_short_ok=None):
     """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp/hvd_poll_loop. 'candles' ist hier
     (anders als die generische BACKTEST_FUNCS-Signatur) ein 6er-Tupel MIT Volumen (ts,o,h,l,c,v)
     wie bei MO7/Maverick Edge, deshalb in run_backtest als Sonderfall behandelt statt ueber den
@@ -5484,23 +5526,47 @@ def backtest_hvd_signal(candles, cfg, adx_filter_ok=None):
             adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx]
         # Bei ABWEICHENDER Zeiteinheit wird adx_filter_ok von run_backtest (async) uebergeben.
 
+    if trend_filter_long_ok is None and cfg.get("hvd_trend_filter_enabled", False):
+        tf_resolution = cfg.get("hvd_trend_filter_resolution", "15m")
+        if tf_resolution in (None, "", "same") or tf_resolution == cfg.get("hvd_resolution", "1m"):
+            tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
+            tf_multiplier = cfg.get("hvd_trend_filter_multiplier", 3.0)
+            tf_st_line, _ = compute_diamond_supertrend(h, l, c, tf_multiplier, tf_atr_period)
+            trend_filter_long_ok = [tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(n)]
+            trend_filter_short_ok = [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(n)]
+        # Bei ABWEICHENDER Zeiteinheit wird trend_filter_long_ok/short_ok von run_backtest (async) uebergeben.
+
     warmup = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 5
     return _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
                                  cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, risk_reward,
                                  sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
-                                 arm_flip_to_short, arm_flip_to_long, adx_filter_ok)
+                                 arm_flip_to_short, arm_flip_to_long, adx_filter_ok,
+                                 trend_filter_long_ok, trend_filter_short_ok)
 
 
 HVD_SWEEP_MAX_COMBOS = 500
 HVD_SWEEP_MIN_RELIABLE_TRADES = 5
 
 
-async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min, rr_max, rr_step, exclude_top_n=1):
+async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min, rr_max, rr_step, exclude_top_n=1,
+                         st_mult_min=None, st_mult_max=None, st_mult_step=0.1):
     """'Monte-Carlo'-Parametersweep fuer '[Hoss] VWAP+RSI+Hull+DI' (Nutzer-Vorgabe): testet einen
     Bereich von Hull-Laenge und Risk:Reward gegeneinander. VWAP-Deviation/OBV-RSI/ADX-DI/ATR
     haengen NICHT von der Hull-Laenge ab und werden nur EINMAL berechnet und fuer alle
     Kombinationen wiederverwendet (wie der MO7-Score bei run_mo7_sum_sweep) - nur die Hull-Linie
-    selbst und die Trade-Simulation (_simulate_hvd_trades) laufen pro Kombination neu."""
+    selbst und die Trade-Simulation (_simulate_hvd_trades) laufen pro Kombination neu.
+
+    st_mult_min/st_mult_max (nach Nutzer-Vorgabe, optional, dritte Sweep-Dimension): testet
+    zusaetzlich den SuperTrend-Trendfilter-Multiplikator ueber einen Bereich (Standard-Vorschlag
+    1.0 bis 5.0 in 0.1-Schritten - NICHT automatisch aktiv, siehe handle_hvd_sweep). ATR-Periode/
+    Zeiteinheit des Trendfilters bleiben dabei FEST auf dem konfigurierten Wert (cfg), nur der
+    Multiplikator wird durchprobiert - haelt die Kombinationsanzahl im Rahmen. Beide Parameter
+    None (Standard) = Trendfilter-Multiplikator NICHT als Sweep-Dimension, bleibt konstant auf
+    cfg-Wert (2D-Sweep wie bisher, unveraenderte Geschwindigkeit). Wichtig fuer die Performance:
+    der SuperTrend-Trendfilter haengt NICHT von Hull-Laenge/Risk:Reward ab, wird also pro
+    Multiplikator-Wert nur EINMAL berechnet (nicht pro hull*rr-Kombination) - die Simulation
+    selbst (_simulate_hvd_trades) laeuft aber pro vollstaendiger (hull, rr, multiplier)-
+    Kombination, die Gesamtlaufzeit skaliert also MIT der Anzahl Multiplikator-Werte."""
     max_candles = BACKTEST_MAX_CANDLES.get("hvd_signal", 100_000)
     resolution = cfg.get("hvd_resolution", "1m")
     candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
@@ -5520,11 +5586,22 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
                                if rr_min + i * rr_step <= rr_max + 1e-9))
     risk_rewards = [x for x in risk_rewards if x > 0]
 
-    total_combos = len(hull_lengths) * len(risk_rewards)
+    sweep_st_mult = st_mult_min is not None and st_mult_max is not None
+    if sweep_st_mult:
+        st_multipliers = sorted(set(round(st_mult_min + i * st_mult_step, 2)
+                                     for i in range(int((st_mult_max - st_mult_min) / max(st_mult_step, 1e-9)) + 1)
+                                     if st_mult_min + i * st_mult_step <= st_mult_max + 1e-9))
+        st_multipliers = [x for x in st_multipliers if x > 0]
+        if not st_multipliers:
+            return {"error": "Der eingestellte SuperTrend-Multiplikator-Bereich ergibt keine gültigen Werte."}
+    else:
+        st_multipliers = [cfg.get("hvd_trend_filter_multiplier", 3.0)]  # konstant, keine echte Sweep-Dimension
+
+    total_combos = len(hull_lengths) * len(risk_rewards) * len(st_multipliers)
     if total_combos == 0:
         return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
     if total_combos > HVD_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {HVD_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {HVD_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern (bei aktivem SuperTrend-Multiplikator-Sweep zusätzlich dessen Bereich verkleinern oder Hull-/Risk:Reward-Bereich verkleinern)."}
 
     vwap_length = cfg.get("hvd_vwap_length", 60)
     vwap_dev_mult = cfg.get("hvd_vwap_dev_mult", 2.0)
@@ -5567,6 +5644,36 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
             filter_adx_aligned = _align_htf_series(ts, ft_ts, filter_adx_htf)
             adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx_aligned]
 
+    # SuperTrend-Trendfilter: nur EINMAL PRO MULTIPLIKATOR-WERT berechnet (nicht pro hull/rr-
+    # Kombination), da er weder von der Hull-Laenge noch von Risk:Reward abhaengt. Bei
+    # deaktiviertem Filter bzw. wenn der Multiplikator nicht als Sweep-Dimension laeuft, gibt es
+    # nur einen einzigen Eintrag in trend_filter_by_mult (Schluessel = st_multipliers[0]).
+    trend_filter_by_mult = {}
+    if cfg.get("hvd_trend_filter_enabled", False):
+        tf_resolution = cfg.get("hvd_trend_filter_resolution", "15m")
+        tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
+        tf_same_resolution = tf_resolution in (None, "", "same") or tf_resolution == resolution
+        tf_candles_h = tf_candles_l = tf_candles_c = tf_candles_ts = None
+        if not tf_same_resolution:
+            tf_candles, tf_err, _ = await _fetch_cached_backtest_candles(symbol, tf_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+            if tf_err:
+                return {"error": f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {tf_err}"}
+            if not tf_candles or len(tf_candles[4]) < tf_atr_period + 5:
+                return {"error": f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."}
+            tf_candles_ts, _tf_o, tf_candles_h, tf_candles_l, tf_candles_c = tf_candles
+        for st_mult in st_multipliers:
+            if tf_same_resolution:
+                tf_st_line, _ = compute_diamond_supertrend(h, l, c, st_mult, tf_atr_period)
+                tf_long_ok = [tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(n)]
+                tf_short_ok = [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(n)]
+            else:
+                tf_st_line, _ = compute_diamond_supertrend(tf_candles_h, tf_candles_l, tf_candles_c, st_mult, tf_atr_period)
+                tf_bullish = [tf_st_line[i] is not None and tf_candles_c[i] > tf_st_line[i] for i in range(len(tf_candles_c))]
+                tf_bullish_aligned = _align_htf_series(ts, tf_candles_ts, tf_bullish)
+                tf_long_ok = [bool(v) for v in tf_bullish_aligned]
+                tf_short_ok = [v is not None and not v for v in tf_bullish_aligned]
+            trend_filter_by_mult[st_mult] = (tf_long_ok, tf_short_ok)
+
     results = []
     for hull_length in hull_lengths:
         hull = compute_hull_ma(c, hull_length)
@@ -5579,12 +5686,18 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
         warmup = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 5
 
         for rr in risk_rewards:
-            trades = _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
-                                           cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, rr,
-                                           sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
-                                           arm_flip_to_short, arm_flip_to_long, adx_filter_ok)
-            stats = summarize_backtest_trades(trades, exclude_top_n)
-            results.append({"hvd_hull_length": hull_length, "hvd_risk_reward": rr, **stats})
+            for st_mult in st_multipliers:
+                tf_long_ok, tf_short_ok = trend_filter_by_mult.get(st_mult, (None, None))
+                trades = _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
+                                               cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, rr,
+                                               sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
+                                               arm_flip_to_short, arm_flip_to_long, adx_filter_ok,
+                                               tf_long_ok, tf_short_ok)
+                stats = summarize_backtest_trades(trades, exclude_top_n)
+                row = {"hvd_hull_length": hull_length, "hvd_risk_reward": rr, **stats}
+                if sweep_st_mult:
+                    row["hvd_trend_filter_multiplier"] = st_mult
+                results.append(row)
 
     best_sorted = sorted(results, key=lambda r: (r["trades"] >= HVD_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
     worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
@@ -10534,7 +10647,28 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
                 adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx_aligned]
             # Bei gleicher Zeiteinheit: bleibt None, backtest_hvd_signal berechnet es selbst intern.
 
-        trades = backtest_hvd_signal(candles, cfg, adx_filter_ok=adx_filter_ok)
+        trend_filter_long_ok = None
+        trend_filter_short_ok = None
+        if cfg.get("hvd_trend_filter_enabled", False):
+            tf_resolution = cfg.get("hvd_trend_filter_resolution", "15m")
+            tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
+            tf_multiplier = cfg.get("hvd_trend_filter_multiplier", 3.0)
+            if not (tf_resolution in (None, "", "same") or tf_resolution == resolution):
+                tf_candles, tf_err, _ = await _fetch_cached_backtest_candles(symbol, tf_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+                if tf_err:
+                    return {"error": f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {tf_err}"}
+                if not tf_candles or len(tf_candles[4]) < tf_atr_period + 5:
+                    return {"error": f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."}
+                tf_ts, tf_o, tf_h, tf_l, tf_c = tf_candles
+                tf_st_line, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
+                tf_bullish = [tf_st_line[i] is not None and tf_c[i] > tf_st_line[i] for i in range(len(tf_c))]
+                tf_bullish_aligned = _align_htf_series(candles[0], tf_ts, tf_bullish)
+                trend_filter_long_ok = [bool(v) for v in tf_bullish_aligned]
+                trend_filter_short_ok = [v is not None and not v for v in tf_bullish_aligned]
+            # Bei gleicher Zeiteinheit: bleibt None, backtest_hvd_signal berechnet es selbst intern.
+
+        trades = backtest_hvd_signal(candles, cfg, adx_filter_ok=adx_filter_ok,
+                                      trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok)
         stats = summarize_backtest_trades(trades, exclude_top_n)
         stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
         stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
