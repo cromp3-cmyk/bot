@@ -644,6 +644,7 @@ def default_config():
         "hvd_trend_filter_resolution": os.getenv("HVD_TREND_FILTER_RESOLUTION", "15m"),  # "1m" | "2m" | "5m" | "15m" | "1h"
         "hvd_trend_filter_atr_period": int(os.getenv("HVD_TREND_FILTER_ATR_PERIOD", "10")),
         "hvd_trend_filter_multiplier": float(os.getenv("HVD_TREND_FILTER_MULTIPLIER", "3.0")),
+        "hvd_trend_filter_signal_window_candles": int(os.getenv("HVD_TREND_FILTER_SIGNAL_WINDOW_CANDLES", "10")),  # Signal wartet bis zu X Kerzen auf SuperTrend-Bestaetigung, statt sofort zu verfallen (0 = aus, muss exakt zusammenfallen wie bisher)
     }
 
 
@@ -3393,6 +3394,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter ATR-Periode</label><input type="number" step="1" min="1" id="hvd_trend_filter_atr_period"></div>
   <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter Multiplikator</label><input type="number" step="0.1" min="0.1" id="hvd_trend_filter_multiplier"></div>
+  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Signal-Wartefenster (Kerzen, 0 = muss exakt zusammenfallen)</label><input type="number" step="1" min="0" id="hvd_trend_filter_signal_window_candles"></div>
+  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    Bestätigt der SuperTrend-Trendfilter ein Hull+DI-Signal nicht SOFORT auf derselben Kerze,
+    verfällt es bei 0 sofort. Größer als 0: das Signal "wartet" bis zu so viele Kerzen auf eine
+    SuperTrend-Bestätigung in dieselbe Richtung - kommt sie rechtzeitig, wird dann erst eingestiegen
+    (zum dann aktuellen Kurs). Ein neues Gegensignal während der Wartezeit ersetzt das alte.
+  </div>
 
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
@@ -5889,6 +5897,7 @@ async function refresh() {
     document.getElementById('hvd_trend_filter_resolution').value = data.config.hvd_trend_filter_resolution;
     document.getElementById('hvd_trend_filter_atr_period').value = data.config.hvd_trend_filter_atr_period;
     document.getElementById('hvd_trend_filter_multiplier').value = data.config.hvd_trend_filter_multiplier;
+    document.getElementById('hvd_trend_filter_signal_window_candles').value = data.config.hvd_trend_filter_signal_window_candles;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -6477,6 +6486,7 @@ function buildConfigPayload() {
     hvd_trend_filter_resolution: document.getElementById('hvd_trend_filter_resolution').value,
     hvd_trend_filter_atr_period: parseInt(document.getElementById('hvd_trend_filter_atr_period').value),
     hvd_trend_filter_multiplier: parseFloat(document.getElementById('hvd_trend_filter_multiplier').value),
+    hvd_trend_filter_signal_window_candles: parseInt(document.getElementById('hvd_trend_filter_signal_window_candles').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -6811,6 +6821,7 @@ async def handle_config_update(request):
                 "hvd_touch_arm_enabled", "hvd_arm_flip_exit_enabled",
                 "hvd_adx_filter_enabled", "hvd_adx_filter_length", "hvd_adx_filter_resolution", "hvd_adx_filter_threshold",
                 "hvd_trend_filter_enabled", "hvd_trend_filter_resolution", "hvd_trend_filter_atr_period", "hvd_trend_filter_multiplier",
+                "hvd_trend_filter_signal_window_candles",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]

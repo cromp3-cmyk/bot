@@ -5144,7 +5144,7 @@ async def check_hvd_sl_tp(symbol, price):
 
 async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus_di_i, minus_di_i, hull_i, atr_i,
                             arm_flip_to_short_i=False, arm_flip_to_long_i=False, adx_filter_ok_i=True,
-                            trend_filter_long_ok_i=True, trend_filter_short_ok_i=True):
+                            trend_filter_long_ok_i=True, trend_filter_short_ok_i=True, candle_index=None):
     """Kernsignal (1:1 aus dem Nutzer-Pine-Script '[Hoss] VWAP+RSI+Hull+DI System' portiert):
     Hull-Farbwechsel auf gruen + Zustand -1 (siehe compute_hvd_arm - vorher gruenes Band UND
     OBV-RSI ueberverkauft) + DI+ > DI- -> Long. Hull-Farbwechsel auf rot + Zustand 1 (vorher
@@ -5163,7 +5163,19 @@ async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus
       Richtung, siehe _hvd_arm_flip_series), wird sofort glatt gestellt - unabhaengig vom
       Hull-Farbwechsel. Ist z.B. eine Short-Position offen und der Arm kippt gerade neu auf
       Long-Konfirmation (gruenes Band + OBV-RSI ueberverkauft im selben Zyklus), wird die Short-
-      Position sofort beendet - und symmetrisch andersrum bei einer offenen Long-Position."""
+      Position sofort beendet - und symmetrisch andersrum bei einer offenen Long-Position.
+
+    hvd_trend_filter_signal_window_candles (nach Nutzer-Vorgabe, nur relevant bei aktivem
+    hvd_trend_filter_enabled): bestaetigt der SuperTrend-Trendfilter ein Hull+DI-Signal nicht
+    SOFORT auf derselben Kerze, verfaellt es bei 0 (Standard-Verhalten wie bisher) sofort. Bei
+    einem Wert > 0 wird das Signal stattdessen als 'ausstehend' gemerkt (st['hvd_pending_signal'])
+    und bei jeder folgenden Kerze erneut geprueft, ob der Trendfilter jetzt (innerhalb des
+    Fensters) die passende Richtung bestaetigt - dann wird ERST JETZT eingestiegen, zum dann
+    aktuellen Kurs/Hull/ATR (nicht rueckwirkend zur urspruenglichen Signalkerze). Ein neues
+    Gegensignal waehrend der Wartezeit ersetzt das alte ausstehende Signal. candle_index (noetig
+    fuer die Fensterberechnung) ist bei hvd_poll_loop der laufende Kerzenindex - bei der 'Sofort
+    ausloesen'-Live-Probe (noch nicht abgeschlossene Kerze) wird ein STABILER Index fuer die
+    gesamte Dauer dieser einen Kerze uebergeben (kein neuer Indexschritt pro Poll-Durchlauf)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -5187,19 +5199,46 @@ async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus
         return
 
     direction_mode = cfg.get("hvd_direction_mode", "both")
-    long_ok = direction_mode != "short_only" and arm_i == -1 and plus_di_i > minus_di_i and adx_filter_ok_i and trend_filter_long_ok_i
-    short_ok = direction_mode != "long_only" and arm_i == 1 and minus_di_i > plus_di_i and adx_filter_ok_i and trend_filter_short_ok_i
+    signal_window = cfg.get("hvd_trend_filter_signal_window_candles", 10)
 
-    if long_flip_i and long_ok:
-        debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: LONG @ {price}")
-        await execute_entry(symbol, "long", price, is_add_on=False)
-        if st["position"] is not None:
-            _hvd_set_sl_tp(st, cfg, "long", price, hull_i, atr_i)
-    elif short_flip_i and short_ok:
-        debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: SHORT @ {price}")
-        await execute_entry(symbol, "short", price, is_add_on=False)
-        if st["position"] is not None:
-            _hvd_set_sl_tp(st, cfg, "short", price, hull_i, atr_i)
+    # Zuerst: gibt es ein ausstehendes Signal, das JETZT durch den Trendfilter bestaetigt wird?
+    pending = st.get("hvd_pending_signal")
+    if pending and candle_index is not None:
+        age = candle_index - pending["candle_index"]
+        if age > signal_window:
+            st["hvd_pending_signal"] = None  # Fenster abgelaufen, verfaellt ohne Einstieg
+        else:
+            p_dir = pending["direction"]
+            confirmed = (p_dir == "long" and trend_filter_long_ok_i) or (p_dir == "short" and trend_filter_short_ok_i)
+            if confirmed:
+                debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg (verzögert bestätigt nach {age} Kerze(n)): {p_dir.upper()} @ {price}")
+                await execute_entry(symbol, p_dir, price, is_add_on=False)
+                if st["position"] is not None:
+                    _hvd_set_sl_tp(st, cfg, p_dir, price, hull_i, atr_i)
+                st["hvd_pending_signal"] = None
+                return
+
+    long_ok_base = direction_mode != "short_only" and arm_i == -1 and plus_di_i > minus_di_i and adx_filter_ok_i
+    short_ok_base = direction_mode != "long_only" and arm_i == 1 and minus_di_i > plus_di_i and adx_filter_ok_i
+
+    if long_flip_i and long_ok_base:
+        if trend_filter_long_ok_i:
+            debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: LONG @ {price}")
+            await execute_entry(symbol, "long", price, is_add_on=False)
+            if st["position"] is not None:
+                _hvd_set_sl_tp(st, cfg, "long", price, hull_i, atr_i)
+        elif signal_window > 0 and candle_index is not None:
+            st["hvd_pending_signal"] = {"direction": "long", "candle_index": candle_index}
+            debug_log(f"⏳ [{symbol}] Hoss VWAP+RSI+Hull+DI Signal LONG wartet auf SuperTrend-Bestätigung (max. {signal_window} Kerzen)")
+    elif short_flip_i and short_ok_base:
+        if trend_filter_short_ok_i:
+            debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: SHORT @ {price}")
+            await execute_entry(symbol, "short", price, is_add_on=False)
+            if st["position"] is not None:
+                _hvd_set_sl_tp(st, cfg, "short", price, hull_i, atr_i)
+        elif signal_window > 0 and candle_index is not None:
+            st["hvd_pending_signal"] = {"direction": "short", "candle_index": candle_index}
+            debug_log(f"⏳ [{symbol}] Hoss VWAP+RSI+Hull+DI Signal SHORT wartet auf SuperTrend-Bestätigung (max. {signal_window} Kerzen)")
 
 
 async def hvd_poll_loop(symbol):
@@ -5358,7 +5397,7 @@ async def hvd_poll_loop(symbol):
                         await check_hvd_signal(symbol, price_i, long_flip[idx], short_flip[idx], arm[idx],
                                                 plus_di[idx], minus_di[idx], hull[idx], atr[idx],
                                                 arm_flip_to_short[idx], arm_flip_to_long[idx], adx_filter_ok_i,
-                                                trend_filter_long_ok_i, trend_filter_short_ok_i)
+                                                trend_filter_long_ok_i, trend_filter_short_ok_i, candle_index=idx)
 
                     await check_hvd_sl_tp(symbol, price)
 
@@ -5391,7 +5430,8 @@ async def hvd_poll_loop(symbol):
                                                     st.get("hvd_last_arm", 0), plus_di_probe[probe_idx], minus_di_probe[probe_idx],
                                                     probe_hull[probe_idx], atr[-1] if atr else None,
                                                     False, False, frozen_adx_filter_ok,
-                                                    frozen_trend_filter_long_ok, frozen_trend_filter_short_ok)
+                                                    frozen_trend_filter_long_ok, frozen_trend_filter_short_ok,
+                                                    candle_index=len(closed_ts))
                             await check_hvd_sl_tp(symbol, live_price)
                 elif due_heartbeat:
                     last_heartbeat = now
@@ -5405,7 +5445,7 @@ async def hvd_poll_loop(symbol):
 def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
                           margin, leverage, direction_mode, atr_min_mult, risk_reward, sl_cooldown_ms, warmup,
                           flip_exit_enabled=False, arm_flip_exit_enabled=False, arm_flip_to_short=None, arm_flip_to_long=None,
-                          adx_filter_ok=None, trend_filter_long_ok=None, trend_filter_short_ok=None):
+                          adx_filter_ok=None, trend_filter_long_ok=None, trend_filter_short_ok=None, signal_window=0):
     """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp - identische Logik, siehe dort fuer
     Kommentare. Von backtest_hvd_signal UND run_hvd_sweep genutzt (wie _simulate_mo7_trades bei
     MO7), damit der Sweep nicht Hull/VWAP/OBV-RSI/DI/ATR-unabhaengige Berechnungen dupliziert.
@@ -5417,11 +5457,16 @@ def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di,
     Hull-Farbwechsel. adx_filter_ok (nach Nutzer-Vorgabe, optional): Liste - True/False pro Kerze,
     ob der zusaetzliche Seitwaerts-Filter (eigener ADX-Wert ueber Schwelle, siehe
     hvd_adx_filter_enabled) einen Einstieg an dieser Stelle erlaubt; None = Filter aus (alles
-    erlaubt). Beide Exits siehe check_hvd_signal fuer identische Live-Logik."""
+    erlaubt). signal_window (nach Nutzer-Vorgabe, nur relevant bei gesetztem trend_filter_long_ok/
+    trend_filter_short_ok): siehe check_hvd_signal - 0 = Signal muss exakt mit dem Trendfilter
+    zusammenfallen (wie bisher), > 0 = Signal 'wartet' bis zu so viele Kerzen auf eine
+    Trendfilter-Bestaetigung, bevor es verfaellt. Beide Exits siehe check_hvd_signal fuer
+    identische Live-Logik."""
     n = len(c)
     position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
     trades = []
     sl_cooldown_until_ts = None
+    pending_signal = None  # {"dir", "signal_i"}
 
     for i in range(warmup, n):
         price = c[i]
@@ -5456,18 +5501,41 @@ def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di,
             filter_ok = adx_filter_ok is None or adx_filter_ok[i]
             trend_long_ok = trend_filter_long_ok is None or trend_filter_long_ok[i]
             trend_short_ok = trend_filter_short_ok is None or trend_filter_short_ok[i]
-            long_ok = direction_mode != "short_only" and arm[i] == -1 and plus_di[i] > minus_di[i] and filter_ok and trend_long_ok
-            short_ok = direction_mode != "long_only" and arm[i] == 1 and minus_di[i] > plus_di[i] and filter_ok and trend_short_ok
+
+            # Ausstehendes Signal: wird JETZT vom Trendfilter bestaetigt?
+            if pending_signal is not None:
+                age = i - pending_signal["signal_i"]
+                if age > signal_window:
+                    pending_signal = None
+                else:
+                    p_dir = pending_signal["dir"]
+                    confirmed = (p_dir == "long" and trend_long_ok) or (p_dir == "short" and trend_short_ok)
+                    if confirmed:
+                        sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], p_dir, price, atr_min_mult, risk_reward)
+                        if sl_price is not None:
+                            size = (margin * leverage) / price
+                            position = {"dir": p_dir, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+                        pending_signal = None
+                        continue
+
+            long_ok = direction_mode != "short_only" and arm[i] == -1 and plus_di[i] > minus_di[i] and filter_ok
+            short_ok = direction_mode != "long_only" and arm[i] == 1 and minus_di[i] > plus_di[i] and filter_ok
             if long_flip[i] and long_ok:
-                sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "long", price, atr_min_mult, risk_reward)
-                if sl_price is not None:
-                    size = (margin * leverage) / price
-                    position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+                if trend_long_ok:
+                    sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "long", price, atr_min_mult, risk_reward)
+                    if sl_price is not None:
+                        size = (margin * leverage) / price
+                        position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+                elif signal_window > 0:
+                    pending_signal = {"dir": "long", "signal_i": i}
             elif short_flip[i] and short_ok:
-                sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "short", price, atr_min_mult, risk_reward)
-                if sl_price is not None:
-                    size = (margin * leverage) / price
-                    position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+                if trend_short_ok:
+                    sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "short", price, atr_min_mult, risk_reward)
+                    if sl_price is not None:
+                        size = (margin * leverage) / price
+                        position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
+                elif signal_window > 0:
+                    pending_signal = {"dir": "short", "signal_i": i}
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
@@ -5541,7 +5609,8 @@ def backtest_hvd_signal(candles, cfg, adx_filter_ok=None, trend_filter_long_ok=N
                                  cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, risk_reward,
                                  sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
                                  arm_flip_to_short, arm_flip_to_long, adx_filter_ok,
-                                 trend_filter_long_ok, trend_filter_short_ok)
+                                 trend_filter_long_ok, trend_filter_short_ok,
+                                 cfg.get("hvd_trend_filter_signal_window_candles", 10))
 
 
 HVD_SWEEP_MAX_COMBOS = 500
@@ -5692,7 +5761,8 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
                                                cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, rr,
                                                sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
                                                arm_flip_to_short, arm_flip_to_long, adx_filter_ok,
-                                               tf_long_ok, tf_short_ok)
+                                               tf_long_ok, tf_short_ok,
+                                               cfg.get("hvd_trend_filter_signal_window_candles", 10))
                 stats = summarize_backtest_trades(trades, exclude_top_n)
                 row = {"hvd_hull_length": hull_length, "hvd_risk_reward": rr, **stats}
                 if sweep_st_mult:
