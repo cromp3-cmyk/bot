@@ -337,7 +337,7 @@ def default_config():
         # TP1/TP2 = echte Teilverkaeufe (Original zeichnet nur Linien), beide Prozentsaetze
         # sowie die zwei SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) einzeln
         # abschaltbar:
-        "ab_resolution": os.getenv("AB_RESOLUTION", "5m"),
+        "ab_resolution": os.getenv("AB_RESOLUTION", "1m"),
         "ab_preset": os.getenv("AB_PRESET", "intraday"),  # scalping/intraday/swing/custom
         "ab_lookback": int(os.getenv("AB_LOOKBACK", "20")),
         "ab_fast_len": int(os.getenv("AB_FAST_LEN", "20")),

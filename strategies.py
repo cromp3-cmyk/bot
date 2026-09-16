@@ -1802,6 +1802,35 @@ async def ab_poll_loop(symbol):
                 now = time.time()
                 due_heartbeat = now - last_heartbeat > 300
 
+                # SL/TP-Pruefung ist bewusst NICHT vom Kerzen-Abruf abhaengig: sie braucht nur den
+                # aktuellen Live-Tick-Preis (st["last_price"], kommt per WS unabhaengig von diesem
+                # Loop rein). So wird der SL auch dann weiter alle ~5s geprueft, wenn die Kerzen-
+                # Abfrage gerade fehlschlaegt oder ein Binance-Rate-Limit aktiv ist - vorher haengte
+                # die SL-Pruefung am erfolgreichen Kerzen-Fetch und blieb waehrend eines Banns
+                # komplett aus, wodurch der SL erst mit der Verzoegerung des Banns griff.
+                if st["position"] is not None and st["last_price"] is not None:
+                    await check_ab_sl_tp(symbol, st["last_price"])
+
+                if closed_ts and len(closed_c) > min_needed:
+                    # Zwei Plausibilitaets-Checks gegen kaputte/veraltete Kerzendaten (z.B. durch eine
+                    # abgeschnittene oder aus dem Cache wiederverwendete REST-Antwort waehrend eines
+                    # Binance-Rate-Limits): (1) die letzte Kerze darf zeitlich nicht zu alt sein -
+                    # das faengt "haengengebliebene" Daten ab, auch wenn deren Preis zufaellig nah am
+                    # aktuellen Kurs liegt; (2) grobe Preis-Ausreisser als zusaetzliches Sicherheitsnetz.
+                    candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
+                    max_age_seconds = 300  # grosszuegig fuer alle hier ueblichen Aufloesungen (10s-1h)
+                    if candle_age_seconds > max_age_seconds:
+                        debug_log(f"⚠️ [{symbol}] Al-Shatri Breakout: letzte Kerze wirkt veraltet "
+                                  f"({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
+                        closed_ts = None
+                    elif st["last_price"] is not None and closed_c[-1]:
+                        deviation_pct = abs(closed_c[-1] - st["last_price"]) / st["last_price"] * 100
+                        if deviation_pct > 2.0:
+                            debug_log(f"⚠️ [{symbol}] Al-Shatri Breakout: Kerzendaten wirken unplausibel "
+                                      f"(letzte Kerze {closed_c[-1]} vs. Live-Preis {st['last_price']}, "
+                                      f"{round(deviation_pct, 2)}% Abweichung) - überspringe Signal-Berechnung diesen Durchlauf.")
+                            closed_ts = None
+
                 if closed_ts and len(closed_c) > min_needed:
                     signal_key = closed_ts[-1]
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
@@ -1831,8 +1860,6 @@ async def ab_poll_loop(symbol):
                         price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
                         await check_ab_entry(symbol, buy_signal, sell_signal, price_i, atr[idx])
-
-                    await check_ab_sl_tp(symbol, price)
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -11052,7 +11079,11 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
 
     if entry_mode == "ab_breakout":
         max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
-        resolution = cfg.get("ab_resolution", "5m")
+        resolution = cfg.get("ab_resolution", "15s")
+        if resolution in SUB_MINUTE_RESOLUTIONS:
+            # Sekunden-Aufloesungen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
+            # Obergrenze bewusst strenger, wie bei allen anderen Sub-Minuten-faehigen Strategien.
+            max_candles = min(max_candles, 5000)
         candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
         if err:
             return {"error": err}
