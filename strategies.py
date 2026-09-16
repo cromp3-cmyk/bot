@@ -1890,11 +1890,16 @@ async def ab_poll_loop(symbol):
                     if last_processed_ts is None:
                         new_indices = [len(closed_ts) - 1]
                     else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
+                        # Numerischer Zeitstempel-Vergleich statt .index()-Lookup: findet zuverlaessig
+                        # alle Kerzen NEUER als die zuletzt verarbeitete, auch wenn deren exakter
+                        # Zeitstempel gerade aus dem geholten Fenster gerutscht ist (z.B. nach einem
+                        # uebersprungenen Durchlauf durch die Plausibilitaets-Checks oben). Der alte
+                        # ".index()"-Ansatz fiel in so einem Fall auf "immer nur die neueste Kerze"
+                        # zurueck - OHNE zu pruefen, ob genau diese Kerze schon verarbeitet wurde. War
+                        # der urspruengliche Einstiegsversuch fehlgeschlagen (Position blieb leer),
+                        # wurde dieselbe (laengst abgeschlossene) Kerze dadurch immer wieder als "neu"
+                        # gewertet und das Signal wiederholt ausgeloest - die "Phantom-Signale".
+                        new_indices = [idx for idx in range(len(closed_ts)) if closed_ts[idx] > last_processed_ts]
 
                     for idx in new_indices:
                         if idx < 1:
