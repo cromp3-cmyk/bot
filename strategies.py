@@ -1688,6 +1688,11 @@ async def check_ab_sl_tp(symbol, price):
             _ab_reset_state(st)
             return
 
+    # TP1/TP2 faellt bewusst OHNE Return direkt zur naechsten Stufe durch, falls der Kurs seit dem
+    # letzten Check (alle ~5s live, oder innerhalb einer Kerze im Backtest) so weit gesprungen ist,
+    # dass mehrere Ziele auf einmal erreicht wurden - vorher wurde pro Aufruf nur EINE Stufe
+    # verarbeitet, wodurch eine uebersprungene Stufe (z.B. TP2) nie nachgeholt wurde, wenn der Kurs
+    # bis zum naechsten Check schon wieder zurueckgelaufen war.
     if not st.get("ab_tp1_done") and st.get("ab_tp1_price") is not None:
         tp1_price = st["ab_tp1_price"]
         if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
@@ -1700,7 +1705,10 @@ async def check_ab_sl_tp(symbol, price):
                     debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'],4)}) gesetzt")
                 else:
                     debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
-        return
+            else:
+                return  # Teilverkauf fehlgeschlagen - nicht so tun als waere TP1 schon durch
+        else:
+            return  # TP1 noch nicht erreicht -> TP2/TP3 koennen es dann erst recht nicht sein
 
     if not st.get("ab_tp2_done") and st.get("ab_tp2_price") is not None:
         tp2_price = st["ab_tp2_price"]
@@ -1714,7 +1722,10 @@ async def check_ab_sl_tp(symbol, price):
                     debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL auf TP1 ({round(st['ab_tp1_price'],4)}) gesetzt")
                 else:
                     debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
-        return
+            else:
+                return
+        else:
+            return
 
     tp3_price = st.get("ab_tp3_price")
     if tp3_price is not None:
@@ -8723,29 +8734,38 @@ def _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup):
                 _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif not position["tp1_done"] and position.get("tp1_price") is not None:
-                tp1_price = position["tp1_price"]
-                if (pdir == "long" and h[i] >= tp1_price) or (pdir == "short" and l[i] <= tp1_price):
-                    close_size = position["size"] * tp1_frac
-                    _bt_close_trade(trades, pdir, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
-                    position["size"] -= close_size
-                    position["tp1_done"] = True
-                    if sl_to_be_on_tp1:
-                        position["sl_price"] = entry
-            elif position["tp1_done"] and not position["tp2_done"] and position.get("tp2_price") is not None:
-                tp2_price = position["tp2_price"]
-                if (pdir == "long" and h[i] >= tp2_price) or (pdir == "short" and l[i] <= tp2_price):
-                    close_size = position["size"] * tp2_frac
-                    _bt_close_trade(trades, pdir, entry, tp2_price, close_size, i, position["entry_i"], "TP2", ts=ts)
-                    position["size"] -= close_size
-                    position["tp2_done"] = True
-                    if sl_to_tp1_on_tp2 and position.get("tp1_price") is not None:
-                        position["sl_price"] = position["tp1_price"]
-            elif position["tp1_done"] and position["tp2_done"] and position.get("tp3_price") is not None:
-                tp3_price = position["tp3_price"]
-                if (pdir == "long" and h[i] >= tp3_price) or (pdir == "short" and l[i] <= tp3_price):
-                    _bt_close_trade(trades, pdir, entry, tp3_price, position["size"], i, position["entry_i"], "TP3", ts=ts)
-                    position = None
+            else:
+                # TP1/TP2/TP3 faellt bewusst OHNE elif/Abbruch durch: da alle drei Ziele in
+                # dieselbe Richtung geordnet sind (TP1 naeher am Einstieg als TP2 als TP3), kann
+                # eine einzelne grosse Kerze (voller Range in h[i]/l[i]) rechnerisch eindeutig
+                # mehrere Stufen auf einmal erreichen - das darf nicht auf die naechste Kerze
+                # verschoben werden, sonst fehlt z.B. TP2 komplett, wenn die naechste Kerze schon
+                # wieder zurücklaeuft (siehe check_ab_sl_tp fuer dieselbe Korrektur live).
+                if not position["tp1_done"] and position.get("tp1_price") is not None:
+                    tp1_price = position["tp1_price"]
+                    if (pdir == "long" and h[i] >= tp1_price) or (pdir == "short" and l[i] <= tp1_price):
+                        close_size = position["size"] * tp1_frac
+                        _bt_close_trade(trades, pdir, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                        position["size"] -= close_size
+                        position["tp1_done"] = True
+                        if sl_to_be_on_tp1:
+                            position["sl_price"] = entry
+
+                if position is not None and position["tp1_done"] and not position["tp2_done"] and position.get("tp2_price") is not None:
+                    tp2_price = position["tp2_price"]
+                    if (pdir == "long" and h[i] >= tp2_price) or (pdir == "short" and l[i] <= tp2_price):
+                        close_size = position["size"] * tp2_frac
+                        _bt_close_trade(trades, pdir, entry, tp2_price, close_size, i, position["entry_i"], "TP2", ts=ts)
+                        position["size"] -= close_size
+                        position["tp2_done"] = True
+                        if sl_to_tp1_on_tp2 and position.get("tp1_price") is not None:
+                            position["sl_price"] = position["tp1_price"]
+
+                if position is not None and position["tp1_done"] and position["tp2_done"] and position.get("tp3_price") is not None:
+                    tp3_price = position["tp3_price"]
+                    if (pdir == "long" and h[i] >= tp3_price) or (pdir == "short" and l[i] <= tp3_price):
+                        _bt_close_trade(trades, pdir, entry, tp3_price, position["size"], i, position["entry_i"], "TP3", ts=ts)
+                        position = None
 
         buy_signal = long_setup[i] and not long_setup[i - 1]
         sell_signal = short_setup[i] and not short_setup[i - 1]
