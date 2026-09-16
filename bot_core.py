@@ -357,6 +357,12 @@ def default_config():
         "ab_sl_to_breakeven_on_tp1": os.getenv("AB_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
         "ab_sl_to_tp1_on_tp2": os.getenv("AB_SL_TO_TP1_ON_TP2", "true").lower() == "true",
         "ab_sl_cooldown_seconds": float(os.getenv("AB_SL_COOLDOWN_SECONDS", "30")),
+        # Optionaler uebergeordneter SuperTrend-Trendfilter (eigene, hoehere Zeiteinheit) - wie bei
+        # [Hoss] VWAP+RSI+Hull+DI: Long nur wenn SuperTrend dort bullisch, Short nur wenn baerisch.
+        "ab_trend_filter_enabled": os.getenv("AB_TREND_FILTER_ENABLED", "false").lower() == "true",
+        "ab_trend_filter_resolution": os.getenv("AB_TREND_FILTER_RESOLUTION", "15m"),
+        "ab_trend_filter_atr_period": int(os.getenv("AB_TREND_FILTER_ATR_PERIOD", "10")),
+        "ab_trend_filter_multiplier": float(os.getenv("AB_TREND_FILTER_MULTIPLIER", "3.0")),
         # Diamond Algo (portiert aus dem gleichnamigen Pine-v5-Indikator) - nur der Signal-Kern:
         # SuperTrend(Sensitivity*2, ATR-Periode) + SMA-Filter, optionaler 200er-EMA-Trendfilter
         # fuer "Smart"-Signale (im Original nur Label-Text, hier ein echter Filter). SL/TP
@@ -1881,6 +1887,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="ab_breakout"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
+  <div data-mode="ab_breakout"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
+    <select class="cfg" id="ab_trend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
+    <select class="cfg" id="ab_trend_filter_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter ATR-Periode</label><input type="number" step="1" min="1" id="ab_trend_filter_atr_period"></div>
+  <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter Multiplikator</label><input type="number" step="0.1" min="0.1" id="ab_trend_filter_multiplier"></div>
+  <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    📈 Long-Einstiege nur, wenn der SuperTrend auf der Trendfilter-Zeiteinheit bullisch ist (Kurs über der Linie), Short-Einstiege nur bei bärischem SuperTrend. Wie bei [Hoss] VWAP+RSI+Hull+DI, hier ohne das dortige Wartefenster - ein Signal, das der Trendfilter im selben Moment nicht bestätigt, verfällt einfach.
+  </div>
 
   <div data-mode="diamond_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📡 <b>Signal</b>: SuperTrend (Sensitivity×2 als ATR-Multiplikator) kreuzt den Kurs + SMA-Filter bestätigt.
@@ -5714,6 +5741,10 @@ async function refresh() {
     document.getElementById('ab_sl_to_breakeven_on_tp1').value = String(data.config.ab_sl_to_breakeven_on_tp1);
     document.getElementById('ab_sl_to_tp1_on_tp2').value = String(data.config.ab_sl_to_tp1_on_tp2);
     document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
+    document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
+    document.getElementById('ab_trend_filter_resolution').value = data.config.ab_trend_filter_resolution;
+    document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
+    document.getElementById('ab_trend_filter_multiplier').value = data.config.ab_trend_filter_multiplier;
     setResolutionField('da_resolution', data.config.da_resolution);
     document.getElementById('da_atr_period').value = data.config.da_atr_period;
     document.getElementById('da_sensitivity').value = data.config.da_sensitivity;
@@ -6323,6 +6354,10 @@ function buildConfigPayload() {
     ab_sl_to_breakeven_on_tp1: document.getElementById('ab_sl_to_breakeven_on_tp1').value === 'true',
     ab_sl_to_tp1_on_tp2: document.getElementById('ab_sl_to_tp1_on_tp2').value === 'true',
     ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
+    ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
+    ab_trend_filter_resolution: document.getElementById('ab_trend_filter_resolution').value,
+    ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
+    ab_trend_filter_multiplier: parseFloat(document.getElementById('ab_trend_filter_multiplier').value),
     da_resolution: getResolutionField('da_resolution'),
     da_atr_period: parseInt(document.getElementById('da_atr_period').value),
     da_sensitivity: parseFloat(document.getElementById('da_sensitivity').value),
@@ -6880,6 +6915,7 @@ async def handle_config_update(request):
                 "ab_resolution", "ab_preset", "ab_lookback", "ab_fast_len", "ab_slow_len", "ab_rsi_len", "ab_rsi_gate",
                 "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
                 "ab_tp1_close_pct", "ab_tp2_close_pct", "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds",
+                "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "da_resolution", "da_atr_period", "da_sensitivity", "da_sma_period", "da_ema_trend_period",
                 "da_signal_mode", "da_entry_trigger", "da_exit_trigger", "da_invert_direction",
                 "da_sl_enabled", "da_tp_enabled", "da_risk_atr_period", "da_risk_mult", "da_tp_rr", "da_sl_cooldown_seconds",
