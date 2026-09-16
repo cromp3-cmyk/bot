@@ -331,6 +331,32 @@ def default_config():
         "ht_tp2_close_pct": float(os.getenv("HT_TP2_CLOSE_PCT", "50")),
         "ht_sl_enabled": os.getenv("HT_SL_ENABLED", "true").lower() == "true",
         "ht_sl_cooldown_seconds": float(os.getenv("HT_SL_COOLDOWN_SECONDS", "30")),
+        # Al-Shatri Breakout (portiert aus Pine-Script "Al-Shatri | Arabic Breakout • Entry &
+        # 3 Targets (Presets)"): Range-Breakout + EMA-Trend + RSI + optionaler Volumen-Filter.
+        # Preset uebernimmt die Original-Presets 1:1, "custom" nutzt die ab_*-Werte direkt.
+        # TP1/TP2 = echte Teilverkaeufe (Original zeichnet nur Linien), beide Prozentsaetze
+        # sowie die zwei SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) einzeln
+        # abschaltbar:
+        "ab_resolution": os.getenv("AB_RESOLUTION", "5m"),
+        "ab_preset": os.getenv("AB_PRESET", "intraday"),  # scalping/intraday/swing/custom
+        "ab_lookback": int(os.getenv("AB_LOOKBACK", "20")),
+        "ab_fast_len": int(os.getenv("AB_FAST_LEN", "20")),
+        "ab_slow_len": int(os.getenv("AB_SLOW_LEN", "50")),
+        "ab_rsi_len": int(os.getenv("AB_RSI_LEN", "14")),
+        "ab_rsi_gate": float(os.getenv("AB_RSI_GATE", "55")),
+        "ab_use_volume": os.getenv("AB_USE_VOLUME", "false").lower() == "true",
+        "ab_vol_mult": float(os.getenv("AB_VOL_MULT", "1.5")),
+        "ab_atr_len": int(os.getenv("AB_ATR_LEN", "14")),
+        "ab_atr_mult": float(os.getenv("AB_ATR_MULT", "1.5")),
+        "ab_r1": float(os.getenv("AB_R1", "1.0")),
+        "ab_r2": float(os.getenv("AB_R2", "2.0")),
+        "ab_r3": float(os.getenv("AB_R3", "3.0")),
+        "ab_direction_mode": os.getenv("AB_DIRECTION_MODE", "both"),
+        "ab_tp1_close_pct": float(os.getenv("AB_TP1_CLOSE_PCT", "33")),
+        "ab_tp2_close_pct": float(os.getenv("AB_TP2_CLOSE_PCT", "50")),
+        "ab_sl_to_breakeven_on_tp1": os.getenv("AB_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
+        "ab_sl_to_tp1_on_tp2": os.getenv("AB_SL_TO_TP1_ON_TP2", "true").lower() == "true",
+        "ab_sl_cooldown_seconds": float(os.getenv("AB_SL_COOLDOWN_SECONDS", "30")),
         # Diamond Algo (portiert aus dem gleichnamigen Pine-v5-Indikator) - nur der Signal-Kern:
         # SuperTrend(Sensitivity*2, ATR-Periode) + SMA-Filter, optionaler 200er-EMA-Trendfilter
         # fuer "Smart"-Signale (im Original nur Label-Text, hier ein echter Filter). SL/TP
@@ -833,6 +859,7 @@ PERSISTED_STATE_KEYS = [
     "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
     "obi_breakeven_triggered",
     "ht_sl_price", "ht_tp1_price", "ht_tp2_price", "ht_tp3_price", "ht_tp1_done", "ht_tp2_done",
+    "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done",
 ]
 
 
@@ -1541,6 +1568,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="maverick_edge">Maverick Edge (Trend-EMA + Guide-Linie + Kerzenstärke, reiner Signal-Einstieg, SL fest oder Guide-Linie als Trail-Stop, fester TP)</option>
       <option value="st_rsi_signal">SuperTrend+RSI (SuperTrend 10/2-Flip + RSI 9-Bestätigung, immer Flip bei Gegensignal, optional ADX/Volumen/MTF%/Z-Score-Filter, fester SL+TP)</option>
       <option value="hvd_signal">[Hoss] VWAP+RSI+Hull+DI (Hull-Farbwechsel + DI-Bestätigung, scharf durch VWAP-Band+OBV-RSI-Extrem am selben Balken, SL=Hull mit ATR-Mindestabstand, TP=Risk-Reward, kein Flip-Exit)</option>
+      <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, TP1/TP2/TP3 mit Teilverkäufen, SL-Nachzug auf Break-Even/TP1)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1785,6 +1813,74 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="halftrend"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ht_sl_cooldown_seconds"></div>
+
+  <div data-mode="ab_breakout" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📡 <b>Signal</b>: Kerzenschluss bricht über/unter das Hoch/Tief der letzten "Breakout-Kerzen" (ohne die aktuelle Kerze) aus, schnelle EMA über/unter langsamer EMA bestätigt den Trend, RSI muss die Schwelle erreichen, optional zusätzlich ein Volumen-Filter.
+    🎯 <b>Plan</b>: SL = ATR × Multiplikator, TP1/TP2/TP3 = Risiko × 1x/2x/3x. Solange ein Plan läuft (bis SL oder TP3), wird kein neues Signal angenommen - wie im Original-Skript.
+  </div>
+  <div data-mode="ab_breakout"><label>Preset</label>
+    <select class="cfg" id="ab_preset">
+      <option value="scalping">Scalping</option>
+      <option value="intraday">Intraday</option>
+      <option value="swing">Swing</option>
+      <option value="custom">Custom (eigene Werte unten)</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout"><label>Zeitrahmen</label>
+    <select class="cfg" id="ab_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="ab_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Breakout-Range (Kerzen)</label><input type="number" step="1" min="2" id="ab_lookback"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Schnelle EMA</label><input type="number" step="1" min="1" id="ab_fast_len"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Langsame EMA</label><input type="number" step="1" min="2" id="ab_slow_len"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>RSI-Periode</label><input type="number" step="1" min="2" id="ab_rsi_len"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>RSI-Schwelle (Long ab, Short = 100 minus diesem Wert)</label><input type="number" step="1" min="50" max="80" id="ab_rsi_gate"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Volumen-Filter verlangen</label>
+    <select class="cfg" id="ab_use_volume">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Volumen vs. 20er-Durchschnitt (Vielfaches)</label><input type="number" step="0.1" min="0.1" id="ab_vol_mult"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>ATR-Periode</label><input type="number" step="1" min="1" id="ab_atr_len"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>SL-Abstand (ATR-Multiplikator)</label><input type="number" step="0.1" min="0.1" id="ab_atr_mult"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Target 1 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r1"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Target 2 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r2"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Target 3 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r3"></div>
+  <div data-mode="ab_breakout"><label>Richtung</label>
+    <select class="cfg" id="ab_direction_mode">
+      <option value="both">Beide</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp1_close_pct"></div>
+  <div data-mode="ab_breakout"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp2_close_pct"></div>
+  <div data-mode="ab_breakout"><label>SL auf Break-Even bei TP1</label>
+    <select class="cfg" id="ab_sl_to_breakeven_on_tp1">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout"><label>SL auf TP1 bei TP2</label>
+    <select class="cfg" id="ab_sl_to_tp1_on_tp2">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
 
   <div data-mode="diamond_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📡 <b>Signal</b>: SuperTrend (Sensitivity×2 als ATR-Multiplikator) kreuzt den Kurs + SMA-Filter bestätigt.
@@ -4560,7 +4656,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -5598,6 +5694,26 @@ async function refresh() {
     document.getElementById('ht_tp2_close_pct').value = data.config.ht_tp2_close_pct;
     document.getElementById('ht_sl_enabled').value = String(data.config.ht_sl_enabled);
     document.getElementById('ht_sl_cooldown_seconds').value = data.config.ht_sl_cooldown_seconds;
+    document.getElementById('ab_preset').value = data.config.ab_preset;
+    setResolutionField('ab_resolution', data.config.ab_resolution);
+    document.getElementById('ab_lookback').value = data.config.ab_lookback;
+    document.getElementById('ab_fast_len').value = data.config.ab_fast_len;
+    document.getElementById('ab_slow_len').value = data.config.ab_slow_len;
+    document.getElementById('ab_rsi_len').value = data.config.ab_rsi_len;
+    document.getElementById('ab_rsi_gate').value = data.config.ab_rsi_gate;
+    document.getElementById('ab_use_volume').value = String(data.config.ab_use_volume);
+    document.getElementById('ab_vol_mult').value = data.config.ab_vol_mult;
+    document.getElementById('ab_atr_len').value = data.config.ab_atr_len;
+    document.getElementById('ab_atr_mult').value = data.config.ab_atr_mult;
+    document.getElementById('ab_r1').value = data.config.ab_r1;
+    document.getElementById('ab_r2').value = data.config.ab_r2;
+    document.getElementById('ab_r3').value = data.config.ab_r3;
+    document.getElementById('ab_direction_mode').value = data.config.ab_direction_mode;
+    document.getElementById('ab_tp1_close_pct').value = data.config.ab_tp1_close_pct;
+    document.getElementById('ab_tp2_close_pct').value = data.config.ab_tp2_close_pct;
+    document.getElementById('ab_sl_to_breakeven_on_tp1').value = String(data.config.ab_sl_to_breakeven_on_tp1);
+    document.getElementById('ab_sl_to_tp1_on_tp2').value = String(data.config.ab_sl_to_tp1_on_tp2);
+    document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
     setResolutionField('da_resolution', data.config.da_resolution);
     document.getElementById('da_atr_period').value = data.config.da_atr_period;
     document.getElementById('da_sensitivity').value = data.config.da_sensitivity;
@@ -6187,6 +6303,26 @@ function buildConfigPayload() {
     ht_tp2_close_pct: parseFloat(document.getElementById('ht_tp2_close_pct').value),
     ht_sl_enabled: document.getElementById('ht_sl_enabled').value === 'true',
     ht_sl_cooldown_seconds: parseFloat(document.getElementById('ht_sl_cooldown_seconds').value),
+    ab_preset: document.getElementById('ab_preset').value,
+    ab_resolution: getResolutionField('ab_resolution'),
+    ab_lookback: parseInt(document.getElementById('ab_lookback').value),
+    ab_fast_len: parseInt(document.getElementById('ab_fast_len').value),
+    ab_slow_len: parseInt(document.getElementById('ab_slow_len').value),
+    ab_rsi_len: parseInt(document.getElementById('ab_rsi_len').value),
+    ab_rsi_gate: parseFloat(document.getElementById('ab_rsi_gate').value),
+    ab_use_volume: document.getElementById('ab_use_volume').value === 'true',
+    ab_vol_mult: parseFloat(document.getElementById('ab_vol_mult').value),
+    ab_atr_len: parseInt(document.getElementById('ab_atr_len').value),
+    ab_atr_mult: parseFloat(document.getElementById('ab_atr_mult').value),
+    ab_r1: parseFloat(document.getElementById('ab_r1').value),
+    ab_r2: parseFloat(document.getElementById('ab_r2').value),
+    ab_r3: parseFloat(document.getElementById('ab_r3').value),
+    ab_direction_mode: document.getElementById('ab_direction_mode').value,
+    ab_tp1_close_pct: parseFloat(document.getElementById('ab_tp1_close_pct').value),
+    ab_tp2_close_pct: parseFloat(document.getElementById('ab_tp2_close_pct').value),
+    ab_sl_to_breakeven_on_tp1: document.getElementById('ab_sl_to_breakeven_on_tp1').value === 'true',
+    ab_sl_to_tp1_on_tp2: document.getElementById('ab_sl_to_tp1_on_tp2').value === 'true',
+    ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
     da_resolution: getResolutionField('da_resolution'),
     da_atr_period: parseInt(document.getElementById('da_atr_period').value),
     da_sensitivity: parseFloat(document.getElementById('da_sensitivity').value),
@@ -6667,6 +6803,10 @@ async def handle_status(request):
         "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"),
         "ht_tp1_price": st.get("ht_tp1_price"), "ht_tp2_price": st.get("ht_tp2_price"), "ht_tp3_price": st.get("ht_tp3_price"),
         "ht_tp1_done": st.get("ht_tp1_done"), "ht_tp2_done": st.get("ht_tp2_done"),
+        "ab_sl_price": st.get("ab_sl_price"), "ab_tp1_price": st.get("ab_tp1_price"),
+        "ab_tp2_price": st.get("ab_tp2_price"), "ab_tp3_price": st.get("ab_tp3_price"),
+        "ab_tp1_done": st.get("ab_tp1_done"), "ab_tp2_done": st.get("ab_tp2_done"),
+        "ab_atr_last": st.get("ab_atr_last"),
         "da_direction": st.get("da_direction"), "da_sl_price": st.get("da_sl_price"), "da_tp_price": st.get("da_tp_price"),
         "es_direction": st.get("es_direction"), "es_sensitivity_last": st.get("es_sensitivity_last"),
         "es_sl_price": st.get("es_sl_price"), "es_tp1_price": st.get("es_tp1_price"),
@@ -6737,6 +6877,9 @@ async def handle_config_update(request):
                 "ht_resolution", "ht_amplitude", "ht_channel_deviation", "ht_base_risk_mult",
                 "ht_entry_trigger", "ht_exit_trigger", "ht_invert_direction",
                 "ht_tp_enabled", "ht_tp1_close_pct", "ht_tp2_close_pct", "ht_sl_enabled", "ht_sl_cooldown_seconds",
+                "ab_resolution", "ab_preset", "ab_lookback", "ab_fast_len", "ab_slow_len", "ab_rsi_len", "ab_rsi_gate",
+                "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
+                "ab_tp1_close_pct", "ab_tp2_close_pct", "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds",
                 "da_resolution", "da_atr_period", "da_sensitivity", "da_sma_period", "da_ema_trend_period",
                 "da_signal_mode", "da_entry_trigger", "da_exit_trigger", "da_invert_direction",
                 "da_sl_enabled", "da_tp_enabled", "da_risk_atr_period", "da_risk_mult", "da_tp_rr", "da_sl_cooldown_seconds",

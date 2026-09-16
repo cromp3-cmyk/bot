@@ -1559,6 +1559,292 @@ async def ht_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
+# ============================================================================
+# Al-Shatri Breakout (portiert aus Pine-Script "Al-Shatri | Arabic Breakout •
+# Entry & 3 Targets (Presets)"). Range-Breakout (Kerzenschluss ueber/unter dem
+# Hoch/Tief der letzten 'lookback' Kerzen, OHNE die aktuelle Kerze selbst - wie
+# Pine's ta.highest(...)[1]) + EMA-Trendbestaetigung (schnelle ueber/unter
+# langsamer EMA) + RSI-Schwelle + optionaler Volumen-Filter (aktuelles Volumen
+# >= Vielfaches des 20er-Durchschnitts). Kein "immer im Markt"-Flip-System wie
+# HalfTrend/UT-Bot: pro Signal wird EIN Plan aufgestellt (SL = ATR*Multiplikator,
+# TP1/TP2/TP3 = Risk*1x/2x/3x wie im Original), erst nach dessen Ende (SL oder
+# TP3) kann das naechste Signal wieder einsteigen - genau wie im Original-Skript
+# ('not active'-Bedingung). NEU ggue. Original: TP1/TP2 sind echte Teilverkaeufe
+# (Original zeichnet nur Linien/Status), beide Teilverkauf-Prozentsaetze frei
+# einstellbar (Standard 33/50 -> ergibt ungefaehr gleiche Drittel wie beim
+# Nutzer gewuenscht), UND zwei separat abschaltbare SL-Nachzieh-Stufen: SL auf
+# Einstieg (Break-Even) sobald TP1 trifft, danach SL auf TP1 sobald TP2 trifft.
+# ============================================================================
+
+AB_PRESETS = {
+    "scalping": {"lookback": 10, "fast_len": 9, "slow_len": 21, "rsi_len": 14, "rsi_gate": 52,
+                 "use_volume": False, "vol_mult": 1.0, "atr_len": 14, "atr_mult": 1.0,
+                 "r1": 0.5, "r2": 1.0, "r3": 1.5},
+    "intraday": {"lookback": 20, "fast_len": 20, "slow_len": 50, "rsi_len": 14, "rsi_gate": 55,
+                 "use_volume": False, "vol_mult": 1.5, "atr_len": 14, "atr_mult": 1.5,
+                 "r1": 1.0, "r2": 2.0, "r3": 3.0},
+    "swing": {"lookback": 50, "fast_len": 50, "slow_len": 200, "rsi_len": 14, "rsi_gate": 58,
+              "use_volume": True, "vol_mult": 1.5, "atr_len": 21, "atr_mult": 2.0,
+              "r1": 1.5, "r2": 3.0, "r3": 5.0},
+}
+
+
+def _ab_effective_params(cfg):
+    """Preset 'Scalping'/'Intraday'/'Swing' uebernimmt die Original-Presets aus dem Pine-Script
+    1:1 (siehe Preset-Logik dort), 'custom' nutzt die frei eingestellten ab_*-Werte."""
+    preset = cfg.get("ab_preset", "intraday")
+    if preset in AB_PRESETS:
+        return AB_PRESETS[preset]
+    return {
+        "lookback": cfg.get("ab_lookback", 20), "fast_len": cfg.get("ab_fast_len", 20),
+        "slow_len": cfg.get("ab_slow_len", 50), "rsi_len": cfg.get("ab_rsi_len", 14),
+        "rsi_gate": cfg.get("ab_rsi_gate", 55), "use_volume": cfg.get("ab_use_volume", False),
+        "vol_mult": cfg.get("ab_vol_mult", 1.5), "atr_len": cfg.get("ab_atr_len", 14),
+        "atr_mult": cfg.get("ab_atr_mult", 1.5), "r1": cfg.get("ab_r1", 1.0),
+        "r2": cfg.get("ab_r2", 2.0), "r3": cfg.get("ab_r3", 3.0),
+    }
+
+
+def compute_ab_breakout_signals(highs, lows, closes, volumes, params):
+    """Liefert (long_setup[], short_setup[], atr[]) je Kerze. long_setup/short_setup sind die
+    ROHEN Bedingungen (Pine 'longSetup'/'shortSetup', noch KEINE Flanken-Erkennung) - der
+    tatsaechliche Trigger ist erst 'jetzt erfuellt, letzte Kerze nicht' (siehe ab_poll_loop /
+    _simulate_ab_trades, analog zu Pine's 'longSetup and not longSetup[1]')."""
+    n = len(closes)
+    lookback, fast_len, slow_len = params["lookback"], params["fast_len"], params["slow_len"]
+    rsi_len, rsi_gate = params["rsi_len"], params["rsi_gate"]
+    use_volume, vol_mult = params["use_volume"], params["vol_mult"]
+    atr_len = params["atr_len"]
+
+    ema_fast = _ema_series(closes, fast_len)
+    ema_slow = _ema_series(closes, slow_len)
+    rsi = compute_rsi(closes, rsi_len)
+    atr = compute_atr(highs, lows, closes, atr_len)
+    _, highs_roll_max = _rolling_min_max(highs, lookback)
+    lows_roll_min, _ = _rolling_min_max(lows, lookback)
+    vol_avg = _sma_series(volumes, 20) if volumes else [0.0] * n
+
+    warmup = max(slow_len, lookback, atr_len, rsi_len)
+    long_setup = [False] * n
+    short_setup = [False] * n
+    for i in range(n):
+        if i < warmup or i < 1:
+            continue
+        if atr[i] is None or atr[i] <= 0:
+            continue
+        # [1]-Verschiebung wie im Original: das Range-Hoch/-Tief und der Volumen-Durchschnitt
+        # der VORHERIGEN Kerze werden gegen den AKTUELLEN Schlusskurs geprueft, damit die
+        # gerade schliessende Kerze ihre eigene Range nicht mitzaehlt (sonst waere ein Ausbruch
+        # trivial immer "wahr").
+        upper = highs_roll_max[i - 1]
+        lower = lows_roll_min[i - 1]
+        if upper is None or lower is None:
+            continue
+        if use_volume:
+            v_avg_prev = vol_avg[i - 1] if i - 1 < len(vol_avg) else 0.0
+            vol_ok = v_avg_prev is not None and v_avg_prev > 0 and volumes[i] >= v_avg_prev * vol_mult
+        else:
+            vol_ok = True
+
+        long_setup[i] = (closes[i] > upper and closes[i] > ema_fast[i] and ema_fast[i] > ema_slow[i]
+                          and rsi[i] >= rsi_gate and vol_ok)
+        short_setup[i] = (closes[i] < lower and closes[i] < ema_fast[i] and ema_fast[i] < ema_slow[i]
+                           and rsi[i] <= 100 - rsi_gate and vol_ok)
+    return long_setup, short_setup, atr
+
+
+def _ab_reset_state(st):
+    st["ab_sl_price"] = None
+    st["ab_tp1_price"] = None
+    st["ab_tp2_price"] = None
+    st["ab_tp3_price"] = None
+    st["ab_tp1_done"] = False
+    st["ab_tp2_done"] = False
+
+
+async def check_ab_sl_tp(symbol, price):
+    """SL zuerst, dann TP1 (Teilverkauf + optional SL->Break-Even), TP2 (weiterer Teilverkauf +
+    optional SL->TP1), TP3 (Rest schliessen) - identisches Muster zu check_ht_sl_tp, nur mit
+    zwei EINZELN abschaltbaren Nachzieh-Stufen statt fest immer Break-Even bei TP1."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+
+    sl_price = st.get("ab_sl_price")
+    if sl_price is not None:
+        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+        if hit_sl:
+            if st.get("ab_tp2_done"):
+                reason = "SL-AUF-TP1"
+            elif st.get("ab_tp1_done"):
+                reason = "BREAKEVEN"
+            else:
+                reason = "SL"
+            debug_log(f"🚪 [{symbol}] Al-Shatri Breakout {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+            await execute_exit(symbol, price, reason)
+            st["ab_sl_cooldown_until"] = time.time() + cfg.get("ab_sl_cooldown_seconds", 30)
+            _ab_reset_state(st)
+            return
+
+    if not st.get("ab_tp1_done") and st.get("ab_tp1_price") is not None:
+        tp1_price = st["ab_tp1_price"]
+        if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
+            fraction = cfg.get("ab_tp1_close_pct", 33) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+            if ok:
+                st["ab_tp1_done"] = True
+                if cfg.get("ab_sl_to_breakeven_on_tp1", True):
+                    st["ab_sl_price"] = st["avg_entry_price"]
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'],4)}) gesetzt")
+                else:
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
+        return
+
+    if not st.get("ab_tp2_done") and st.get("ab_tp2_price") is not None:
+        tp2_price = st["ab_tp2_price"]
+        if (pos == "long" and price >= tp2_price) or (pos == "short" and price <= tp2_price):
+            fraction = cfg.get("ab_tp2_close_pct", 50) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP2")
+            if ok:
+                st["ab_tp2_done"] = True
+                if cfg.get("ab_sl_to_tp1_on_tp2", True) and st.get("ab_tp1_price") is not None:
+                    st["ab_sl_price"] = st["ab_tp1_price"]
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL auf TP1 ({round(st['ab_tp1_price'],4)}) gesetzt")
+                else:
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
+        return
+
+    tp3_price = st.get("ab_tp3_price")
+    if tp3_price is not None:
+        if (pos == "long" and price >= tp3_price) or (pos == "short" and price <= tp3_price):
+            debug_log(f"🚪 [{symbol}] Al-Shatri Breakout TP3 (Rest): {pos.upper()} @ {price}")
+            await execute_exit(symbol, price, "TP3")
+            _ab_reset_state(st)
+
+
+async def check_ab_entry(symbol, buy_signal, sell_signal, price, atr_now):
+    """Einstieg nur wenn flach (kein 'active'-Plan laeuft) - wie im Original, das waehrend eines
+    laufenden Plans keine neuen Linien zeichnet. SL/TP1/TP2/TP3 werden einmalig aus dem ATR-Risk-
+    Abstand zum Einstiegszeitpunkt berechnet, wie im Original-Skript (kein Nachziehen)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if time.time() < st.get("ab_sl_cooldown_until", 0.0):
+        return
+    direction_mode = cfg.get("ab_direction_mode", "both")
+    if direction_mode == "long_only":
+        sell_signal = False
+    elif direction_mode == "short_only":
+        buy_signal = False
+    if not (buy_signal or sell_signal):
+        return
+    if atr_now is None or atr_now <= 0:
+        return
+    direction = "long" if buy_signal else "short"
+    debug_log(f"📡 [{symbol}] Al-Shatri Breakout Signal: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+    if st["position"] is None:
+        return  # Einstieg (z.B. dry_run-Fehler) hat nicht geklappt
+    _ab_reset_state(st)
+    params = _ab_effective_params(cfg)
+    risk = atr_now * params["atr_mult"]
+    st["ab_sl_price"] = price - risk if direction == "long" else price + risk
+    r1, r2, r3 = params["r1"], params["r2"], params["r3"]
+    if direction == "long":
+        st["ab_tp1_price"] = price + risk * r1
+        st["ab_tp2_price"] = price + risk * r2
+        st["ab_tp3_price"] = price + risk * r3
+    else:
+        st["ab_tp1_price"] = price - risk * r1
+        st["ab_tp2_price"] = price - risk * r2
+        st["ab_tp3_price"] = price - risk * r3
+
+
+async def ab_poll_loop(symbol):
+    """Al-Shatri Breakout - siehe Kommentar-Block oben fuer die Signal-Logik. Ein-/Ausstieg immer
+    bei Kerzenschluss (Original-Skript prueft explizit 'barstate.isconfirmed'), Flanken-Erkennung
+    (jetzt erfuellt, letzte Kerze nicht) wie im Original. Alle Zeitrahmen, Backtest-faehig."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "ab_breakout" and cfg["bot_active"]:
+                resolution = cfg.get("ab_resolution", "5m")
+                params = _ab_effective_params(cfg)
+                min_needed = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 5
+                needed_bars = min(1000, max(min_needed * 2, 200))
+                st = b["state"]
+
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, _, closed_h, closed_l, closed_c = local
+                        closed_v = [0.0] * len(closed_c)  # Sekunden-Puffer fuehrt kein Volumen mit
+                    else:
+                        closed_ts = None
+                else:
+                    # Nur Binance-Spot liefert Volumen ueber fetch_candles_binance_vol (keine
+                    # market_type-Auswahl wie beim volumenlosen fetch_candles_binance_multi) -
+                    # fuer den optionalen Volumen-Filter (Standard aus) reicht das.
+                    data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
+                    if data:
+                        timestamps, opens, highs, lows, closes, volumes = data
+                        closed_ts, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                    else:
+                        closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if closed_ts and len(closed_c) > min_needed:
+                    signal_key = closed_ts[-1]
+                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
+
+                    long_setup, short_setup, atr = compute_ab_breakout_signals(closed_h, closed_l, closed_c, closed_v, params)
+                    st["ab_atr_last"] = atr[-1]
+
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] Al-Shatri Breakout aktiv: Preset={cfg.get('ab_preset','intraday')}, "
+                                  f"ATR={round(atr[-1] or 0,4)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        try:
+                            last_idx = closed_ts.index(last_processed_ts)
+                            new_indices = list(range(last_idx + 1, len(closed_ts)))
+                        except ValueError:
+                            new_indices = [len(closed_ts) - 1]
+
+                    for idx in new_indices:
+                        if idx < 1:
+                            continue
+                        buy_signal = long_setup[idx] and not long_setup[idx - 1]
+                        sell_signal = short_setup[idx] and not short_setup[idx - 1]
+                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        await check_ab_entry(symbol, buy_signal, sell_signal, price_i, atr[idx])
+
+                    await check_ab_sl_tp(symbol, price)
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Al-Shatri Breakout wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Al-Shatri Breakout wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Al-Shatri Breakout-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
 def _da_reset_state(st):
     st["da_sl_price"] = None
     st["da_tp_price"] = None
@@ -8377,6 +8663,102 @@ def backtest_halftrend(candles, cfg):
     return _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup)
 
 
+def _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup):
+    """Kern-Simulation fuer Al-Shatri Breakout - wie _simulate_halftrend_trades (TP1/TP2/TP3 als
+    echte Teilverkaeufe), aber KEIN Flip-Exit (das Original bleibt bis SL/TP3 im Plan, ein neues
+    Gegen-Signal wird waehrend 'active' schlicht ignoriert) und mit den zwei EINZELN abschaltbaren
+    SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) statt fest immer Break-Even."""
+    ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    params = _ab_effective_params(cfg)
+    r1, r2, r3, atr_mult = params["r1"], params["r2"], params["r3"], params["atr_mult"]
+    tp1_frac = cfg.get("ab_tp1_close_pct", 33) / 100
+    tp2_frac = cfg.get("ab_tp2_close_pct", 50) / 100
+    sl_to_be_on_tp1 = cfg.get("ab_sl_to_breakeven_on_tp1", True)
+    sl_to_tp1_on_tp2 = cfg.get("ab_sl_to_tp1_on_tp2", True)
+    sl_cooldown_ms = cfg.get("ab_sl_cooldown_seconds", 30) * 1000
+    direction_mode = cfg.get("ab_direction_mode", "both")
+
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp1_price","tp2_price","tp3_price","tp1_done","tp2_done"}
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position.get("sl_price")
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            if hit_sl:
+                reason = "SL-AUF-TP1" if position["tp2_done"] else ("BREAKEVEN" if position["tp1_done"] else "SL")
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif not position["tp1_done"] and position.get("tp1_price") is not None:
+                tp1_price = position["tp1_price"]
+                if (pdir == "long" and h[i] >= tp1_price) or (pdir == "short" and l[i] <= tp1_price):
+                    close_size = position["size"] * tp1_frac
+                    _bt_close_trade(trades, pdir, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                    position["size"] -= close_size
+                    position["tp1_done"] = True
+                    if sl_to_be_on_tp1:
+                        position["sl_price"] = entry
+            elif position["tp1_done"] and not position["tp2_done"] and position.get("tp2_price") is not None:
+                tp2_price = position["tp2_price"]
+                if (pdir == "long" and h[i] >= tp2_price) or (pdir == "short" and l[i] <= tp2_price):
+                    close_size = position["size"] * tp2_frac
+                    _bt_close_trade(trades, pdir, entry, tp2_price, close_size, i, position["entry_i"], "TP2", ts=ts)
+                    position["size"] -= close_size
+                    position["tp2_done"] = True
+                    if sl_to_tp1_on_tp2 and position.get("tp1_price") is not None:
+                        position["sl_price"] = position["tp1_price"]
+            elif position["tp1_done"] and position["tp2_done"] and position.get("tp3_price") is not None:
+                tp3_price = position["tp3_price"]
+                if (pdir == "long" and h[i] >= tp3_price) or (pdir == "short" and l[i] <= tp3_price):
+                    _bt_close_trade(trades, pdir, entry, tp3_price, position["size"], i, position["entry_i"], "TP3", ts=ts)
+                    position = None
+
+        buy_signal = long_setup[i] and not long_setup[i - 1]
+        sell_signal = short_setup[i] and not short_setup[i - 1]
+        if direction_mode == "long_only":
+            sell_signal = False
+        elif direction_mode == "short_only":
+            buy_signal = False
+
+        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and (buy_signal or sell_signal) and atr[i] and atr[i] > 0:
+            direction = "long" if buy_signal else "short"
+            size = (margin * leverage) / price
+            risk = atr[i] * atr_mult
+            sl_price = price - risk if direction == "long" else price + risk
+            if direction == "long":
+                tp1_price, tp2_price, tp3_price = price + risk * r1, price + risk * r2, price + risk * r3
+            else:
+                tp1_price, tp2_price, tp3_price = price - risk * r1, price - risk * r2, price - risk * r3
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
+                        "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price, "tp3_price": tp3_price,
+                        "tp1_done": False, "tp2_done": False}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_ab_breakout(candles, cfg):
+    """Backtest fuer Al-Shatri Breakout. Braucht (anders als die meisten anderen Strategien) eine
+    6er-Kerzenquelle MIT Volumen fuer den optionalen Volumen-Filter (Standard aus) - deshalb wie
+    mo7_scalp/maverick_edge in run_backtest() als Sonderfall behandelt statt ueber den generischen
+    5er-Tupel-Dispatch (BACKTEST_FUNCS)."""
+    h, l, c, v = candles[2], candles[3], candles[4], candles[5]
+    params = _ab_effective_params(cfg)
+    long_setup, short_setup, atr = compute_ab_breakout_signals(h, l, c, v, params)
+    warmup = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 5
+    return _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup)
+
+
 def _simulate_cp_trades(candles, cfg, bull, bear, risk_atr, warmup):
     """Kern-Simulation fuer Candle-Patterns. Wie _simulate_es_trades, aber nur EIN SL/EIN TP
     (keine TP1/TP2/TP3-Stufen - passt besser zu einem einzelnen, seltenen Umkehr-Signal statt
@@ -10622,6 +11004,7 @@ BACKTEST_MAX_CANDLES = {
     "maverick_edge": 100_000,
     "st_rsi_signal": 100_000,
     "hvd_signal": 100_000,
+    "ab_breakout": 100_000,
 }
 
 BACKTEST_FUNCS = {
@@ -10655,6 +11038,30 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
         n_candles = len(candles[4])
         trades = backtest_maverick_edge(candles, cfg)
+        stats = summarize_backtest_trades(trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
+
+    if entry_mode == "ab_breakout":
+        max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
+        resolution = cfg.get("ab_resolution", "5m")
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        params = _ab_effective_params(cfg)
+        min_needed = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 10
+        if not candles or len(candles[4]) < min_needed:
+            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+        n_candles = len(candles[4])
+        trades = backtest_ab_breakout(candles, cfg)
         stats = summarize_backtest_trades(trades, exclude_top_n)
         stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
         stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
@@ -10752,7 +11159,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         }
 
     if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge, st_rsi_signal, hvd_signal - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge, st_rsi_signal, hvd_signal, ab_breakout - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 
     max_candles = BACKTEST_MAX_CANDLES[entry_mode]
 
