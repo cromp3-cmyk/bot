@@ -973,6 +973,61 @@ def compute_diamond_supertrend(highs, lows, closes, factor, atr_period):
     return st_out, dir_out
 
 
+def compute_aso_filter(opens, highs, lows, closes, length=10, mode=0, confirm_bars=1):
+    """Portiert aus dem Nutzer-Pine-Indikator 'Average Sentiment Oscillator' (ASO, KivancOzbilgic) -
+    misst Bullen-/Baerendruck aus Intrabar- UND Gruppen-Kerzen-Bewegung (Intrabar = aktuelle Kerze,
+    Gruppe = die letzten 'length' Kerzen inkl. Range-Hoch/-Tief und dem Open von vor 'length-1'
+    Kerzen, wie im Original 'open[length-1]'). mode: 0 = Mittel aus Intrabar+Gruppe (Original-
+    Standard), 1 = nur Intrabar, 2 = nur Gruppe. Als Filter genutzt (nicht als Chart-Linien wie im
+    Pine-Original): bull_ok[i] = ASOBulls > ASOBears an Kerze i, bear_ok[i] = umgekehrt.
+    confirm_bars > 1 verlangt zusaetzlich, dass die letzten confirm_bars Kerzen ALLE in dieselbe
+    Richtung zeigen (verhindert Filterwechsel bei jedem kleinen Wackler, wie beim separaten
+    ASO-Filter-Pine-Script). Gibt (bull_ok, bear_ok) als Bool-Listen zurueck."""
+    n = len(closes)
+    if n == 0:
+        return [], []
+    lowest, _ = _rolling_min_max(lows, length)
+    _, highest = _rolling_min_max(highs, length)
+    bulls_raw = [0.0] * n
+    bears_raw = [0.0] * n
+    for i in range(n):
+        intrarange = highs[i] - lows[i]
+        k1 = intrarange if intrarange != 0 else 1
+        grouplow = lowest[i]
+        grouphigh = highest[i]
+        group_open_i = i - length + 1
+        groupopen = opens[group_open_i] if group_open_i >= 0 else opens[0]
+        grouprange = grouphigh - grouplow
+        k2 = grouprange if grouprange != 0 else 1
+        intrabar_bulls = (((closes[i] - lows[i]) + (highs[i] - opens[i])) / 2 * 100) / k1
+        group_bulls = (((closes[i] - grouplow) + (grouphigh - groupopen)) / 2 * 100) / k2
+        intrabar_bears = (((highs[i] - closes[i]) + (opens[i] - lows[i])) / 2 * 100) / k1
+        group_bears = (((grouphigh - closes[i]) + (groupopen - grouplow)) / 2 * 100) / k2
+        if mode == 1:
+            bulls_raw[i] = intrabar_bulls
+            bears_raw[i] = intrabar_bears
+        elif mode == 2:
+            bulls_raw[i] = group_bulls
+            bears_raw[i] = group_bears
+        else:
+            bulls_raw[i] = (intrabar_bulls + group_bulls) / 2
+            bears_raw[i] = (intrabar_bears + group_bears) / 2
+    aso_bulls = _sma_series(bulls_raw, length)
+    aso_bears = _sma_series(bears_raw, length)
+    raw_bullish = [aso_bulls[i] > aso_bears[i] for i in range(n)]
+    if confirm_bars <= 1:
+        return raw_bullish, [not b for b in raw_bullish]
+    bull_ok = [False] * n
+    bear_ok = [False] * n
+    for i in range(n):
+        if i < confirm_bars - 1:
+            continue
+        window = raw_bullish[i - confirm_bars + 1:i + 1]
+        bull_ok[i] = all(window)
+        bear_ok[i] = not any(window)
+    return bull_ok, bear_ok
+
+
 def compute_wma_series(values, period):
     """Gewichteter gleitender Durchschnitt (Pine's wma) - je juenger der Wert, desto hoeher das
     Gewicht (1..period)."""
@@ -1795,7 +1850,7 @@ async def ab_poll_loop(symbol):
                 if resolution in SUB_MINUTE_RESOLUTIONS:
                     local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     if local:
-                        closed_ts, _, closed_h, closed_l, closed_c = local
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
                         closed_v = [0.0] * len(closed_c)  # Sekunden-Puffer fuehrt kein Volumen mit
                     else:
                         closed_ts = None
@@ -1806,7 +1861,7 @@ async def ab_poll_loop(symbol):
                     data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
                     if data:
                         timestamps, opens, highs, lows, closes, volumes = data
-                        closed_ts, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                        closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
                     else:
                         closed_ts = None
 
@@ -1881,6 +1936,20 @@ async def ab_poll_loop(symbol):
                                 tf_short_ok = [True] * n_sig
                         long_setup = [long_setup[i] and tf_long_ok[i] for i in range(n_sig)]
                         short_setup = [short_setup[i] and tf_short_ok[i] for i in range(n_sig)]
+
+                    # Optionaler ASO-Sentiment-Filter (Nutzer-Idee, aus eigenem 'Average Sentiment
+                    # Oscillator'-Pine-Script portiert, siehe compute_aso_filter): Long nur wenn
+                    # ASOBulls>ASOBears, Short nur umgekehrt - AND-Gate wie der SuperTrend-Filter
+                    # oben, aber immer auf derselben Zeiteinheit (keine hoehere Zeiteinheit noetig,
+                    # der ASO ist als Kerzen-Sentiment gedacht, nicht als groesserer Trendfilter).
+                    if cfg.get("ab_aso_filter_enabled", False):
+                        n_sig = len(closed_c)
+                        aso_bull_ok, aso_bear_ok = compute_aso_filter(
+                            closed_o, closed_h, closed_l, closed_c,
+                            cfg.get("ab_aso_filter_length", 10), cfg.get("ab_aso_filter_mode", 0),
+                            cfg.get("ab_aso_filter_confirm_bars", 1))
+                        long_setup = [long_setup[i] and aso_bull_ok[i] for i in range(n_sig)]
+                        short_setup = [short_setup[i] and aso_bear_ok[i] for i in range(n_sig)]
 
                     if due_heartbeat:
                         last_heartbeat = now
@@ -4139,7 +4208,7 @@ async def check_fr_sl_tp(symbol, price):
         st["fr_sl_cooldown_until"] = time.time() + cfg.get("fr_sl_cooldown_seconds", 30)
 
 
-async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None, is_latest_bar=True):
+async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None, is_latest_bar=True, aso_long_ok_i=True, aso_short_ok_i=True):
     """Immer im Markt, reiner Buy/Sell-Wechsel: Tief-Fraktal (down_fractal) = Kauf-Signal,
     Hoch-Fraktal (up_fractal) = Verkauf-Signal - oder umgekehrt, wenn fr_invert_direction an ist
     (buy_i/sell_i kommen von fr_poll_loop bereits entsprechend vertauscht, siehe dort). Optionaler
@@ -4225,11 +4294,13 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
     long_ok = (direction_mode != "short_only"
                and (not zscore_enabled or zscore is None or zscore > 0)
                and adx_long_ok
-               and (not mtf_enabled or trend_pct is None or trend_pct > long_thr))
+               and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
+               and aso_long_ok_i)
     short_ok = (direction_mode != "long_only"
                 and (not zscore_enabled or zscore is None or zscore < 0)
                 and adx_short_ok
-                and (not mtf_enabled or trend_pct is None or trend_pct < short_thr))
+                and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
+                and aso_short_ok_i)
     pos = st["position"]
 
     if pos is None:
@@ -4285,6 +4356,8 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
                 reason = "FR-EXIT-ZSCORE"
             elif adx_enabled and not adx_short_ok:
                 reason = "FR-EXIT-ADX"
+            elif not aso_short_ok_i:
+                reason = "FR-EXIT-ASO"
             else:
                 reason = "FR-EXIT-MTF"
         else:
@@ -4313,6 +4386,8 @@ async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, p
                 reason = "FR-EXIT-ZSCORE"
             elif adx_enabled and not adx_long_ok:
                 reason = "FR-EXIT-ADX"
+            elif not aso_long_ok_i:
+                reason = "FR-EXIT-ASO"
             else:
                 reason = "FR-EXIT-MTF"
         else:
@@ -4454,6 +4529,21 @@ async def fr_poll_loop(symbol):
                                 trend_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow, mtf_atr)[-1]
                         st["fr_trend_pct_last"] = trend_now
 
+                    # Optionaler ASO-Sentiment-Filter (Nutzer-Idee, aus eigenem 'Average Sentiment
+                    # Oscillator'-Pine-Script portiert, siehe compute_aso_filter): Long nur wenn
+                    # ASOBulls>ASOBears, Short nur umgekehrt. Immer auf derselben Zeiteinheit wie
+                    # die Fraktal-Erkennung selbst (keine MTF-Option, anders als Z-Score/ADX/MTF
+                    # oben), da der ASO als Kerzen-Sentiment gedacht ist, nicht als groesserer
+                    # Trendfilter auf hoeherer Zeiteinheit.
+                    aso_enabled = cfg.get("fr_aso_filter_enabled", False)
+                    if aso_enabled:
+                        aso_long_ok_series, aso_short_ok_series = compute_aso_filter(
+                            closed_o, closed_h, closed_l, closed_c,
+                            cfg.get("fr_aso_filter_length", 10), cfg.get("fr_aso_filter_mode", 0),
+                            cfg.get("fr_aso_filter_confirm_bars", 1))
+                    else:
+                        aso_long_ok_series, aso_short_ok_series = None, None
+
                     if last_processed_ts is None:
                         new_indices = [len(closed_ts) - 1]
                     else:
@@ -4476,8 +4566,10 @@ async def fr_poll_loop(symbol):
                         adx_i = adx_series[idx] if adx_series else None
                         plus_di_i = plus_di_series[idx] if plus_di_series else None
                         minus_di_i = minus_di_series[idx] if minus_di_series else None
+                        aso_long_ok_i = aso_long_ok_series[idx] if aso_long_ok_series else True
+                        aso_short_ok_i = aso_short_ok_series[idx] if aso_short_ok_series else True
                         is_latest_bar = idx == len(closed_ts) - 1
-                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], adx_i, plus_di_i, minus_di_i, trend_now, is_latest_bar)
+                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], adx_i, plus_di_i, minus_di_i, trend_now, is_latest_bar, aso_long_ok_i, aso_short_ok_i)
 
                     await check_fr_sl_tp(symbol, price)
                 elif due_heartbeat:
@@ -5640,7 +5732,7 @@ async def hvd_poll_loop(symbol):
                 data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
                 if data:
                     timestamps, opens, highs, lows, closes, volumes = data
-                    closed_ts, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                    closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
                     if immediate_enabled and highs:
                         live_h_raw, live_l_raw, live_c_raw = highs[-1], lows[-1], closes[-1]
                 else:
@@ -5729,6 +5821,23 @@ async def hvd_poll_loop(symbol):
                             else:
                                 trend_filter_long_ok_series = [True] * n  # Fallback, falls (noch) keine Daten
                                 trend_filter_short_ok_series = [True] * n
+
+                    # Optionaler ASO-Sentiment-Filter (Nutzer-Idee, siehe compute_aso_filter) - wird
+                    # in denselben trend_filter_long_ok_series/short_ok_series-Slot eingehaengt wie
+                    # der SuperTrend-Trendfilter oben (per AND kombiniert falls beide aktiv), damit
+                    # er automatisch dieselbe Wartefenster-Logik (hvd_trend_filter_signal_window_candles)
+                    # in check_hvd_signal mitnutzt. Immer auf derselben Zeiteinheit, keine MTF-Option.
+                    if cfg.get("hvd_aso_filter_enabled", False):
+                        aso_bull_ok, aso_bear_ok = compute_aso_filter(
+                            closed_o, closed_h, closed_l, closed_c,
+                            cfg.get("hvd_aso_filter_length", 10), cfg.get("hvd_aso_filter_mode", 0),
+                            cfg.get("hvd_aso_filter_confirm_bars", 1))
+                        if trend_filter_long_ok_series is None:
+                            trend_filter_long_ok_series = aso_bull_ok
+                            trend_filter_short_ok_series = aso_bear_ok
+                        else:
+                            trend_filter_long_ok_series = [trend_filter_long_ok_series[i] and aso_bull_ok[i] for i in range(n)]
+                            trend_filter_short_ok_series = [trend_filter_short_ok_series[i] and aso_bear_ok[i] for i in range(n)]
 
                     st["hvd_last_hull"] = hull[-1]
                     st["hvd_last_arm"] = arm[-1]
@@ -5965,6 +6074,17 @@ def backtest_hvd_signal(candles, cfg, adx_filter_ok=None, trend_filter_long_ok=N
             trend_filter_long_ok = [tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(n)]
             trend_filter_short_ok = [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(n)]
         # Bei ABWEICHENDER Zeiteinheit wird trend_filter_long_ok/short_ok von run_backtest (async) uebergeben.
+
+    if cfg.get("hvd_aso_filter_enabled", False):
+        aso_bull_ok, aso_bear_ok = compute_aso_filter(
+            o, h, l, c, cfg.get("hvd_aso_filter_length", 10), cfg.get("hvd_aso_filter_mode", 0),
+            cfg.get("hvd_aso_filter_confirm_bars", 1))
+        if trend_filter_long_ok is None:
+            trend_filter_long_ok = aso_bull_ok
+            trend_filter_short_ok = aso_bear_ok
+        else:
+            trend_filter_long_ok = [trend_filter_long_ok[i] and aso_bull_ok[i] for i in range(n)]
+            trend_filter_short_ok = [trend_filter_short_ok[i] and aso_bear_ok[i] for i in range(n)]
 
     warmup = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 5
     return _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
@@ -8858,6 +8978,14 @@ def backtest_ab_breakout(candles, cfg, trend_filter_long_ok=None, trend_filter_s
         long_setup = [long_setup[i] and trend_filter_long_ok[i] for i in range(len(long_setup))]
         short_setup = [short_setup[i] and trend_filter_short_ok[i] for i in range(len(short_setup))]
 
+    if cfg.get("ab_aso_filter_enabled", False):
+        o = candles[1]
+        aso_bull_ok, aso_bear_ok = compute_aso_filter(
+            o, h, l, c, cfg.get("ab_aso_filter_length", 10), cfg.get("ab_aso_filter_mode", 0),
+            cfg.get("ab_aso_filter_confirm_bars", 1))
+        long_setup = [long_setup[i] and aso_bull_ok[i] for i in range(len(long_setup))]
+        short_setup = [short_setup[i] and aso_bear_ok[i] for i in range(len(short_setup))]
+
     warmup = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 5
     return _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup)
 
@@ -10192,7 +10320,7 @@ def _fr_bt_set_tp(position, cfg):
     position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
 
 
-def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None):
+def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None, aso_long_ok=None, aso_short_ok=None):
     """Backtest-Pendant zu check_fr_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
     mit Z-Score-Filter, optionalem ADX/DI-Trendfilter, optionalem MTF-Trend%-Filter (alle
     unabhaengig kombinierbar) und optionalem festem SL/TP (siehe _fr_bt_set_sl/_fr_bt_set_tp -
@@ -10230,13 +10358,15 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
         return (direction_mode != "short_only"
                 and (not zscore_enabled or zscore is None or zscore[i] > 0)
                 and adx_long_ok(i)
-                and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr))
+                and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr)
+                and (aso_long_ok is None or aso_long_ok[i]))
 
     def short_ok(i):
         return (direction_mode != "long_only"
                 and (not zscore_enabled or zscore is None or zscore[i] < 0)
                 and adx_short_ok(i)
-                and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr))
+                and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr)
+                and (aso_short_ok is None or aso_short_ok[i]))
 
     position = None
     trades = []
@@ -10317,6 +10447,8 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 reason = "FR-EXIT-ZSCORE"
             elif adx_enabled and not adx_short_ok(i):
                 reason = "FR-EXIT-ADX"
+            elif aso_short_ok is not None and not aso_short_ok[i]:
+                reason = "FR-EXIT-ASO"
             else:
                 reason = "FR-EXIT-MTF"
             if not can_flip and not flatten_on_block:
@@ -10341,6 +10473,8 @@ def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=N
                 reason = "FR-EXIT-ZSCORE"
             elif adx_enabled and not adx_long_ok(i):
                 reason = "FR-EXIT-ADX"
+            elif aso_long_ok is not None and not aso_long_ok[i]:
+                reason = "FR-EXIT-ASO"
             else:
                 reason = "FR-EXIT-MTF"
             if not can_flip and not flatten_on_block:
@@ -10375,8 +10509,13 @@ def backtest_fractals_flip(candles, cfg):
     if adx is None and cfg.get("fr_adx_filter_enabled", False):
         adx, plus_di, minus_di = compute_adx(h, l, c, cfg.get("fr_adx_length", 14))
     trend_pct = cfg.get("_fr_trend_pct_precomputed")  # von run_backtest vorab async berechnet, siehe _pk_build_mtf_trend_pct
+    aso_long_ok = aso_short_ok = None
+    if cfg.get("fr_aso_filter_enabled", False):
+        aso_long_ok, aso_short_ok = compute_aso_filter(
+            o, h, l, c, cfg.get("fr_aso_filter_length", 10), cfg.get("fr_aso_filter_mode", 0),
+            cfg.get("fr_aso_filter_confirm_bars", 1))
     warmup = 2 * n_periods + 5
-    return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore, adx=adx, plus_di=plus_di, minus_di=minus_di, trend_pct=trend_pct)
+    return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore, adx=adx, plus_di=plus_di, minus_di=minus_di, trend_pct=trend_pct, aso_long_ok=aso_long_ok, aso_short_ok=aso_short_ok)
 
 
 def _cd_bt_set_sl(position, cfg, margin, leverage):

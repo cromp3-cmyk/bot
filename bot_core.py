@@ -363,6 +363,12 @@ def default_config():
         "ab_trend_filter_resolution": os.getenv("AB_TREND_FILTER_RESOLUTION", "15m"),
         "ab_trend_filter_atr_period": int(os.getenv("AB_TREND_FILTER_ATR_PERIOD", "10")),
         "ab_trend_filter_multiplier": float(os.getenv("AB_TREND_FILTER_MULTIPLIER", "3.0")),
+        # Optionaler ASO-Sentiment-Filter (Nutzer-eigener "Average Sentiment Oscillator"-Pine-
+        # Indikator, siehe compute_aso_filter) - Long nur wenn ASOBulls>ASOBears, Short umgekehrt.
+        "ab_aso_filter_enabled": os.getenv("AB_ASO_FILTER_ENABLED", "false").lower() == "true",
+        "ab_aso_filter_length": int(os.getenv("AB_ASO_FILTER_LENGTH", "10")),
+        "ab_aso_filter_mode": int(os.getenv("AB_ASO_FILTER_MODE", "0")),
+        "ab_aso_filter_confirm_bars": int(os.getenv("AB_ASO_FILTER_CONFIRM_BARS", "1")),
         # Diamond Algo (portiert aus dem gleichnamigen Pine-v5-Indikator) - nur der Signal-Kern:
         # SuperTrend(Sensitivity*2, ATR-Periode) + SMA-Filter, optionaler 200er-EMA-Trendfilter
         # fuer "Smart"-Signale (im Original nur Label-Text, hier ein echter Filter). SL/TP
@@ -547,6 +553,12 @@ def default_config():
         "fr_mtf_fast_len": int(os.getenv("FR_MTF_FAST_LEN", "5")),
         "fr_mtf_slow_len": int(os.getenv("FR_MTF_SLOW_LEN", "9")),
         "fr_mtf_atr_len": int(os.getenv("FR_MTF_ATR_LEN", "14")),
+        # Optionaler ASO-Sentiment-Filter (Nutzer-eigener "Average Sentiment Oscillator"-Pine-
+        # Indikator, siehe compute_aso_filter) - Long nur wenn ASOBulls>ASOBears, Short umgekehrt.
+        "fr_aso_filter_enabled": os.getenv("FR_ASO_FILTER_ENABLED", "false").lower() == "true",
+        "fr_aso_filter_length": int(os.getenv("FR_ASO_FILTER_LENGTH", "10")),
+        "fr_aso_filter_mode": int(os.getenv("FR_ASO_FILTER_MODE", "0")),
+        "fr_aso_filter_confirm_bars": int(os.getenv("FR_ASO_FILTER_CONFIRM_BARS", "1")),
         "fr_mtf_long_threshold": float(os.getenv("FR_MTF_LONG_THRESHOLD", "0.5")),
         "fr_mtf_short_threshold": float(os.getenv("FR_MTF_SHORT_THRESHOLD", "-0.5")),
         "fr_flatten_on_block_enabled": os.getenv("FR_FLATTEN_ON_BLOCK_ENABLED", "true").lower() == "true",  # AN (Standard) = Position bei blockiertem Flip glattstellen. AUS = Signal ignorieren, Position bleibt offen bis ein Flip moeglich ist
@@ -676,6 +688,15 @@ def default_config():
         "hvd_trend_filter_resolution": os.getenv("HVD_TREND_FILTER_RESOLUTION", "15m"),  # "1m" | "2m" | "5m" | "15m" | "1h"
         "hvd_trend_filter_atr_period": int(os.getenv("HVD_TREND_FILTER_ATR_PERIOD", "10")),
         "hvd_trend_filter_multiplier": float(os.getenv("HVD_TREND_FILTER_MULTIPLIER", "3.0")),
+        # Optionaler ASO-Sentiment-Filter (Nutzer-eigener "Average Sentiment Oscillator"-Pine-
+        # Indikator, siehe compute_aso_filter) - Long nur wenn ASOBulls>ASOBears, Short umgekehrt.
+        # Wird intern in denselben trend_filter_long_ok/short_ok-Slot eingehaengt wie der
+        # SuperTrend-Filter oben (siehe hvd_poll_loop/backtest_hvd_signal), nutzt also automatisch
+        # dasselbe hvd_trend_filter_signal_window_candles-Wartefenster mit.
+        "hvd_aso_filter_enabled": os.getenv("HVD_ASO_FILTER_ENABLED", "false").lower() == "true",
+        "hvd_aso_filter_length": int(os.getenv("HVD_ASO_FILTER_LENGTH", "10")),
+        "hvd_aso_filter_mode": int(os.getenv("HVD_ASO_FILTER_MODE", "0")),
+        "hvd_aso_filter_confirm_bars": int(os.getenv("HVD_ASO_FILTER_CONFIRM_BARS", "1")),
         "hvd_trend_filter_signal_window_candles": int(os.getenv("HVD_TREND_FILTER_SIGNAL_WINDOW_CANDLES", "10")),  # Signal wartet bis zu X Kerzen auf SuperTrend-Bestaetigung, statt sofort zu verfallen (0 = aus, muss exakt zusammenfallen wie bisher)
     }
 
@@ -1908,6 +1929,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     📈 Long-Einstiege nur, wenn der SuperTrend auf der Trendfilter-Zeiteinheit bullisch ist (Kurs über der Linie), Short-Einstiege nur bei bärischem SuperTrend. Wie bei [Hoss] VWAP+RSI+Hull+DI, hier ohne das dortige Wartefenster - ein Signal, das der Trendfilter im selben Moment nicht bestätigt, verfällt einfach.
   </div>
+  <div data-mode="ab_breakout"><label>ASO-Sentiment-Filter</label>
+    <select class="cfg" id="ab_aso_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled"><label>ASO-Periode</label><input type="number" step="1" min="1" id="ab_aso_filter_length"></div>
+  <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled"><label>ASO-Berechnung</label>
+    <select class="cfg" id="ab_aso_filter_mode">
+      <option value="0">Mittel aus Intrabar+Gruppe</option>
+      <option value="1">Nur Intrabar</option>
+      <option value="2">Nur Gruppe</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled"><label>Bestätigungs-Kerzen</label><input type="number" step="1" min="1" id="ab_aso_filter_confirm_bars"></div>
+  <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    🎭 Eigener Average-Sentiment-Oscillator-Filter (aus deinem Pine-Script): Long-Einstiege nur, wenn ASOBulls&gt;ASOBears auf derselben Zeiteinheit, Short nur umgekehrt. Bestätigungs-Kerzen &gt;1 verlangt, dass mehrere Kerzen hintereinander in dieselbe Richtung zeigen, bevor der Filter kippt.
+  </div>
 
   <div data-mode="diamond_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📡 <b>Signal</b>: SuperTrend (Sensitivity×2 als ATR-Multiplikator) kreuzt den Kurs + SMA-Filter bestätigt.
@@ -2802,6 +2841,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="fr_mtf_fast_len"></div>
   <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="fr_mtf_slow_len"></div>
   <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="fr_mtf_atr_len"></div>
+  <div data-mode="fractals_flip"><label>ASO-Sentiment-Filter</label>
+    <select class="cfg" id="fr_aso_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="fractals_flip" data-requires="fr_aso_filter_enabled"><label>ASO-Periode</label><input type="number" step="1" min="1" id="fr_aso_filter_length"></div>
+  <div data-mode="fractals_flip" data-requires="fr_aso_filter_enabled"><label>ASO-Berechnung</label>
+    <select class="cfg" id="fr_aso_filter_mode">
+      <option value="0">Mittel aus Intrabar+Gruppe</option>
+      <option value="1">Nur Intrabar</option>
+      <option value="2">Nur Gruppe</option>
+    </select>
+  </div>
+  <div data-mode="fractals_flip" data-requires="fr_aso_filter_enabled"><label>Bestätigungs-Kerzen</label><input type="number" step="1" min="1" id="fr_aso_filter_confirm_bars"></div>
+  <div data-mode="fractals_flip" data-requires="fr_aso_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    🎭 Eigener Average-Sentiment-Oscillator-Filter (aus deinem Pine-Script), viertes unabhängiges Filter neben Z-Score/ADX/MTF: Long-Fraktale nur wenn ASOBulls&gt;ASOBears auf derselben Zeiteinheit, Short nur umgekehrt.
+  </div>
   <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     Was passiert, wenn ein Gegen-Fraktal kommt, aber Richtung/ein Filter das Drehen verbietet?
     "Glattstellen" (Standard) schließt die Position sofort und wartet auf das nächste
@@ -3523,6 +3580,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     verfällt es bei 0 sofort. Größer als 0: das Signal "wartet" bis zu so viele Kerzen auf eine
     SuperTrend-Bestätigung in dieselbe Richtung - kommt sie rechtzeitig, wird dann erst eingestiegen
     (zum dann aktuellen Kurs). Ein neues Gegensignal während der Wartezeit ersetzt das alte.
+  </div>
+  <div data-mode="hvd_signal"><label>ASO-Sentiment-Filter</label>
+    <select class="cfg" id="hvd_aso_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="hvd_signal" data-requires="hvd_aso_filter_enabled"><label>ASO-Periode</label><input type="number" step="1" min="1" id="hvd_aso_filter_length"></div>
+  <div data-mode="hvd_signal" data-requires="hvd_aso_filter_enabled"><label>ASO-Berechnung</label>
+    <select class="cfg" id="hvd_aso_filter_mode">
+      <option value="0">Mittel aus Intrabar+Gruppe</option>
+      <option value="1">Nur Intrabar</option>
+      <option value="2">Nur Gruppe</option>
+    </select>
+  </div>
+  <div data-mode="hvd_signal" data-requires="hvd_aso_filter_enabled"><label>Bestätigungs-Kerzen</label><input type="number" step="1" min="1" id="hvd_aso_filter_confirm_bars"></div>
+  <div data-mode="hvd_signal" data-requires="hvd_aso_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    🎭 Eigener Average-Sentiment-Oscillator-Filter (aus deinem Pine-Script): Long-Einstiege nur, wenn ASOBulls&gt;ASOBears auf derselben Zeiteinheit, Short nur umgekehrt. Läuft technisch im selben Filter-Slot wie der SuperTrend-Trendfilter oben (bei beiden aktiv: AND-verknüpft) und nutzt daher auch das Signal-Wartefenster oben mit.
   </div>
 
   <div data-mode="grid"><label>Richtung</label>
@@ -5745,6 +5820,10 @@ async function refresh() {
     document.getElementById('ab_trend_filter_resolution').value = data.config.ab_trend_filter_resolution;
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
     document.getElementById('ab_trend_filter_multiplier').value = data.config.ab_trend_filter_multiplier;
+    document.getElementById('ab_aso_filter_enabled').value = String(data.config.ab_aso_filter_enabled);
+    document.getElementById('ab_aso_filter_length').value = data.config.ab_aso_filter_length;
+    document.getElementById('ab_aso_filter_mode').value = data.config.ab_aso_filter_mode;
+    document.getElementById('ab_aso_filter_confirm_bars').value = data.config.ab_aso_filter_confirm_bars;
     setResolutionField('da_resolution', data.config.da_resolution);
     document.getElementById('da_atr_period').value = data.config.da_atr_period;
     document.getElementById('da_sensitivity').value = data.config.da_sensitivity;
@@ -5918,6 +5997,10 @@ async function refresh() {
     document.getElementById('fr_mtf_fast_len').value = data.config.fr_mtf_fast_len;
     document.getElementById('fr_mtf_slow_len').value = data.config.fr_mtf_slow_len;
     document.getElementById('fr_mtf_atr_len').value = data.config.fr_mtf_atr_len;
+    document.getElementById('fr_aso_filter_enabled').value = String(data.config.fr_aso_filter_enabled);
+    document.getElementById('fr_aso_filter_length').value = data.config.fr_aso_filter_length;
+    document.getElementById('fr_aso_filter_mode').value = data.config.fr_aso_filter_mode;
+    document.getElementById('fr_aso_filter_confirm_bars').value = data.config.fr_aso_filter_confirm_bars;
     document.getElementById('fr_flatten_on_block_enabled').value = String(data.config.fr_flatten_on_block_enabled);
     document.getElementById('fr_dca_enabled').value = String(data.config.fr_dca_enabled);
     document.getElementById('fr_dca_max_entries').value = data.config.fr_dca_max_entries;
@@ -6045,6 +6128,10 @@ async function refresh() {
     document.getElementById('hvd_trend_filter_atr_period').value = data.config.hvd_trend_filter_atr_period;
     document.getElementById('hvd_trend_filter_multiplier').value = data.config.hvd_trend_filter_multiplier;
     document.getElementById('hvd_trend_filter_signal_window_candles').value = data.config.hvd_trend_filter_signal_window_candles;
+    document.getElementById('hvd_aso_filter_enabled').value = String(data.config.hvd_aso_filter_enabled);
+    document.getElementById('hvd_aso_filter_length').value = data.config.hvd_aso_filter_length;
+    document.getElementById('hvd_aso_filter_mode').value = data.config.hvd_aso_filter_mode;
+    document.getElementById('hvd_aso_filter_confirm_bars').value = data.config.hvd_aso_filter_confirm_bars;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -6358,6 +6445,10 @@ function buildConfigPayload() {
     ab_trend_filter_resolution: document.getElementById('ab_trend_filter_resolution').value,
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
     ab_trend_filter_multiplier: parseFloat(document.getElementById('ab_trend_filter_multiplier').value),
+    ab_aso_filter_enabled: document.getElementById('ab_aso_filter_enabled').value === 'true',
+    ab_aso_filter_length: parseInt(document.getElementById('ab_aso_filter_length').value),
+    ab_aso_filter_mode: parseInt(document.getElementById('ab_aso_filter_mode').value),
+    ab_aso_filter_confirm_bars: parseInt(document.getElementById('ab_aso_filter_confirm_bars').value),
     da_resolution: getResolutionField('da_resolution'),
     da_atr_period: parseInt(document.getElementById('da_atr_period').value),
     da_sensitivity: parseFloat(document.getElementById('da_sensitivity').value),
@@ -6531,6 +6622,10 @@ function buildConfigPayload() {
     fr_mtf_fast_len: parseInt(document.getElementById('fr_mtf_fast_len').value),
     fr_mtf_slow_len: parseInt(document.getElementById('fr_mtf_slow_len').value),
     fr_mtf_atr_len: parseInt(document.getElementById('fr_mtf_atr_len').value),
+    fr_aso_filter_enabled: document.getElementById('fr_aso_filter_enabled').value === 'true',
+    fr_aso_filter_length: parseInt(document.getElementById('fr_aso_filter_length').value),
+    fr_aso_filter_mode: parseInt(document.getElementById('fr_aso_filter_mode').value),
+    fr_aso_filter_confirm_bars: parseInt(document.getElementById('fr_aso_filter_confirm_bars').value),
     fr_flatten_on_block_enabled: document.getElementById('fr_flatten_on_block_enabled').value === 'true',
     fr_dca_enabled: document.getElementById('fr_dca_enabled').value === 'true',
     fr_dca_max_entries: parseInt(document.getElementById('fr_dca_max_entries').value),
@@ -6658,6 +6753,10 @@ function buildConfigPayload() {
     hvd_trend_filter_atr_period: parseInt(document.getElementById('hvd_trend_filter_atr_period').value),
     hvd_trend_filter_multiplier: parseFloat(document.getElementById('hvd_trend_filter_multiplier').value),
     hvd_trend_filter_signal_window_candles: parseInt(document.getElementById('hvd_trend_filter_signal_window_candles').value),
+    hvd_aso_filter_enabled: document.getElementById('hvd_aso_filter_enabled').value === 'true',
+    hvd_aso_filter_length: parseInt(document.getElementById('hvd_aso_filter_length').value),
+    hvd_aso_filter_mode: parseInt(document.getElementById('hvd_aso_filter_mode').value),
+    hvd_aso_filter_confirm_bars: parseInt(document.getElementById('hvd_aso_filter_confirm_bars').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -6916,6 +7015,7 @@ async def handle_config_update(request):
                 "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
                 "ab_tp1_close_pct", "ab_tp2_close_pct", "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
+                "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
                 "da_resolution", "da_atr_period", "da_sensitivity", "da_sma_period", "da_ema_trend_period",
                 "da_signal_mode", "da_entry_trigger", "da_exit_trigger", "da_invert_direction",
                 "da_sl_enabled", "da_tp_enabled", "da_risk_atr_period", "da_risk_mult", "da_tp_rr", "da_sl_cooldown_seconds",
@@ -6963,6 +7063,7 @@ async def handle_config_update(request):
                 "fr_adx_filter_enabled", "fr_adx_resolution", "fr_adx_length", "fr_adx_threshold", "fr_adx_invert_enabled",
                 "fr_mtf_filter_enabled", "fr_mtf_tf1", "fr_mtf_fast_len", "fr_mtf_slow_len", "fr_mtf_atr_len",
                 "fr_mtf_long_threshold", "fr_mtf_short_threshold",
+                "fr_aso_filter_enabled", "fr_aso_filter_length", "fr_aso_filter_mode", "fr_aso_filter_confirm_bars",
                 "fr_flatten_on_block_enabled",
                 "fr_dca_enabled", "fr_dca_max_entries", "fr_dca_step_usd",
                 "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode", "cd_invert_direction",
@@ -7001,6 +7102,7 @@ async def handle_config_update(request):
                 "hvd_adx_filter_enabled", "hvd_adx_filter_length", "hvd_adx_filter_resolution", "hvd_adx_filter_threshold",
                 "hvd_trend_filter_enabled", "hvd_trend_filter_resolution", "hvd_trend_filter_atr_period", "hvd_trend_filter_multiplier",
                 "hvd_trend_filter_signal_window_candles",
+                "hvd_aso_filter_enabled", "hvd_aso_filter_length", "hvd_aso_filter_mode", "hvd_aso_filter_confirm_bars",
                 "quad_stoch_resolution"]:
         if key in body:
             cfg[key] = body[key]
