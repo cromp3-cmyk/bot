@@ -3951,15 +3951,36 @@ async def _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, tf_resoluti
     return candles, None
 
 
+def _min_ts_step(ts):
+    """Kleinster positiver Abstand zwischen zwei Zeitstempeln = Kerzenlaenge (auch bei Luecken)."""
+    best = None
+    for k in range(1, len(ts)):
+        d = ts[k] - ts[k - 1]
+        if d > 0 and (best is None or d < best):
+            best = d
+    return best
+
+
 def _trend_filter_ok_series(base_ts, tf_candles, tf_multiplier, tf_atr_period):
-    """(long_ok[], short_ok[]) je Handels-Kerze aus dem SuperTrend der Trendfilter-Zeiteinheit
-    (Forward-Fill, siehe _align_htf_series). Handels-Kerzen VOR der ersten Filter-Kerze bekommen
-    (False, False) = kein Signal - vorher galten sie faelschlich als 'baerisch' (Short erlaubt)."""
+    """(long_ok[], short_ok[]) je Handels-Kerze aus dem SuperTrend der Trendfilter-Zeiteinheit.
+
+    KEIN Look-Ahead: eine Filter-Kerze ist fuer eine Handels-Kerze erst verwendbar, wenn sie zu deren
+    SCHLUSS bereits geschlossen ist (Filter-Kerzenende <= Handels-Kerzenende) - genau wie live, wo nur
+    die letzte abgeschlossene Filter-Kerze zaehlt. Vorher wurde nach dem ERÖFFNUNGSzeitpunkt
+    zugeordnet: eine 15m-Kerze war damit schon ab ihrer ersten Minute mit ihrem spaeteren Schlusskurs
+    (und damit ihrer spaeteren SuperTrend-Richtung) sichtbar - der Backtest 'wusste' die Richtung der
+    laufenden Filter-Kerze im Voraus und war deutlich zu optimistisch (bei Sweeps besonders bei kleinen
+    Multiplikatoren, weil die den Look-Ahead am staerksten ausnutzen).
+    Handels-Kerzen VOR der ersten verwendbaren Filter-Kerze bekommen (False, False) = kein Signal."""
     tf_ts, _o, tf_h, tf_l, tf_c = tf_candles
     tf_st_line, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
     tf_bullish = [tf_st_line[i] is not None and tf_c[i] > tf_st_line[i] for i in range(len(tf_c))]
-    aligned = _align_htf_series(base_ts, tf_ts, tf_bullish)
-    first_ts = tf_ts[0]
+    base_ms = _min_ts_step(base_ts) or 60_000
+    tf_ms = _min_ts_step(tf_ts) or base_ms
+    # verwendbar ab: tf_ts[j] + tf_ms <= base_ts[i] + base_ms  <=>  (tf_ts[j] + tf_ms - base_ms) <= base_ts[i]
+    available_ts = [t + tf_ms - base_ms for t in tf_ts]
+    aligned = _align_htf_series(base_ts, available_ts, tf_bullish)
+    first_ts = available_ts[0]
     long_ok = [bool(aligned[i]) and base_ts[i] >= first_ts for i in range(len(base_ts))]
     short_ok = [(not aligned[i]) and base_ts[i] >= first_ts for i in range(len(base_ts))]
     return long_ok, short_ok
