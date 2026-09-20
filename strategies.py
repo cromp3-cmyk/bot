@@ -1970,14 +1970,9 @@ async def ab_poll_loop(symbol):
                             tf_long_ok = [tf_st_line[i] is not None and closed_c[i] > tf_st_line[i] for i in range(n_sig)]
                             tf_short_ok = [tf_st_line[i] is not None and closed_c[i] < tf_st_line[i] for i in range(n_sig)]
                         else:
-                            tf_needed = min(500, tf_atr_period * 5 + 20)
-                            tf_data = await fetch_candles_binance_multi(symbol, tf_resolution, count_back=tf_needed, market_type=cfg.get("binance_market_type", "spot"))
-                            if tf_data:
-                                _, _, tf_h, tf_l, tf_c = tf_data
-                                tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
-                            else:
-                                tf_h = tf_l = tf_c = None
-                            if tf_c and len(tf_c) > tf_atr_period:
+                            tf_closed = await _fetch_trend_filter_candles_live(symbol, st, cfg, tf_resolution, tf_atr_period)
+                            if tf_closed:
+                                tf_h, tf_l, tf_c = tf_closed
                                 tf_st_line_now, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
                                 tf_bullish_now = tf_st_line_now[-1] is not None and tf_c[-1] > tf_st_line_now[-1]
                                 tf_long_ok = [tf_bullish_now] * n_sig
@@ -3834,6 +3829,98 @@ async def wtc_poll_loop(symbol):
             debug_log(f"⚠️ [{symbol}] WaveTrend-Cross-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
+
+
+def _resolution_ms(resolution):
+    """Kerzenlaenge einer Zeiteinheit in Millisekunden (10s/15s/30s/45s, native Binance-Intervalle
+    und beliebige Minutenwerte wie '8m'/'24m') - None bei unbekanntem Format."""
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        return SUB_MINUTE_RESOLUTIONS[resolution] * 1000
+    if resolution in BINANCE_INTERVAL_MS:
+        return BINANCE_INTERVAL_MS[resolution]
+    m = re.match(r"^(\d+)m$", resolution or "")
+    if m and int(m.group(1)) > 0:
+        return int(m.group(1)) * 60_000
+    return None
+
+
+_trend_filter_warn_last = {}
+
+
+async def _fetch_trend_filter_candles_live(symbol, st, cfg, tf_resolution, tf_atr_period):
+    """Liefert (highs, lows, closes) der ABGESCHLOSSENEN Kerzen der SuperTrend-Trendfilter-Zeiteinheit
+    (live, fuer ab_breakout und hvd_signal) - oder None, wenn (noch) nicht genug Daten da sind (der
+    Aufrufer laesst den Filter dann wie bisher durch). Unterstuetzt ALLE Zeiteinheiten der Strategien:
+    Sekunden-Zeitrahmen (10s/15s/30s/45s) kommen aus dem 1s-Puffer (wie beim eigenen Handels-Zeitrahmen,
+    kein REST-Traffic), native Minuten/Stunden aus dem Binance-Cache, eigene Minutenwerte (z.B. 8m, 24m)
+    werden aus 1m-Kerzen zusammengesetzt."""
+    tf_needed = min(500, tf_atr_period * 5 + 20)
+    tf_h = tf_l = tf_c = None
+    if tf_resolution in SUB_MINUTE_RESOLUTIONS:
+        local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf_resolution], tf_needed)
+        if local:
+            # get_seconds_candles liefert bereits nur abgeschlossene Buckets (der letzte muss
+            # vollstaendig sein) - deshalb hier KEIN "[:-1]" wie bei den Minuten-Zeitrahmen.
+            _, _, tf_h, tf_l, tf_c = local
+    else:
+        synth = resolve_synthetic_resolution(tf_resolution)
+        factor = synth[1] if synth else 1
+        # Zusammengesetzte Zeitrahmen (z.B. 24m) brauchen factor-mal so viele Basis-Kerzen - die
+        # Basis-Abfrage bleibt bewusst unter ~900 Kerzen (REST-Limit 1000), sonst kaeme gar nichts an.
+        count = tf_needed if factor == 1 else max(1, min(tf_needed, 900 // factor))
+        tf_data = await fetch_candles_binance_multi(symbol, tf_resolution, count_back=count, market_type=cfg.get("binance_market_type", "spot"))
+        if tf_data:
+            _, _, tf_h, tf_l, tf_c = tf_data
+            tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
+    if not tf_c or len(tf_c) <= tf_atr_period:
+        now = time.time()
+        key = (symbol, tf_resolution)
+        if now - _trend_filter_warn_last.get(key, 0.0) > 300:
+            _trend_filter_warn_last[key] = now
+            debug_log(f"⚠️ [{symbol}] SuperTrend-Trendfilter ({tf_resolution}): noch nicht genug Kerzen "
+                      f"({len(tf_c) if tf_c else 0}/{tf_atr_period + 1} nötig) - Filter lässt Signale vorerst durch.")
+        return None
+    return tf_h, tf_l, tf_c
+
+
+async def _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, tf_resolution, tf_atr_period):
+    """Backtest-Gegenstueck: holt die Kerzen der Trendfilter-Zeiteinheit passend zum ZEITRAUM der
+    Handels-Kerzen (base_ts) - plus Vorlauf fuer die SuperTrend-Einschwingphase. Liefert
+    (candles, None) oder (None, fertige Fehlermeldung). Vorher: feste 20.000-Kerzen-Grenze, bei
+    feinen Zeiteinheiten (z.B. 1m ueber 30 Tage) fehlte dadurch der Anfang des Zeitraums."""
+    tf_ms = _resolution_ms(tf_resolution)
+    if tf_ms is None:
+        return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): unbekanntes Format."
+    warm_ms = (tf_atr_period * 5 + 20) * tf_ms
+    span_ms = (base_ts[-1] - base_ts[0]) + warm_ms + tf_ms
+    needed = int(span_ms // tf_ms) + 10
+    if tf_resolution in SUB_MINUTE_RESOLUTIONS and needed > 5000:
+        cover_h = round(5000 * tf_ms / 3_600_000, 1)
+        return None, (f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): Sekunden-Zeiteinheiten sind im Backtest auf "
+                      f"5000 Kerzen (~{cover_h} Std.) begrenzt, der Backtest-Zeitraum ist länger. Kürzeren Zeitraum "
+                      f"oder eine Trendfilter-Zeiteinheit ab 1 Minute wählen.")
+    candles, err, _ = await _fetch_cached_backtest_candles(
+        symbol, tf_resolution, span_ms / 86_400_000, min(max(needed, 200), 100_000),
+        market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {err}"
+    if not candles or len(candles[4]) < tf_atr_period + 5:
+        return None, f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."
+    return candles, None
+
+
+def _trend_filter_ok_series(base_ts, tf_candles, tf_multiplier, tf_atr_period):
+    """(long_ok[], short_ok[]) je Handels-Kerze aus dem SuperTrend der Trendfilter-Zeiteinheit
+    (Forward-Fill, siehe _align_htf_series). Handels-Kerzen VOR der ersten Filter-Kerze bekommen
+    (False, False) = kein Signal - vorher galten sie faelschlich als 'baerisch' (Short erlaubt)."""
+    tf_ts, _o, tf_h, tf_l, tf_c = tf_candles
+    tf_st_line, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
+    tf_bullish = [tf_st_line[i] is not None and tf_c[i] > tf_st_line[i] for i in range(len(tf_c))]
+    aligned = _align_htf_series(base_ts, tf_ts, tf_bullish)
+    first_ts = tf_ts[0]
+    long_ok = [bool(aligned[i]) and base_ts[i] >= first_ts for i in range(len(base_ts))]
+    short_ok = [(not aligned[i]) and base_ts[i] >= first_ts for i in range(len(base_ts))]
+    return long_ok, short_ok
 
 
 def _align_htf_series(base_ts, htf_ts, htf_vals):
@@ -5858,14 +5945,9 @@ async def hvd_poll_loop(symbol):
                             trend_filter_long_ok_series = [tf_st_line[i] is not None and closed_c[i] > tf_st_line[i] for i in range(n)]
                             trend_filter_short_ok_series = [tf_st_line[i] is not None and closed_c[i] < tf_st_line[i] for i in range(n)]
                         else:
-                            tf_needed = min(500, tf_atr_period * 5 + 20)
-                            tf_data = await fetch_candles_binance_multi(symbol, tf_resolution, count_back=tf_needed, market_type=cfg.get("binance_market_type", "spot"))
-                            if tf_data:
-                                _, _, tf_h, tf_l, tf_c = tf_data
-                                tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
-                            else:
-                                tf_h = tf_l = tf_c = None
-                            if tf_c and len(tf_c) > tf_atr_period:
+                            tf_closed = await _fetch_trend_filter_candles_live(symbol, st, cfg, tf_resolution, tf_atr_period)
+                            if tf_closed:
+                                tf_h, tf_l, tf_c = tf_closed
                                 tf_st_line_now, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
                                 tf_bullish_now = tf_st_line_now[-1] is not None and tf_c[-1] > tf_st_line_now[-1]
                                 trend_filter_long_ok_series = [tf_bullish_now] * n
@@ -6256,25 +6338,18 @@ async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min
         tf_resolution = cfg.get("hvd_trend_filter_resolution", "15m")
         tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
         tf_same_resolution = tf_resolution in (None, "", "same") or tf_resolution == resolution
-        tf_candles_h = tf_candles_l = tf_candles_c = tf_candles_ts = None
+        tf_candles = None
         if not tf_same_resolution:
-            tf_candles, tf_err, _ = await _fetch_cached_backtest_candles(symbol, tf_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+            tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, ts, tf_resolution, tf_atr_period)
             if tf_err:
-                return {"error": f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {tf_err}"}
-            if not tf_candles or len(tf_candles[4]) < tf_atr_period + 5:
-                return {"error": f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."}
-            tf_candles_ts, _tf_o, tf_candles_h, tf_candles_l, tf_candles_c = tf_candles
+                return {"error": tf_err}
         for st_mult in st_multipliers:
             if tf_same_resolution:
                 tf_st_line, _ = compute_diamond_supertrend(h, l, c, st_mult, tf_atr_period)
                 tf_long_ok = [tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(n)]
                 tf_short_ok = [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(n)]
             else:
-                tf_st_line, _ = compute_diamond_supertrend(tf_candles_h, tf_candles_l, tf_candles_c, st_mult, tf_atr_period)
-                tf_bullish = [tf_st_line[i] is not None and tf_candles_c[i] > tf_st_line[i] for i in range(len(tf_candles_c))]
-                tf_bullish_aligned = _align_htf_series(ts, tf_candles_ts, tf_bullish)
-                tf_long_ok = [bool(v) for v in tf_bullish_aligned]
-                tf_short_ok = [v is not None and not v for v in tf_bullish_aligned]
+                tf_long_ok, tf_short_ok = _trend_filter_ok_series(ts, tf_candles, st_mult, tf_atr_period)
             trend_filter_by_mult[st_mult] = (tf_long_ok, tf_short_ok)
 
     results = []
@@ -11412,17 +11487,10 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
             tf_multiplier = cfg.get("ab_trend_filter_multiplier", 3.0)
             if not (tf_resolution in (None, "", "same") or tf_resolution == resolution):
-                tf_candles, tf_err, _ = await _fetch_cached_backtest_candles(symbol, tf_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+                tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, candles[0], tf_resolution, tf_atr_period)
                 if tf_err:
-                    return {"error": f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {tf_err}"}
-                if not tf_candles or len(tf_candles[4]) < tf_atr_period + 5:
-                    return {"error": f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."}
-                tf_ts, tf_o, tf_h, tf_l, tf_c = tf_candles
-                tf_st_line, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
-                tf_bullish = [tf_st_line[i] is not None and tf_c[i] > tf_st_line[i] for i in range(len(tf_c))]
-                tf_bullish_aligned = _align_htf_series(candles[0], tf_ts, tf_bullish)
-                trend_filter_long_ok = [bool(v) for v in tf_bullish_aligned]
-                trend_filter_short_ok = [v is not None and not v for v in tf_bullish_aligned]
+                    return {"error": tf_err}
+                trend_filter_long_ok, trend_filter_short_ok = _trend_filter_ok_series(candles[0], tf_candles, tf_multiplier, tf_atr_period)
             # Bei gleicher Zeiteinheit: bleibt None, backtest_ab_breakout berechnet es selbst intern.
 
         trades = backtest_ab_breakout(candles, cfg, trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok)
@@ -11495,17 +11563,10 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
             tf_multiplier = cfg.get("hvd_trend_filter_multiplier", 3.0)
             if not (tf_resolution in (None, "", "same") or tf_resolution == resolution):
-                tf_candles, tf_err, _ = await _fetch_cached_backtest_candles(symbol, tf_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
+                tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, candles[0], tf_resolution, tf_atr_period)
                 if tf_err:
-                    return {"error": f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {tf_err}"}
-                if not tf_candles or len(tf_candles[4]) < tf_atr_period + 5:
-                    return {"error": f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."}
-                tf_ts, tf_o, tf_h, tf_l, tf_c = tf_candles
-                tf_st_line, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
-                tf_bullish = [tf_st_line[i] is not None and tf_c[i] > tf_st_line[i] for i in range(len(tf_c))]
-                tf_bullish_aligned = _align_htf_series(candles[0], tf_ts, tf_bullish)
-                trend_filter_long_ok = [bool(v) for v in tf_bullish_aligned]
-                trend_filter_short_ok = [v is not None and not v for v in tf_bullish_aligned]
+                    return {"error": tf_err}
+                trend_filter_long_ok, trend_filter_short_ok = _trend_filter_ok_series(candles[0], tf_candles, tf_multiplier, tf_atr_period)
             # Bei gleicher Zeiteinheit: bleibt None, backtest_hvd_signal berechnet es selbst intern.
 
         trades = backtest_hvd_signal(candles, cfg, adx_filter_ok=adx_filter_ok,

@@ -689,7 +689,7 @@ def default_config():
         "hvd_adx_filter_threshold": float(os.getenv("HVD_ADX_FILTER_THRESHOLD", "20")),
         "hvd_adx_filter_resolution": os.getenv("HVD_ADX_FILTER_RESOLUTION", "same"),
         "hvd_trend_filter_enabled": os.getenv("HVD_TREND_FILTER_ENABLED", "false").lower() == "true",  # optionaler uebergeordneter SuperTrend-Filter (eigene, hoehere Zeiteinheit) - Long nur wenn Trend bullisch, Short nur wenn baerisch
-        "hvd_trend_filter_resolution": os.getenv("HVD_TREND_FILTER_RESOLUTION", "15m"),  # "1m" | "2m" | "5m" | "15m" | "1h"
+        "hvd_trend_filter_resolution": os.getenv("HVD_TREND_FILTER_RESOLUTION", "15m"),  # alle Zeiteinheiten der Strategien: 10s/15s/30s/45s/1m/5m/15m/30m/1h/4h oder eigene Minuten (z.B. "8m")
         "hvd_trend_filter_atr_period": int(os.getenv("HVD_TREND_FILTER_ATR_PERIOD", "10")),
         "hvd_trend_filter_multiplier": float(os.getenv("HVD_TREND_FILTER_MULTIPLIER", "3.0")),
         # Optionaler ASO-Sentiment-Filter (Nutzer-eigener "Average Sentiment Oscillator"-Pine-
@@ -1929,13 +1929,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
     <select class="cfg" id="ab_trend_filter_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="ab_trend_filter_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter ATR-Periode</label><input type="number" step="1" min="1" id="ab_trend_filter_atr_period"></div>
   <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter Multiplikator</label><input type="number" step="0.1" min="0.1" id="ab_trend_filter_multiplier"></div>
@@ -3578,12 +3584,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
     <select class="cfg" id="hvd_trend_filter_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="hvd_trend_filter_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter ATR-Periode</label><input type="number" step="1" min="1" id="hvd_trend_filter_atr_period"></div>
   <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter Multiplikator</label><input type="number" step="0.1" min="0.1" id="hvd_trend_filter_multiplier"></div>
@@ -4771,7 +4784,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -5831,7 +5844,7 @@ async function refresh() {
     document.getElementById('ab_sl_to_tp1_on_tp2').value = String(data.config.ab_sl_to_tp1_on_tp2);
     document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
-    document.getElementById('ab_trend_filter_resolution').value = data.config.ab_trend_filter_resolution;
+    setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
     document.getElementById('ab_trend_filter_multiplier').value = data.config.ab_trend_filter_multiplier;
     document.getElementById('ab_aso_filter_enabled').value = String(data.config.ab_aso_filter_enabled);
@@ -6138,7 +6151,7 @@ async function refresh() {
     setResolutionField('hvd_adx_filter_resolution', data.config.hvd_adx_filter_resolution);
     document.getElementById('hvd_adx_filter_threshold').value = data.config.hvd_adx_filter_threshold;
     document.getElementById('hvd_trend_filter_enabled').value = String(data.config.hvd_trend_filter_enabled);
-    document.getElementById('hvd_trend_filter_resolution').value = data.config.hvd_trend_filter_resolution;
+    setResolutionField('hvd_trend_filter_resolution', data.config.hvd_trend_filter_resolution);
     document.getElementById('hvd_trend_filter_atr_period').value = data.config.hvd_trend_filter_atr_period;
     document.getElementById('hvd_trend_filter_multiplier').value = data.config.hvd_trend_filter_multiplier;
     document.getElementById('hvd_trend_filter_signal_window_candles').value = data.config.hvd_trend_filter_signal_window_candles;
@@ -6457,7 +6470,7 @@ function buildConfigPayload() {
     ab_sl_to_tp1_on_tp2: document.getElementById('ab_sl_to_tp1_on_tp2').value === 'true',
     ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
-    ab_trend_filter_resolution: document.getElementById('ab_trend_filter_resolution').value,
+    ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
     ab_trend_filter_multiplier: parseFloat(document.getElementById('ab_trend_filter_multiplier').value),
     ab_aso_filter_enabled: document.getElementById('ab_aso_filter_enabled').value === 'true',
@@ -6764,7 +6777,7 @@ function buildConfigPayload() {
     hvd_adx_filter_resolution: getResolutionField('hvd_adx_filter_resolution'),
     hvd_adx_filter_threshold: parseFloat(document.getElementById('hvd_adx_filter_threshold').value),
     hvd_trend_filter_enabled: document.getElementById('hvd_trend_filter_enabled').value === 'true',
-    hvd_trend_filter_resolution: document.getElementById('hvd_trend_filter_resolution').value,
+    hvd_trend_filter_resolution: getResolutionField('hvd_trend_filter_resolution'),
     hvd_trend_filter_atr_period: parseInt(document.getElementById('hvd_trend_filter_atr_period').value),
     hvd_trend_filter_multiplier: parseFloat(document.getElementById('hvd_trend_filter_multiplier').value),
     hvd_trend_filter_signal_window_candles: parseInt(document.getElementById('hvd_trend_filter_signal_window_candles').value),
