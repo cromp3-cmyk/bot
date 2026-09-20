@@ -46,17 +46,86 @@ _binance_last_request_ts = 0.0
 _binance_throttle_lock = None  # wird beim ersten Gebrauch lazy angelegt (braucht einen laufenden Event-Loop)
 BINANCE_MIN_REQUEST_INTERVAL = 0.15  # Sekunden zwischen zwei Binance-Anfragen = max. ~6.7 Anfragen/Sekunde global
 
+# Gewichts-bewusste Drossel: Binance zaehlt pro IP ein "Gewicht" pro Minute (Spot 6000, Futures 2400) -
+# NICHT die Anfragenzahl. Eine Klines-Anfrage mit limit=1000 kostet bei Futures 5 Gewicht (Spot 2), die
+# reine 0,15-s-Drossel oben kann also trotz "nur" ~400 Anfragen/Min das Futures-Limit reissen. Binance
+# meldet in JEDER Antwort den aktuellen IP-weiten Verbrauch (Header X-MBX-USED-WEIGHT-1M) - inklusive dem
+# anderer Programme auf derselben (z.B. geteilten Render-)IP. Ab BINANCE_WEIGHT_SOFT_FRACTION des Limits
+# werden Anfragen stufenlos gebremst (0,5 s bis 5 s Zusatzpause), lange bevor es ein 429/418 (IP-Bann) gibt.
+BINANCE_WEIGHT_LIMIT_1M = {"spot": 6000, "futures": 2400}
+BINANCE_WEIGHT_SOFT_FRACTION = 0.6
+_binance_used_weight = {"spot": (0, 0.0), "futures": (0, 0.0)}  # (Gewicht laut letzter Antwort, Zeitpunkt)
+_binance_req_counts = {}  # (market_type, kind) -> Anzahl seit dem letzten Statistik-Log
+_binance_stats_last_log = time.time()
+_binance_slowdown_logged_at = 0.0
+BINANCE_STATS_LOG_INTERVAL = 300
 
-async def _binance_throttle():
-    global _binance_last_request_ts, _binance_throttle_lock
+
+def _binance_note_response(market_type, resp):
+    """Merkt sich den von Binance gemeldeten IP-Gewichtsverbrauch der letzten Minute."""
+    try:
+        raw = resp.headers.get("X-MBX-USED-WEIGHT-1M")
+        if raw is not None:
+            _binance_used_weight[market_type] = (int(raw), time.time())
+    except Exception:
+        pass
+
+
+def _binance_weight_delay(market_type):
+    """Zusatzpause in Sekunden je nach zuletzt gemeldetem Gewichtsverbrauch (0 unter der Schwelle)."""
+    weight, ts = _binance_used_weight.get(market_type, (0, 0.0))
+    if time.time() - ts >= 60:
+        return 0.0  # Messwert aelter als das 1-Minuten-Fenster - gilt als zurueckgesetzt
+    limit = BINANCE_WEIGHT_LIMIT_1M.get(market_type, 6000)
+    frac = weight / limit
+    if frac < BINANCE_WEIGHT_SOFT_FRACTION:
+        return 0.0
+    return 0.5 + min(1.0, (frac - BINANCE_WEIGHT_SOFT_FRACTION) / (1 - BINANCE_WEIGHT_SOFT_FRACTION)) * 4.5
+
+
+def _binance_log_stats_if_due():
+    """Alle 5 Minuten eine Zeile: wie viele Anfragen kamen von WEM (Art:Intervall) und wie hoch war der
+    IP-Gewichtsverbrauch - so sieht man im Log, WOHER der Traffic kommt (oder dass er gar nicht von uns ist)."""
+    global _binance_stats_last_log
+    now = time.time()
+    if now - _binance_stats_last_log < BINANCE_STATS_LOG_INTERVAL or not _binance_req_counts:
+        return
+    minutes = (now - _binance_stats_last_log) / 60
+    _binance_stats_last_log = now
+    parts = []
+    for mt in ("spot", "futures"):
+        items = sorted(((k[1], n) for k, n in _binance_req_counts.items() if k[0] == mt), key=lambda x: -x[1])
+        if not items:
+            continue
+        total = sum(n for _, n in items)
+        weight, ts = _binance_used_weight.get(mt, (0, 0.0))
+        top = ", ".join(f"{kind}:{n}" for kind, n in items[:6])
+        parts.append(f"{mt} {total} Anfragen (~{round(total / minutes, 1)}/Min; {top}), zuletzt gemeldetes IP-Gewicht {weight}/{BINANCE_WEIGHT_LIMIT_1M[mt]} pro Min")
+    _binance_req_counts.clear()
+    debug_log("📊 [Binance-REST] letzte " + str(round(minutes)) + " Min: " + " | ".join(parts))
+
+
+async def _binance_throttle(market_type="spot", kind="klines"):
+    global _binance_last_request_ts, _binance_throttle_lock, _binance_slowdown_logged_at
     if _binance_throttle_lock is None:
         _binance_throttle_lock = asyncio.Lock()
     async with _binance_throttle_lock:
         now = time.time()
         wait = BINANCE_MIN_REQUEST_INTERVAL - (now - _binance_last_request_ts)
+        extra = _binance_weight_delay(market_type)
+        if extra > 0:
+            wait = max(wait, extra)
+            if now - _binance_slowdown_logged_at > 60:
+                _binance_slowdown_logged_at = now
+                weight, _ts = _binance_used_weight.get(market_type, (0, 0.0))
+                debug_log(f"🐢 [Binance-{market_type}] IP-Gewicht {weight}/{BINANCE_WEIGHT_LIMIT_1M.get(market_type, 6000)} pro Min - "
+                          f"bremse Anfragen ({round(extra, 1)}s Pause), um einen Bann zu vermeiden")
         if wait > 0:
             await asyncio.sleep(wait)
         _binance_last_request_ts = time.time()
+        key = (market_type, kind)
+        _binance_req_counts[key] = _binance_req_counts.get(key, 0) + 1
+        _binance_log_stats_if_due()
 
 
 BINANCE_BASE_URLS = {
@@ -142,9 +211,10 @@ async def fetch_candles_binance(symbol, resolution, count_back=150, market_type=
 
         base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
         url = f"{base_url}?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
-        await _binance_throttle()
+        await _binance_throttle(effective_market_type, f"live:{resolution}")
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                _binance_note_response(effective_market_type, resp)
                 if resp.status in (418, 429):
                     body = await resp.text()
                     _binance_register_ban(effective_market_type, symbol, resp.status, body)
@@ -193,10 +263,11 @@ async def get_smart_direction_g2(symbol):
             try:
                 base = "https://fapi.binance.com/fapi/v1/ticker/24hr" if effective_market_type == "futures" \
                     else "https://api.binance.com/api/v3/ticker/24hr"
-                await _binance_throttle()
+                await _binance_throttle(effective_market_type, "ticker")
                 url = f"{base}?symbol={pair}"
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        _binance_note_response(effective_market_type, resp)
                         if resp.status in (418, 429):
                             body = await resp.text()
                             _binance_register_ban(effective_market_type, symbol, resp.status, body)
@@ -282,8 +353,9 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
                     return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
 
                 url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
-                await _binance_throttle()
+                await _binance_throttle(effective_market_type, f"history:{base_resolution}")
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    _binance_note_response(effective_market_type, resp)
                     if resp.status in (418, 429):
                         # NICHT blind mit kurzer Pause wiederholen - das hat den Bann in der
                         # Praxis immer weiter verlaengert. Stattdessen die tatsaechliche
@@ -375,8 +447,9 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
                     wait_s = max(0, (_binance_ban_until_ms.get(effective_market_type, 0.0) - time.time() * 1000) / 1000)
                     return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
                 url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
-                await _binance_throttle()
+                await _binance_throttle(effective_market_type, f"history-vol:{base_resolution}")
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    _binance_note_response(effective_market_type, resp)
                     if resp.status in (418, 429):
                         body = await resp.text()
                         _binance_register_ban(effective_market_type, symbol, resp.status, body)
@@ -448,13 +521,31 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
     base_resolution, factor = synth if synth else (resolution, 1)
     fetch_limit = min(1000, count_back * factor + factor + 5)
 
+    if synth:
+        # Zusammengesetzte Zeitrahmen (10s/15s/30s/45s aus 1s, 2m/eigene Minuten aus 1m) kamen bisher
+        # bei JEDEM Durchlauf (alle 5 s, je Coin) per REST - jetzt wie die nativen Intervalle aus dem
+        # WebSocket-Cache der Basis-Aufloesung (1s/1m, beide gecacht) zusammengesetzt; REST nur noch,
+        # wenn der Cache (noch) nicht warm oder eingefroren ist.
+        binance_ws.ensure_subscribed("spot", pair, base_resolution)
+        cached = binance_ws.get_cached_candles("spot", pair, base_resolution, fetch_limit)
+        if cached is not None and cached[0]:
+            if base_resolution == "1s":
+                out = _resample_seconds_candles_with_volume(cached, factor)
+            else:
+                out = resample_candles_with_volume(cached, factor)
+            if out and out[4]:
+                if len(out[4]) > count_back:
+                    out = tuple(series[-count_back:] for series in out)
+                return out
+
     if _binance_is_banned("spot"):
         return None  # aktiver Bann - keine Anfrage stellen, das wuerde ihn nur verlaengern
     try:
-        await _binance_throttle()
+        await _binance_throttle("spot", f"vol:{base_resolution}")
         url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={base_resolution}&limit={fetch_limit}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                _binance_note_response("spot", resp)
                 if resp.status in (418, 429):
                     body = await resp.text()
                     _binance_register_ban("spot", symbol, resp.status, body)
@@ -662,7 +753,20 @@ async def binance_1s_poll_loop(symbol):
     b = BOTS[symbol]
     st = b["state"]
 
-    if not st.get("binance_1s_buffer"):
+    # Der 1s-Puffer wird NUR von Sekunden-Zeitrahmen (10s/15s/30s/45s) gebraucht (get_seconds_candles) -
+    # egal ob als Handels-Zeitrahmen oder als Zeitrahmen eines Filters. Vorher lief Vorbefuellung
+    # (~11 REST-Seiten je Coin) + 5-s-Abruf + 1s-WebSocket-Stream fuer JEDEN Coin in GRID_SYMBOLS, auch
+    # wenn dort gar keine Sekunden-Strategie eingestellt ist. Jetzt nur noch fuer Coins, in deren
+    # Config irgendwo ein Sekunden-Zeitrahmen steht (wird laufend neu geprueft, Umschalten wirkt sofort).
+    def _needs_1s_buffer(cfg):
+        return any(isinstance(v, str) and v in SUB_MINUTE_RESOLUTIONS for v in cfg.values())
+
+    prefill_done = bool(st.get("binance_1s_buffer"))
+    while not prefill_done:
+        if not _needs_1s_buffer(b["config"]):
+            await asyncio.sleep(10)
+            continue
+        prefill_done = True
         try:
             market_type = b["config"].get("binance_market_type", "spot")
             seed, err = await fetch_historical_candles_binance(symbol, "1s", days=0.125, max_candles=10800, market_type=market_type)  # ~3 Stunden
@@ -681,7 +785,7 @@ async def binance_1s_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["bot_active"]:
+            if cfg["bot_active"] and _needs_1s_buffer(cfg):
                 # count_back klein halten (nicht mehr 1000!) - wir brauchen bei einem 5-Sekunden-
                 # Poll-Intervall nur eine kleine Ueberlappung zurueck, um bereits gespeicherte,
                 # aber von Binance zwischenzeitlich noch nachtraeglich stabilisierte/korrigierte

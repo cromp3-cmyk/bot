@@ -137,7 +137,7 @@ async def _seed_stream_history(market_type, pair, interval):
     Zirkelimport beim Modul-Laden zu vermeiden - strategies.py importiert dieses Modul
     bereits auf oberster Ebene)."""
     import aiohttp
-    from strategies import _binance_throttle, _binance_is_banned, _binance_register_ban
+    from strategies import _binance_throttle, _binance_is_banned, _binance_register_ban, _binance_note_response
 
     if _binance_is_banned(market_type):
         # Aktiver Bann - Seed spaeter nachholen, damit wir ihn nicht verlaengern. Der
@@ -149,10 +149,11 @@ async def _seed_stream_history(market_type, pair, interval):
     base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
     limit = REST_SEED_LIMIT.get(interval, 500)
     try:
-        await _binance_throttle()
+        await _binance_throttle(market_type, f"seed:{interval}")
         url = f"{base_url}?symbol={pair}&interval={interval}&limit={limit}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                _binance_note_response(market_type, resp)
                 if resp.status in (418, 429):
                     body = await resp.text()
                     _binance_register_ban(market_type, pair, resp.status, body)
