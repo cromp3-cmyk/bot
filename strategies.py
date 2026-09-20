@@ -504,15 +504,25 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
     synthetische Aufloesungen (2m, eigene Minuten, 10s/15s/30s/45s - siehe
     resolve_synthetic_resolution): der WS-Cache deckt nur native Intervalle ab (siehe
     binance_ws.CACHEABLE_INTERVALS), fuer alles andere wird die Basis-Aufloesung per REST
-    geholt und das Volumen beim Zusammenfassen pro Bucket aufsummiert."""
+    geholt und das Volumen beim Zusammenfassen pro Bucket aufsummiert.
+
+    Markt: Spot - AUSSER bei Coins, die es auf Binance nur als Futures gibt (BINANCE_FUTURES_ONLY_SYMBOLS:
+    LIT, XAU, XAG). Vorher ging auch dafuer die Spot-Anfrage raus: fuer LIT lieferte sie die Kerzen eines
+    laengst delisteten alten LIT-Spot-Paars (letzte Kerze ~587 Tage alt) - die Strategie-Loops
+    ueberspringen so etwas zwar (Veraltet-Pruefung), bekamen aber nie gueltige Daten, und der WS-Cache
+    hat den toten Stream alle paar Minuten neu geseedet."""
     pair = BINANCE_SYMBOL_MAP.get(symbol)
     if not pair:
         return None
 
+    mt = "futures" if symbol in BINANCE_FUTURES_ONLY_SYMBOLS else "spot"
     synth = resolve_synthetic_resolution(resolution)
+    if mt == "futures" and synth and synth[0] == "1s":
+        return None  # Binance-Futures bietet keine 1s-Kerzen an - Sekunden-Zeitrahmen gehen hier nicht
+
     if not synth:
-        binance_ws.ensure_subscribed("spot", pair, resolution)
-        cached = binance_ws.get_cached_candles("spot", pair, resolution, count_back)
+        binance_ws.ensure_subscribed(mt, pair, resolution)
+        cached = binance_ws.get_cached_candles(mt, pair, resolution, count_back)
         if cached is not None:
             ts, o, h, l, c, v = cached
             if ts:
@@ -526,8 +536,8 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
         # bei JEDEM Durchlauf (alle 5 s, je Coin) per REST - jetzt wie die nativen Intervalle aus dem
         # WebSocket-Cache der Basis-Aufloesung (1s/1m, beide gecacht) zusammengesetzt; REST nur noch,
         # wenn der Cache (noch) nicht warm oder eingefroren ist.
-        binance_ws.ensure_subscribed("spot", pair, base_resolution)
-        cached = binance_ws.get_cached_candles("spot", pair, base_resolution, fetch_limit)
+        binance_ws.ensure_subscribed(mt, pair, base_resolution)
+        cached = binance_ws.get_cached_candles(mt, pair, base_resolution, fetch_limit)
         if cached is not None and cached[0]:
             if base_resolution == "1s":
                 out = _resample_seconds_candles_with_volume(cached, factor)
@@ -538,17 +548,17 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
                     out = tuple(series[-count_back:] for series in out)
                 return out
 
-    if _binance_is_banned("spot"):
+    if _binance_is_banned(mt):
         return None  # aktiver Bann - keine Anfrage stellen, das wuerde ihn nur verlaengern
     try:
-        await _binance_throttle("spot", f"vol:{base_resolution}")
-        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={base_resolution}&limit={fetch_limit}"
+        await _binance_throttle(mt, f"vol:{base_resolution}")
+        url = f"{BINANCE_BASE_URLS[mt]}?symbol={pair}&interval={base_resolution}&limit={fetch_limit}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                _binance_note_response("spot", resp)
+                _binance_note_response(mt, resp)
                 if resp.status in (418, 429):
                     body = await resp.text()
-                    _binance_register_ban("spot", symbol, resp.status, body)
+                    _binance_register_ban(mt, symbol, resp.status, body)
                     return None
                 if resp.status != 200:
                     debug_log(f"⚠️ [{symbol}] Binance-Kerzenabfrage (mit Volumen) HTTP {resp.status}")
