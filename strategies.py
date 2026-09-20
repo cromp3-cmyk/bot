@@ -1790,12 +1790,58 @@ async def check_ab_sl_tp(symbol, price):
             _ab_reset_state(st)
 
 
+async def _check_ab_flip(symbol, buy_signal, sell_signal, price):
+    """Wechsel-Modus (ab_flip_mode): immer im Markt, KEIN SL und KEIN TP. Die offene Position bleibt
+    bis zum Gegen-Signal stehen; das Gegen-Signal schliesst sie und oeffnet im selben Schritt die
+    Gegenrichtung (erster Buy bleibt offen bis zum ersten Sell, der Sell bleibt offen bis zum
+    naechsten Buy usw.). Ein weiteres Signal in Richtung der schon offenen Position tut nichts.
+    Richtung 'nur Long'/'nur Short': das Gegen-Signal schliesst die Position weiterhin, eroeffnet
+    aber keine Position in der gesperrten Richtung (danach flach bis zum naechsten erlaubten Signal).
+    Alle Filter (EMA/RSI/Volumen/SuperTrend/ASO) wirken bereits VOR dieser Funktion auf die
+    Setup-Serien - ein vom Filter blockiertes Gegen-Signal dreht die Position also nicht."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    if buy_signal:
+        target = "long"
+    elif sell_signal:
+        target = "short"
+    else:
+        return
+    pos = st["position"]
+    if pos == target:
+        return  # schon in dieser Richtung offen - nur das Gegen-Signal zaehlt
+
+    direction_mode = cfg.get("ab_direction_mode", "both")
+    can_open = (direction_mode == "both"
+                or (direction_mode == "long_only" and target == "long")
+                or (direction_mode == "short_only" and target == "short"))
+
+    if pos is not None:
+        debug_log(f"🔄 [{symbol}] Al-Shatri Breakout Flip: {pos.upper()} -> {target.upper() if can_open else 'FLACH'} @ {price}")
+        await execute_exit(symbol, price, "AB-FLIP")
+        if st["position"] is not None:
+            # Exit fehlgeschlagen (Details im execute_exit-Log) - Position bleibt offen, deshalb
+            # KEIN Gegen-Einstieg, sonst waeren beide Richtungen gleichzeitig im Bestand.
+            return
+    _ab_reset_state(st)  # Flip-Modus kennt keinen SL/TP - Reste eines frueheren Plans verwerfen
+    if not can_open:
+        return
+    debug_log(f"📡 [{symbol}] Al-Shatri Breakout Flip-Signal: {target.upper()} @ {price}")
+    await execute_entry(symbol, target, price, is_add_on=False)
+
+
 async def check_ab_entry(symbol, buy_signal, sell_signal, price, atr_now):
     """Einstieg nur wenn flach (kein 'active'-Plan laeuft) - wie im Original, das waehrend eines
     laufenden Plans keine neuen Linien zeichnet. SL/TP1/TP2/TP3 werden einmalig aus dem ATR-Risk-
-    Abstand zum Einstiegszeitpunkt berechnet, wie im Original-Skript (kein Nachziehen)."""
+    Abstand zum Einstiegszeitpunkt berechnet, wie im Original-Skript (kein Nachziehen).
+    Mit ab_flip_mode wird stattdessen _check_ab_flip verwendet (Wechsel ohne SL/TP)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
+    if cfg.get("ab_flip_mode", False):
+        await _check_ab_flip(symbol, buy_signal, sell_signal, price)
+        return
     if not cfg["bot_active"] or st["position"] is not None or price is None:
         return
     if time.time() < st.get("ab_sl_cooldown_until", 0.0):
@@ -1874,7 +1920,12 @@ async def ab_poll_loop(symbol):
                 # Abfrage gerade fehlschlaegt oder ein Binance-Rate-Limit aktiv ist - vorher haengte
                 # die SL-Pruefung am erfolgreichen Kerzen-Fetch und blieb waehrend eines Banns
                 # komplett aus, wodurch der SL erst mit der Verzoegerung des Banns griff.
-                if st["position"] is not None and st["last_price"] is not None:
+                # Im Wechsel-Modus (ab_flip_mode) gibt es weder SL noch TP - die Position wird
+                # ausschliesslich durch das Gegen-Signal gedreht. Reste eines frueheren Plans
+                # (z.B. nach dem Umschalten mitten in einer Position) werden verworfen.
+                if cfg.get("ab_flip_mode", False):
+                    _ab_reset_state(st)
+                elif st["position"] is not None and st["last_price"] is not None:
                     await check_ab_sl_tp(symbol, st["last_price"])
 
                 if closed_ts and len(closed_c) > min_needed:
@@ -1954,6 +2005,7 @@ async def ab_poll_loop(symbol):
                     if due_heartbeat:
                         last_heartbeat = now
                         debug_log(f"💓 [{symbol}] Al-Shatri Breakout aktiv: Preset={cfg.get('ab_preset','intraday')}, "
+                                  f"Modus={'Flip (ohne SL/TP)' if cfg.get('ab_flip_mode', False) else 'Plan'}, "
                                   f"ATR={round(atr[-1] or 0,4)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
                     if last_processed_ts is None:
@@ -8859,11 +8911,56 @@ def backtest_halftrend(candles, cfg):
     return _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup)
 
 
+def _simulate_ab_flip_trades(candles, cfg, long_setup, short_setup, warmup):
+    """Backtest fuer den Wechsel-Modus (ab_flip_mode) - Gegenstueck zu _check_ab_flip: kein SL, kein
+    TP. Der Einstieg passiert zum Schlusskurs der Signal-Kerze (wie im Normalmodus), das
+    Gegen-Signal schliesst die offene Position zum Schlusskurs und oeffnet die Gegenrichtung.
+    Am Ende des Zeitraums wird eine noch offene Position zum letzten Schlusskurs bewertet
+    (END-OF-BACKTEST) - bei einem Modus ohne Stop zeigt das den offenen Buchgewinn/-verlust."""
+    ts, c = candles[0], candles[4]
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    direction_mode = cfg.get("ab_direction_mode", "both")
+
+    position = None  # {"dir","entry","size","entry_i"}
+    trades = []
+
+    for i in range(max(warmup, 1), n):
+        buy_signal = long_setup[i] and not long_setup[i - 1]
+        sell_signal = short_setup[i] and not short_setup[i - 1]
+        if buy_signal:
+            target = "long"
+        elif sell_signal:
+            target = "short"
+        else:
+            continue
+        if position is not None and position["dir"] == target:
+            continue
+        price = c[i]
+        if position is not None:
+            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "AB-FLIP", ts=ts)
+            position = None
+        can_open = (direction_mode == "both"
+                    or (direction_mode == "long_only" and target == "long")
+                    or (direction_mode == "short_only" and target == "short"))
+        if not can_open:
+            continue
+        position = {"dir": target, "entry": price, "size": (margin * leverage) / price, "entry_i": i}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
 def _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup):
     """Kern-Simulation fuer Al-Shatri Breakout - wie _simulate_halftrend_trades (TP1/TP2/TP3 als
     echte Teilverkaeufe), aber KEIN Flip-Exit (das Original bleibt bis SL/TP3 im Plan, ein neues
     Gegen-Signal wird waehrend 'active' schlicht ignoriert) und mit den zwei EINZELN abschaltbaren
-    SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) statt fest immer Break-Even."""
+    SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) statt fest immer Break-Even.
+    Mit ab_flip_mode (Wechsel-Modus ohne SL/TP) -> _simulate_ab_flip_trades."""
+    if cfg.get("ab_flip_mode", False):
+        return _simulate_ab_flip_trades(candles, cfg, long_setup, short_setup, warmup)
     ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]

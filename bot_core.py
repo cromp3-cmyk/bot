@@ -357,6 +357,10 @@ def default_config():
         "ab_sl_to_breakeven_on_tp1": os.getenv("AB_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
         "ab_sl_to_tp1_on_tp2": os.getenv("AB_SL_TO_TP1_ON_TP2", "true").lower() == "true",
         "ab_sl_cooldown_seconds": float(os.getenv("AB_SL_COOLDOWN_SECONDS", "30")),
+        # Wechsel-Modus: immer im Markt, KEIN SL/TP. Das Gegen-Signal schliesst die offene Position
+        # und oeffnet die Gegenrichtung (Buy bleibt offen bis zum Sell, Sell bis zum Buy). Alle
+        # Filter gelten weiter; TP/SL-Felder und Break-Even-Nachzug sind in diesem Modus wirkungslos.
+        "ab_flip_mode": os.getenv("AB_FLIP_MODE", "false").lower() == "true",
         # Optionaler uebergeordneter SuperTrend-Trendfilter (eigene, hoehere Zeiteinheit) - wie bei
         # [Hoss] VWAP+RSI+Hull+DI: Long nur wenn SuperTrend dort bullisch, Short nur wenn baerisch.
         "ab_trend_filter_enabled": os.getenv("AB_TREND_FILTER_ENABLED", "false").lower() == "true",
@@ -1893,21 +1897,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short</option>
     </select>
   </div>
-  <div data-mode="ab_breakout"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp1_close_pct"></div>
-  <div data-mode="ab_breakout"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp2_close_pct"></div>
-  <div data-mode="ab_breakout"><label>SL auf Break-Even bei TP1</label>
+  <div data-mode="ab_breakout"><label>Wechsel-Modus (Flip)</label>
+    <select class="cfg" id="ab_flip_mode">
+      <option value="false">Aus (Plan mit SL + TP1/TP2/TP3)</option>
+      <option value="true">An (Gegen-Signal dreht die Position, kein SL/TP)</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_flip_mode" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    🔄 <b>Wechsel-Modus</b>: Der erste Buy bleibt offen, bis das erste Sell kommt - das Sell schliesst ihn und öffnet direkt einen Sell, der bis zum nächsten Buy offen bleibt. <b>Kein Stop-Loss, kein Take-Profit, keine Teilverkäufe</b> - das Risiko pro Position ist unbegrenzt. Ein weiteres Signal in Richtung der offenen Position wird ignoriert. Alle Filter gelten weiter (auch für das Gegen-Signal). Bei &quot;Nur Long/Nur Short&quot; schließt das Gegen-Signal nur, ohne die gesperrte Richtung zu eröffnen. SL-/TP-/Break-Even-Felder sind hier ohne Wirkung.
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp1_close_pct"></div>
+  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp2_close_pct"></div>
+  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>SL auf Break-Even bei TP1</label>
     <select class="cfg" id="ab_sl_to_breakeven_on_tp1">
       <option value="false">Aus (SL bleibt unverändert)</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="ab_breakout"><label>SL auf TP1 bei TP2</label>
+  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>SL auf TP1 bei TP2</label>
     <select class="cfg" id="ab_sl_to_tp1_on_tp2">
       <option value="false">Aus (SL bleibt unverändert)</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="ab_breakout"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
+  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
   <div data-mode="ab_breakout"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
     <select class="cfg" id="ab_trend_filter_enabled">
       <option value="false">Aus</option>
@@ -5811,6 +5824,7 @@ async function refresh() {
     document.getElementById('ab_r2').value = data.config.ab_r2;
     document.getElementById('ab_r3').value = data.config.ab_r3;
     document.getElementById('ab_direction_mode').value = data.config.ab_direction_mode;
+    document.getElementById('ab_flip_mode').value = String(data.config.ab_flip_mode);
     document.getElementById('ab_tp1_close_pct').value = data.config.ab_tp1_close_pct;
     document.getElementById('ab_tp2_close_pct').value = data.config.ab_tp2_close_pct;
     document.getElementById('ab_sl_to_breakeven_on_tp1').value = String(data.config.ab_sl_to_breakeven_on_tp1);
@@ -6436,6 +6450,7 @@ function buildConfigPayload() {
     ab_r2: parseFloat(document.getElementById('ab_r2').value),
     ab_r3: parseFloat(document.getElementById('ab_r3').value),
     ab_direction_mode: document.getElementById('ab_direction_mode').value,
+    ab_flip_mode: document.getElementById('ab_flip_mode').value === 'true',
     ab_tp1_close_pct: parseFloat(document.getElementById('ab_tp1_close_pct').value),
     ab_tp2_close_pct: parseFloat(document.getElementById('ab_tp2_close_pct').value),
     ab_sl_to_breakeven_on_tp1: document.getElementById('ab_sl_to_breakeven_on_tp1').value === 'true',
@@ -7012,7 +7027,7 @@ async def handle_config_update(request):
                 "ht_entry_trigger", "ht_exit_trigger", "ht_invert_direction",
                 "ht_tp_enabled", "ht_tp1_close_pct", "ht_tp2_close_pct", "ht_sl_enabled", "ht_sl_cooldown_seconds",
                 "ab_resolution", "ab_preset", "ab_lookback", "ab_fast_len", "ab_slow_len", "ab_rsi_len", "ab_rsi_gate",
-                "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
+                "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode", "ab_flip_mode",
                 "ab_tp1_close_pct", "ab_tp2_close_pct", "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
