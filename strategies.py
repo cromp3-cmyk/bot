@@ -3912,6 +3912,27 @@ async def _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, tf_resoluti
     tf_ms = _resolution_ms(tf_resolution)
     if tf_ms is None:
         return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): unbekanntes Format."
+
+    synth = resolve_synthetic_resolution(tf_resolution)
+    if synth and synth[0] == "1m":
+        # Aus 1m zusammengesetzte Minuten-Zeiteinheiten (6m-14m, 16m-20m, ...): die 1m-Historie wird
+        # EINMAL geladen (Cache-Schluessel gleich fuer alle diese Zeiteinheiten, weil das Fenster auf den
+        # Vorlauf von mindestens 20 Minuten-Kerzen ausgelegt ist) und hier lokal zusammengesetzt -
+        # statt fuer jede Zeiteinheit dieselben ~45 REST-Seiten (30 Tage) erneut zu holen.
+        wide_ms = max(tf_ms, 20 * 60_000)
+        fetch_ms = (base_ts[-1] - base_ts[0]) + (tf_atr_period * 5 + 20) * wide_ms + wide_ms
+        fetch_ms = -(-fetch_ms // 3_600_000) * 3_600_000  # auf ganze Stunden aufrunden -> gleicher Cache-Schluessel
+        needed_1m = int(fetch_ms // 60_000) + 10
+        base_1m, err, _ = await _fetch_cached_backtest_candles(
+            symbol, "1m", fetch_ms / 86_400_000, min(max(needed_1m, 200), 150_000),
+            market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {err}"
+        candles = resample_candles(base_1m, synth[1]) if base_1m else None
+        if not candles or len(candles[4]) < tf_atr_period + 5:
+            return None, f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."
+        return candles, None
+
     warm_ms = (tf_atr_period * 5 + 20) * tf_ms
     span_ms = (base_ts[-1] - base_ts[0]) + warm_ms + tf_ms
     needed = int(span_ms // tf_ms) + 10

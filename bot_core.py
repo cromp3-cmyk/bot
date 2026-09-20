@@ -4188,21 +4188,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div style="margin-bottom:12px;">
     <label>SuperTrend-Zeiteinheiten (übergeordnet)</label><br>
-    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="10s"> 10s</label>
-    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="15s"> 15s</label>
-    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="30s"> 30s</label>
-    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="45s"> 45s</label>
     <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="1m" checked> 1m</label>
     <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="5m" checked> 5m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="6m"> 6m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="7m"> 7m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="8m"> 8m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="9m"> 9m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="10m"> 10m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="11m"> 11m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="12m"> 12m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="13m"> 13m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="14m"> 14m</label>
     <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="15m" checked> 15m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="16m"> 16m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="17m"> 17m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="18m"> 18m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="19m"> 19m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="20m"> 20m</label>
     <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="30m" checked> 30m</label>
     <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="1h" checked> 1h</label>
     <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="4h" checked> 4h</label>
+    <div style="margin-top:6px;"><button type="button" id="btn-ab-sweep-tf-6-20" style="padding:4px 10px; font-size:12px;">6–20 min alle an/aus</button></div>
     <div style="margin-top:6px;"><label>weitere (kommagetrennt, z.B. 3m,8m,2h)</label> <input type="text" id="ab-sweep-tf-extra" placeholder="optional" style="width:180px;"></div>
   </div>
   <div style="font-size:12px; color:var(--text-dim); padding:2px 0; margin-bottom:8px;">
-    Sekunden-Zeiteinheiten (10s-45s) gehen im Backtest nur bei kurzem Zeitraum (max. 5000 Kerzen, z.B. ~42 Std. bei 30s) -
-    sonst werden sie übersprungen und unten gemeldet. Bei 30 Multiplikatoren × 6 Zeiteinheiten = 180 Kombinationen (Limit 600).
+    Minuten-Zeiteinheiten außerhalb von 1/3/5/15/30 Minuten (6–14, 16–20 usw.) setzt der Bot selbst aus 1m-Kerzen
+    zusammen - die 1m-Historie wird dafür nur EINMAL geladen und für alle gewählten Zeiteinheiten wiederverwendet (der erste Lauf
+    lädt bei 30 Tagen etwa 45 Anfragen, danach ist sie im Cache). Alle 20 Boxen × 30 Multiplikatoren = 600 Kombinationen = das Limit.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <button id="btn-ab-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
@@ -5335,6 +5347,12 @@ const utbSweepRowHtml = (r) => `
   </tr>`;
 const renderUtbSweepResults = makeSortableTable('utb-sweep-results-table', () => window.utbSweepResultsData, utbSweepRowHtml);
 const renderUtbSweepWorst = makeSortableTable('utb-sweep-worst-table', () => window.utbSweepWorstData, utbSweepRowHtml);
+
+document.getElementById('btn-ab-sweep-tf-6-20').addEventListener('click', () => {
+  const boxes = Array.from(document.querySelectorAll('.ab-sweep-tf')).filter(x => { const m = parseInt(x.value); return x.value.endsWith('m') && m >= 6 && m <= 20 && m !== 15; });
+  const allOn = boxes.every(x => x.checked);
+  boxes.forEach(x => x.checked = !allOn);
+});
 
 document.getElementById('btn-ab-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-ab-sweep');
