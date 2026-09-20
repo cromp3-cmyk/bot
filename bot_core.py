@@ -334,9 +334,8 @@ def default_config():
         # Al-Shatri Breakout (portiert aus Pine-Script "Al-Shatri | Arabic Breakout • Entry &
         # 3 Targets (Presets)"): Range-Breakout + EMA-Trend + RSI + optionaler Volumen-Filter.
         # Preset uebernimmt die Original-Presets 1:1, "custom" nutzt die ab_*-Werte direkt.
-        # TP1/TP2 = echte Teilverkaeufe (Original zeichnet nur Linien), beide Prozentsaetze
-        # sowie die zwei SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) einzeln
-        # abschaltbar:
+        # Ausstieg: Wechsel-System (Gegen-Signal schliesst die Position und oeffnet die Gegenrichtung,
+        # immer im Markt) + optionaler fester Dollar-SL. KEIN ATR-SL, keine Targets/Teilverkaeufe.
         "ab_resolution": os.getenv("AB_RESOLUTION", "1m"),
         "ab_preset": os.getenv("AB_PRESET", "intraday"),  # scalping/intraday/swing/custom
         "ab_lookback": int(os.getenv("AB_LOOKBACK", "20")),
@@ -347,20 +346,12 @@ def default_config():
         "ab_use_volume": os.getenv("AB_USE_VOLUME", "false").lower() == "true",
         "ab_vol_mult": float(os.getenv("AB_VOL_MULT", "1.5")),
         "ab_atr_len": int(os.getenv("AB_ATR_LEN", "14")),
-        "ab_atr_mult": float(os.getenv("AB_ATR_MULT", "1.5")),
-        "ab_r1": float(os.getenv("AB_R1", "1.0")),
-        "ab_r2": float(os.getenv("AB_R2", "2.0")),
-        "ab_r3": float(os.getenv("AB_R3", "3.0")),
         "ab_direction_mode": os.getenv("AB_DIRECTION_MODE", "both"),
-        "ab_tp1_close_pct": float(os.getenv("AB_TP1_CLOSE_PCT", "33")),
-        "ab_tp2_close_pct": float(os.getenv("AB_TP2_CLOSE_PCT", "50")),
-        "ab_sl_to_breakeven_on_tp1": os.getenv("AB_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
-        "ab_sl_to_tp1_on_tp2": os.getenv("AB_SL_TO_TP1_ON_TP2", "true").lower() == "true",
         "ab_sl_cooldown_seconds": float(os.getenv("AB_SL_COOLDOWN_SECONDS", "30")),
-        # Wechsel-Modus: immer im Markt, KEIN SL/TP. Das Gegen-Signal schliesst die offene Position
-        # und oeffnet die Gegenrichtung (Buy bleibt offen bis zum Sell, Sell bis zum Buy). Alle
-        # Filter gelten weiter; TP/SL-Felder und Break-Even-Nachzug sind in diesem Modus wirkungslos.
-        "ab_flip_mode": os.getenv("AB_FLIP_MODE", "false").lower() == "true",
+        # Fester Dollar-SL, abschaltbar: Verlust der Position in USD beim SL (Preisabstand = Betrag /
+        # Positionsgroesse, wie bei MO7/UTB u.a.). Aus = Ausstieg nur per Gegen-Signal.
+        "ab_sl_enabled": os.getenv("AB_SL_ENABLED", "true").lower() == "true",
+        "ab_sl_manual_usd": float(os.getenv("AB_SL_MANUAL_USD", "5.0")),
         # Optionaler uebergeordneter SuperTrend-Trendfilter (eigene, hoehere Zeiteinheit) - wie bei
         # [Hoss] VWAP+RSI+Hull+DI: Long nur wenn SuperTrend dort bullisch, Short nur wenn baerisch.
         "ab_trend_filter_enabled": os.getenv("AB_TREND_FILTER_ENABLED", "false").lower() == "true",
@@ -890,7 +881,7 @@ PERSISTED_STATE_KEYS = [
     "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
     "obi_breakeven_triggered",
     "ht_sl_price", "ht_tp1_price", "ht_tp2_price", "ht_tp3_price", "ht_tp1_done", "ht_tp2_done",
-    "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done",
+    "ab_sl_price",
 ]
 
 
@@ -1599,7 +1590,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="maverick_edge">Maverick Edge (Trend-EMA + Guide-Linie + Kerzenstärke, reiner Signal-Einstieg, SL fest oder Guide-Linie als Trail-Stop, fester TP)</option>
       <option value="st_rsi_signal">SuperTrend+RSI (SuperTrend 10/2-Flip + RSI 9-Bestätigung, immer Flip bei Gegensignal, optional ADX/Volumen/MTF%/Z-Score-Filter, fester SL+TP)</option>
       <option value="hvd_signal">[Hoss] VWAP+RSI+Hull+DI (Hull-Farbwechsel + DI-Bestätigung, scharf durch VWAP-Band+OBV-RSI-Extrem am selben Balken, SL=Hull mit ATR-Mindestabstand, TP=Risk-Reward, kein Flip-Exit)</option>
-      <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, TP1/TP2/TP3 mit Teilverkäufen, SL-Nachzug auf Break-Even/TP1)</option>
+      <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Wechsel bei Gegen-Signal, optionaler fester $-SL)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1847,7 +1838,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div data-mode="ab_breakout" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📡 <b>Signal</b>: Kerzenschluss bricht über/unter das Hoch/Tief der letzten "Breakout-Kerzen" (ohne die aktuelle Kerze) aus, schnelle EMA über/unter langsamer EMA bestätigt den Trend, RSI muss die Schwelle erreichen, optional zusätzlich ein Volumen-Filter.
-    🎯 <b>Plan</b>: SL = ATR × Multiplikator, TP1/TP2/TP3 = Risiko × 1x/2x/3x. Solange ein Plan läuft (bis SL oder TP3), wird kein neues Signal angenommen - wie im Original-Skript.
+    🔄 <b>Ausstieg</b>: Immer im Markt - der erste Buy bleibt offen, bis das erste Sell kommt; das Sell schließt ihn und öffnet direkt einen Sell (und umgekehrt). Kein ATR-SL, keine Targets. Optional ein <b>fester Dollar-SL</b> (Verlust der Position in $) - ohne SL ist das Risiko pro Position unbegrenzt.
   </div>
   <div data-mode="ab_breakout"><label>Preset</label>
     <select class="cfg" id="ab_preset">
@@ -1885,11 +1876,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Volumen vs. 20er-Durchschnitt (Vielfaches)</label><input type="number" step="0.1" min="0.1" id="ab_vol_mult"></div>
-  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>ATR-Periode</label><input type="number" step="1" min="1" id="ab_atr_len"></div>
-  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>SL-Abstand (ATR-Multiplikator)</label><input type="number" step="0.1" min="0.1" id="ab_atr_mult"></div>
-  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Target 1 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r1"></div>
-  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Target 2 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r2"></div>
-  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Target 3 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r3"></div>
   <div data-mode="ab_breakout"><label>Richtung</label>
     <select class="cfg" id="ab_direction_mode">
       <option value="both">Beide</option>
@@ -1897,30 +1883,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short</option>
     </select>
   </div>
-  <div data-mode="ab_breakout"><label>Wechsel-Modus (Flip)</label>
-    <select class="cfg" id="ab_flip_mode">
-      <option value="false">Aus (Plan mit SL + TP1/TP2/TP3)</option>
-      <option value="true">An (Gegen-Signal dreht die Position, kein SL/TP)</option>
-    </select>
-  </div>
-  <div data-mode="ab_breakout" data-requires="ab_flip_mode" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    🔄 <b>Wechsel-Modus</b>: Der erste Buy bleibt offen, bis das erste Sell kommt - das Sell schliesst ihn und öffnet direkt einen Sell, der bis zum nächsten Buy offen bleibt. <b>Kein Stop-Loss, kein Take-Profit, keine Teilverkäufe</b> - das Risiko pro Position ist unbegrenzt. Ein weiteres Signal in Richtung der offenen Position wird ignoriert. Alle Filter gelten weiter (auch für das Gegen-Signal). Bei &quot;Nur Long/Nur Short&quot; schließt das Gegen-Signal nur, ohne die gesperrte Richtung zu eröffnen. SL-/TP-/Break-Even-Felder sind hier ohne Wirkung.
-  </div>
-  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp1_close_pct"></div>
-  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp2_close_pct"></div>
-  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>SL auf Break-Even bei TP1</label>
-    <select class="cfg" id="ab_sl_to_breakeven_on_tp1">
-      <option value="false">Aus (SL bleibt unverändert)</option>
+  <div data-mode="ab_breakout"><label>Stop-Loss (fester Dollar-Betrag)</label>
+    <select class="cfg" id="ab_sl_enabled">
       <option value="true">An</option>
+      <option value="false">Aus (Ausstieg nur per Gegen-Signal)</option>
     </select>
   </div>
-  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>SL auf TP1 bei TP2</label>
-    <select class="cfg" id="ab_sl_to_tp1_on_tp2">
-      <option value="false">Aus (SL bleibt unverändert)</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="ab_breakout" data-requires="ab_flip_mode" data-requires-value="false"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
+  <div data-mode="ab_breakout" data-requires="ab_sl_enabled"><label>SL-Betrag ($ Verlust der Position)</label><input type="number" step="0.1" min="0.1" id="ab_sl_manual_usd"></div>
+  <div data-mode="ab_breakout" data-requires="ab_sl_enabled"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
   <div data-mode="ab_breakout"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
     <select class="cfg" id="ab_trend_filter_enabled">
       <option value="false">Aus</option>
@@ -4198,6 +4168,91 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="ab_breakout" style="display:none;">
+<h2 class="section-title">🎲 Al-Shatri Breakout Sweep (SuperTrend-Zeiteinheit × Multiplikator)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet den übergeordneten SuperTrend-Trendfilter über alle gewählten Zeiteinheiten und einen Bereich
+    von Multiplikatoren gegeneinander. Der Filter ist dabei für jede Kombination fest eingeschaltet; alles
+    andere (Signal-Parameter, fester $-SL, Richtung, ASO-Filter, ATR-Periode des SuperTrends) kommt aus den
+    Einstellungen oben. Die Roh-Signale werden nur EINMAL berechnet.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="ab-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="ab-sweep-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Multiplikator von</label><input type="number" step="0.1" min="0.1" id="ab-sweep-st-mult-min" value="0.1" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="ab-sweep-st-mult-max" value="3.0" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.01" min="0.01" id="ab-sweep-st-mult-step" value="0.1" style="width:90px;"></div>
+  </div>
+  <div style="margin-bottom:12px;">
+    <label>SuperTrend-Zeiteinheiten (übergeordnet)</label><br>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="10s"> 10s</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="15s"> 15s</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="30s"> 30s</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="45s"> 45s</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="1m" checked> 1m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="5m" checked> 5m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="15m" checked> 15m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="30m" checked> 30m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="1h" checked> 1h</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="4h" checked> 4h</label>
+    <div style="margin-top:6px;"><label>weitere (kommagetrennt, z.B. 3m,8m,2h)</label> <input type="text" id="ab-sweep-tf-extra" placeholder="optional" style="width:180px;"></div>
+  </div>
+  <div style="font-size:12px; color:var(--text-dim); padding:2px 0; margin-bottom:8px;">
+    Sekunden-Zeiteinheiten (10s-45s) gehen im Backtest nur bei kurzem Zeitraum (max. 5000 Kerzen, z.B. ~42 Std. bei 30s) -
+    sonst werden sie übersprungen und unten gemeldet. Bei 30 Multiplikatoren × 6 Zeiteinheiten = 180 Kombinationen (Limit 600).
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-ab-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="ab-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:16px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sweep-best-tf-title">🏁 Bester Multiplikator je Zeiteinheit</h3>
+  <table id="ab-sweep-best-tf-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="ab_trend_filter_resolution">ST-Zeiteinheit ⇅</th>
+      <th class="sortable" data-key="ab_trend_filter_multiplier">ST-Multiplikator ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="ab-sweep-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="ab_trend_filter_resolution">ST-Zeiteinheit ⇅</th>
+      <th class="sortable" data-key="ab_trend_filter_multiplier">ST-Multiplikator ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="ab-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="ab_trend_filter_resolution">ST-Zeiteinheit ⇅</th>
+      <th class="sortable" data-key="ab_trend_filter_multiplier">ST-Multiplikator ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="hvd_signal" style="display:none;">
 <h2 class="section-title">🎲 [Hoss] VWAP+RSI+Hull+DI Parameter-Sweep (Hull-Länge × Risk:Reward)</h2>
 <div class="panel-card">
@@ -5281,6 +5336,76 @@ const utbSweepRowHtml = (r) => `
 const renderUtbSweepResults = makeSortableTable('utb-sweep-results-table', () => window.utbSweepResultsData, utbSweepRowHtml);
 const renderUtbSweepWorst = makeSortableTable('utb-sweep-worst-table', () => window.utbSweepWorstData, utbSweepRowHtml);
 
+document.getElementById('btn-ab-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-ab-sweep');
+  const statusEl = document.getElementById('ab-sweep-status');
+  const els = ['best-tf', 'top', 'worst'].map(k => k);
+  const tables = {best: document.getElementById('ab-sweep-best-tf-table'), top: document.getElementById('ab-sweep-results-table'), worst: document.getElementById('ab-sweep-worst-table')};
+  const titles = {best: document.getElementById('ab-sweep-best-tf-title'), top: document.getElementById('ab-sweep-top-title'), worst: document.getElementById('ab-sweep-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const tfs = Array.from(document.querySelectorAll('.ab-sweep-tf:checked')).map(x => x.value);
+  document.getElementById('ab-sweep-tf-extra').value.split(',').map(x => x.trim()).filter(x => x).forEach(x => { if (!tfs.includes(x)) tfs.push(x); });
+  const payload = {
+    days: parseInt(document.getElementById('ab-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('ab-sweep-exclude-top-n').value) || 0,
+    st_mult_min: parseFloat(document.getElementById('ab-sweep-st-mult-min').value),
+    st_mult_max: parseFloat(document.getElementById('ab-sweep-st-mult-max').value),
+    st_mult_step: parseFloat(document.getElementById('ab-sweep-st-mult-step').value),
+    timeframes: tfs,
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Werten etwas dauern.`;
+  try {
+    const res = await fetch(`/api/ab_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      let msg = `${data.combos_tested} Kombinationen (${data.multipliers_tested} Multiplikatoren × ${data.timeframes_tested.length} Zeiteinheiten: ${data.timeframes_tested.join(', ')}) getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}), SL: ${data.sl_enabled ? '$' + data.sl_usd : 'aus'} - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      if (data.skipped_timeframes && data.skipped_timeframes.length) {
+        msg += ` ⚠️ Übersprungen: ` + data.skipped_timeframes.map(x => `${x.timeframe} (${x.reason})`).join(' | ');
+      }
+      statusEl.innerText = msg;
+      window.abSweepBestTfData = data.best_per_timeframe || [];
+      window.abSweepResultsData = data.results || [];
+      window.abSweepWorstData = data.worst_results || [];
+      renderAbSweepBestTf();
+      renderAbSweepResults();
+      renderAbSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.abSweepBestTfData = [];
+window.abSweepResultsData = [];
+window.abSweepWorstData = [];
+const abSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.ab_trend_filter_resolution}</td>
+    <td>${r.ab_trend_filter_multiplier}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderAbSweepBestTf = makeSortableTable('ab-sweep-best-tf-table', () => window.abSweepBestTfData, abSweepRowHtml);
+const renderAbSweepResults = makeSortableTable('ab-sweep-results-table', () => window.abSweepResultsData, abSweepRowHtml);
+const renderAbSweepWorst = makeSortableTable('ab-sweep-worst-table', () => window.abSweepWorstData, abSweepRowHtml);
+
 document.getElementById('hvd-sweep-st-mult-enabled').addEventListener('change', (e) => {
   document.getElementById('hvd-sweep-st-mult-row').style.display = e.target.checked ? 'flex' : 'none';
 });
@@ -5831,17 +5956,9 @@ async function refresh() {
     document.getElementById('ab_rsi_gate').value = data.config.ab_rsi_gate;
     document.getElementById('ab_use_volume').value = String(data.config.ab_use_volume);
     document.getElementById('ab_vol_mult').value = data.config.ab_vol_mult;
-    document.getElementById('ab_atr_len').value = data.config.ab_atr_len;
-    document.getElementById('ab_atr_mult').value = data.config.ab_atr_mult;
-    document.getElementById('ab_r1').value = data.config.ab_r1;
-    document.getElementById('ab_r2').value = data.config.ab_r2;
-    document.getElementById('ab_r3').value = data.config.ab_r3;
     document.getElementById('ab_direction_mode').value = data.config.ab_direction_mode;
-    document.getElementById('ab_flip_mode').value = String(data.config.ab_flip_mode);
-    document.getElementById('ab_tp1_close_pct').value = data.config.ab_tp1_close_pct;
-    document.getElementById('ab_tp2_close_pct').value = data.config.ab_tp2_close_pct;
-    document.getElementById('ab_sl_to_breakeven_on_tp1').value = String(data.config.ab_sl_to_breakeven_on_tp1);
-    document.getElementById('ab_sl_to_tp1_on_tp2').value = String(data.config.ab_sl_to_tp1_on_tp2);
+    document.getElementById('ab_sl_enabled').value = String(data.config.ab_sl_enabled);
+    document.getElementById('ab_sl_manual_usd').value = data.config.ab_sl_manual_usd;
     document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
@@ -6457,17 +6574,9 @@ function buildConfigPayload() {
     ab_rsi_gate: parseFloat(document.getElementById('ab_rsi_gate').value),
     ab_use_volume: document.getElementById('ab_use_volume').value === 'true',
     ab_vol_mult: parseFloat(document.getElementById('ab_vol_mult').value),
-    ab_atr_len: parseInt(document.getElementById('ab_atr_len').value),
-    ab_atr_mult: parseFloat(document.getElementById('ab_atr_mult').value),
-    ab_r1: parseFloat(document.getElementById('ab_r1').value),
-    ab_r2: parseFloat(document.getElementById('ab_r2').value),
-    ab_r3: parseFloat(document.getElementById('ab_r3').value),
     ab_direction_mode: document.getElementById('ab_direction_mode').value,
-    ab_flip_mode: document.getElementById('ab_flip_mode').value === 'true',
-    ab_tp1_close_pct: parseFloat(document.getElementById('ab_tp1_close_pct').value),
-    ab_tp2_close_pct: parseFloat(document.getElementById('ab_tp2_close_pct').value),
-    ab_sl_to_breakeven_on_tp1: document.getElementById('ab_sl_to_breakeven_on_tp1').value === 'true',
-    ab_sl_to_tp1_on_tp2: document.getElementById('ab_sl_to_tp1_on_tp2').value === 'true',
+    ab_sl_enabled: document.getElementById('ab_sl_enabled').value === 'true',
+    ab_sl_manual_usd: parseFloat(document.getElementById('ab_sl_manual_usd').value),
     ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
@@ -6965,9 +7074,7 @@ async def handle_status(request):
         "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"),
         "ht_tp1_price": st.get("ht_tp1_price"), "ht_tp2_price": st.get("ht_tp2_price"), "ht_tp3_price": st.get("ht_tp3_price"),
         "ht_tp1_done": st.get("ht_tp1_done"), "ht_tp2_done": st.get("ht_tp2_done"),
-        "ab_sl_price": st.get("ab_sl_price"), "ab_tp1_price": st.get("ab_tp1_price"),
-        "ab_tp2_price": st.get("ab_tp2_price"), "ab_tp3_price": st.get("ab_tp3_price"),
-        "ab_tp1_done": st.get("ab_tp1_done"), "ab_tp2_done": st.get("ab_tp2_done"),
+        "ab_sl_price": st.get("ab_sl_price"),
         "ab_atr_last": st.get("ab_atr_last"),
         "da_direction": st.get("da_direction"), "da_sl_price": st.get("da_sl_price"), "da_tp_price": st.get("da_tp_price"),
         "es_direction": st.get("es_direction"), "es_sensitivity_last": st.get("es_sensitivity_last"),
@@ -7040,8 +7147,7 @@ async def handle_config_update(request):
                 "ht_entry_trigger", "ht_exit_trigger", "ht_invert_direction",
                 "ht_tp_enabled", "ht_tp1_close_pct", "ht_tp2_close_pct", "ht_sl_enabled", "ht_sl_cooldown_seconds",
                 "ab_resolution", "ab_preset", "ab_lookback", "ab_fast_len", "ab_slow_len", "ab_rsi_len", "ab_rsi_gate",
-                "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode", "ab_flip_mode",
-                "ab_tp1_close_pct", "ab_tp2_close_pct", "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds",
+                "ab_use_volume", "ab_vol_mult", "ab_direction_mode", "ab_sl_enabled", "ab_sl_manual_usd", "ab_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
                 "da_resolution", "da_atr_period", "da_sensitivity", "da_sma_period", "da_ema_trend_period",
@@ -7394,6 +7500,38 @@ async def handle_utb_param_sweep(request):
                                         sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n,
                                         long_threshold_min, long_threshold_max, long_threshold_step,
                                         short_threshold_min, short_threshold_max, short_threshold_step)
+    return web.json_response(result)
+
+
+async def handle_ab_sweep(request):
+    """'Monte-Carlo'-Sweep fuer Al-Shatri Breakout: uebergeordnete SuperTrend-Zeiteinheit(en) x
+    Multiplikator-Bereich (Standard 0.1-3.0 in 0.1-Schritten), siehe run_ab_sweep."""
+    from strategies import run_ab_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        st_mult_min = max(0.1, float(body.get("st_mult_min", 0.1)))
+        st_mult_max = max(st_mult_min, float(body.get("st_mult_max", 3.0)))
+        st_mult_step = max(0.01, float(body.get("st_mult_step", 0.1)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Multiplikator-Bereich."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
+    timeframes = body.get("timeframes")
+    if not isinstance(timeframes, list) or len(timeframes) > 20:
+        return web.json_response({"error": "Bitte 1-20 SuperTrend-Zeiteinheiten auswählen."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_ab_sweep(symbol, cfg, days, [str(t) for t in timeframes], st_mult_min, st_mult_max, st_mult_step, exclude_top_n)
     return web.json_response(result)
 
 
