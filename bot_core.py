@@ -355,6 +355,10 @@ def default_config():
         # Betrag / Positionsgroesse, wie bei MO7/UTB u.a.). Aus = Ausstieg nur per Gegen-Signal.
         "ab_sl_enabled": os.getenv("AB_SL_ENABLED", "true").lower() == "true",
         "ab_sl_manual_usd": float(os.getenv("AB_SL_MANUAL_USD", "5.0")),
+        # flip-Modus: sobald die Position um diesen Dollar-Betrag im Gewinn ist, wird der SL auf den
+        # Einstiegskurs gesetzt (Break-Even). Auch ohne festen $-SL nutzbar.
+        "ab_be_enabled": os.getenv("AB_BE_ENABLED", "false").lower() == "true",
+        "ab_be_trigger_usd": float(os.getenv("AB_BE_TRIGGER_USD", "5.0")),
         # plan-Modus: SL = ATR x Multiplikator, TP1/TP2/TP3 = Risiko x r1/r2/r3 (bei Preset "custom" frei
         # einstellbar, sonst aus dem Preset). TP1/TP2 = echte Teilverkaeufe, beide Prozentsaetze sowie die
         # zwei SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) einzeln abschaltbar.
@@ -895,7 +899,7 @@ PERSISTED_STATE_KEYS = [
     "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
     "obi_breakeven_triggered",
     "ht_sl_price", "ht_tp1_price", "ht_tp2_price", "ht_tp3_price", "ht_tp1_done", "ht_tp2_done",
-    "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done",
+    "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
 ]
 
 
@@ -1854,7 +1858,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     📡 <b>Signal</b>: Kerzenschluss bricht über/unter das Hoch/Tief der letzten "Breakout-Kerzen" (ohne die aktuelle Kerze) aus, schnelle EMA über/unter langsamer EMA bestätigt den Trend, RSI muss die Schwelle erreichen, optional zusätzlich ein Volumen-Filter.
   </div>
   <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    🔄 <b>Wechsel</b>: Immer im Markt - der erste Buy bleibt offen, bis das erste Sell kommt; das Sell schließt ihn und öffnet direkt einen Sell (und umgekehrt). Keine Targets. Optional ein <b>fester Dollar-SL</b> (Verlust der Position in $) - ohne SL ist das Risiko pro Position unbegrenzt.
+    🔄 <b>Wechsel</b>: Immer im Markt - der erste Buy bleibt offen, bis das erste Sell kommt; das Sell schließt ihn und öffnet direkt einen Sell (und umgekehrt). Keine Targets. Optional ein <b>fester Dollar-SL</b> (Verlust der Position in $) - ohne SL ist das Risiko pro Position unbegrenzt. Optional <b>SL auf Einstieg</b>: sobald die Position den eingestellten Dollar-Betrag im Gewinn ist, wird der SL auf den Einstiegskurs gesetzt.
   </div>
   <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     🎯 <b>Plan (wie Original-Skript)</b>: SL = ATR × Multiplikator, TP1/TP2/TP3 = Risiko × 1x/2x/3x (Werte je Preset; bei "Custom" frei einstellbar). Solange ein Plan läuft (bis SL oder TP3), wird kein neues Signal angenommen; ein Gegen-Signal schließt nichts.
@@ -1920,6 +1924,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="ab_breakout" data-requires="ab_sl_enabled" data-requires-also="ab_exit_mode=flip"><label>SL-Betrag ($ Verlust der Position)</label><input type="number" step="0.1" min="0.1" id="ab_sl_manual_usd"></div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="flip"><label>SL auf Einstieg bei Gewinn (Break-Even)</label>
+    <select class="cfg" id="ab_be_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_be_enabled" data-requires-also="ab_exit_mode=flip"><label>Gewinn-Schwelle ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="ab_be_trigger_usd"></div>
   <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp1_close_pct"></div>
   <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp2_close_pct"></div>
   <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>SL auf Break-Even bei TP1</label>
@@ -6028,6 +6039,8 @@ async function refresh() {
     document.getElementById('ab_direction_mode').value = data.config.ab_direction_mode;
     document.getElementById('ab_exit_mode').value = data.config.ab_exit_mode || 'flip';
     document.getElementById('ab_sl_enabled').value = String(data.config.ab_sl_enabled);
+    document.getElementById('ab_be_enabled').value = String(data.config.ab_be_enabled);
+    document.getElementById('ab_be_trigger_usd').value = data.config.ab_be_trigger_usd;
     document.getElementById('ab_atr_len').value = data.config.ab_atr_len;
     document.getElementById('ab_atr_mult').value = data.config.ab_atr_mult;
     document.getElementById('ab_r1').value = data.config.ab_r1;
@@ -6656,6 +6669,8 @@ function buildConfigPayload() {
     ab_direction_mode: document.getElementById('ab_direction_mode').value,
     ab_exit_mode: document.getElementById('ab_exit_mode').value,
     ab_sl_enabled: document.getElementById('ab_sl_enabled').value === 'true',
+    ab_be_enabled: document.getElementById('ab_be_enabled').value === 'true',
+    ab_be_trigger_usd: parseFloat(document.getElementById('ab_be_trigger_usd').value),
     ab_atr_len: parseInt(document.getElementById('ab_atr_len').value),
     ab_atr_mult: parseFloat(document.getElementById('ab_atr_mult').value),
     ab_r1: parseFloat(document.getElementById('ab_r1').value),
@@ -7166,6 +7181,7 @@ async def handle_status(request):
         "ab_sl_price": st.get("ab_sl_price"), "ab_tp1_price": st.get("ab_tp1_price"),
         "ab_tp2_price": st.get("ab_tp2_price"), "ab_tp3_price": st.get("ab_tp3_price"),
         "ab_tp1_done": st.get("ab_tp1_done"), "ab_tp2_done": st.get("ab_tp2_done"),
+        "ab_be_done": st.get("ab_be_done"),
         "ab_atr_last": st.get("ab_atr_last"),
         "da_direction": st.get("da_direction"), "da_sl_price": st.get("da_sl_price"), "da_tp_price": st.get("da_tp_price"),
         "es_direction": st.get("es_direction"), "es_sensitivity_last": st.get("es_sensitivity_last"),
@@ -7239,7 +7255,7 @@ async def handle_config_update(request):
                 "ht_tp_enabled", "ht_tp1_close_pct", "ht_tp2_close_pct", "ht_sl_enabled", "ht_sl_cooldown_seconds",
                 "ab_resolution", "ab_preset", "ab_lookback", "ab_fast_len", "ab_slow_len", "ab_rsi_len", "ab_rsi_gate",
                 "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
-                "ab_exit_mode", "ab_sl_enabled", "ab_sl_manual_usd", "ab_tp1_close_pct", "ab_tp2_close_pct",
+                "ab_exit_mode", "ab_sl_enabled", "ab_sl_manual_usd", "ab_be_enabled", "ab_be_trigger_usd", "ab_tp1_close_pct", "ab_tp2_close_pct",
                 "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",

@@ -1830,6 +1830,7 @@ def _ab_reset_state(st):
     st["ab_tp3_price"] = None
     st["ab_tp1_done"] = False
     st["ab_tp2_done"] = False
+    st["ab_be_done"] = False
 
 
 async def check_ab_sl_tp(symbol, price):
@@ -1906,26 +1907,40 @@ async def check_ab_sl_tp(symbol, price):
 
 
 async def check_ab_sl(symbol, price):
-    """Optionaler fester Dollar-SL (ab_sl_enabled/ab_sl_manual_usd). Wird bei jedem Loop-Durchlauf
-    gegen den Live-Preis geprueft (unabhaengig vom Kerzen-Abruf, siehe ab_poll_loop). Schlaegt der
-    Exit fehl (Position bleibt offen), bleibt der SL bestehen und wird beim naechsten Durchlauf
-    erneut versucht - statt ihn faelschlich als erledigt zu vergessen."""
+    """Wechsel-Modus: optionaler fester Dollar-SL (ab_sl_enabled/ab_sl_manual_usd) und optional
+    'SL auf Einstieg' (ab_be_enabled/ab_be_trigger_usd): sobald die Position um den eingestellten
+    Dollar-Betrag im Gewinn ist (Preisabstand = Betrag / Positionsgroesse, wie beim SL), wird der SL auf
+    den Einstiegskurs gesetzt (Break-Even) - auch wenn der feste $-SL abgeschaltet ist, dann entsteht
+    der SL erst mit dem Break-Even. Wird bei jedem Loop-Durchlauf gegen den Live-Preis geprueft
+    (unabhaengig vom Kerzen-Abruf, siehe ab_poll_loop). Schlaegt der Exit fehl (Position bleibt
+    offen), bleibt der SL bestehen und wird beim naechsten Durchlauf erneut versucht - statt ihn
+    faelschlich als erledigt zu vergessen."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if st["position"] is None or price is None:
         return
-    if not cfg.get("ab_sl_enabled", True):
-        st["ab_sl_price"] = None  # SL wurde bei offener Position abgeschaltet
-        return
+    pos = st["position"]
+    if not cfg.get("ab_sl_enabled", True) and not st.get("ab_be_done"):
+        st["ab_sl_price"] = None  # SL wurde bei offener Position abgeschaltet (ein Break-Even-SL bleibt)
+    if cfg.get("ab_be_enabled", False) and not st.get("ab_be_done"):
+        size = st.get("total_coin_size") or 0
+        entry_ref = st.get("avg_entry_price")
+        if size > 0 and entry_ref:
+            dist_be = cfg.get("ab_be_trigger_usd", 5.0) / size
+            reached = price >= entry_ref + dist_be if pos == "long" else price <= entry_ref - dist_be
+            if reached:
+                st["ab_sl_price"] = entry_ref
+                st["ab_be_done"] = True
+                debug_log(f"📡 [{symbol}] Al-Shatri Breakout: ${cfg.get('ab_be_trigger_usd', 5.0)} Gewinn erreicht - SL auf Einstieg ({round(entry_ref, 4)}) gesetzt")
     sl_price = st.get("ab_sl_price")
     if sl_price is None:
         return
-    pos = st["position"]
     hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
     if not hit_sl:
         return
-    debug_log(f"🚪 [{symbol}] Al-Shatri Breakout SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-    await execute_exit(symbol, price, "SL")
+    reason = "BREAKEVEN" if st.get("ab_be_done") else "SL"
+    debug_log(f"🚪 [{symbol}] Al-Shatri Breakout {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+    await execute_exit(symbol, price, reason)
     if st["position"] is None:
         st["ab_sl_cooldown_until"] = time.time() + cfg.get("ab_sl_cooldown_seconds", 30)
         _ab_reset_state(st)
@@ -9326,8 +9341,10 @@ def _simulate_ab_flip_trades(candles, cfg, long_setup, short_setup, warmup):
     sl_manual_usd = cfg.get("ab_sl_manual_usd", 5.0)
     sl_cooldown_ms = cfg.get("ab_sl_cooldown_seconds", 30) * 1000
     direction_mode = cfg.get("ab_direction_mode", "both")
+    be_enabled = cfg.get("ab_be_enabled", False)
+    be_trigger_usd = cfg.get("ab_be_trigger_usd", 5.0)
 
-    position = None  # {"dir","entry","size","entry_i","sl_price"}
+    position = None  # {"dir","entry","size","entry_i","sl_price","be_done"}
     trades = []
     sl_cooldown_until_ts = None
 
@@ -9337,9 +9354,17 @@ def _simulate_ab_flip_trades(candles, cfg, long_setup, short_setup, warmup):
             sl_price = position.get("sl_price")
             hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
             if hit_sl:
-                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                reason = "BREAKEVEN" if position["be_done"] else "SL"
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif be_enabled and not position["be_done"] and position["size"] > 0:
+                # 'SL auf Einstieg' ab X $ Gewinn: Ausloesung ueber Hoch/Tief der Kerze; der neue SL gilt
+                # (wie der urspruengliche SL und der SL-Nachzug im Plan-Modus) erst ab der NAECHSTEN Kerze.
+                dist_be = be_trigger_usd / position["size"]
+                if (pdir == "long" and h[i] >= entry + dist_be) or (pdir == "short" and l[i] <= entry - dist_be):
+                    position["sl_price"] = entry
+                    position["be_done"] = True
 
         if long_setup[i] and not long_setup[i - 1]:
             target = "long"
@@ -9365,7 +9390,7 @@ def _simulate_ab_flip_trades(candles, cfg, long_setup, short_setup, warmup):
         if sl_enabled and size > 0:
             dist_sl = sl_manual_usd / size
             sl_price = price - dist_sl if target == "long" else price + dist_sl
-        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price}
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "be_done": False}
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
