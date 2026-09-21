@@ -1736,21 +1736,26 @@ async def ht_poll_loop(symbol):
 # langsamer EMA) + RSI-Schwelle + optionaler Volumen-Filter (aktuelles Volumen
 # >= Vielfaches des 20er-Durchschnitts).
 #
-# AUSSTIEG (Nutzer-Vorgabe, ersetzt den frueheren ATR-Plan mit SL + TP1/TP2/TP3):
-# "Wechsel-System" - immer im Markt. Der erste Buy bleibt offen, bis das erste
-# Sell kommt; das Sell schliesst ihn und oeffnet direkt die Gegenrichtung (und
-# umgekehrt). Optional zusaetzlich EIN fester Dollar-SL (Verlust der Position in
-# USD, wie bei MO7/UTB u.a.: Abstand = SL-Betrag / Positionsgroesse), abschaltbar.
-# Keine Targets, keine Teilverkaeufe, keine ATR-Abstaende.
+# AUSSTIEG - zwei waehlbare Modi (ab_exit_mode):
+#  * "flip" (Standard): Wechsel-System - immer im Markt. Der erste Buy bleibt offen, bis
+#    das erste Sell kommt; das Sell schliesst ihn und oeffnet direkt die Gegenrichtung
+#    (und umgekehrt). Optional EIN fester Dollar-SL (Verlust der Position in USD, wie bei
+#    MO7/UTB u.a.: Abstand = SL-Betrag / Positionsgroesse), abschaltbar. Keine Targets.
+#  * "plan": wie das Original-Skript - SL = ATR x Multiplikator, TP1/TP2/TP3 = Risiko x
+#    1/2/3 (echte Teilverkaeufe, SL-Nachzug auf Break-Even/TP1 einzeln abschaltbar);
+#    solange ein Plan laeuft (bis SL oder TP3), wird kein neues Signal angenommen.
 # ============================================================================
 
 AB_PRESETS = {
     "scalping": {"lookback": 10, "fast_len": 9, "slow_len": 21, "rsi_len": 14, "rsi_gate": 52,
-                 "use_volume": False, "vol_mult": 1.0, "atr_len": 14},
+                 "use_volume": False, "vol_mult": 1.0, "atr_len": 14, "atr_mult": 1.0,
+                 "r1": 0.5, "r2": 1.0, "r3": 1.5},
     "intraday": {"lookback": 20, "fast_len": 20, "slow_len": 50, "rsi_len": 14, "rsi_gate": 55,
-                 "use_volume": False, "vol_mult": 1.5, "atr_len": 14},
+                 "use_volume": False, "vol_mult": 1.5, "atr_len": 14, "atr_mult": 1.5,
+                 "r1": 1.0, "r2": 2.0, "r3": 3.0},
     "swing": {"lookback": 50, "fast_len": 50, "slow_len": 200, "rsi_len": 14, "rsi_gate": 58,
-              "use_volume": True, "vol_mult": 1.5, "atr_len": 21},
+              "use_volume": True, "vol_mult": 1.5, "atr_len": 21, "atr_mult": 2.0,
+              "r1": 1.5, "r2": 3.0, "r3": 5.0},
 }
 
 
@@ -1765,6 +1770,8 @@ def _ab_effective_params(cfg):
         "slow_len": cfg.get("ab_slow_len", 50), "rsi_len": cfg.get("ab_rsi_len", 14),
         "rsi_gate": cfg.get("ab_rsi_gate", 55), "use_volume": cfg.get("ab_use_volume", False),
         "vol_mult": cfg.get("ab_vol_mult", 1.5), "atr_len": cfg.get("ab_atr_len", 14),
+        "atr_mult": cfg.get("ab_atr_mult", 1.5), "r1": cfg.get("ab_r1", 1.0),
+        "r2": cfg.get("ab_r2", 2.0), "r3": cfg.get("ab_r3", 3.0),
     }
 
 
@@ -1818,6 +1825,84 @@ def compute_ab_breakout_signals(highs, lows, closes, volumes, params):
 
 def _ab_reset_state(st):
     st["ab_sl_price"] = None
+    st["ab_tp1_price"] = None
+    st["ab_tp2_price"] = None
+    st["ab_tp3_price"] = None
+    st["ab_tp1_done"] = False
+    st["ab_tp2_done"] = False
+
+
+async def check_ab_sl_tp(symbol, price):
+    """SL zuerst, dann TP1 (Teilverkauf + optional SL->Break-Even), TP2 (weiterer Teilverkauf +
+    optional SL->TP1), TP3 (Rest schliessen) - identisches Muster zu check_ht_sl_tp, nur mit
+    zwei EINZELN abschaltbaren Nachzieh-Stufen statt fest immer Break-Even bei TP1."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+
+    sl_price = st.get("ab_sl_price")
+    if sl_price is not None:
+        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+        if hit_sl:
+            if st.get("ab_tp2_done"):
+                reason = "SL-AUF-TP1"
+            elif st.get("ab_tp1_done"):
+                reason = "BREAKEVEN"
+            else:
+                reason = "SL"
+            debug_log(f"🚪 [{symbol}] Al-Shatri Breakout {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+            await execute_exit(symbol, price, reason)
+            st["ab_sl_cooldown_until"] = time.time() + cfg.get("ab_sl_cooldown_seconds", 30)
+            _ab_reset_state(st)
+            return
+
+    # TP1/TP2 faellt bewusst OHNE Return direkt zur naechsten Stufe durch, falls der Kurs seit dem
+    # letzten Check (alle ~5s live, oder innerhalb einer Kerze im Backtest) so weit gesprungen ist,
+    # dass mehrere Ziele auf einmal erreicht wurden - vorher wurde pro Aufruf nur EINE Stufe
+    # verarbeitet, wodurch eine uebersprungene Stufe (z.B. TP2) nie nachgeholt wurde, wenn der Kurs
+    # bis zum naechsten Check schon wieder zurueckgelaufen war.
+    if not st.get("ab_tp1_done") and st.get("ab_tp1_price") is not None:
+        tp1_price = st["ab_tp1_price"]
+        if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
+            fraction = cfg.get("ab_tp1_close_pct", 33) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+            if ok:
+                st["ab_tp1_done"] = True
+                if cfg.get("ab_sl_to_breakeven_on_tp1", True):
+                    st["ab_sl_price"] = st["avg_entry_price"]
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'],4)}) gesetzt")
+                else:
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
+            else:
+                return  # Teilverkauf fehlgeschlagen - nicht so tun als waere TP1 schon durch
+        else:
+            return  # TP1 noch nicht erreicht -> TP2/TP3 koennen es dann erst recht nicht sein
+
+    if not st.get("ab_tp2_done") and st.get("ab_tp2_price") is not None:
+        tp2_price = st["ab_tp2_price"]
+        if (pos == "long" and price >= tp2_price) or (pos == "short" and price <= tp2_price):
+            fraction = cfg.get("ab_tp2_close_pct", 50) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP2")
+            if ok:
+                st["ab_tp2_done"] = True
+                if cfg.get("ab_sl_to_tp1_on_tp2", True) and st.get("ab_tp1_price") is not None:
+                    st["ab_sl_price"] = st["ab_tp1_price"]
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL auf TP1 ({round(st['ab_tp1_price'],4)}) gesetzt")
+                else:
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
+            else:
+                return
+        else:
+            return
+
+    tp3_price = st.get("ab_tp3_price")
+    if tp3_price is not None:
+        if (pos == "long" and price >= tp3_price) or (pos == "short" and price <= tp3_price):
+            debug_log(f"🚪 [{symbol}] Al-Shatri Breakout TP3 (Rest): {pos.upper()} @ {price}")
+            await execute_exit(symbol, price, "TP3")
+            _ab_reset_state(st)
 
 
 async def check_ab_sl(symbol, price):
@@ -1846,7 +1931,7 @@ async def check_ab_sl(symbol, price):
         _ab_reset_state(st)
 
 
-async def check_ab_entry(symbol, buy_signal, sell_signal, price):
+async def _check_ab_flip(symbol, buy_signal, sell_signal, price):
     """Wechsel-System: immer im Markt. Ein Signal in Richtung der schon offenen Position tut
     nichts; das Gegen-Signal schliesst die Position (Grund 'AB-FLIP') und oeffnet im selben Schritt
     die Gegenrichtung - der erste Buy bleibt also offen, bis das erste Sell kommt, usw.
@@ -1900,6 +1985,55 @@ async def check_ab_entry(symbol, buy_signal, sell_signal, price):
         st["ab_sl_price"] = entry_ref - dist_sl if target == "long" else entry_ref + dist_sl
 
 
+async def _check_ab_plan_entry(symbol, buy_signal, sell_signal, price, atr_now):
+    """Plan-Modus (wie Original-Skript): Einstieg nur wenn flach (kein 'active'-Plan laeuft) - das
+    Original zeichnet waehrend eines laufenden Plans keine neuen Linien. SL/TP1/TP2/TP3 werden
+    einmalig aus dem ATR-Risk-Abstand zum Einstiegszeitpunkt berechnet (kein Nachziehen ausser den
+    beiden abschaltbaren SL-Stufen nach TP1/TP2, siehe check_ab_sl_tp)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if time.time() < st.get("ab_sl_cooldown_until", 0.0):
+        return
+    direction_mode = cfg.get("ab_direction_mode", "both")
+    if direction_mode == "long_only":
+        sell_signal = False
+    elif direction_mode == "short_only":
+        buy_signal = False
+    if not (buy_signal or sell_signal):
+        return
+    if atr_now is None or atr_now <= 0:
+        return
+    direction = "long" if buy_signal else "short"
+    debug_log(f"📡 [{symbol}] Al-Shatri Breakout Signal: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+    if st["position"] is None:
+        return  # Einstieg (z.B. dry_run-Fehler) hat nicht geklappt
+    _ab_reset_state(st)
+    params = _ab_effective_params(cfg)
+    risk = atr_now * params["atr_mult"]
+    st["ab_sl_price"] = price - risk if direction == "long" else price + risk
+    r1, r2, r3 = params["r1"], params["r2"], params["r3"]
+    if direction == "long":
+        st["ab_tp1_price"] = price + risk * r1
+        st["ab_tp2_price"] = price + risk * r2
+        st["ab_tp3_price"] = price + risk * r3
+    else:
+        st["ab_tp1_price"] = price - risk * r1
+        st["ab_tp2_price"] = price - risk * r2
+        st["ab_tp3_price"] = price - risk * r3
+
+
+async def check_ab_entry(symbol, buy_signal, sell_signal, price, atr_now):
+    """Waehlt je nach ab_exit_mode: 'plan' (ATR-SL + TP1/TP2/TP3 wie im Original-Skript) oder
+    'flip' (Standard: Wechsel bei Gegen-Signal + optionaler fester Dollar-SL)."""
+    if BOTS[symbol]["config"].get("ab_exit_mode", "flip") == "plan":
+        await _check_ab_plan_entry(symbol, buy_signal, sell_signal, price, atr_now)
+    else:
+        await _check_ab_flip(symbol, buy_signal, sell_signal, price)
+
+
 async def ab_poll_loop(symbol):
     """Al-Shatri Breakout - siehe Kommentar-Block oben fuer die Signal-Logik. Ein-/Ausstieg (Wechsel bei
     Gegen-Signal) immer bei Kerzenschluss, Flanken-Erkennung (jetzt erfuellt, letzte Kerze nicht) wie im
@@ -1947,7 +2081,10 @@ async def ab_poll_loop(symbol):
                 # die SL-Pruefung am erfolgreichen Kerzen-Fetch und blieb waehrend eines Banns
                 # komplett aus, wodurch der SL erst mit der Verzoegerung des Banns griff.
                 if st["position"] is not None and st["last_price"] is not None:
-                    await check_ab_sl(symbol, st["last_price"])
+                    if cfg.get("ab_exit_mode", "flip") == "plan":
+                        await check_ab_sl_tp(symbol, st["last_price"])
+                    else:
+                        await check_ab_sl(symbol, st["last_price"])
 
                 if closed_ts and len(closed_c) > min_needed:
                     # Zwei Plausibilitaets-Checks gegen kaputte/veraltete Kerzendaten (z.B. durch eine
@@ -2021,7 +2158,7 @@ async def ab_poll_loop(symbol):
                     if due_heartbeat:
                         last_heartbeat = now
                         debug_log(f"💓 [{symbol}] Al-Shatri Breakout aktiv: Preset={cfg.get('ab_preset','intraday')}, "
-                                  f"Ausstieg=Wechsel bei Gegen-Signal, SL={'$' + str(cfg.get('ab_sl_manual_usd', 5.0)) if cfg.get('ab_sl_enabled', True) else 'aus'}, "
+                                  f"Ausstieg={'Plan (ATR-SL + TP1/2/3)' if cfg.get('ab_exit_mode', 'flip') == 'plan' else 'Wechsel bei Gegen-Signal, SL=' + ('$' + str(cfg.get('ab_sl_manual_usd', 5.0)) if cfg.get('ab_sl_enabled', True) else 'aus')}, "
                                   f"ATR={round(atr[-1] or 0,4)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
 
                     if last_processed_ts is None:
@@ -2045,7 +2182,7 @@ async def ab_poll_loop(symbol):
                         sell_signal = short_setup[idx] and not short_setup[idx - 1]
                         price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
-                        await check_ab_entry(symbol, buy_signal, sell_signal, price_i)
+                        await check_ab_entry(symbol, buy_signal, sell_signal, price_i, atr[idx])
                 elif due_heartbeat:
                     last_heartbeat = now
                     if not closed_ts:
@@ -6489,7 +6626,7 @@ def _ab_sweep_compute(candles, cfg, tf_data, multipliers, tf_atr_period, exclude
                 long_ok, short_ok = _trend_filter_ok_series(ts, tf_candles, mult, tf_atr_period)
             long_setup = [long_raw[i] and long_ok[i] for i in range(n)]
             short_setup = [short_raw[i] and short_ok[i] for i in range(n)]
-            trades = _simulate_ab_trades(candles, cfg, long_setup, short_setup, warmup)
+            trades = _simulate_ab_trades(candles, cfg, long_setup, short_setup, _atr, warmup)
             stats = summarize_backtest_trades(trades, exclude_top_n)
             results.append({"ab_trend_filter_resolution": tf_resolution, "ab_trend_filter_multiplier": mult, **stats})
     return results
@@ -6575,6 +6712,7 @@ async def run_ab_sweep(symbol, cfg, days, timeframes, st_mult_min=0.1, st_mult_m
         "min_reliable_trades": AB_SWEEP_MIN_RELIABLE_TRADES,
         "combos_tested": len(results), "multipliers_tested": len(multipliers),
         "timeframes_tested": [tf for tf, _c in tf_data], "skipped_timeframes": skipped,
+        "exit_mode": cfg.get("ab_exit_mode", "flip"),
         "sl_enabled": cfg.get("ab_sl_enabled", True), "sl_usd": cfg.get("ab_sl_manual_usd", 5.0),
         "results": best_sorted[:30], "worst_results": worst_sorted[:20], "best_per_timeframe": best_per_tf,
     }
@@ -9174,7 +9312,7 @@ def backtest_halftrend(candles, cfg):
     return _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup)
 
 
-def _simulate_ab_trades(candles, cfg, long_setup, short_setup, warmup):
+def _simulate_ab_flip_trades(candles, cfg, long_setup, short_setup, warmup):
     """Backtest-Gegenstueck zu check_ab_entry/check_ab_sl: Wechsel-System (Gegen-Signal schliesst zum
     Schlusskurs und oeffnet die Gegenrichtung) plus optionaler fester Dollar-SL (Preisabstand =
     SL-Betrag / Positionsgroesse, Ausloesung ueber Hoch/Tief der Kerze, Ausfuehrung zum SL-Preis) mit
@@ -9235,6 +9373,108 @@ def _simulate_ab_trades(candles, cfg, long_setup, short_setup, warmup):
     return trades
 
 
+def _simulate_ab_plan_trades(candles, cfg, long_setup, short_setup, atr, warmup):
+    """Kern-Simulation fuer Al-Shatri Breakout - wie _simulate_halftrend_trades (TP1/TP2/TP3 als
+    echte Teilverkaeufe), aber KEIN Flip-Exit (das Original bleibt bis SL/TP3 im Plan, ein neues
+    Gegen-Signal wird waehrend 'active' schlicht ignoriert) und mit den zwei EINZELN abschaltbaren
+    SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) statt fest immer Break-Even.
+    Plan-Modus (ab_exit_mode='plan'), Gegenstueck zu check_ab_sl_tp/_check_ab_plan_entry."""
+    ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    params = _ab_effective_params(cfg)
+    r1, r2, r3, atr_mult = params["r1"], params["r2"], params["r3"], params["atr_mult"]
+    tp1_frac = cfg.get("ab_tp1_close_pct", 33) / 100
+    tp2_frac = cfg.get("ab_tp2_close_pct", 50) / 100
+    sl_to_be_on_tp1 = cfg.get("ab_sl_to_breakeven_on_tp1", True)
+    sl_to_tp1_on_tp2 = cfg.get("ab_sl_to_tp1_on_tp2", True)
+    sl_cooldown_ms = cfg.get("ab_sl_cooldown_seconds", 30) * 1000
+    direction_mode = cfg.get("ab_direction_mode", "both")
+
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp1_price","tp2_price","tp3_price","tp1_done","tp2_done"}
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position.get("sl_price")
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            if hit_sl:
+                reason = "SL-AUF-TP1" if position["tp2_done"] else ("BREAKEVEN" if position["tp1_done"] else "SL")
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            else:
+                # TP1/TP2/TP3 faellt bewusst OHNE elif/Abbruch durch: da alle drei Ziele in
+                # dieselbe Richtung geordnet sind (TP1 naeher am Einstieg als TP2 als TP3), kann
+                # eine einzelne grosse Kerze (voller Range in h[i]/l[i]) rechnerisch eindeutig
+                # mehrere Stufen auf einmal erreichen - das darf nicht auf die naechste Kerze
+                # verschoben werden, sonst fehlt z.B. TP2 komplett, wenn die naechste Kerze schon
+                # wieder zurücklaeuft (siehe check_ab_sl_tp fuer dieselbe Korrektur live).
+                if not position["tp1_done"] and position.get("tp1_price") is not None:
+                    tp1_price = position["tp1_price"]
+                    if (pdir == "long" and h[i] >= tp1_price) or (pdir == "short" and l[i] <= tp1_price):
+                        close_size = position["size"] * tp1_frac
+                        _bt_close_trade(trades, pdir, entry, tp1_price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                        position["size"] -= close_size
+                        position["tp1_done"] = True
+                        if sl_to_be_on_tp1:
+                            position["sl_price"] = entry
+
+                if position is not None and position["tp1_done"] and not position["tp2_done"] and position.get("tp2_price") is not None:
+                    tp2_price = position["tp2_price"]
+                    if (pdir == "long" and h[i] >= tp2_price) or (pdir == "short" and l[i] <= tp2_price):
+                        close_size = position["size"] * tp2_frac
+                        _bt_close_trade(trades, pdir, entry, tp2_price, close_size, i, position["entry_i"], "TP2", ts=ts)
+                        position["size"] -= close_size
+                        position["tp2_done"] = True
+                        if sl_to_tp1_on_tp2 and position.get("tp1_price") is not None:
+                            position["sl_price"] = position["tp1_price"]
+
+                if position is not None and position["tp1_done"] and position["tp2_done"] and position.get("tp3_price") is not None:
+                    tp3_price = position["tp3_price"]
+                    if (pdir == "long" and h[i] >= tp3_price) or (pdir == "short" and l[i] <= tp3_price):
+                        _bt_close_trade(trades, pdir, entry, tp3_price, position["size"], i, position["entry_i"], "TP3", ts=ts)
+                        position = None
+
+        buy_signal = long_setup[i] and not long_setup[i - 1]
+        sell_signal = short_setup[i] and not short_setup[i - 1]
+        if direction_mode == "long_only":
+            sell_signal = False
+        elif direction_mode == "short_only":
+            buy_signal = False
+
+        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and (buy_signal or sell_signal) and atr[i] and atr[i] > 0:
+            direction = "long" if buy_signal else "short"
+            size = (margin * leverage) / price
+            risk = atr[i] * atr_mult
+            sl_price = price - risk if direction == "long" else price + risk
+            if direction == "long":
+                tp1_price, tp2_price, tp3_price = price + risk * r1, price + risk * r2, price + risk * r3
+            else:
+                tp1_price, tp2_price, tp3_price = price - risk * r1, price - risk * r2, price - risk * r3
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
+                        "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price, "tp3_price": tp3_price,
+                        "tp1_done": False, "tp2_done": False}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup):
+    """Waehlt je nach ab_exit_mode die Simulation: 'plan' (ATR-SL + TP1/TP2/TP3 wie im Original) oder
+    'flip' (Standard: Wechsel bei Gegen-Signal + optionaler fester Dollar-SL)."""
+    if cfg.get("ab_exit_mode", "flip") == "plan":
+        return _simulate_ab_plan_trades(candles, cfg, long_setup, short_setup, atr, warmup)
+    return _simulate_ab_flip_trades(candles, cfg, long_setup, short_setup, warmup)
+
+
 def backtest_ab_breakout(candles, cfg, trend_filter_long_ok=None, trend_filter_short_ok=None):
     """Backtest fuer Al-Shatri Breakout. Braucht (anders als die meisten anderen Strategien) eine
     6er-Kerzenquelle MIT Volumen fuer den optionalen Volumen-Filter (Standard aus) - deshalb wie
@@ -9270,7 +9510,7 @@ def backtest_ab_breakout(candles, cfg, trend_filter_long_ok=None, trend_filter_s
         short_setup = [short_setup[i] and aso_bear_ok[i] for i in range(len(short_setup))]
 
     warmup = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 5
-    return _simulate_ab_trades(candles, cfg, long_setup, short_setup, warmup)
+    return _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup)
 
 
 def _simulate_cp_trades(candles, cfg, bull, bear, risk_atr, warmup):

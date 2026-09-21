@@ -348,10 +348,24 @@ def default_config():
         "ab_atr_len": int(os.getenv("AB_ATR_LEN", "14")),
         "ab_direction_mode": os.getenv("AB_DIRECTION_MODE", "both"),
         "ab_sl_cooldown_seconds": float(os.getenv("AB_SL_COOLDOWN_SECONDS", "30")),
-        # Fester Dollar-SL, abschaltbar: Verlust der Position in USD beim SL (Preisabstand = Betrag /
-        # Positionsgroesse, wie bei MO7/UTB u.a.). Aus = Ausstieg nur per Gegen-Signal.
+        # Ausstiegs-Modus: "flip" = Wechsel bei Gegen-Signal (immer im Markt) + optionaler fester
+        # Dollar-SL; "plan" = wie das Original-Skript (ATR-SL + TP1/TP2/TP3 mit Teilverkaeufen).
+        "ab_exit_mode": os.getenv("AB_EXIT_MODE", "flip"),
+        # flip-Modus: fester Dollar-SL, abschaltbar (Verlust der Position in USD beim SL, Preisabstand =
+        # Betrag / Positionsgroesse, wie bei MO7/UTB u.a.). Aus = Ausstieg nur per Gegen-Signal.
         "ab_sl_enabled": os.getenv("AB_SL_ENABLED", "true").lower() == "true",
         "ab_sl_manual_usd": float(os.getenv("AB_SL_MANUAL_USD", "5.0")),
+        # plan-Modus: SL = ATR x Multiplikator, TP1/TP2/TP3 = Risiko x r1/r2/r3 (bei Preset "custom" frei
+        # einstellbar, sonst aus dem Preset). TP1/TP2 = echte Teilverkaeufe, beide Prozentsaetze sowie die
+        # zwei SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) einzeln abschaltbar.
+        "ab_atr_mult": float(os.getenv("AB_ATR_MULT", "1.5")),
+        "ab_r1": float(os.getenv("AB_R1", "1.0")),
+        "ab_r2": float(os.getenv("AB_R2", "2.0")),
+        "ab_r3": float(os.getenv("AB_R3", "3.0")),
+        "ab_tp1_close_pct": float(os.getenv("AB_TP1_CLOSE_PCT", "33")),
+        "ab_tp2_close_pct": float(os.getenv("AB_TP2_CLOSE_PCT", "50")),
+        "ab_sl_to_breakeven_on_tp1": os.getenv("AB_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
+        "ab_sl_to_tp1_on_tp2": os.getenv("AB_SL_TO_TP1_ON_TP2", "true").lower() == "true",
         # Optionaler uebergeordneter SuperTrend-Trendfilter (eigene, hoehere Zeiteinheit) - wie bei
         # [Hoss] VWAP+RSI+Hull+DI: Long nur wenn SuperTrend dort bullisch, Short nur wenn baerisch.
         "ab_trend_filter_enabled": os.getenv("AB_TREND_FILTER_ENABLED", "false").lower() == "true",
@@ -881,7 +895,7 @@ PERSISTED_STATE_KEYS = [
     "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
     "obi_breakeven_triggered",
     "ht_sl_price", "ht_tp1_price", "ht_tp2_price", "ht_tp3_price", "ht_tp1_done", "ht_tp2_done",
-    "ab_sl_price",
+    "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done",
 ]
 
 
@@ -1590,7 +1604,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="maverick_edge">Maverick Edge (Trend-EMA + Guide-Linie + Kerzenstärke, reiner Signal-Einstieg, SL fest oder Guide-Linie als Trail-Stop, fester TP)</option>
       <option value="st_rsi_signal">SuperTrend+RSI (SuperTrend 10/2-Flip + RSI 9-Bestätigung, immer Flip bei Gegensignal, optional ADX/Volumen/MTF%/Z-Score-Filter, fester SL+TP)</option>
       <option value="hvd_signal">[Hoss] VWAP+RSI+Hull+DI (Hull-Farbwechsel + DI-Bestätigung, scharf durch VWAP-Band+OBV-RSI-Extrem am selben Balken, SL=Hull mit ATR-Mindestabstand, TP=Risk-Reward, kein Flip-Exit)</option>
-      <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Wechsel bei Gegen-Signal, optionaler fester $-SL)</option>
+      <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
     </select>
   </div>
   <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
@@ -1838,7 +1852,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div data-mode="ab_breakout" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📡 <b>Signal</b>: Kerzenschluss bricht über/unter das Hoch/Tief der letzten "Breakout-Kerzen" (ohne die aktuelle Kerze) aus, schnelle EMA über/unter langsamer EMA bestätigt den Trend, RSI muss die Schwelle erreichen, optional zusätzlich ein Volumen-Filter.
-    🔄 <b>Ausstieg</b>: Immer im Markt - der erste Buy bleibt offen, bis das erste Sell kommt; das Sell schließt ihn und öffnet direkt einen Sell (und umgekehrt). Kein ATR-SL, keine Targets. Optional ein <b>fester Dollar-SL</b> (Verlust der Position in $) - ohne SL ist das Risiko pro Position unbegrenzt.
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    🔄 <b>Wechsel</b>: Immer im Markt - der erste Buy bleibt offen, bis das erste Sell kommt; das Sell schließt ihn und öffnet direkt einen Sell (und umgekehrt). Keine Targets. Optional ein <b>fester Dollar-SL</b> (Verlust der Position in $) - ohne SL ist das Risiko pro Position unbegrenzt.
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    🎯 <b>Plan (wie Original-Skript)</b>: SL = ATR × Multiplikator, TP1/TP2/TP3 = Risiko × 1x/2x/3x (Werte je Preset; bei "Custom" frei einstellbar). Solange ein Plan läuft (bis SL oder TP3), wird kein neues Signal angenommen; ein Gegen-Signal schließt nichts.
   </div>
   <div data-mode="ab_breakout"><label>Preset</label>
     <select class="cfg" id="ab_preset">
@@ -1876,6 +1895,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Volumen vs. 20er-Durchschnitt (Vielfaches)</label><input type="number" step="0.1" min="0.1" id="ab_vol_mult"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>ATR-Periode</label><input type="number" step="1" min="1" id="ab_atr_len"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom" data-requires-also="ab_exit_mode=plan"><label>SL-Abstand (ATR-Multiplikator)</label><input type="number" step="0.1" min="0.1" id="ab_atr_mult"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom" data-requires-also="ab_exit_mode=plan"><label>Target 1 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r1"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom" data-requires-also="ab_exit_mode=plan"><label>Target 2 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r2"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom" data-requires-also="ab_exit_mode=plan"><label>Target 3 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r3"></div>
   <div data-mode="ab_breakout"><label>Richtung</label>
     <select class="cfg" id="ab_direction_mode">
       <option value="both">Beide</option>
@@ -1883,14 +1907,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short</option>
     </select>
   </div>
-  <div data-mode="ab_breakout"><label>Stop-Loss (fester Dollar-Betrag)</label>
+  <div data-mode="ab_breakout"><label>Ausstieg</label>
+    <select class="cfg" id="ab_exit_mode">
+      <option value="flip">Wechsel bei Gegen-Signal (+ optionaler fester $-SL)</option>
+      <option value="plan">Plan wie Original-Skript (ATR-SL + TP1/TP2/TP3)</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="flip"><label>Stop-Loss (fester Dollar-Betrag)</label>
     <select class="cfg" id="ab_sl_enabled">
       <option value="true">An</option>
       <option value="false">Aus (Ausstieg nur per Gegen-Signal)</option>
     </select>
   </div>
-  <div data-mode="ab_breakout" data-requires="ab_sl_enabled"><label>SL-Betrag ($ Verlust der Position)</label><input type="number" step="0.1" min="0.1" id="ab_sl_manual_usd"></div>
-  <div data-mode="ab_breakout" data-requires="ab_sl_enabled"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
+  <div data-mode="ab_breakout" data-requires="ab_sl_enabled" data-requires-also="ab_exit_mode=flip"><label>SL-Betrag ($ Verlust der Position)</label><input type="number" step="0.1" min="0.1" id="ab_sl_manual_usd"></div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp1_close_pct"></div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp2_close_pct"></div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>SL auf Break-Even bei TP1</label>
+    <select class="cfg" id="ab_sl_to_breakeven_on_tp1">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>SL auf TP1 bei TP2</label>
+    <select class="cfg" id="ab_sl_to_tp1_on_tp2">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
   <div data-mode="ab_breakout"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
     <select class="cfg" id="ab_trend_filter_enabled">
       <option value="false">Aus</option>
@@ -4174,7 +4218,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
     Testet den übergeordneten SuperTrend-Trendfilter über alle gewählten Zeiteinheiten und einen Bereich
     von Multiplikatoren gegeneinander. Der Filter ist dabei für jede Kombination fest eingeschaltet; alles
-    andere (Signal-Parameter, fester $-SL, Richtung, ASO-Filter, ATR-Periode des SuperTrends) kommt aus den
+    andere (Signal-Parameter, Ausstiegs-Modus mit SL/TP, Richtung, ASO-Filter, ATR-Periode des SuperTrends) kommt aus den
     Einstellungen oben. Die Roh-Signale werden nur EINMAL berechnet.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
@@ -4588,7 +4632,14 @@ function applyFilterRequires() {
     // Mehrwert-Selects (z.B. mv_sl_mode: "fixed"/"guide_trail") - dann zaehlt Gleichheit mit
     // diesem Wert statt 'true'.
     const expected = el.dataset.requiresValue;
-    const active = ctrl && (expected !== undefined ? ctrl.value === expected : ctrl.value === 'true');
+    let active = ctrl && (expected !== undefined ? ctrl.value === expected : ctrl.value === 'true');
+    // Optional zweite Bedingung "data-requires-also=\"id=wert\"" (z.B. Feld gilt nur bei Preset Custom UND
+    // Ausstiegs-Modus Plan) - beide muessen erfuellt sein.
+    if (active && el.dataset.requiresAlso) {
+      const [alsoId, alsoVal] = el.dataset.requiresAlso.split('=');
+      const alsoCtrl = document.getElementById(alsoId);
+      active = !!alsoCtrl && alsoCtrl.value === alsoVal;
+    }
     el.style.display = active ? '' : 'none';
   });
 }
@@ -5385,7 +5436,7 @@ document.getElementById('btn-ab-sweep').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      let msg = `${data.combos_tested} Kombinationen (${data.multipliers_tested} Multiplikatoren × ${data.timeframes_tested.length} Zeiteinheiten: ${data.timeframes_tested.join(', ')}) getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}), SL: ${data.sl_enabled ? '$' + data.sl_usd : 'aus'} - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      let msg = `${data.combos_tested} Kombinationen (${data.multipliers_tested} Multiplikatoren × ${data.timeframes_tested.length} Zeiteinheiten: ${data.timeframes_tested.join(', ')}) getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}), Ausstieg: ${data.exit_mode === 'plan' ? 'Plan (ATR-SL + TP1/2/3)' : 'Wechsel, SL ' + (data.sl_enabled ? '$' + data.sl_usd : 'aus')} - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
       if (data.skipped_timeframes && data.skipped_timeframes.length) {
         msg += ` ⚠️ Übersprungen: ` + data.skipped_timeframes.map(x => `${x.timeframe} (${x.reason})`).join(' | ');
       }
@@ -5975,7 +6026,17 @@ async function refresh() {
     document.getElementById('ab_use_volume').value = String(data.config.ab_use_volume);
     document.getElementById('ab_vol_mult').value = data.config.ab_vol_mult;
     document.getElementById('ab_direction_mode').value = data.config.ab_direction_mode;
+    document.getElementById('ab_exit_mode').value = data.config.ab_exit_mode || 'flip';
     document.getElementById('ab_sl_enabled').value = String(data.config.ab_sl_enabled);
+    document.getElementById('ab_atr_len').value = data.config.ab_atr_len;
+    document.getElementById('ab_atr_mult').value = data.config.ab_atr_mult;
+    document.getElementById('ab_r1').value = data.config.ab_r1;
+    document.getElementById('ab_r2').value = data.config.ab_r2;
+    document.getElementById('ab_r3').value = data.config.ab_r3;
+    document.getElementById('ab_tp1_close_pct').value = data.config.ab_tp1_close_pct;
+    document.getElementById('ab_tp2_close_pct').value = data.config.ab_tp2_close_pct;
+    document.getElementById('ab_sl_to_breakeven_on_tp1').value = String(data.config.ab_sl_to_breakeven_on_tp1);
+    document.getElementById('ab_sl_to_tp1_on_tp2').value = String(data.config.ab_sl_to_tp1_on_tp2);
     document.getElementById('ab_sl_manual_usd').value = data.config.ab_sl_manual_usd;
     document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
@@ -6593,7 +6654,17 @@ function buildConfigPayload() {
     ab_use_volume: document.getElementById('ab_use_volume').value === 'true',
     ab_vol_mult: parseFloat(document.getElementById('ab_vol_mult').value),
     ab_direction_mode: document.getElementById('ab_direction_mode').value,
+    ab_exit_mode: document.getElementById('ab_exit_mode').value,
     ab_sl_enabled: document.getElementById('ab_sl_enabled').value === 'true',
+    ab_atr_len: parseInt(document.getElementById('ab_atr_len').value),
+    ab_atr_mult: parseFloat(document.getElementById('ab_atr_mult').value),
+    ab_r1: parseFloat(document.getElementById('ab_r1').value),
+    ab_r2: parseFloat(document.getElementById('ab_r2').value),
+    ab_r3: parseFloat(document.getElementById('ab_r3').value),
+    ab_tp1_close_pct: parseFloat(document.getElementById('ab_tp1_close_pct').value),
+    ab_tp2_close_pct: parseFloat(document.getElementById('ab_tp2_close_pct').value),
+    ab_sl_to_breakeven_on_tp1: document.getElementById('ab_sl_to_breakeven_on_tp1').value === 'true',
+    ab_sl_to_tp1_on_tp2: document.getElementById('ab_sl_to_tp1_on_tp2').value === 'true',
     ab_sl_manual_usd: parseFloat(document.getElementById('ab_sl_manual_usd').value),
     ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
@@ -7092,7 +7163,9 @@ async def handle_status(request):
         "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"),
         "ht_tp1_price": st.get("ht_tp1_price"), "ht_tp2_price": st.get("ht_tp2_price"), "ht_tp3_price": st.get("ht_tp3_price"),
         "ht_tp1_done": st.get("ht_tp1_done"), "ht_tp2_done": st.get("ht_tp2_done"),
-        "ab_sl_price": st.get("ab_sl_price"),
+        "ab_sl_price": st.get("ab_sl_price"), "ab_tp1_price": st.get("ab_tp1_price"),
+        "ab_tp2_price": st.get("ab_tp2_price"), "ab_tp3_price": st.get("ab_tp3_price"),
+        "ab_tp1_done": st.get("ab_tp1_done"), "ab_tp2_done": st.get("ab_tp2_done"),
         "ab_atr_last": st.get("ab_atr_last"),
         "da_direction": st.get("da_direction"), "da_sl_price": st.get("da_sl_price"), "da_tp_price": st.get("da_tp_price"),
         "es_direction": st.get("es_direction"), "es_sensitivity_last": st.get("es_sensitivity_last"),
@@ -7165,7 +7238,9 @@ async def handle_config_update(request):
                 "ht_entry_trigger", "ht_exit_trigger", "ht_invert_direction",
                 "ht_tp_enabled", "ht_tp1_close_pct", "ht_tp2_close_pct", "ht_sl_enabled", "ht_sl_cooldown_seconds",
                 "ab_resolution", "ab_preset", "ab_lookback", "ab_fast_len", "ab_slow_len", "ab_rsi_len", "ab_rsi_gate",
-                "ab_use_volume", "ab_vol_mult", "ab_direction_mode", "ab_sl_enabled", "ab_sl_manual_usd", "ab_sl_cooldown_seconds",
+                "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
+                "ab_exit_mode", "ab_sl_enabled", "ab_sl_manual_usd", "ab_tp1_close_pct", "ab_tp2_close_pct",
+                "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
                 "da_resolution", "da_atr_period", "da_sensitivity", "da_sma_period", "da_ema_trend_period",
