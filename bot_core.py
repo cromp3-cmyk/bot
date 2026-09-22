@@ -4320,6 +4320,76 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="ab_breakout" style="display:none;">
+<h2 class="section-title">🎲 Al-Shatri Signal-Sweep (Breakout-Range × EMAs, unabhängig vom SuperTrend)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet Breakout-Range (Kerzen), schnelle EMA und langsame EMA gegeneinander. Der SuperTrend-
+    Trendfilter wird hier NICHT mitvariiert - er bleibt genau so an oder aus, wie oben im Strategie-
+    Panel eingestellt (für den SuperTrend selbst gibt es den separaten Sweep darüber). RSI, Volumen,
+    ATR-Periode, Ausstiegs-Modus, Richtung und ASO-Filter kommen ebenfalls aus den Einstellungen oben.
+    Kombinationen mit schneller ≥ langsamer EMA werden automatisch übersprungen.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="ab-sig-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="ab-sig-sweep-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Breakout-Range von</label><input type="number" step="1" min="2" id="ab-sig-sweep-lb-min" value="10" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="2" id="ab-sig-sweep-lb-max" value="60" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="ab-sig-sweep-lb-step" value="10" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Schnelle EMA von</label><input type="number" step="1" min="2" id="ab-sig-sweep-fast-min" value="10" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="2" id="ab-sig-sweep-fast-max" value="60" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="ab-sig-sweep-fast-step" value="10" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Langsame EMA von</label><input type="number" step="1" min="2" id="ab-sig-sweep-slow-min" value="30" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="2" id="ab-sig-sweep-slow-max" value="150" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="ab-sig-sweep-slow-step" value="20" style="width:80px;"></div>
+  </div>
+  <div style="font-size:12px; color:var(--text-dim); padding:2px 0; margin-bottom:8px;">
+    Limit 600 gültige Kombinationen (nur fast &lt; slow zählt). Bei den Standardwerten sind das
+    6 × 6 × 7 = 252 mögliche, davon ein Teil ungültig (fast ≥ slow) und übersprungen.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-ab-sig-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="ab-sig-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sig-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="ab-sig-sweep-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="ab_lookback">Breakout-Range ⇅</th>
+      <th class="sortable" data-key="ab_fast_len">Schnelle EMA ⇅</th>
+      <th class="sortable" data-key="ab_slow_len">Langsame EMA ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sig-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="ab-sig-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="ab_lookback">Breakout-Range ⇅</th>
+      <th class="sortable" data-key="ab_fast_len">Schnelle EMA ⇅</th>
+      <th class="sortable" data-key="ab_slow_len">Langsame EMA ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="hvd_signal" style="display:none;">
 <h2 class="section-title">🎲 [Hoss] VWAP+RSI+Hull+DI Parameter-Sweep (Hull-Länge × Risk:Reward)</h2>
 <div class="panel-card">
@@ -5409,6 +5479,72 @@ const utbSweepRowHtml = (r) => `
   </tr>`;
 const renderUtbSweepResults = makeSortableTable('utb-sweep-results-table', () => window.utbSweepResultsData, utbSweepRowHtml);
 const renderUtbSweepWorst = makeSortableTable('utb-sweep-worst-table', () => window.utbSweepWorstData, utbSweepRowHtml);
+
+document.getElementById('btn-ab-sig-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-ab-sig-sweep');
+  const statusEl = document.getElementById('ab-sig-sweep-status');
+  const tables = {top: document.getElementById('ab-sig-sweep-results-table'), worst: document.getElementById('ab-sig-sweep-worst-table')};
+  const titles = {top: document.getElementById('ab-sig-sweep-top-title'), worst: document.getElementById('ab-sig-sweep-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('ab-sig-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('ab-sig-sweep-exclude-top-n').value) || 0,
+    lookback_min: parseInt(document.getElementById('ab-sig-sweep-lb-min').value),
+    lookback_max: parseInt(document.getElementById('ab-sig-sweep-lb-max').value),
+    lookback_step: parseInt(document.getElementById('ab-sig-sweep-lb-step').value),
+    fast_min: parseInt(document.getElementById('ab-sig-sweep-fast-min').value),
+    fast_max: parseInt(document.getElementById('ab-sig-sweep-fast-max').value),
+    fast_step: parseInt(document.getElementById('ab-sig-sweep-fast-step').value),
+    slow_min: parseInt(document.getElementById('ab-sig-sweep-slow-min').value),
+    slow_max: parseInt(document.getElementById('ab-sig-sweep-slow-max').value),
+    slow_step: parseInt(document.getElementById('ab-sig-sweep-slow-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen...`;
+  try {
+    const res = await fetch(`/api/ab_signal_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      const tf = data.trend_filter_enabled ? `SuperTrend an (${data.trend_filter_resolution}, unverändert)` : 'SuperTrend aus';
+      statusEl.innerText = `${data.combos_tested} gültige Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}), ${tf}, Ausstieg: ${data.exit_mode === 'plan' ? 'Plan (ATR-SL + TP1/2/3)' : 'Wechsel, SL ' + (data.sl_enabled ? '$' + data.sl_usd : 'aus')} - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.abSigSweepResultsData = data.results || [];
+      window.abSigSweepWorstData = data.worst_results || [];
+      renderAbSigSweepResults();
+      renderAbSigSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.abSigSweepResultsData = [];
+window.abSigSweepWorstData = [];
+const abSigSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.ab_lookback}</td>
+    <td>${r.ab_fast_len}</td>
+    <td>${r.ab_slow_len}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderAbSigSweepResults = makeSortableTable('ab-sig-sweep-results-table', () => window.abSigSweepResultsData, abSigSweepRowHtml);
+const renderAbSigSweepWorst = makeSortableTable('ab-sig-sweep-worst-table', () => window.abSigSweepWorstData, abSigSweepRowHtml);
 
 document.getElementById('btn-ab-sweep-tf-6-20').addEventListener('click', () => {
   const boxes = Array.from(document.querySelectorAll('.ab-sweep-tf')).filter(x => { const m = parseInt(x.value); return x.value.endsWith('m') && m >= 6 && m <= 20 && m !== 15; });
@@ -7609,6 +7745,43 @@ async def handle_utb_param_sweep(request):
                                         sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n,
                                         long_threshold_min, long_threshold_max, long_threshold_step,
                                         short_threshold_min, short_threshold_max, short_threshold_step)
+    return web.json_response(result)
+
+
+async def handle_ab_signal_sweep(request):
+    """'Monte-Carlo'-Sweep fuer Al-Shatri Breakout: Breakout-Range x schnelle EMA x langsame EMA,
+    unabhaengig vom SuperTrend-Trendfilter (der bleibt unveraendert wie konfiguriert), siehe
+    run_ab_signal_sweep."""
+    from strategies import run_ab_signal_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        lookback_min = max(2, int(body.get("lookback_min", 10)))
+        lookback_max = max(lookback_min, int(body.get("lookback_max", 60)))
+        lookback_step = max(1, int(body.get("lookback_step", 10)))
+        fast_min = max(2, int(body.get("fast_min", 10)))
+        fast_max = max(fast_min, int(body.get("fast_max", 60)))
+        fast_step = max(1, int(body.get("fast_step", 10)))
+        slow_min = max(2, int(body.get("slow_min", 30)))
+        slow_max = max(slow_min, int(body.get("slow_max", 150)))
+        slow_step = max(1, int(body.get("slow_step", 20)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    result = await run_ab_signal_sweep(symbol, cfg, days, lookback_min, lookback_max, lookback_step,
+                                        fast_min, fast_max, fast_step, slow_min, slow_max, slow_step, exclude_top_n)
     return web.json_response(result)
 
 

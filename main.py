@@ -14,7 +14,7 @@ from bot_core import (
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reset,
     handle_manual_trade, handle_backtest, handle_ht_sweep, handle_da_sweep, handle_es_sensitivity_sweep,
-    handle_mo7_sum_sweep, handle_ab_sweep,
+    handle_mo7_sum_sweep, handle_ab_sweep, handle_ab_signal_sweep,
     handle_utb_param_sweep, handle_pk_sensitivity_sweep, handle_rf_sweep, handle_hvd_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
@@ -55,6 +55,7 @@ async def start_web_server():
     app.router.add_post("/api/rf_sweep", handle_rf_sweep)
     app.router.add_post("/api/hvd_sweep", handle_hvd_sweep)
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
+    app.router.add_post("/api/ab_signal_sweep", handle_ab_signal_sweep)
     app.router.add_get("/api/global_settings", handle_global_settings_get)
     app.router.add_post("/api/global_settings", handle_global_settings_update)
     app.router.add_post("/api/reset", handle_reset)

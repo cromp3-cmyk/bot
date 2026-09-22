@@ -6733,6 +6733,120 @@ async def run_ab_sweep(symbol, cfg, days, timeframes, st_mult_min=0.1, st_mult_m
     }
 
 
+AB_SIGNAL_SWEEP_MAX_COMBOS = 600
+AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+def _ab_signal_sweep_compute(candles, cfg, base_params, trend_ok, aso_ok, combos, exclude_top_n):
+    """Rechenteil des Al-Shatri Signal-Sweeps (Breakout-Range x schnelle EMA x langsame EMA),
+    reine CPU-Arbeit im Thread. Der SuperTrend-Trendfilter und der ASO-Filter sind hier FEST -
+    sie werden genau EINMAL vorab berechnet (trend_ok/aso_ok, je nach Config an/aus) und dann bei
+    jeder Kombination unveraendert per AND auf die Signale gelegt; nur Range/EMA/RSI/Volumen aus
+    compute_ab_breakout_signals wird je Kombination neu gerechnet. 'unabhaengig vom SuperTrend'
+    (Nutzer-Vorgabe): dieser Sweep variiert den Trendfilter NICHT mit, anders als der bestehende
+    SuperTrend-Sweep (run_ab_sweep) - er bleibt exakt so, wie im Strategie-Panel eingestellt."""
+    ts, o, h, l, c, v = candles
+    n = len(c)
+    results = []
+    for lookback, fast_len, slow_len in combos:
+        params = dict(base_params, lookback=lookback, fast_len=fast_len, slow_len=slow_len)
+        long_setup, short_setup, atr = compute_ab_breakout_signals(h, l, c, v, params)
+        if trend_ok is not None:
+            trend_long_ok, trend_short_ok = trend_ok
+            long_setup = [long_setup[i] and trend_long_ok[i] for i in range(n)]
+            short_setup = [short_setup[i] and trend_short_ok[i] for i in range(n)]
+        if aso_ok is not None:
+            aso_bull_ok, aso_bear_ok = aso_ok
+            long_setup = [long_setup[i] and aso_bull_ok[i] for i in range(n)]
+            short_setup = [short_setup[i] and aso_bear_ok[i] for i in range(n)]
+        warmup = max(slow_len, lookback, params["atr_len"], params["rsi_len"]) + 5
+        trades = _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup)
+        stats = summarize_backtest_trades(trades, exclude_top_n)
+        results.append({"ab_lookback": lookback, "ab_fast_len": fast_len, "ab_slow_len": slow_len, **stats})
+    return results
+
+
+async def run_ab_signal_sweep(symbol, cfg, days, lookback_min=10, lookback_max=60, lookback_step=10,
+                               fast_min=10, fast_max=60, fast_step=10, slow_min=30, slow_max=150,
+                               slow_step=20, exclude_top_n=1):
+    """'Monte-Carlo'-Sweep fuer Al-Shatri Breakout ueber Breakout-Range (Kerzen), schnelle EMA und
+    langsame EMA (Nutzer-Vorgabe) - unabhaengig vom SuperTrend-Trendfilter: der bleibt exakt so, wie
+    im Strategie-Panel eingestellt (an oder aus, mit seiner konfigurierten Zeiteinheit/Multiplikator),
+    und wird hier NICHT mitvariiert - dafuer gibt es den separaten run_ab_sweep. RSI/Volumen/ATR-
+    Periode und der optionale ASO-Filter kommen ebenfalls unveraendert aus der aktuellen Config.
+    Kombinationen mit schneller >= langsamer EMA werden uebersprungen (ungueltig, siehe Validierung
+    im Original-Skript)."""
+    max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
+    resolution = cfg.get("ab_resolution", "1m")
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    ts, o, h, l, c, v = candles
+    n = len(c)
+    if n < max(slow_max, lookback_max) + 10:
+        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~{max(slow_max, lookback_max) + 10} nötig)."}
+
+    def _int_range(lo, hi, step):
+        lo, hi, step = int(lo), int(hi), max(1, int(step))
+        return sorted(set(v for v in range(lo, hi + 1, step) if v >= 2))
+
+    lookbacks = _int_range(lookback_min, lookback_max, lookback_step)
+    fasts = _int_range(fast_min, fast_max, fast_step)
+    slows = _int_range(slow_min, slow_max, slow_step)
+    if not lookbacks or not fasts or not slows:
+        return {"error": "Die eingestellten Bereiche für Breakout-Range/EMA ergeben keine gültigen Werte."}
+
+    combos = [(lb, f, sl) for lb in lookbacks for f in fasts for sl in slows if f < sl]
+    if not combos:
+        return {"error": "Keine gültige Kombination: die schnelle EMA muss in jeder Kombination kleiner als die langsame sein - Bereiche prüfen."}
+    if len(combos) > AB_SIGNAL_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({len(combos)}, Limit {AB_SIGNAL_SWEEP_MAX_COMBOS}) - Bereiche verkleinern oder Schrittweiten vergrößern."}
+
+    base_params = dict(_ab_effective_params(cfg))  # rsi_len/rsi_gate/use_volume/vol_mult/atr_len bleiben fest
+
+    trend_ok = None
+    if cfg.get("ab_trend_filter_enabled", False):
+        tf_resolution = cfg.get("ab_trend_filter_resolution", "15m")
+        tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
+        tf_multiplier = cfg.get("ab_trend_filter_multiplier", 3.0)
+        if tf_resolution in (None, "", "same") or tf_resolution == resolution:
+            tf_st_line, _ = compute_diamond_supertrend(h, l, c, tf_multiplier, tf_atr_period)
+            trend_ok = ([tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(n)],
+                        [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(n)])
+        else:
+            tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, ts, tf_resolution, tf_atr_period)
+            if tf_err:
+                return {"error": f"SuperTrend-Trendfilter ({tf_resolution}): {tf_err}"}
+            trend_ok = _trend_filter_ok_series(ts, tf_candles, tf_multiplier, tf_atr_period)
+
+    aso_ok = None
+    if cfg.get("ab_aso_filter_enabled", False):
+        aso_ok = compute_aso_filter(o, h, l, c, cfg.get("ab_aso_filter_length", 10),
+                                     cfg.get("ab_aso_filter_mode", 0), cfg.get("ab_aso_filter_confirm_bars", 1))
+
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, _ab_signal_sweep_compute, candles, cfg, base_params, trend_ok, aso_ok, combos, exclude_top_n)
+
+    rank_key = lambda r: (r["trades"] >= AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
+    best_sorted = sorted(results, key=rank_key, reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": n,
+        "min_reliable_trades": AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": len(results), "lookbacks_tested": lookbacks, "fasts_tested": fasts, "slows_tested": slows,
+        "exit_mode": cfg.get("ab_exit_mode", "flip"),
+        "sl_enabled": cfg.get("ab_sl_enabled", True), "sl_usd": cfg.get("ab_sl_manual_usd", 5.0),
+        "trend_filter_enabled": cfg.get("ab_trend_filter_enabled", False),
+        "trend_filter_resolution": cfg.get("ab_trend_filter_resolution", "15m") if cfg.get("ab_trend_filter_enabled", False) else None,
+        "results": best_sorted[:30], "worst_results": worst_sorted[:20],
+    }
+
+
 def compute_candle_dna(opens, highs, lows, closes, rejection_mult):
     """Eigene Entwicklung (kein Port): Konviktions-Score je Kerze von -100 (voll bearisch) bis
     +100 (voll bullisch). Basis: Koerper-Anteil an der Hoch-Tief-Spanne (100*body/range,
