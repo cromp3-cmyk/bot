@@ -348,6 +348,10 @@ def default_config():
         "ab_atr_len": int(os.getenv("AB_ATR_LEN", "14")),
         "ab_direction_mode": os.getenv("AB_DIRECTION_MODE", "both"),
         "ab_sl_cooldown_seconds": float(os.getenv("AB_SL_COOLDOWN_SECONDS", "30")),
+        # Signal (Range/EMA/RSI, plus der ATR fuer den Plan-Modus) auf Heikin-Ashi-Kerzen statt
+        # normalen Kerzen berechnen - wie bei Diamond Algo/UT Bot/Candle DNA. Ein-/Ausstieg loest
+        # weiterhin am ECHTEN Marktpreis aus.
+        "ab_use_heikin_ashi": os.getenv("AB_USE_HEIKIN_ASHI", "false").lower() == "true",
         # Ausstiegs-Modus: "flip" = Wechsel bei Gegen-Signal (immer im Markt) + optionaler fester
         # Dollar-SL; "plan" = wie das Original-Skript (ATR-SL + TP1/TP2/TP3 mit Teilverkaeufen).
         "ab_exit_mode": os.getenv("AB_EXIT_MODE", "flip"),
@@ -1946,6 +1950,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="ab_breakout"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
+  <div data-mode="ab_breakout"><label>Kerzenart für die Signalberechnung</label>
+    <select class="cfg" id="ab_use_heikin_ashi">
+      <option value="false">Normale Kerzen</option>
+      <option value="true">Heikin Ashi (wie bei TradingView Chart-Typ-Umschaltung - glättet den Trend, Ein-/Ausstieg löst trotzdem am echten Kurs aus)</option>
+    </select>
+  </div>
   <div data-mode="ab_breakout"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
     <select class="cfg" id="ab_trend_filter_enabled">
       <option value="false">Aus</option>
@@ -6188,6 +6198,7 @@ async function refresh() {
     document.getElementById('ab_sl_to_tp1_on_tp2').value = String(data.config.ab_sl_to_tp1_on_tp2);
     document.getElementById('ab_sl_manual_usd').value = data.config.ab_sl_manual_usd;
     document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
+    document.getElementById('ab_use_heikin_ashi').value = String(data.config.ab_use_heikin_ashi);
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -6818,6 +6829,7 @@ function buildConfigPayload() {
     ab_sl_to_tp1_on_tp2: document.getElementById('ab_sl_to_tp1_on_tp2').value === 'true',
     ab_sl_manual_usd: parseFloat(document.getElementById('ab_sl_manual_usd').value),
     ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
+    ab_use_heikin_ashi: document.getElementById('ab_use_heikin_ashi').value === 'true',
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -7392,7 +7404,7 @@ async def handle_config_update(request):
                 "ab_resolution", "ab_preset", "ab_lookback", "ab_fast_len", "ab_slow_len", "ab_rsi_len", "ab_rsi_gate",
                 "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
                 "ab_exit_mode", "ab_sl_enabled", "ab_sl_manual_usd", "ab_be_enabled", "ab_be_trigger_usd", "ab_tp1_close_pct", "ab_tp2_close_pct",
-                "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds",
+                "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds", "ab_use_heikin_ashi",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
                 "da_resolution", "da_atr_period", "da_sensitivity", "da_sma_period", "da_ema_trend_period",

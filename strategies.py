@@ -2125,7 +2125,16 @@ async def ab_poll_loop(symbol):
                     signal_key = closed_ts[-1]
                     price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
 
-                    long_setup, short_setup, atr = compute_ab_breakout_signals(closed_h, closed_l, closed_c, closed_v, params)
+                    if cfg.get("ab_use_heikin_ashi", False):
+                        # Heikin-Ashi-Umrechnung VOR der Signal-Berechnung - wie bei TradingView, wenn
+                        # man den Chart-Typ umstellt. Reale Preise (price/last_price) bleiben fuer die
+                        # tatsaechliche Order-Ausfuehrung unveraendert, nur das SIGNAL (und der daraus
+                        # abgeleitete ATR fuer den Plan-Modus) rechnet auf den geglaetteten HA-Kerzen -
+                        # genau wie bei Diamond Algo/UT Bot/Candle DNA in diesem Bot.
+                        _, ab_sig_h, ab_sig_l, ab_sig_c = compute_heikin_ashi(closed_o, closed_h, closed_l, closed_c)
+                    else:
+                        ab_sig_h, ab_sig_l, ab_sig_c = closed_h, closed_l, closed_c
+                    long_setup, short_setup, atr = compute_ab_breakout_signals(ab_sig_h, ab_sig_l, ab_sig_c, closed_v, params)
                     st["ab_atr_last"] = atr[-1]
 
                     # Optionaler uebergeordneter SuperTrend-Trendfilter (eigene, hoehere Zeiteinheit) -
@@ -6621,7 +6630,11 @@ def _ab_sweep_compute(candles, cfg, tf_data, multipliers, tf_atr_period, exclude
     ts, o, h, l, c, v = candles
     n = len(c)
     params = _ab_effective_params(cfg)
-    long_raw, short_raw, _atr = compute_ab_breakout_signals(h, l, c, v, params)
+    if cfg.get("ab_use_heikin_ashi", False):
+        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
+    else:
+        sig_h, sig_l, sig_c = h, l, c
+    long_raw, short_raw, _atr = compute_ab_breakout_signals(sig_h, sig_l, sig_c, v, params)
     if cfg.get("ab_aso_filter_enabled", False):
         aso_bull_ok, aso_bear_ok = compute_aso_filter(
             o, h, l, c, cfg.get("ab_aso_filter_length", 10), cfg.get("ab_aso_filter_mode", 0),
@@ -6747,10 +6760,14 @@ def _ab_signal_sweep_compute(candles, cfg, base_params, trend_ok, aso_ok, combos
     SuperTrend-Sweep (run_ab_sweep) - er bleibt exakt so, wie im Strategie-Panel eingestellt."""
     ts, o, h, l, c, v = candles
     n = len(c)
+    if cfg.get("ab_use_heikin_ashi", False):
+        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
+    else:
+        sig_h, sig_l, sig_c = h, l, c
     results = []
     for lookback, fast_len, slow_len in combos:
         params = dict(base_params, lookback=lookback, fast_len=fast_len, slow_len=slow_len)
-        long_setup, short_setup, atr = compute_ab_breakout_signals(h, l, c, v, params)
+        long_setup, short_setup, atr = compute_ab_breakout_signals(sig_h, sig_l, sig_c, v, params)
         if trend_ok is not None:
             trend_long_ok, trend_short_ok = trend_ok
             long_setup = [long_setup[i] and trend_long_ok[i] for i in range(n)]
@@ -9622,9 +9639,17 @@ def backtest_ab_breakout(candles, cfg, trend_filter_long_ok=None, trend_filter_s
     Listen fuer den SuperTrend-Trendfilter bei ABWEICHENDER Zeiteinheit (von run_backtest async
     vorbereitet und ausgerichtet, siehe _align_htf_series); bei gleicher Zeiteinheit/deaktiviertem
     Filter wird hier intern berechnet - wie bei backtest_hvd_signal."""
-    h, l, c, v = candles[2], candles[3], candles[4], candles[5]
+    o, h, l, c, v = candles[1], candles[2], candles[3], candles[4], candles[5]
     params = _ab_effective_params(cfg)
-    long_setup, short_setup, atr = compute_ab_breakout_signals(h, l, c, v, params)
+    if cfg.get("ab_use_heikin_ashi", False):
+        # Signal UND ATR (fuer den Plan-Modus) rechnen auf Heikin-Ashi-Kerzen, SL/TP-Ausloesung im
+        # Backtest bleibt trotzdem an den ECHTEN Kerzen (candles/_simulate_ab_trades), da im
+        # Live-Handel auch der echte Marktpreis ausloest, nicht der geglaettete HA-Wert - wie bei
+        # Diamond Algo (backtest_diamond_algo).
+        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
+    else:
+        sig_h, sig_l, sig_c = h, l, c
+    long_setup, short_setup, atr = compute_ab_breakout_signals(sig_h, sig_l, sig_c, v, params)
 
     if trend_filter_long_ok is None and cfg.get("ab_trend_filter_enabled", False):
         tf_resolution = cfg.get("ab_trend_filter_resolution", "15m")
