@@ -304,7 +304,6 @@ def default_config():
         "oms_liq_filter_enabled": os.getenv("OMS_LIQ_FILTER_ENABLED", "false").lower() == "true",
         "oms_liq_window_seconds": float(os.getenv("OMS_LIQ_WINDOW_SECONDS", "60")),
         "oms_liq_min_ratio": float(os.getenv("OMS_LIQ_MIN_RATIO", "0.2")),
-        "quad_stoch_resolution": os.getenv("QUAD_STOCH_RESOLUTION", "1m"),
         "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
         "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
         "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
@@ -741,8 +740,6 @@ def default_state():
         "oms_funding_rate": None, "oms_last_signal_direction": None, "oms_last_trade_time": 0.0,
         "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None, "oms_rsi_ok": None, "oms_rsi": None,
         "oms_liq_buffer": [], "oms_liq_ratio": None, "oms_liq_count": 0, "oms_liq_ok": None,
-        "scalp_board": {},
-        "quad_stoch_history": [],
         "da_opens": [], "da_highs": [], "da_lows": [], "da_closes": [], "da_direction": None,
         "da_atr_risk_last": None, "da_sl_price": None, "da_tp_price": None, "da_sl_cooldown_until": 0.0,
         "es_opens": [], "es_highs": [], "es_lows": [], "es_closes": [], "es_direction": None,
@@ -824,7 +821,6 @@ async def save_bot_configs():
 # Globale Schalter, unabhaengig von einzelnen Coins - z.B. um bei knappen Server-Ressourcen
 # (siehe Render Memory/CPU-Limit) Last komplett abzuschalten, ohne jeden Coin einzeln umzustellen.
 GLOBAL_SETTINGS = {
-    "scalp_board_enabled": True,   # Scalp-Board-Berechnung (RSI/Stoch/MACD/MO7/OBI auf 10-60s) fuer ALLE Coins
     "copytrading_enabled": True,   # Copytrading vom Hyperliquid-Leaderboard komplett an/aus
 }
 
@@ -859,7 +855,7 @@ async def handle_global_settings_get(request):
 async def handle_global_settings_update(request):
     body = await request.json()
     changed = False
-    for key in ("scalp_board_enabled", "copytrading_enabled"):
+    for key in ("copytrading_enabled",):
         if key in body:
             GLOBAL_SETTINGS[key] = bool(body[key])
             changed = True
@@ -1449,8 +1445,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"><title>Grid-Bot Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<link href="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack.min.css" rel="stylesheet"/>
-<script src="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack-all.js"></script>
 <style>
   :root {
     --bg: #060a18;
@@ -1544,9 +1538,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="topbar">
   <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select></div>
   <div class="topbar-right">
-    <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Scalp-Board-Berechnung (RSI/Stoch/MACD/MO7/OBI) für ALLE Coins global an/aus - spart CPU/RAM, wenn du gerade nicht manuell scalpst">
-      <input type="checkbox" id="toggle-scalp-board-global" style="cursor:pointer;"> ⚡ Scalp-Details
-    </label>
     <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
       <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
     </label>
@@ -1557,14 +1548,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="coin-overview" id="coin-overview"></div>
 
-<details id="widget-grid-section" open style="margin-top:8px;">
-<summary style="cursor:pointer; font-size:18px; font-weight:700; padding:10px 0; color:var(--text);">📊 Live-Kacheln (Pocket-Trading, Scalp-Board, Gauges, ...) (aufklappen/einklappen)</summary>
-<div id="oms-grid-header" style="display:none; margin-bottom:8px;">
-  <button id="btn-reset-layout" type="button">↺ Layout zurücksetzen</button>
-  <div style="font-size:11px; color:var(--text-dim); padding-top:8px;">Ziehe an der Titelleiste eines Kachel, um sie zu verschieben - an der unteren rechten Ecke ziehen, um die Größe zu ändern.</div>
+<div class="panel-card" style="margin-top:8px;">
+<h2 class="section-title">⚡ Manuelles Trading</h2>
+<div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; font-size:11px;">
+  <div><div class="label">Margin</div><div class="value" id="pocket-margin" style="font-size:14px;">-</div></div>
+  <div><div class="label">Position</div><div class="value" id="pocket-position" style="font-size:14px;">-</div></div>
+  <div><div class="label">Ø-Einstieg</div><div class="value" id="pocket-entry" style="font-size:14px;">-</div></div>
+  <div><div class="label">Unrealisiert $</div><div class="value" id="pocket-pnl" style="font-size:14px;">-</div></div>
 </div>
-<div class="grid-stack" id="oms-grid" style="margin-bottom:12px;"></div>
-</details>
+<div style="display:flex; gap:8px; margin-bottom:12px;">
+  <button id="btn-manual-buy" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#16a34a; color:white; border:none; border-radius:10px; cursor:pointer;">⬆️ BUY</button>
+  <button id="btn-manual-sell" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#dc2626; color:white; border:none; border-radius:10px; cursor:pointer;">⬇️ SELL</button>
+  <button id="btn-manual-tp" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#2563eb; color:white; border:none; border-radius:10px; cursor:pointer;">✅ TP</button>
+</div>
+<div class="label" style="margin-bottom:4px; font-size:10px;">Letzte 10 Kerzen</div>
+<div id="mini-candles" style="display:flex; gap:3px; align-items:center; height:60px;"></div>
+</div>
 
 <div id="generic-chart-wrap">
   <h2 class="section-title">Kursverlauf</h2>
@@ -4546,108 +4545,18 @@ let priceChart;
 let obiChart;
 let quadStochChart;
 
-// ===== Verschieb-/größenveränderbares Widget-Dashboard (wie bei Lighter) =====
-// Jede Kachel behält ihre bestehende ID (oms-trend-meter, oms-gauge-wrap, ...) im Inneren -
-// die ganze bisherige Render-Logik funktioniert dadurch unveraendert weiter, nur die AUSSENHUELLE
-// ist jetzt per GridStack frei verschieb-/groessenveraenderbar. Layout wird pro Browser
-// gespeichert (localStorage), nicht auf dem Server - jeder Nutzer kann sein eigenes Layout haben.
-const OMS_WIDGET_DEFS = [
-  { id: "gsi-signal", title: "📡 Signal", x: 0, y: 0, w: 4, h: 3,
-    body: '<div id="oms-trend-meter" style="padding:16px; border-radius:10px; text-align:center; font-weight:800; font-size:20px;"></div><div id="oms-trend-meter-detail" style="margin-top:8px; font-size:11px; color:var(--text-dim); text-align:center;"></div>' },
-  { id: "gsi-gauge", title: "📶 OBI-Gauge", x: 4, y: 0, w: 4, h: 3, body: '<div id="oms-gauge-wrap"></div>' },
-  { id: "gsi-cvd-gauge", title: "💹 CVD-Gauge", x: 8, y: 0, w: 4, h: 3, body: '<div id="oms-cvd-gauge-wrap"></div>' },
-  { id: "gsi-oi-gauge", title: "📊 Open-Interest-Gauge", x: 0, y: 3, w: 4, h: 3, body: '<div id="oms-oi-gauge-wrap"></div>' },
-  { id: "gsi-liq-gauge", title: "💥 Liquidations-Gauge", x: 4, y: 3, w: 4, h: 3, body: '<div id="oms-liq-gauge-wrap"></div>' },
-  { id: "gsi-checklist", title: "✅ Warum feuert's?", x: 8, y: 3, w: 4, h: 3, body: '<div id="oms-checklist-wrap"></div>' },
-  { id: "gsi-pocket", title: "⚡ Pocket-Trading", x: 0, y: 6, w: 4, h: 5, body: `
-    <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; font-size:11px;">
-      <div><div class="label">Margin</div><div class="value" id="pocket-margin" style="font-size:14px;">-</div></div>
-      <div><div class="label">Position</div><div class="value" id="pocket-position" style="font-size:14px;">-</div></div>
-      <div><div class="label">Ø-Einstieg</div><div class="value" id="pocket-entry" style="font-size:14px;">-</div></div>
-      <div><div class="label">Unrealisiert $</div><div class="value" id="pocket-pnl" style="font-size:14px;">-</div></div>
-    </div>
-    <div style="display:flex; gap:8px; margin-bottom:12px;">
-      <button id="btn-manual-buy" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#16a34a; color:white; border:none; border-radius:10px; cursor:pointer;">⬆️ BUY</button>
-      <button id="btn-manual-sell" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#dc2626; color:white; border:none; border-radius:10px; cursor:pointer;">⬇️ SELL</button>
-      <button id="btn-manual-tp" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#2563eb; color:white; border:none; border-radius:10px; cursor:pointer;">✅ TP</button>
-    </div>
-    <div class="label" style="margin-bottom:4px; font-size:10px;">Letzte 10 Kerzen</div>
-    <div id="mini-candles" style="display:flex; gap:3px; align-items:center; height:60px;"></div>` },
-  { id: "gsi-chart", title: "📈 Preisverlauf", x: 4, y: 6, w: 8, h: 5, body: '<div id="oms-chart-wrap"></div>' },
-  { id: "gsi-obi", title: "〰️ OBI-Verlauf", x: 0, y: 11, w: 12, h: 4, body: '<div style="position:relative; height:100%; min-height:180px;"><canvas id="obiChart"></canvas></div>' },
-  { id: "gsi-scalp-board", title: "⚡ Scalp-Board (30s/45s/60s)", x: 0, y: 15, w: 12, h: 5, body: '<div id="scalp-board-wrap"></div>' },
-  { id: "gsi-quad-stoch", title: "〰️ Quad-Stochastic-Verlauf", x: 0, y: 20, w: 12, h: 5, body: `
-    <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
-      <select id="quad-stoch-resolution-select" style="font-size:11px; padding:3px 8px; background:var(--panel); color:var(--text); border:1px solid var(--panel-border); border-radius:6px;">
-        <option value="30s">30 Sekunden</option>
-        <option value="1m">1 Minute</option>
-        <option value="2m">2 Minuten</option>
-        <option value="5m">5 Minuten</option>
-      </select>
-    </div>
-    <div style="position:relative; height:calc(100% - 34px); min-height:160px;"><canvas id="quadStochChart"></canvas></div>` },
-];
+// Manuelles Trading (BUY/SELL/TP) - fest im Dashboard, nicht mehr Teil eines verschiebbaren
+// Kacheln-Systems (das frueher hier alle Diagnose-Widgets fuer OBI-Momentum-Scalp/Scalp-Board
+// enthielt - mit deren Entfernung ist das jetzt ein einfaches statisches Panel).
+document.getElementById('btn-manual-buy').addEventListener('click', () => manualTrade('long'));
+document.getElementById('btn-manual-sell').addEventListener('click', () => manualTrade('short'));
+document.getElementById('btn-manual-tp').addEventListener('click', async () => {
+  const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method: 'POST' });
+  const data = await res.json();
+  if (data.error) alert(data.error);
+  refresh();
+});
 
-let omsGrid;
-function initOmsGrid() {
-  const container = document.getElementById('oms-grid');
-  container.innerHTML = OMS_WIDGET_DEFS.map(w => `
-    <div class="grid-stack-item" gs-id="${w.id}" gs-x="${w.x}" gs-y="${w.y}" gs-w="${w.w}" gs-h="${w.h}" id="${w.id}">
-      <div class="grid-stack-item-content">
-        <div class="widget-drag-handle">${w.title}</div>
-        <div class="widget-body">${w.body}</div>
-      </div>
-    </div>`).join('');
-
-  omsGrid = GridStack.init({ cellHeight: 46, margin: 6, float: true, handle: '.widget-drag-handle', animate: true }, container);
-
-  // Gespeichertes Layout mit den AKTUELL bekannten Widgets zusammenfuehren: Kacheln, die der
-  // Nutzer schon verschoben/skaliert hat, behalten seine Position; neu hinzugekommene Kacheln
-  // (die im gespeicherten Layout noch gar nicht existierten) fallen auf ihre Default-Position
-  // zurueck, statt komplett zu verschwinden - das war der Bug, der OI-/Liq-Gauge unsichtbar
-  // gemacht hat, als sie zu einem bereits gespeicherten Layout hinzukamen.
-  let saved = null;
-  try { saved = JSON.parse(localStorage.getItem('oms_dashboard_layout') || 'null'); } catch (e) {}
-  const savedById = {};
-  if (saved && Array.isArray(saved)) {
-    saved.forEach(item => { if (item && item.id) savedById[item.id] = item; });
-  }
-  const merged = OMS_WIDGET_DEFS.map(w => savedById[w.id]
-    ? { id: w.id, x: savedById[w.id].x, y: savedById[w.id].y, w: savedById[w.id].w, h: savedById[w.id].h }
-    : { id: w.id, x: w.x, y: w.y, w: w.w, h: w.h });
-  omsGrid.load(merged);
-
-  omsGrid.on('change', () => {
-    try { localStorage.setItem('oms_dashboard_layout', JSON.stringify(omsGrid.save(false))); } catch (e) {}
-  });
-
-  document.getElementById('btn-reset-layout').addEventListener('click', () => {
-    try { localStorage.removeItem('oms_dashboard_layout'); } catch (e) {}
-    omsGrid.load(OMS_WIDGET_DEFS.map(w => ({ id: w.id, x: w.x, y: w.y, w: w.w, h: w.h })));
-  });
-
-  // Manuelle Buy/Sell/TP-Buttons neu verdrahten, da sie jetzt per innerHTML neu erzeugt wurden
-  document.getElementById('btn-manual-buy').addEventListener('click', () => manualTrade('long'));
-  document.getElementById('btn-manual-sell').addEventListener('click', () => manualTrade('short'));
-  document.getElementById('btn-manual-tp').addEventListener('click', async () => {
-    const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method: 'POST' });
-    const data = await res.json();
-    if (data.error) alert(data.error);
-    refresh();
-  });
-
-  // Quad-Stochastic Zeitrahmen-Dropdown: schreibt direkt (Partial-Update, kein ganzes
-  // Formular noetig) ins Config-Backend und laedt die Anzeige neu
-  document.getElementById('quad-stoch-resolution-select').addEventListener('change', async (e) => {
-    await fetch(`/api/config?symbol=${currentSymbol}`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ quad_stoch_resolution: e.target.value })
-    });
-    refresh();
-  });
-}
-initOmsGrid();
-let currentSymbol = null;
 let allSymbols = [];
 
 function computeEMA(values, period) {
@@ -5954,69 +5863,9 @@ async function refresh() {
     data.config.bot_active ? '<span class="badge active">AKTIV</span>' : '<span class="badge paused">GESTOPPT</span>';
   document.getElementById('live-warn').style.display = data.config.dry_run ? 'none' : 'block';
 
-  // OBI-Momentum-Scalp Trend-Meter: grosse, prominente Live-Anzeige der aktuellen
-  // Signal-Richtung - auch nutzbar wenn der Bot pausiert ist, zum manuellen Nachhandeln
-  const trendMeterEl = document.getElementById('oms-trend-meter');
-  const trendMeterDetailEl = document.getElementById('oms-trend-meter-detail');
-  const gaugeWrap = document.getElementById('oms-gauge-wrap');
-  const checklistWrap = document.getElementById('oms-checklist-wrap');
-  const chartWrap = document.getElementById('oms-chart-wrap');
-
-  const showGridWidget = (gsiId, show) => {
-    const el = document.getElementById(gsiId);
-    if (el) el.style.display = show ? '' : 'none';
-  };
-  const isOms = data.config.entry_mode === 'oms_scalp';
-  const isObiLikeMode = isOms || data.config.entry_mode === 'obi_scalp';
-  // Das Grid selbst ist jetzt IMMER sichtbar (Pocket-Trading und das Scalp-Board sind
-  // absichtlich unabhaengig von der gewaehlten Strategie nutzbar) - nur einzelne Kacheln
-  // darin bleiben an bestimmte Modi gebunden (z.B. die OBI-/CVD-Gauges an oms_scalp).
-  document.getElementById('oms-grid').style.display = '';
-  document.getElementById('oms-grid-header').style.display = '';
-  showGridWidget('gsi-signal', isOms);
-  showGridWidget('gsi-gauge', isOms);
-  showGridWidget('gsi-cvd-gauge', isOms);
-  showGridWidget('gsi-oi-gauge', isOms);
-  showGridWidget('gsi-liq-gauge', isOms);
-  showGridWidget('gsi-checklist', isOms);
-  showGridWidget('gsi-chart', isOms);
-  showGridWidget('gsi-pocket', true);
-  showGridWidget('gsi-obi', isObiLikeMode);
-  showGridWidget('gsi-scalp-board', true);
-  document.getElementById('scalp-board-wrap').innerHTML = renderScalpBoard(data.scalp_board);
-  showGridWidget('gsi-quad-stoch', true);
-
-  if (isOms) {
-    const sig = data.oms_signal;
-    if (sig === 'long') {
-      trendMeterEl.style.background = 'rgba(34,197,94,0.18)';
-      trendMeterEl.style.color = '#22c55e';
-      trendMeterEl.innerText = '🟢 JETZT LONG';
-    } else if (sig === 'short') {
-      trendMeterEl.style.background = 'rgba(240,82,107,0.18)';
-      trendMeterEl.style.color = '#f0526b';
-      trendMeterEl.innerText = '🔴 JETZT SHORT';
-    } else {
-      trendMeterEl.style.background = 'rgba(124,138,168,0.12)';
-      trendMeterEl.style.color = 'var(--text-dim)';
-      trendMeterEl.innerText = '⚪ KEIN SIGNAL';
-    }
-    trendMeterDetailEl.innerText =
-      `OBI schnell/mittel/langsam: ${data.oms_obi_fast ?? '-'} / ${data.oms_obi_medium ?? '-'} / ${data.oms_obi_slow ?? '-'}  |  ` +
-      `CVD: ${data.oms_cvd_ratio ?? '-'}  |  Funding: ${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'}` +
-      (data.config.oms_rsi_filter_enabled ? `  |  RSI: ${data.oms_rsi ?? '-'}` : '');
-
-    gaugeWrap.innerHTML = renderOmsGauge(data.oms_obi_fast, data.oms_obi_medium, data.oms_obi_slow, data.config.oms_obi_threshold);
-    document.getElementById('oms-cvd-gauge-wrap').innerHTML = renderOmsCvdGauge(data.oms_cvd_ratio, data.config.oms_cvd_min_ratio);
-    document.getElementById('oms-oi-gauge-wrap').innerHTML = renderOmsOiGauge(data.oms_oi_score, data.config.oms_oi_min_score);
-    document.getElementById('oms-liq-gauge-wrap').innerHTML = renderOmsLiqGauge(data.oms_liq_ratio, data.config.oms_liq_min_ratio, data.oms_liq_count);
-    checklistWrap.innerHTML = renderOmsChecklist(data);
-    chartWrap.innerHTML = renderOmsChart(data.oms_price_history, data.oms_markers, {
-      position: data.position, avg_entry_price: data.avg_entry_price, size: data.total_coin_size,
-      sl_usd: data.config.oms_sl_usd, tp1_usd: data.config.oms_tp1_usd,
-      tp1_done: data.oms_tp1_done, trail_price: data.oms_trail_price, exit_mode: data.config.oms_exit_mode,
-    });
-  }
+  // OBI-Momentum-Scalp Trend-Meter (grosse Live-Anzeige der Signalrichtung) gibt es nur noch,
+  // solange oms_scalp als Strategie existiert - siehe fruehere Version dieser Funktion fuer den
+  // vollstaendigen Gauge-/Scalp-Board-/Quad-Stochastic-Block, der mit den Live-Kacheln entfernt wurde.
 
   const gl = data.grid_levels || {};
   const mode = data.config.entry_mode;
@@ -7246,16 +7095,11 @@ async function loadGlobalSettings() {
   try {
     const res = await fetch('/api/global_settings');
     const data = await res.json();
-    document.getElementById('toggle-scalp-board-global').checked = !!data.scalp_board_enabled;
     document.getElementById('toggle-copytrading-global').checked = !!data.copytrading_enabled;
   } catch (e) {
     console.error('Globale Einstellungen konnten nicht geladen werden:', e);
   }
 }
-document.getElementById('toggle-scalp-board-global').addEventListener('change', async (e) => {
-  await fetch('/api/global_settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({scalp_board_enabled: e.target.checked}) });
-  showToast(e.target.checked ? '✅ Scalp-Details global AN' : '⏸️ Scalp-Details global AUS (spart Ressourcen)');
-});
 document.getElementById('toggle-copytrading-global').addEventListener('change', async (e) => {
   await fetch('/api/global_settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({copytrading_enabled: e.target.checked}) });
   showToast(e.target.checked ? '✅ Copytrading global AN' : '⏸️ Copytrading global AUS');
@@ -7312,8 +7156,6 @@ async def handle_status(request):
         "oms_funding_ok": st.get("oms_funding_ok"), "oms_rsi_ok": st.get("oms_rsi_ok"), "oms_rsi": st.get("oms_rsi"),
         "oms_oi_ok": st.get("oms_oi_ok"), "oms_oi_score": st.get("oms_oi_score"), "oms_open_interest": st.get("oms_open_interest"),
         "oms_liq_ok": st.get("oms_liq_ok"), "oms_liq_ratio": st.get("oms_liq_ratio"), "oms_liq_count": st.get("oms_liq_count"),
-        "scalp_board": st.get("scalp_board", {}),
-        "quad_stoch_history": st.get("quad_stoch_history", [])[-100:],
         "oms_cvd_ratio": st.get("oms_cvd_ratio"), "oms_funding_rate": st.get("oms_funding_rate"),
         "oms_tp1_done": st.get("oms_tp1_done"), "oms_trail_price": st.get("oms_trail_price"),
         "oms_dca_count": st.get("oms_dca_count"),
@@ -7493,8 +7335,7 @@ async def handle_config_update(request):
                 "hvd_adx_filter_enabled", "hvd_adx_filter_length", "hvd_adx_filter_resolution", "hvd_adx_filter_threshold",
                 "hvd_trend_filter_enabled", "hvd_trend_filter_resolution", "hvd_trend_filter_atr_period", "hvd_trend_filter_multiplier",
                 "hvd_trend_filter_signal_window_candles",
-                "hvd_aso_filter_enabled", "hvd_aso_filter_length", "hvd_aso_filter_mode", "hvd_aso_filter_confirm_bars",
-                "quad_stoch_resolution"]:
+                "hvd_aso_filter_enabled", "hvd_aso_filter_length", "hvd_aso_filter_mode", "hvd_aso_filter_confirm_bars"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
