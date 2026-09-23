@@ -177,7 +177,7 @@ def default_config():
         # Binance USD-M Perpetual (fapi.binance.com) statt Spot - dieselben Symbolnamen, aber
         # eigener (leicht abweichender) Kurs. Wichtig zum 1:1-Vergleich mit TradingView-Charts
         # auf ".P"-Symbolen (z.B. "BTCUSDT.P"), die selbst auf dem Perpetual-Kurs basieren.
-        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "obi_scalp", "oms_scalp", "fib_reversal", "halftrend"
+        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "grid_v2", "grid_scalp", "ab_breakout" (weitere folgen bei Bedarf)
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
         "grid_mode": os.getenv("GRID_MODE", "pct"),  # "pct" oder "usd"
@@ -229,81 +229,6 @@ def default_config():
         "g2_double_enabled": os.getenv("G2_DOUBLE_ENABLED", "false").lower() == "true",  # jede Nachkauf-Stufe verdoppelt die Positionsgroesse der vorherigen (1x, 2x, 4x, 8x, ...)
         "g2_size_multiplier": float(os.getenv("G2_SIZE_MULTIPLIER", "1.0")),  # Alternative zu g2_double_enabled: frei waehlbarer Faktor statt fixer Verdopplung (1.0 = aus, greift nur wenn g2_double_enabled=false)
         "g2_deviation_multiplier": float(os.getenv("G2_DEVIATION_MULTIPLIER", "1.0")),  # jeder weitere Nachkauf braucht einen groesseren Abstand als der vorherige (1.0 = fix wie bisher)
-        "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
-        "obi_mode": os.getenv("OBI_MODE", "momentum"),  # "momentum" (mit dem Ungleichgewicht), "mean_reversion" (dagegen) oder "reversal" (separater Long/Short-Einstieg bei Umkehr aus Extremzone)
-        "obi_long_threshold": float(os.getenv("OBI_LONG_THRESHOLD", "0.20")),  # nur Reversal-Modus: Long-Zone ab OBI <= -Wert
-        "obi_short_threshold": float(os.getenv("OBI_SHORT_THRESHOLD", "0.30")),  # nur Reversal-Modus: Short-Zone ab OBI >= +Wert
-        "obi_reversal_min_bounce": float(os.getenv("OBI_REVERSAL_MIN_BOUNCE", "0.05")),
-        "obi_window_fast_seconds": float(os.getenv("OBI_WINDOW_FAST_SECONDS", "5")),
-        "obi_window_medium_seconds": float(os.getenv("OBI_WINDOW_MEDIUM_SECONDS", "20")),
-        "obi_window_slow_seconds": float(os.getenv("OBI_WINDOW_SLOW_SECONDS", "60")),
-        "obi_levels": int(os.getenv("OBI_LEVELS", "15")),
-        "obi_depth_weighting_enabled": os.getenv("OBI_DEPTH_WEIGHTING_ENABLED", "false").lower() == "true",
-        "obi_use_median": os.getenv("OBI_USE_MEDIAN", "false").lower() == "true",
-        "obi_min_liquidity": float(os.getenv("OBI_MIN_LIQUIDITY", "0")),
-        "obi_breakeven_enabled": os.getenv("OBI_BREAKEVEN_ENABLED", "false").lower() == "true",
-        "obi_breakeven_trigger_ratio": float(os.getenv("OBI_BREAKEVEN_TRIGGER_RATIO", "0.5")),
-        "obi_breakeven_lock_usd": float(os.getenv("OBI_BREAKEVEN_LOCK_USD", "0.1")),
-        "obi_breakeven_lock_pct": float(os.getenv("OBI_BREAKEVEN_LOCK_PCT", "0.1")),
-        "obi_instant_reset_ratio": float(os.getenv("OBI_INSTANT_RESET_RATIO", "0.5")),
-        "obi_tp_sl_mode": os.getenv("OBI_TP_SL_MODE", "pct"),  # "pct" oder "usd"
-        "obi_tp_pct": float(os.getenv("OBI_TP_PCT", "0.15")),
-        "obi_sl_pct": float(os.getenv("OBI_SL_PCT", "0.15")),
-        "obi_tp_usd": float(os.getenv("OBI_TP_USD", "1")),
-        "obi_sl_usd": float(os.getenv("OBI_SL_USD", "1")),
-        "obi_cooldown_seconds": float(os.getenv("OBI_COOLDOWN_SECONDS", "7")),
-        "obi_trend_filter": os.getenv("OBI_TREND_FILTER", "false").lower() == "true",
-        "obi_trend_ema_length": int(os.getenv("OBI_TREND_EMA_LENGTH", "300")),
-        # Spread-Filter: verwirft Signale bei ungewoehnlich weitem Bid/Ask-Spread (Prozent vom Mid-Preis).
-        # Ein weiter Spread bedeutet duennes/chaotisches Buch - genau dort ist OBI am unzuverlaessigsten
-        # (Microstructure-Forschung: hoher Spread korreliert mit hoeheren Handelskosten und weniger
-        # verlaesslichem Orderbuch-Signal).
-        "obi_spread_filter_enabled": os.getenv("OBI_SPREAD_FILTER_ENABLED", "false").lower() == "true",
-        "obi_max_spread_pct": float(os.getenv("OBI_MAX_SPREAD_PCT", "0.05")),
-        # Volatilitaets-Regime-Filter: verwirft Signale, wenn die kurzfristige Preis-Schwankung (Hoch-Tief-
-        # Spanne der letzten Ticks in % vom Durchschnittspreis) ausserhalb eines Normalbands liegt.
-        # Zu niedrig = totes/seitwaertsrauschendes Buch (OBI-Zittern ohne Fortsetzung), zu hoch = News-Spike/
-        # Wick-Risiko (OBI kann in Sekunden komplett drehen). Beide Enden erzeugen erfahrungsgemaess
-        # ueberproportional viele Fehlsignale.
-        "obi_vol_filter_enabled": os.getenv("OBI_VOL_FILTER_ENABLED", "false").lower() == "true",
-        "obi_vol_window_seconds": float(os.getenv("OBI_VOL_WINDOW_SECONDS", "30")),
-        "obi_vol_min_pct": float(os.getenv("OBI_VOL_MIN_PCT", "0.0")),
-        "obi_vol_max_pct": float(os.getenv("OBI_VOL_MAX_PCT", "1.0")),
-        # OBI-Momentum-Scalp (oms_): eigenstaendige neue Strategie - OBI (3-Fenster) + CVD-
-        # Bestaetigung (echtes Trade-Tape) + optionaler Funding-Filter. Exit: TP1 (Teilverkauf)
-        # + Trailing-Stop auf Rest, SL von Anfang an fester $-Betrag (NICHT die Liquidation).
-        "oms_levels": int(os.getenv("OMS_LEVELS", "10")),
-        "oms_obi_threshold": float(os.getenv("OMS_OBI_THRESHOLD", "0.35")),
-        "oms_window_fast_seconds": float(os.getenv("OMS_WINDOW_FAST_SECONDS", "3")),
-        "oms_window_medium_seconds": float(os.getenv("OMS_WINDOW_MEDIUM_SECONDS", "10")),
-        "oms_window_slow_seconds": float(os.getenv("OMS_WINDOW_SLOW_SECONDS", "30")),
-        "oms_cvd_confirm_enabled": os.getenv("OMS_CVD_CONFIRM_ENABLED", "true").lower() == "true",
-        "oms_cvd_window_seconds": float(os.getenv("OMS_CVD_WINDOW_SECONDS", "10")),
-        "oms_cvd_min_ratio": float(os.getenv("OMS_CVD_MIN_RATIO", "0.15")),
-        "oms_funding_filter_enabled": os.getenv("OMS_FUNDING_FILTER_ENABLED", "true").lower() == "true",
-        "oms_funding_max_abs": float(os.getenv("OMS_FUNDING_MAX_ABS", "0.0005")),
-        "oms_cooldown_seconds": float(os.getenv("OMS_COOLDOWN_SECONDS", "5")),
-        "oms_tp1_usd": float(os.getenv("OMS_TP1_USD", "2.5")),
-        "oms_exit_mode": os.getenv("OMS_EXIT_MODE", "tp1_trail"),  # "tp1_trail" oder "single_tp"
-        "oms_tp1_close_pct": float(os.getenv("OMS_TP1_CLOSE_PCT", "50")),
-        "oms_sl_usd": float(os.getenv("OMS_SL_USD", "3.5")),
-        "oms_trail_distance_usd": float(os.getenv("OMS_TRAIL_DISTANCE_USD", "1.5")),
-        "oms_dca_enabled": os.getenv("OMS_DCA_ENABLED", "true").lower() == "true",
-        "oms_dca_max_entries": int(os.getenv("OMS_DCA_MAX_ENTRIES", "2")),
-        "oms_dca_size_fraction": float(os.getenv("OMS_DCA_SIZE_FRACTION", "0.6")),
-        "oms_dca_min_pullback_usd": float(os.getenv("OMS_DCA_MIN_PULLBACK_USD", "1.0")),
-        "oms_reverse_on_signal": os.getenv("OMS_REVERSE_ON_SIGNAL", "false").lower() == "true",
-        "oms_rsi_filter_enabled": os.getenv("OMS_RSI_FILTER_ENABLED", "false").lower() == "true",
-        "oms_rsi_resolution": os.getenv("OMS_RSI_RESOLUTION", "1m"),
-        "oms_rsi_period": int(os.getenv("OMS_RSI_PERIOD", "14")),
-        "oms_rsi_midline": float(os.getenv("OMS_RSI_MIDLINE", "50")),
-        "oms_oi_filter_enabled": os.getenv("OMS_OI_FILTER_ENABLED", "false").lower() == "true",
-        "oms_oi_window_seconds": float(os.getenv("OMS_OI_WINDOW_SECONDS", "30")),
-        "oms_oi_min_change_pct": float(os.getenv("OMS_OI_MIN_CHANGE_PCT", "0.001")),
-        "oms_oi_min_score": float(os.getenv("OMS_OI_MIN_SCORE", "0.3")),
-        "oms_liq_filter_enabled": os.getenv("OMS_LIQ_FILTER_ENABLED", "false").lower() == "true",
-        "oms_liq_window_seconds": float(os.getenv("OMS_LIQ_WINDOW_SECONDS", "60")),
-        "oms_liq_min_ratio": float(os.getenv("OMS_LIQ_MIN_RATIO", "0.2")),
         "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
         "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
         "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
@@ -724,22 +649,10 @@ def default_state():
         "current_position_entries": [],
         "price_history": [],
         "position_opened_at": None,
-        "obi_book": {"bids": {}, "asks": {}}, "obi_avg_buffer": [], "obi_last_signal_direction": None,
-        "obi_breakeven_triggered": False,
-        "obi_instant_armed_short": True, "obi_instant_armed_long": True,
-        "obi_fast": None, "obi_medium": None, "obi_slow": None, "obi_history": [],
         "last_entry_price": None,
         "gs_anchor": None, "gs_cooldown_until": 0.0, "gs_tag_map": {},
         "gs_last_error": None, "gs_open_orders": 0,
         "grid_sl_cooldown_until": 0.0,
-        "obi_last_trade_time": 0.0, "obi_trend_ema": None, "obi_current": None,
-        "obi_extreme_zone": None, "obi_extreme_value": None, "obi_prev_fast": None,
-        "obi_spread_pct": None, "obi_recent_vol_pct": None,
-        "oms_obi_buffer": [], "oms_obi_fast": None, "oms_obi_medium": None, "oms_obi_slow": None,
-        "oms_cvd_buffer": [], "oms_cvd_ratio": None,
-        "oms_funding_rate": None, "oms_last_signal_direction": None, "oms_last_trade_time": 0.0,
-        "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None, "oms_rsi_ok": None, "oms_rsi": None,
-        "oms_liq_buffer": [], "oms_liq_ratio": None, "oms_liq_count": 0, "oms_liq_ok": None,
         "da_opens": [], "da_highs": [], "da_lows": [], "da_closes": [], "da_direction": None,
         "da_atr_risk_last": None, "da_sl_price": None, "da_tp_price": None, "da_sl_cooldown_until": 0.0,
         "es_opens": [], "es_highs": [], "es_lows": [], "es_closes": [], "es_direction": None,
@@ -763,11 +676,6 @@ def default_state():
         "pk_sl_price": None, "pk_tp_price": None, "pk_sl_cooldown_until": 0.0,
         "pk_trail_active": False, "pk_trail_best_price": None,
         "pk_trend_pct_last": None,
-        "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
-        "oms_obi_history": [],
-        "oms_tp1_done": False, "oms_trail_price": None,
-        "oms_dca_count": 0, "oms_last_entry_price": None,
-        "oms_price_history": [], "oms_markers": [],
         "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
         "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "binance_1s_buffer": [],
@@ -897,7 +805,6 @@ PERSISTED_STATE_KEYS = [
     # mehr, welche offenen Orders im Buch seine eigenen sind, und cancelt sie als fremd.
     "gs_anchor", "gs_cooldown_until", "gs_tag_map", "grid_sl_cooldown_until",
     "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
-    "obi_breakeven_triggered",
     "ht_sl_price", "ht_tp1_price", "ht_tp2_price", "ht_tp3_price", "ht_tp1_done", "ht_tp2_done",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
 ]
@@ -1594,8 +1501,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
-      <option value="obi_scalp">OBI-Scalp (Orderbuch-Ungleichgewicht, symmetrisches TP/SL)</option>
-      <option value="oms_scalp">OBI-Momentum-Scalp (OBI + CVD-Bestätigung + Funding-Filter, TP1+Trailing, Nachkauf)</option>
       <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
       <option value="halftrend">HalfTrend (Swing-Hoch/-Tief-Trendwechsel, optional ATR2-basiertes SL+TP, invertierbar)</option>
       <option value="diamond_algo">Diamond Algo (SuperTrend+SMA-Signal, optional 200-EMA-Smart-Filter, ATR-basiertes SL+TP)</option>
@@ -1614,176 +1519,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
     </select>
   </div>
-  <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
-  <div data-mode="obi_scalp"><label>OBI Modus</label>
-    <select class="cfg" id="obi_mode">
-      <option value="momentum">Momentum (mit dem Ungleichgewicht - empfohlen)</option>
-      <option value="mean_reversion">Mean-Reversion (dagegen, wie RSI)</option>
-      <option value="reversal">Reversal (separater Long/Short-Einstieg bei Umkehr aus Extremzone)</option>
-      <option value="reversal_instant">Reversal-Sofort (getrennte Long/Short-Schwellen, sofort bei Durchbruch, ohne Rückprall-Wartezeit)</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>OBI-Fenster (Sek.)</label><input type="number" step="1" id="obi_window_fast_seconds"></div>
-  <div data-mode="obi_scalp"><label>Orderbuch-Level (Empfehlung: oberste 5-10)</label><input type="number" step="1" id="obi_levels"></div>
-  <div data-mode="obi_scalp"><label>TP (%)</label><input type="number" step="any" id="obi_tp_pct"></div>
-  <div data-mode="obi_scalp"><label>SL (%)</label><input type="number" step="any" id="obi_sl_pct"></div>
-  <div data-mode="obi_scalp"><label>Cooldown (Sek.)</label><input type="number" step="1" id="obi_cooldown_seconds"></div>
-  <div data-mode="obi_scalp" style="grid-column:1/-1;">
-    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:400;">
-      <input type="checkbox" id="obi-advanced-toggle" style="width:auto;">
-      ⚙️ Erweiterte OBI-Einstellungen anzeigen (Reversal-Feinjustierung, Filter, Breakeven - für die meisten nicht nötig)
-    </label>
-  </div>
-  <div id="obi-advanced-fields" style="display:none; grid-column:1/-1; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap:14px; align-items:end;">
-  <div data-mode="obi_scalp"><label>Reversal OBI-Wert Long (überverkauft, negativ)</label><input type="number" step="0.01" id="obi_long_threshold"></div>
-  <div data-mode="obi_scalp"><label>Reversal OBI-Wert Short (überkauft, positiv)</label><input type="number" step="0.01" id="obi_short_threshold"></div>
-  <div data-mode="obi_scalp"><label>Reversal Rückprall-Schwelle</label><input type="number" step="0.01" id="obi_reversal_min_bounce"></div>
-  <div data-mode="obi_scalp"><label>Reversal-Sofort: Reset-Verhältnis (Anteil der Schwelle, z.B. 0.5 = 50%)</label><input type="number" step="0.05" id="obi_instant_reset_ratio"></div>
-  <div data-mode="obi_scalp"><label>OBI mittel (Sek.)</label><input type="number" step="1" id="obi_window_medium_seconds"></div>
-  <div data-mode="obi_scalp"><label>OBI langsam (Sek.)</label><input type="number" step="1" id="obi_window_slow_seconds"></div>
-  <div data-mode="obi_scalp"><label>Tiefen-Gewichtung (nahe Level zählen mehr)</label>
-    <select class="cfg" id="obi_depth_weighting_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>Median statt Durchschnitt (robuster gegen Ausreißer)</label>
-    <select class="cfg" id="obi_use_median">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>Mindest-Liquidität (Buch-Gesamtvolumen, 0 = aus)</label><input type="number" step="any" id="obi_min_liquidity"></div>
-  <div data-mode="obi_scalp"><label>Gewinn absichern (SL springt bei X% vom TP auf kleinen Gewinn)</label>
-    <select class="cfg" id="obi_breakeven_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>Auslöser (Anteil vom TP, z.B. 0.5 = 50%)</label><input type="number" step="0.05" id="obi_breakeven_trigger_ratio"></div>
-  <div data-mode="obi_scalp"><label>Abgesicherter Gewinn ($, nur $-Modus)</label><input type="number" step="any" id="obi_breakeven_lock_usd"></div>
-  <div data-mode="obi_scalp"><label>Abgesicherter Gewinn (%, nur %-Modus)</label><input type="number" step="0.01" id="obi_breakeven_lock_pct"></div>
-  <div data-mode="obi_scalp"><label>TP/SL Modus</label>
-    <select class="cfg" id="obi_tp_sl_mode">
-      <option value="pct">Prozent (%)</option>
-      <option value="usd">Fester $-Betrag</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>TP ($)</label><input type="number" step="any" id="obi_tp_usd"></div>
-  <div data-mode="obi_scalp"><label>SL ($)</label><input type="number" step="any" id="obi_sl_usd"></div>
-  <div data-mode="obi_scalp"><label>Trendfilter (EMA)</label>
-    <select class="cfg" id="obi_trend_filter">
-      <option value="false">Aus</option>
-      <option value="true">An - nur Longs über/Shorts unter EMA</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp" data-requires="obi_trend_filter"><label>Trend-EMA Länge (Trades)</label><input type="number" step="1" id="obi_trend_ema_length"></div>
-  <div data-mode="obi_scalp"><label>Spread-Filter (verwirft Signale bei zu weitem Bid/Ask-Spread)</label>
-    <select class="cfg" id="obi_spread_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp" data-requires="obi_spread_filter_enabled"><label>Max. Spread (% vom Mid-Preis)</label><input type="number" step="0.0001" id="obi_max_spread_pct"></div>
-  <div data-mode="obi_scalp"><label>Volatilitäts-Regime-Filter (verwirft Signale außerhalb Normalband)</label>
-    <select class="cfg" id="obi_vol_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp" data-requires="obi_vol_filter_enabled"><label>Volatilitäts-Fenster (Sek.)</label><input type="number" step="1" id="obi_vol_window_seconds"></div>
-  <div data-mode="obi_scalp" data-requires="obi_vol_filter_enabled"><label>Min. Volatilität (% Hoch-Tief-Spanne, darunter = zu ruhig)</label><input type="number" step="0.0001" id="obi_vol_min_pct"></div>
-  <div data-mode="obi_scalp" data-requires="obi_vol_filter_enabled"><label>Max. Volatilität (% Hoch-Tief-Spanne, darüber = zu wild)</label><input type="number" step="0.0001" id="obi_vol_max_pct"></div>
-  </div>
 
-  <div data-mode="oms_scalp" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    📡 <b>Einstieg</b> nur wenn Orderbuch (OBI) UND echte Trades (CVD) übereinstimmend in dieselbe Richtung zeigen.
-    🎯 <b>Ausstieg</b>: erst Teilgewinn (TP1), Rest wird eng nachgezogen (Trailing). SL ist ein fester $-Betrag von Anfang an.
-    ➕ <b>Nachkauf</b>: nur wenn Signal nach Rücksetzer erneut bestätigt, mit fallender Größe.
-  </div>
-  <div data-mode="oms_scalp"><label>Orderbuch-Tiefe (Preisstufen)</label><input type="number" step="1" id="oms_levels"></div>
-  <div data-mode="oms_scalp"><label>OBI-Schwelle (0-1, höher = strenger)</label><input type="number" step="0.01" id="oms_obi_threshold"></div>
-  <div data-mode="oms_scalp"><label>OBI Zeitfenster schnell (Sek.)</label><input type="number" step="1" id="oms_window_fast_seconds"></div>
-  <div data-mode="oms_scalp"><label>OBI Zeitfenster mittel (Sek.)</label><input type="number" step="1" id="oms_window_medium_seconds"></div>
-  <div data-mode="oms_scalp"><label>OBI Zeitfenster langsam (Sek.)</label><input type="number" step="1" id="oms_window_slow_seconds"></div>
-  <div data-mode="oms_scalp"><label>CVD-Bestätigung (echte Trade-Richtung muss zustimmen)</label>
-    <select class="cfg" id="oms_cvd_confirm_enabled">
-      <option value="true">An (empfohlen)</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp"><label>CVD Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_cvd_window_seconds"></div>
-  <div data-mode="oms_scalp"><label>CVD Mindest-Verhältnis (0-1)</label><input type="number" step="0.01" id="oms_cvd_min_ratio"></div>
-  <div data-mode="oms_scalp"><label>Funding-Filter (nicht in überfüllte Richtung nachlegen)</label>
-    <select class="cfg" id="oms_funding_filter_enabled">
-      <option value="true">An (empfohlen)</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_funding_filter_enabled"><label>Funding-Grenze (absolut, z.B. 0.0005 = 0.05%)</label><input type="number" step="0.0001" id="oms_funding_max_abs"></div>
-  <div data-mode="oms_scalp"><label>Cooldown zwischen Signalen (Sek.)</label><input type="number" step="1" id="oms_cooldown_seconds"></div>
-  <div data-mode="oms_scalp"><label>Exit-Modus</label>
-    <select class="cfg" id="oms_exit_mode">
-      <option value="tp1_trail">TP1 + Trailing (Teilverkauf, Rest wird nachgezogen)</option>
-      <option value="single_tp">Nur TP (kompletter Ausstieg bei Zielerreichung, kein Teilverkauf/Trailing)</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp"><label id="oms_tp1_usd_label">TP1 Ziel ($, Teilverkauf)</label><input type="number" step="0.1" id="oms_tp1_usd"></div>
-  <div data-mode="oms_scalp" data-oms-exit-mode="tp1_trail"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" id="oms_tp1_close_pct"></div>
-  <div data-mode="oms_scalp"><label>Stop-Loss ($, gesamte Position - NICHT die Liquidation)</label><input type="number" step="0.1" id="oms_sl_usd"></div>
-  <div data-mode="oms_scalp" data-oms-exit-mode="tp1_trail"><label>Trailing-Abstand nach TP1 ($)</label><input type="number" step="0.1" id="oms_trail_distance_usd"></div>
-  <div data-mode="oms_scalp"><label>Nachkauf (DCA)</label>
-    <select class="cfg" id="oms_dca_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp"><label>Nachkauf: max. Stufen</label><input type="number" step="1" id="oms_dca_max_entries"></div>
-  <div data-mode="oms_scalp"><label>Nachkauf: Größen-Faktor je Stufe (0-1, fallend)</label><input type="number" step="0.05" id="oms_dca_size_fraction"></div>
-  <div data-mode="oms_scalp"><label>Nachkauf: Mindest-Rücksetzer ($, bevor nachgekauft wird)</label><input type="number" step="0.1" id="oms_dca_min_pullback_usd"></div>
-  <div data-mode="oms_scalp"><label>Bei Gegen-Signal sofort umdrehen (Reverse) statt auf SL/TP1/Trail zu warten</label>
-    <select class="cfg" id="oms_reverse_on_signal">
-      <option value="false">Aus (nur SL/TP1/Trail schließt die Position)</option>
-      <option value="true">An (bestätigtes Gegen-Signal dreht sofort um)</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp"><label>RSI-Regime-Filter (RSI &lt; Mittellinie → nur Short, RSI &gt; Mittellinie → nur Long)</label>
-    <select class="cfg" id="oms_rsi_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_rsi_filter_enabled"><label>RSI Zeitrahmen</label>
-    <select class="cfg" id="oms_rsi_resolution">
-      <option value="10s">10 Sekunden</option>
-      <option value="15s">15 Sekunden</option>
-      <option value="30s">30 Sekunden</option>
-      <option value="45s">45 Sekunden</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_rsi_filter_enabled"><label>RSI Periode</label><input type="number" step="1" id="oms_rsi_period"></div>
-  <div data-mode="oms_scalp" data-requires="oms_rsi_filter_enabled"><label>RSI Mittellinie</label><input type="number" step="1" id="oms_rsi_midline"></div>
-  <div data-mode="oms_scalp"><label>Open-Interest-Filter (Preis+OI kombiniert muss Richtung stützen)</label>
-    <select class="cfg" id="oms_oi_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_oi_filter_enabled"><label>OI Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_oi_window_seconds"></div>
-  <div data-mode="oms_scalp" data-requires="oms_oi_filter_enabled"><label>OI Mindest-Änderung (%, z.B. 0.001 = 0.1%)</label><input type="number" step="0.0001" id="oms_oi_min_change_pct"></div>
-  <div data-mode="oms_scalp" data-requires="oms_oi_filter_enabled"><label>OI Mindest-Score (0-1)</label><input type="number" step="0.05" id="oms_oi_min_score"></div>
-  <div data-mode="oms_scalp"><label>Liquidations-Filter (Zwangsliquidationen müssen Richtung stützen)</label>
-    <select class="cfg" id="oms_liq_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_liq_filter_enabled"><label>Liquidations Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_liq_window_seconds"></div>
-  <div data-mode="oms_scalp" data-requires="oms_liq_filter_enabled"><label>Liquidations Mindest-Verhältnis (0-1)</label><input type="number" step="0.05" id="oms_liq_min_ratio"></div>
 
   <div data-mode="fib_reversal"><label>Zeitrahmen</label>
     <select class="cfg" id="fib_resolution">
@@ -4606,13 +4342,6 @@ function updateModeFields() {
   document.querySelectorAll('[data-mode-section]').forEach(el => {
     el.style.display = (el.dataset.modeSection === mode) ? '' : 'none';
   });
-  // OBI-Momentum-Scalp hat keinen Kerzen-Backtest (braucht Orderbuch/Trade-Tape/Funding, die es
-  // historisch nicht gibt) und der grosse generische Kursverlauf-Chart ist redundant zum
-  // kompakten Mini-Chart oben - beides ausblenden, damit die Seite aufgeraeumt bleibt
-  const isOms = mode === 'oms_scalp';
-  document.getElementById('backtest-zone').style.display = isOms ? 'none' : '';
-  document.getElementById('generic-chart-wrap').style.display = isOms ? 'none' : '';
-  if (isOms) updateOmsExitModeFields();
   applyFilterRequires();
 }
 
@@ -4647,23 +4376,9 @@ document.getElementById('config-form').addEventListener('change', () => {
   applyFilterRequires();
 });
 
-function updateOmsExitModeFields() {
-  const exitMode = document.getElementById('oms_exit_mode').value;
-  document.querySelectorAll('[data-oms-exit-mode]').forEach(el => {
-    el.style.display = (el.dataset.omsExitMode === exitMode) ? '' : 'none';
-  });
-  document.getElementById('oms_tp1_usd_label').innerText = exitMode === 'single_tp' ? 'TP Ziel ($)' : 'TP1 Ziel ($, Teilverkauf)';
-}
 document.getElementById('entry_mode').addEventListener('change', () => {
   window.formTouched = true;
   updateModeFields();
-});
-document.getElementById('obi-advanced-toggle').addEventListener('change', (e) => {
-  document.getElementById('obi-advanced-fields').style.display = e.target.checked ? 'grid' : 'none';
-});
-document.getElementById('oms_exit_mode').addEventListener('change', () => {
-  window.formTouched = true;
-  updateOmsExitModeFields();
 });
 
 async function loadSymbols() {
@@ -5745,31 +5460,6 @@ function renderScalpBoard(board) {
   </div>`;
 }
 
-function renderOmsChecklist(data) {
-  const row = (label, status, detail) => {
-    const icon = status === true ? '✅' : status === false ? '❌' : '➖';
-    return `<div style="display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid var(--panel-border);">
-      <span>${icon} ${label}</span><span style="color:var(--text-dim); font-size:12px;">${detail}</span>
-    </div>`;
-  };
-  const obiOk = data.oms_obi_direction != null;
-  const obiDetail = `schnell ${data.oms_obi_fast ?? '-'} / mittel ${data.oms_obi_medium ?? '-'} / langsam ${data.oms_obi_slow ?? '-'}`;
-  const cvdDetail = data.config.oms_cvd_confirm_enabled ? `CVD ${data.oms_cvd_ratio ?? '-'} (min. ${data.config.oms_cvd_min_ratio})` : 'deaktiviert';
-  const fundingDetail = data.config.oms_funding_filter_enabled ? `${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'} (Grenze ${(data.config.oms_funding_max_abs*100).toFixed(3)}%)` : 'deaktiviert';
-  const rsiDetail = data.config.oms_rsi_filter_enabled ? `RSI ${data.oms_rsi ?? '-'} (Mittellinie ${data.config.oms_rsi_midline})` : 'deaktiviert';
-  const oiDetail = data.config.oms_oi_filter_enabled ? `Score ${data.oms_oi_score ?? '-'} (min. ${data.config.oms_oi_min_score})` : 'deaktiviert';
-  const liqDetail = data.config.oms_liq_filter_enabled ? `${data.oms_liq_ratio ?? '-'} (${data.oms_liq_count ?? 0} Events im Fenster, min. ${data.config.oms_liq_min_ratio})` : 'deaktiviert';
-  return `<div class="panel-card" style="padding:14px;">
-    <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">Warum feuert (nicht)?</div>
-    ${row('OBI-Übereinstimmung (3 Fenster gleiche Richtung)', obiOk, obiDetail)}
-    ${row('CVD-Bestätigung', data.oms_cvd_ok, cvdDetail)}
-    ${row('Funding-Filter bestanden', data.oms_funding_ok, fundingDetail)}
-    ${row('RSI-Regime-Filter bestanden', data.oms_rsi_ok, rsiDetail)}
-    ${row('Open-Interest-Filter bestanden', data.oms_oi_ok, oiDetail)}
-    ${row('Liquidations-Filter bestanden', data.oms_liq_ok, liqDetail)}
-  </div>`;
-}
-
 function renderOmsChart(history, markers, pos) {
   if (!history || history.length < 2) {
     return '<div class="panel-card" style="padding:10px; color:var(--text-dim); font-size:12px;">Preisverlauf sammelt noch Daten...</div>';
@@ -5863,10 +5553,6 @@ async function refresh() {
     data.config.bot_active ? '<span class="badge active">AKTIV</span>' : '<span class="badge paused">GESTOPPT</span>';
   document.getElementById('live-warn').style.display = data.config.dry_run ? 'none' : 'block';
 
-  // OBI-Momentum-Scalp Trend-Meter (grosse Live-Anzeige der Signalrichtung) gibt es nur noch,
-  // solange oms_scalp als Strategie existiert - siehe fruehere Version dieser Funktion fuer den
-  // vollstaendigen Gauge-/Scalp-Board-/Quad-Stochastic-Block, der mit den Live-Kacheln entfernt wurde.
-
   const gl = data.grid_levels || {};
   const mode = data.config.entry_mode;
   // Nachkauf-Stufe: die generische max_nachkauf-Einstellung gilt eigentlich nur fuer Grid -
@@ -5894,18 +5580,6 @@ async function refresh() {
   ];
 
   const modeCards = {
-    obi_scalp: () => [
-      `<div class="card"><div class="label">OBI schnell</div><div class="value ${data.obi_fast>=0?'green':'red'}">${data.obi_fast ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">OBI mittel</div><div class="value ${data.obi_medium>=0?'green':'red'}">${data.obi_medium ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">OBI langsam</div><div class="value ${data.obi_slow>=0?'green':'red'}">${data.obi_slow ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">Spread % (Filter ${data.config.obi_spread_filter_enabled?'an':'aus'})</div><div class="value ${data.config.obi_spread_filter_enabled && data.obi_spread_pct!=null && data.obi_spread_pct>data.config.obi_max_spread_pct?'red':''}">${data.obi_spread_pct!=null?data.obi_spread_pct.toFixed(4):'-'}</div></div>`,
-      `<div class="card"><div class="label">Volatilität % (Filter ${data.config.obi_vol_filter_enabled?'an':'aus'})</div><div class="value ${data.config.obi_vol_filter_enabled && data.obi_recent_vol_pct!=null && (data.obi_recent_vol_pct<data.config.obi_vol_min_pct || data.obi_recent_vol_pct>data.config.obi_vol_max_pct)?'red':''}">${data.obi_recent_vol_pct!=null?data.obi_recent_vol_pct.toFixed(4):'-'}</div></div>`,
-    ],
-    oms_scalp: () => [
-      `<div class="card"><div class="label">OMS TP1 erreicht?</div><div class="value ${data.oms_tp1_done?'green':''}">${data.oms_tp1_done?'Ja - Rest wird getrailt':'Nein'}</div></div>`,
-      `<div class="card"><div class="label">OMS Trailing-Referenz</div><div class="value">${data.oms_trail_price ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">OMS Nachkauf-Stufe</div><div class="value">${data.oms_dca_count ?? 0} / ${data.config.oms_dca_max_entries}</div></div>`,
-    ],
     fib_reversal: () => [
       `<div class="card"><div class="label">Fib High / Low</div><div class="value">${data.fib?.high ?? '-'} / ${data.fib?.low ?? '-'}</div></div>`,
       `<div class="card"><div class="label">Fib Einstieg 1 / 2</div><div class="value">${data.fib?.entry1_price ?? '-'} / ${data.fib?.entry2_price ?? '-'}</div></div>`,
@@ -5938,69 +5612,6 @@ async function refresh() {
     document.getElementById('margin').value = data.config.margin;
     document.getElementById('leverage').value = data.config.leverage;
     document.getElementById('entry_mode').value = data.config.entry_mode;
-    document.getElementById('obi_threshold').value = data.config.obi_threshold;
-    document.getElementById('obi_mode').value = data.config.obi_mode;
-    document.getElementById('obi_long_threshold').value = data.config.obi_long_threshold;
-    document.getElementById('obi_short_threshold').value = data.config.obi_short_threshold;
-    document.getElementById('obi_reversal_min_bounce').value = data.config.obi_reversal_min_bounce;
-    document.getElementById('obi_instant_reset_ratio').value = data.config.obi_instant_reset_ratio;
-    document.getElementById('obi_window_fast_seconds').value = data.config.obi_window_fast_seconds;
-    document.getElementById('obi_window_medium_seconds').value = data.config.obi_window_medium_seconds;
-    document.getElementById('obi_window_slow_seconds').value = data.config.obi_window_slow_seconds;
-    document.getElementById('obi_levels').value = data.config.obi_levels;
-    document.getElementById('obi_depth_weighting_enabled').value = String(data.config.obi_depth_weighting_enabled);
-    document.getElementById('obi_use_median').value = String(data.config.obi_use_median);
-    document.getElementById('obi_min_liquidity').value = data.config.obi_min_liquidity;
-    document.getElementById('obi_breakeven_enabled').value = String(data.config.obi_breakeven_enabled);
-    document.getElementById('obi_breakeven_trigger_ratio').value = data.config.obi_breakeven_trigger_ratio;
-    document.getElementById('obi_breakeven_lock_usd').value = data.config.obi_breakeven_lock_usd;
-    document.getElementById('obi_breakeven_lock_pct').value = data.config.obi_breakeven_lock_pct;
-    document.getElementById('obi_tp_sl_mode').value = data.config.obi_tp_sl_mode;
-    document.getElementById('obi_tp_pct').value = data.config.obi_tp_pct;
-    document.getElementById('obi_sl_pct').value = data.config.obi_sl_pct;
-    document.getElementById('obi_tp_usd').value = data.config.obi_tp_usd;
-    document.getElementById('obi_sl_usd').value = data.config.obi_sl_usd;
-    document.getElementById('obi_cooldown_seconds').value = data.config.obi_cooldown_seconds;
-    document.getElementById('obi_trend_filter').value = String(data.config.obi_trend_filter);
-    document.getElementById('obi_trend_ema_length').value = data.config.obi_trend_ema_length;
-    document.getElementById('obi_spread_filter_enabled').value = String(data.config.obi_spread_filter_enabled);
-    document.getElementById('obi_max_spread_pct').value = data.config.obi_max_spread_pct;
-    document.getElementById('obi_vol_filter_enabled').value = String(data.config.obi_vol_filter_enabled);
-    document.getElementById('obi_vol_window_seconds').value = data.config.obi_vol_window_seconds;
-    document.getElementById('obi_vol_min_pct').value = data.config.obi_vol_min_pct;
-    document.getElementById('obi_vol_max_pct').value = data.config.obi_vol_max_pct;
-    document.getElementById('oms_levels').value = data.config.oms_levels;
-    document.getElementById('oms_obi_threshold').value = data.config.oms_obi_threshold;
-    document.getElementById('oms_window_fast_seconds').value = data.config.oms_window_fast_seconds;
-    document.getElementById('oms_window_medium_seconds').value = data.config.oms_window_medium_seconds;
-    document.getElementById('oms_window_slow_seconds').value = data.config.oms_window_slow_seconds;
-    document.getElementById('oms_cvd_confirm_enabled').value = String(data.config.oms_cvd_confirm_enabled);
-    document.getElementById('oms_cvd_window_seconds').value = data.config.oms_cvd_window_seconds;
-    document.getElementById('oms_cvd_min_ratio').value = data.config.oms_cvd_min_ratio;
-    document.getElementById('oms_funding_filter_enabled').value = String(data.config.oms_funding_filter_enabled);
-    document.getElementById('oms_funding_max_abs').value = data.config.oms_funding_max_abs;
-    document.getElementById('oms_cooldown_seconds').value = data.config.oms_cooldown_seconds;
-    document.getElementById('oms_tp1_usd').value = data.config.oms_tp1_usd;
-    document.getElementById('oms_exit_mode').value = data.config.oms_exit_mode;
-    document.getElementById('oms_tp1_close_pct').value = data.config.oms_tp1_close_pct;
-    document.getElementById('oms_sl_usd').value = data.config.oms_sl_usd;
-    document.getElementById('oms_trail_distance_usd').value = data.config.oms_trail_distance_usd;
-    document.getElementById('oms_dca_enabled').value = String(data.config.oms_dca_enabled);
-    document.getElementById('oms_dca_max_entries').value = data.config.oms_dca_max_entries;
-    document.getElementById('oms_dca_size_fraction').value = data.config.oms_dca_size_fraction;
-    document.getElementById('oms_dca_min_pullback_usd').value = data.config.oms_dca_min_pullback_usd;
-    document.getElementById('oms_reverse_on_signal').value = String(data.config.oms_reverse_on_signal);
-    document.getElementById('oms_rsi_filter_enabled').value = String(data.config.oms_rsi_filter_enabled);
-    document.getElementById('oms_rsi_resolution').value = data.config.oms_rsi_resolution;
-    document.getElementById('oms_rsi_period').value = data.config.oms_rsi_period;
-    document.getElementById('oms_rsi_midline').value = data.config.oms_rsi_midline;
-    document.getElementById('oms_oi_filter_enabled').value = String(data.config.oms_oi_filter_enabled);
-    document.getElementById('oms_oi_window_seconds').value = data.config.oms_oi_window_seconds;
-    document.getElementById('oms_oi_min_change_pct').value = data.config.oms_oi_min_change_pct;
-    document.getElementById('oms_oi_min_score').value = data.config.oms_oi_min_score;
-    document.getElementById('oms_liq_filter_enabled').value = String(data.config.oms_liq_filter_enabled);
-    document.getElementById('oms_liq_window_seconds').value = data.config.oms_liq_window_seconds;
-    document.getElementById('oms_liq_min_ratio').value = data.config.oms_liq_min_ratio;
     document.getElementById('fib_resolution').value = data.config.fib_resolution;
     document.getElementById('fib_lookback_candles').value = data.config.fib_lookback_candles;
     document.getElementById('fib_entry1_level').value = data.config.fib_entry1_level;
@@ -6426,10 +6037,6 @@ async function refresh() {
   if (gl.next_entry_long) datasets.push({ label:'Entry Long ab', data: Array(n).fill(gl.next_entry_long), borderColor:'#4ade80', borderDash:[2,2], pointRadius:0, borderWidth:1 });
   if (gl.next_entry_short) datasets.push({ label:'Entry Short ab', data: Array(n).fill(gl.next_entry_short), borderColor:'#f87171', borderDash:[2,2], pointRadius:0, borderWidth:1 });
 
-  if (data.config.entry_mode === 'obi_scalp' && prices.length > 5) {
-    datasets.push({ label:'EMA 9', data: computeEMA(prices, 9), borderColor:'#fbbf24', pointRadius:0, borderWidth:1.5 });
-    datasets.push({ label:'EMA 21', data: computeEMA(prices, 21), borderColor:'#a78bfa', pointRadius:0, borderWidth:1.5 });
-  }
 
   if (!priceChart) {
     priceChart = new Chart(document.getElementById('priceChart'), {
@@ -6443,46 +6050,6 @@ async function refresh() {
     priceChart.update('none');
   }
 
-  try {
-    const isObiLike = data.config.entry_mode === 'obi_scalp' || data.config.entry_mode === 'oms_scalp';
-    const rawHist = data.config.entry_mode === 'oms_scalp' ? (data.oms_obi_history || []) : (data.obi_history || []);
-    const threshold = data.config.entry_mode === 'oms_scalp' ? data.config.oms_obi_threshold : data.config.obi_threshold;
-    if (isObiLike && rawHist.length > 0) {
-      const obiHist = rawHist;
-      const obiLabels = obiHist.map(p => new Date(p.ts).toLocaleTimeString());
-      const obiDatasets = [
-        { label:'Schnell', data: obiHist.map(p=>p.fast), borderColor:'#f87171', pointRadius:0, borderWidth:2 },
-        { label:'Mittel', data: obiHist.map(p=>p.medium), borderColor:'#fbbf24', pointRadius:0, borderWidth:2 },
-        { label:'Langsam', data: obiHist.map(p=>p.slow), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
-        { label:'Schwelle +', data: Array(obiHist.length).fill(threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
-        { label:'Schwelle -', data: Array(obiHist.length).fill(-threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
-        { label:'Null', data: Array(obiHist.length).fill(0), borderColor:'#4b5563', pointRadius:0, borderWidth:1 },
-      ];
-      const obiCanvas = document.getElementById('obiChart');
-      if (obiCanvas) {
-        if (!obiChart) {
-          obiChart = new Chart(obiCanvas, {
-            type: 'line',
-            data: { labels: obiLabels, datasets: obiDatasets },
-            options: {
-              responsive:true, maintainAspectRatio:false, animation:false,
-              scales: { x:{ display:false }, y:{ min:-1, max:1, ticks:{color:'#9ca3af'} } },
-              plugins:{legend:{labels:{color:'#e5e7eb', boxWidth:10, font:{size:10}}}}
-            }
-          });
-          // Falls die Kachel beim ersten Erstellen noch unsichtbar war (display:none),
-          // rechnet Chart.js sonst dauerhaft mit Groesse 0 - erzwingt Neuberechnung
-          requestAnimationFrame(() => obiChart && obiChart.resize());
-        } else {
-          obiChart.data.labels = obiLabels;
-          obiChart.data.datasets = obiDatasets;
-          obiChart.update('none');
-        }
-      }
-    }
-  } catch (e) {
-    console.error('OBI-Chart-Fehler:', e);
-  }
 
   try {
     const resSelect = document.getElementById('quad-stoch-resolution-select');
@@ -6569,69 +6136,6 @@ function buildConfigPayload() {
     margin: parseFloat(document.getElementById('margin').value),
     leverage: parseInt(document.getElementById('leverage').value),
     entry_mode: document.getElementById('entry_mode').value,
-    obi_threshold: parseFloat(document.getElementById('obi_threshold').value),
-    obi_mode: document.getElementById('obi_mode').value,
-    obi_long_threshold: parseFloat(document.getElementById('obi_long_threshold').value),
-    obi_short_threshold: parseFloat(document.getElementById('obi_short_threshold').value),
-    obi_reversal_min_bounce: parseFloat(document.getElementById('obi_reversal_min_bounce').value),
-    obi_instant_reset_ratio: parseFloat(document.getElementById('obi_instant_reset_ratio').value),
-    obi_window_fast_seconds: parseFloat(document.getElementById('obi_window_fast_seconds').value),
-    obi_window_medium_seconds: parseFloat(document.getElementById('obi_window_medium_seconds').value),
-    obi_window_slow_seconds: parseFloat(document.getElementById('obi_window_slow_seconds').value),
-    obi_levels: parseInt(document.getElementById('obi_levels').value),
-    obi_depth_weighting_enabled: document.getElementById('obi_depth_weighting_enabled').value === 'true',
-    obi_use_median: document.getElementById('obi_use_median').value === 'true',
-    obi_min_liquidity: parseFloat(document.getElementById('obi_min_liquidity').value),
-    obi_breakeven_enabled: document.getElementById('obi_breakeven_enabled').value === 'true',
-    obi_breakeven_trigger_ratio: parseFloat(document.getElementById('obi_breakeven_trigger_ratio').value),
-    obi_breakeven_lock_usd: parseFloat(document.getElementById('obi_breakeven_lock_usd').value),
-    obi_breakeven_lock_pct: parseFloat(document.getElementById('obi_breakeven_lock_pct').value),
-    obi_tp_sl_mode: document.getElementById('obi_tp_sl_mode').value,
-    obi_tp_pct: parseFloat(document.getElementById('obi_tp_pct').value),
-    obi_sl_pct: parseFloat(document.getElementById('obi_sl_pct').value),
-    obi_tp_usd: parseFloat(document.getElementById('obi_tp_usd').value),
-    obi_sl_usd: parseFloat(document.getElementById('obi_sl_usd').value),
-    obi_cooldown_seconds: parseFloat(document.getElementById('obi_cooldown_seconds').value),
-    obi_trend_filter: document.getElementById('obi_trend_filter').value === 'true',
-    obi_trend_ema_length: parseInt(document.getElementById('obi_trend_ema_length').value),
-    obi_spread_filter_enabled: document.getElementById('obi_spread_filter_enabled').value === 'true',
-    obi_max_spread_pct: parseFloat(document.getElementById('obi_max_spread_pct').value),
-    obi_vol_filter_enabled: document.getElementById('obi_vol_filter_enabled').value === 'true',
-    obi_vol_window_seconds: parseFloat(document.getElementById('obi_vol_window_seconds').value),
-    obi_vol_min_pct: parseFloat(document.getElementById('obi_vol_min_pct').value),
-    obi_vol_max_pct: parseFloat(document.getElementById('obi_vol_max_pct').value),
-    oms_levels: parseInt(document.getElementById('oms_levels').value),
-    oms_obi_threshold: parseFloat(document.getElementById('oms_obi_threshold').value),
-    oms_window_fast_seconds: parseFloat(document.getElementById('oms_window_fast_seconds').value),
-    oms_window_medium_seconds: parseFloat(document.getElementById('oms_window_medium_seconds').value),
-    oms_window_slow_seconds: parseFloat(document.getElementById('oms_window_slow_seconds').value),
-    oms_cvd_confirm_enabled: document.getElementById('oms_cvd_confirm_enabled').value === 'true',
-    oms_cvd_window_seconds: parseFloat(document.getElementById('oms_cvd_window_seconds').value),
-    oms_cvd_min_ratio: parseFloat(document.getElementById('oms_cvd_min_ratio').value),
-    oms_funding_filter_enabled: document.getElementById('oms_funding_filter_enabled').value === 'true',
-    oms_funding_max_abs: parseFloat(document.getElementById('oms_funding_max_abs').value),
-    oms_cooldown_seconds: parseFloat(document.getElementById('oms_cooldown_seconds').value),
-    oms_tp1_usd: parseFloat(document.getElementById('oms_tp1_usd').value),
-    oms_exit_mode: document.getElementById('oms_exit_mode').value,
-    oms_tp1_close_pct: parseFloat(document.getElementById('oms_tp1_close_pct').value),
-    oms_sl_usd: parseFloat(document.getElementById('oms_sl_usd').value),
-    oms_trail_distance_usd: parseFloat(document.getElementById('oms_trail_distance_usd').value),
-    oms_dca_enabled: document.getElementById('oms_dca_enabled').value === 'true',
-    oms_dca_max_entries: parseInt(document.getElementById('oms_dca_max_entries').value),
-    oms_dca_size_fraction: parseFloat(document.getElementById('oms_dca_size_fraction').value),
-    oms_dca_min_pullback_usd: parseFloat(document.getElementById('oms_dca_min_pullback_usd').value),
-    oms_reverse_on_signal: document.getElementById('oms_reverse_on_signal').value === 'true',
-    oms_rsi_filter_enabled: document.getElementById('oms_rsi_filter_enabled').value === 'true',
-    oms_rsi_resolution: document.getElementById('oms_rsi_resolution').value,
-    oms_rsi_period: parseInt(document.getElementById('oms_rsi_period').value),
-    oms_rsi_midline: parseFloat(document.getElementById('oms_rsi_midline').value),
-    oms_oi_filter_enabled: document.getElementById('oms_oi_filter_enabled').value === 'true',
-    oms_oi_window_seconds: parseFloat(document.getElementById('oms_oi_window_seconds').value),
-    oms_oi_min_change_pct: parseFloat(document.getElementById('oms_oi_min_change_pct').value),
-    oms_oi_min_score: parseFloat(document.getElementById('oms_oi_min_score').value),
-    oms_liq_filter_enabled: document.getElementById('oms_liq_filter_enabled').value === 'true',
-    oms_liq_window_seconds: parseFloat(document.getElementById('oms_liq_window_seconds').value),
-    oms_liq_min_ratio: parseFloat(document.getElementById('oms_liq_min_ratio').value),
     fib_resolution: document.getElementById('fib_resolution').value,
     fib_lookback_candles: parseInt(document.getElementById('fib_lookback_candles').value),
     fib_entry1_level: parseFloat(document.getElementById('fib_entry1_level').value),
@@ -7148,22 +6652,6 @@ async def handle_status(request):
         "unrealized_pnl_usd": calc_unrealized_pnl(symbol),
         "grid_levels": calc_grid_levels(symbol),
         "current_position_entries": st.get("current_position_entries", []),
-        "obi_current": st.get("obi_current"), "obi_fast": st.get("obi_fast"),
-        "obi_medium": st.get("obi_medium"), "obi_slow": st.get("obi_slow"),
-        "oms_signal": st.get("oms_signal"), "oms_obi_fast": st.get("oms_obi_fast"),
-        "oms_obi_medium": st.get("oms_obi_medium"), "oms_obi_slow": st.get("oms_obi_slow"),
-        "oms_obi_direction": st.get("oms_obi_direction"), "oms_cvd_ok": st.get("oms_cvd_ok"),
-        "oms_funding_ok": st.get("oms_funding_ok"), "oms_rsi_ok": st.get("oms_rsi_ok"), "oms_rsi": st.get("oms_rsi"),
-        "oms_oi_ok": st.get("oms_oi_ok"), "oms_oi_score": st.get("oms_oi_score"), "oms_open_interest": st.get("oms_open_interest"),
-        "oms_liq_ok": st.get("oms_liq_ok"), "oms_liq_ratio": st.get("oms_liq_ratio"), "oms_liq_count": st.get("oms_liq_count"),
-        "oms_cvd_ratio": st.get("oms_cvd_ratio"), "oms_funding_rate": st.get("oms_funding_rate"),
-        "oms_tp1_done": st.get("oms_tp1_done"), "oms_trail_price": st.get("oms_trail_price"),
-        "oms_dca_count": st.get("oms_dca_count"),
-        "oms_price_history": [[round(ts, 1), price] for ts, price in st.get("oms_price_history", [])[-100:]],
-        "oms_markers": st.get("oms_markers", [])[-30:],
-        "oms_obi_history": st.get("oms_obi_history", [])[-100:],
-        "obi_history": st.get("obi_history", [])[-100:],
-        "obi_spread_pct": st.get("obi_spread_pct"), "obi_recent_vol_pct": st.get("obi_recent_vol_pct"),
         "fib": st.get("fib"),
         "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"),
         "ht_tp1_price": st.get("ht_tp1_price"), "ht_tp2_price": st.get("ht_tp2_price"), "ht_tp3_price": st.get("ht_tp3_price"),
@@ -7225,19 +6713,6 @@ async def handle_config_update(request):
                 "g2_anchor_follow_enabled", "g2_anchor_follow_pct",
                 "g2_auto_reverse", "g2_revisit_enabled", "g2_revisit_rearm_pct", "g2_double_enabled",
                 "g2_size_multiplier", "g2_deviation_multiplier",
-                "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_instant_reset_ratio", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_depth_weighting_enabled", "obi_use_median", "obi_min_liquidity", "obi_breakeven_enabled", "obi_breakeven_trigger_ratio", "obi_breakeven_lock_usd", "obi_breakeven_lock_pct", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
-                "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length",
-                "obi_spread_filter_enabled", "obi_max_spread_pct",
-                "obi_vol_filter_enabled", "obi_vol_window_seconds", "obi_vol_min_pct", "obi_vol_max_pct",
-                "oms_levels", "oms_obi_threshold", "oms_window_fast_seconds", "oms_window_medium_seconds",
-                "oms_window_slow_seconds", "oms_cvd_confirm_enabled", "oms_cvd_window_seconds", "oms_cvd_min_ratio",
-                "oms_funding_filter_enabled", "oms_funding_max_abs", "oms_cooldown_seconds",
-                "oms_tp1_usd", "oms_exit_mode", "oms_tp1_close_pct", "oms_sl_usd", "oms_trail_distance_usd",
-                "oms_dca_enabled", "oms_dca_max_entries", "oms_dca_size_fraction", "oms_dca_min_pullback_usd",
-                "oms_reverse_on_signal",
-                "oms_rsi_filter_enabled", "oms_rsi_resolution", "oms_rsi_period", "oms_rsi_midline",
-                "oms_oi_filter_enabled", "oms_oi_window_seconds", "oms_oi_min_change_pct", "oms_oi_min_score",
-                "oms_liq_filter_enabled", "oms_liq_window_seconds", "oms_liq_min_ratio",
                 "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
                 "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds",
                 "ht_resolution", "ht_amplitude", "ht_channel_deviation", "ht_base_risk_mult",
