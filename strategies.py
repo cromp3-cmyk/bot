@@ -892,1163 +892,6 @@ def build_fib_levels(swing, cfg):
     }
 
 
-async def fib_reversal_poll_loop(symbol):
-    """Fibonacci-Reversal: solange noch kein Einstieg erfolgt ist, wird die Fib bei
-    jedem Poll auf den neuesten Swing (letzte fib_lookback_candles Kerzen) neu gezogen.
-    Sobald Einstieg 1 ausgefuehrt wurde, wird die Fib eingefroren (kein Nachziehen mehr),
-    bis die Position komplett geschlossen ist (SL oder TP2)."""
-    b = BOTS[symbol]
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "fib_reversal" and cfg["bot_active"]:
-                st = b["state"]
-                if not st["fib_entry1_done"]:
-                    needed_bars = cfg["fib_lookback_candles"] + 5
-                    resolution = cfg["fib_resolution"]
-                    if resolution in SUB_MINUTE_RESOLUTIONS:
-                        local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                        if local:
-                            _, _, closed_h, closed_l, _ = local
-                        else:
-                            closed_h = None
-                    else:
-                        data = await fetch_candles_binance(symbol, resolution, count_back=needed_bars)
-                        if data:
-                            timestamps, opens, highs, lows, closes = data
-                            closed_h, closed_l = highs[:-1], lows[:-1]
-                        else:
-                            closed_h = None
-                    if closed_h and len(closed_h) >= 5:
-                        swing = compute_fib_swing(closed_h, closed_l, cfg["fib_lookback_candles"])
-                        if swing:
-                            st["fib"] = build_fib_levels(swing, cfg)
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Fib-Reversal-Abfrage fehlgeschlagen", {"error": str(e)})
-
-        await asyncio.sleep(30)
-
-
-
-def compute_stochastic(highs, lows, closes, k_period, smooth_k, d_period):
-    """Standard-Stochastic-Oszillator: %K = 100 * (Close - Tiefstes Tief) / (Hoechstes Hoch -
-    Tiefstes Tief) ueber k_period, danach %K geglaettet (smooth_k) und %D als SMA von %K
-    (d_period). Reagiert bei kurzen Perioden schneller auf rohe Kursausschlaege als RSI -
-    deshalb fuers Scalp-Board als Haupt-Timing-Oszillator genutzt."""
-    n = len(closes)
-    if n == 0:
-        return [], []
-    raw_k = [50.0] * n
-    for i in range(n):
-        start = max(0, i - k_period + 1)
-        hh = max(highs[start:i + 1])
-        ll = min(lows[start:i + 1])
-        raw_k[i] = 50.0 if hh == ll else 100 * (closes[i] - ll) / (hh - ll)
-    k = _sma_series(raw_k, smooth_k) if smooth_k > 1 else raw_k
-    d = _sma_series(k, d_period)
-    return k, d
-
-
-def compute_atr(highs, lows, closes, period):
-    """ATR mit Wilder-RMA-Glaettung (wie Pine's ta.atr), fuer marktadaptive SL-Groesse."""
-    n = len(closes)
-    if n < 2:
-        return []
-    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
-    for i in range(1, n):
-        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-    atr = [tr[0]] * n
-    for i in range(1, n):
-        if i < period:
-            atr[i] = sum(tr[:i + 1]) / (i + 1)
-        else:
-            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-    return atr
-
-
-def compute_adx(highs, lows, closes, period=14):
-    """Klassischer Wilder-ADX/DMI (wie Pine's ta.dmi), Wilder-RMA-Glaettung wie compute_atr.
-    Gibt (adx, plus_di, minus_di) zurueck - Standardnutzung als Trendfilter: ADX > Schwelle
-    (z.B. 20) heisst 'genug Trendstaerke vorhanden', +DI > -DI heisst 'Richtung ist bullisch',
-    -DI > +DI heisst 'Richtung ist bearisch'. Wird hier als optionaler Long/Short-Filter fuer
-    Kerzen-DNA genutzt (siehe cd_adx_filter_enabled)."""
-    n = len(closes)
-    if n < 2:
-        return [0.0] * n, [0.0] * n, [0.0] * n
-
-    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
-    plus_dm = [0.0] * n
-    minus_dm = [0.0] * n
-    for i in range(1, n):
-        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-        up_move = highs[i] - highs[i - 1]
-        down_move = lows[i - 1] - lows[i]
-        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
-        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
-
-    def _wilder_smooth(values):
-        out = [values[0]] * n
-        for i in range(1, n):
-            if i < period:
-                out[i] = sum(values[:i + 1]) / (i + 1)
-            else:
-                out[i] = out[i - 1] - (out[i - 1] / period) + values[i]
-        return out
-
-    tr_smooth = _wilder_smooth(tr)
-    plus_dm_smooth = _wilder_smooth(plus_dm)
-    minus_dm_smooth = _wilder_smooth(minus_dm)
-
-    plus_di = [100 * plus_dm_smooth[i] / tr_smooth[i] if tr_smooth[i] > 0 else 0.0 for i in range(n)]
-    minus_di = [100 * minus_dm_smooth[i] / tr_smooth[i] if tr_smooth[i] > 0 else 0.0 for i in range(n)]
-    dx = [100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) > 0 else 0.0 for i in range(n)]
-
-    adx = [dx[0]] * n
-    for i in range(1, n):
-        if i < period:
-            adx[i] = sum(dx[:i + 1]) / (i + 1)
-        else:
-            adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-
-    return adx, plus_di, minus_di
-
-
-def _sma_series(values, length):
-    n = len(values)
-    out = [0.0] * n
-    for i in range(n):
-        start = max(0, i - length + 1)
-        window = values[start:i + 1]
-        out[i] = sum(window) / len(window)
-    return out
-
-
-def compute_rolling_zscore(closes, lookback, smooth):
-    """Portiert aus 'Rolling Z-Score Trend [QuantAlgo]' (Pine v6): misst, wie viele
-    Standardabweichungen der aktuelle Kurs vom gleitenden Durchschnitt der letzten 'lookback'
-    Kerzen entfernt ist (SMA + STDEV), danach leicht geglaettet (EMA 'smooth'). Wird hier als
-    generischer, wiederverwendbarer Baustein fuer den optionalen Long/Short-Filter bei mehreren
-    Strategien genutzt (>0 = Long erlaubt, <0 = Short erlaubt)."""
-    n = len(closes)
-    mean = _sma_series(closes, lookback)
-    z_raw = [0.0] * n
-    for i in range(n):
-        start = max(0, i - lookback + 1)
-        window = closes[start:i + 1]
-        m = len(window)
-        if m > 1:
-            avg = sum(window) / m
-            variance = sum((x - avg) ** 2 for x in window) / m
-            stdev = variance ** 0.5
-        else:
-            stdev = 0.0
-        z_raw[i] = (closes[i] - mean[i]) / stdev if stdev > 0 else 0.0
-    return _ema_series(z_raw, smooth)
-
-
-def compute_diamond_supertrend(highs, lows, closes, factor, atr_period):
-    """Portiert aus 'Diamond Algo' (Pine v5) - der SuperTrend-Kernbaustein (Standard-SuperTrend-
-    Algorithmus). factor = Sensitivity * 2 (siehe Original: supertrend(close, nsensitivity*2, 11)).
-    Gibt (supertrend_line, direction) zurueck - direction 1 = bullisch (Linie = unteres Band),
-    -1 = baerisch (Linie = oberes Band), wie im Original-Skript (NICHT dieselbe Konvention wie bei
-    compute_halftrend, dort ist 0=bullisch - hier bewusst beim Original-Vorzeichen geblieben)."""
-    n = len(closes)
-    if n == 0:
-        return [], []
-    atr = compute_atr(highs, lows, closes, atr_period)
-    lower_band_prev = 0.0
-    upper_band_prev = 0.0
-    st_prev = None
-    st_out = [0.0] * n
-    dir_out = [1] * n
-    for i in range(n):
-        basic_upper = closes[i] + factor * atr[i]
-        basic_lower = closes[i] - factor * atr[i]
-        prev_close = closes[i - 1] if i > 0 else closes[i]
-
-        lower_band = basic_lower if (basic_lower > lower_band_prev or prev_close < lower_band_prev) else lower_band_prev
-        upper_band = basic_upper if (basic_upper < upper_band_prev or prev_close > upper_band_prev) else upper_band_prev
-
-        if i == 0:
-            direction = 1
-        elif st_prev == upper_band_prev:
-            direction = -1 if closes[i] > upper_band else 1
-        else:
-            direction = 1 if closes[i] < lower_band else -1
-
-        st = lower_band if direction == -1 else upper_band
-        st_out[i] = st
-        dir_out[i] = direction
-
-        lower_band_prev = lower_band
-        upper_band_prev = upper_band
-        st_prev = st
-    return st_out, dir_out
-
-
-def compute_aso_filter(opens, highs, lows, closes, length=10, mode=0, confirm_bars=1):
-    """Portiert aus dem Nutzer-Pine-Indikator 'Average Sentiment Oscillator' (ASO, KivancOzbilgic) -
-    misst Bullen-/Baerendruck aus Intrabar- UND Gruppen-Kerzen-Bewegung (Intrabar = aktuelle Kerze,
-    Gruppe = die letzten 'length' Kerzen inkl. Range-Hoch/-Tief und dem Open von vor 'length-1'
-    Kerzen, wie im Original 'open[length-1]'). mode: 0 = Mittel aus Intrabar+Gruppe (Original-
-    Standard), 1 = nur Intrabar, 2 = nur Gruppe. Als Filter genutzt (nicht als Chart-Linien wie im
-    Pine-Original): bull_ok[i] = ASOBulls > ASOBears an Kerze i, bear_ok[i] = umgekehrt.
-    confirm_bars > 1 verlangt zusaetzlich, dass die letzten confirm_bars Kerzen ALLE in dieselbe
-    Richtung zeigen (verhindert Filterwechsel bei jedem kleinen Wackler, wie beim separaten
-    ASO-Filter-Pine-Script). Gibt (bull_ok, bear_ok) als Bool-Listen zurueck."""
-    n = len(closes)
-    if n == 0:
-        return [], []
-    lowest, _ = _rolling_min_max(lows, length)
-    _, highest = _rolling_min_max(highs, length)
-    bulls_raw = [0.0] * n
-    bears_raw = [0.0] * n
-    for i in range(n):
-        intrarange = highs[i] - lows[i]
-        k1 = intrarange if intrarange != 0 else 1
-        grouplow = lowest[i]
-        grouphigh = highest[i]
-        group_open_i = i - length + 1
-        groupopen = opens[group_open_i] if group_open_i >= 0 else opens[0]
-        grouprange = grouphigh - grouplow
-        k2 = grouprange if grouprange != 0 else 1
-        intrabar_bulls = (((closes[i] - lows[i]) + (highs[i] - opens[i])) / 2 * 100) / k1
-        group_bulls = (((closes[i] - grouplow) + (grouphigh - groupopen)) / 2 * 100) / k2
-        intrabar_bears = (((highs[i] - closes[i]) + (opens[i] - lows[i])) / 2 * 100) / k1
-        group_bears = (((grouphigh - closes[i]) + (groupopen - grouplow)) / 2 * 100) / k2
-        if mode == 1:
-            bulls_raw[i] = intrabar_bulls
-            bears_raw[i] = intrabar_bears
-        elif mode == 2:
-            bulls_raw[i] = group_bulls
-            bears_raw[i] = group_bears
-        else:
-            bulls_raw[i] = (intrabar_bulls + group_bulls) / 2
-            bears_raw[i] = (intrabar_bears + group_bears) / 2
-    aso_bulls = _sma_series(bulls_raw, length)
-    aso_bears = _sma_series(bears_raw, length)
-    raw_bullish = [aso_bulls[i] > aso_bears[i] for i in range(n)]
-    if confirm_bars <= 1:
-        return raw_bullish, [not b for b in raw_bullish]
-    bull_ok = [False] * n
-    bear_ok = [False] * n
-    for i in range(n):
-        if i < confirm_bars - 1:
-            continue
-        window = raw_bullish[i - confirm_bars + 1:i + 1]
-        bull_ok[i] = all(window)
-        bear_ok[i] = not any(window)
-    return bull_ok, bear_ok
-
-
-def compute_wma_series(values, period):
-    """Gewichteter gleitender Durchschnitt (Pine's wma) - je juenger der Wert, desto hoeher das
-    Gewicht (1..period)."""
-    n = len(values)
-    out = [None] * n
-    denom = period * (period + 1) / 2
-    for i in range(n):
-        if i < period - 1:
-            continue
-        window = values[i - period + 1:i + 1]
-        out[i] = sum(window[j] * (j + 1) for j in range(period)) / denom
-    return out
-
-
-def compute_hull_ma(closes, period):
-    """Hull Moving Average (Pine's HMA): WMA(2*WMA(n/2) - WMA(n), sqrt(n)) - reagiert schneller
-    und mit weniger Verzoegerung als eine normale MA. Gibt die HMA-Linie zurueck; die Farbe
-    (gruen/rot) ergibt sich aus dem Vorzeichen der Steigung (aktueller Wert vs. vorheriger)."""
-    n = len(closes)
-    half = max(1, round(period / 2))
-    sqn = max(1, round(math.sqrt(period)))
-    wma_half = compute_wma_series(closes, half)
-    wma_full = compute_wma_series(closes, period)
-    diff = [(2 * wma_half[i] - wma_full[i]) if (wma_half[i] is not None and wma_full[i] is not None) else None for i in range(n)]
-    # compute_wma_series braucht `sqn` weitere echte Werte danach - fehlende (None) Stellen am
-    # Anfang einfach mit dem ersten gueltigen Wert auffuellen, damit compute_wma_series darauf
-    # rechnen kann (matcht die Pine-Verhalten "na" ohnehin nur als Warmup-Bereich).
-    first_valid = next((x for x in diff if x is not None), 0.0)
-    diff_filled = [x if x is not None else first_valid for x in diff]
-    hma = compute_wma_series(diff_filled, sqn)
-    return hma
-
-
-def compute_obv(closes, volumes):
-    """On-Balance-Volume (Pine's ta.cum mit vorzeichenbehaftetem Volumen): kumulierte Summe des
-    Volumens, positiv bei steigendem, negativ bei fallendem Schlusskurs, unveraendert bei
-    Gleichstand. Basis fuer den OBV-RSI von '[Hoss] VWAP+RSI+Hull+DI' - der RSI wird NICHT auf
-    dem Preis, sondern auf dieser Volumen-Kurve berechnet (siehe compute_rsi, generisch genug
-    fuer jede Eingabeserie)."""
-    n = len(closes)
-    obv = [0.0] * n
-    for i in range(1, n):
-        if closes[i] > closes[i - 1]:
-            obv[i] = obv[i - 1] + volumes[i]
-        elif closes[i] < closes[i - 1]:
-            obv[i] = obv[i - 1] - volumes[i]
-        else:
-            obv[i] = obv[i - 1]
-    return obv
-
-
-def compute_ut_bot(opens, highs, lows, closes, atr_period, sensitivity, use_heikin_ashi=False):
-    """UT Bot Alerts (weit verbreitetes Pine-Script): ATR-Trailing-Stop-Linie, BUY wenn der Kurs
-    (bzw. Heikin-Ashi-Kurs) von unten nach oben ueber die Stop-Linie kreuzt, SELL umgekehrt.
-    Gibt (buy, sell, stop_line) zurueck."""
-    if use_heikin_ashi:
-        _, h_src, l_src, src = compute_heikin_ashi(opens, highs, lows, closes)
-    else:
-        h_src, l_src, src = highs, lows, closes
-    atr = compute_atr(h_src, l_src, src, atr_period)
-    n = len(src)
-    nloss = [sensitivity * (atr[i] or 0) for i in range(n)]
-    stop = [0.0] * n
-    for i in range(n):
-        prev_stop = stop[i - 1] if i > 0 else 0.0
-        prev_src = src[i - 1] if i > 0 else src[i]
-        if src[i] > prev_stop and prev_src > prev_stop:
-            stop[i] = max(prev_stop, src[i] - nloss[i])
-        elif src[i] < prev_stop and prev_src < prev_stop:
-            stop[i] = min(prev_stop, src[i] + nloss[i])
-        else:
-            stop[i] = src[i] - nloss[i] if src[i] > prev_stop else src[i] + nloss[i]
-
-    buy = [False] * n
-    sell = [False] * n
-    for i in range(1, n):
-        above = src[i - 1] <= stop[i - 1] and src[i] > stop[i]
-        below = src[i - 1] >= stop[i - 1] and src[i] < stop[i]
-        buy[i] = src[i] > stop[i] and above
-        sell[i] = src[i] < stop[i] and below
-    return buy, sell, stop
-
-
-def compute_heikin_ashi(opens, highs, lows, closes):
-    """Rechnet normale OHLC-Kerzen in Heikin-Ashi-Kerzen um (wie bei TradingView, wenn man den
-    Chart-Typ auf 'Heikin Ashi' umstellt). Heikin-Ashi glaettet den Kursverlauf, indem jede Kerze
-    den Durchschnitt der vorherigen mit einrechnet - Trends wirken dadurch 'glatter' (weniger
-    kleine Gegenkerzen), Wendepunkte fallen dafuer etwas verzoegert auf. Gibt (ha_open, ha_high,
-    ha_low, ha_close) zurueck - diese vier werden dann anstelle der normalen OHLC-Werte in die
-    Signal-Berechnung (compute_diamond_signal, compute_atr) gegeben."""
-    n = len(closes)
-    ha_close = [(opens[i] + highs[i] + lows[i] + closes[i]) / 4 for i in range(n)]
-    ha_open = [0.0] * n
-    ha_high = [0.0] * n
-    ha_low = [0.0] * n
-    for i in range(n):
-        ha_open[i] = (opens[i] + closes[i]) / 2 if i == 0 else (ha_open[i - 1] + ha_close[i - 1]) / 2
-        ha_high[i] = max(highs[i], ha_open[i], ha_close[i])
-        ha_low[i] = min(lows[i], ha_open[i], ha_close[i])
-    return ha_open, ha_high, ha_low, ha_close
-
-
-def compute_elte_supertrend(opens, highs, lows, closes, factor, atr_period):
-    """Portiert aus 'ELTE SMART' (Pine v5) - SuperTrend auf ohlc4 (Durchschnitt aus O/H/L/C)
-    statt nur Close, etwas geglaettet. WICHTIG: andere Vorzeichen-Konvention als bei Diamond
-    Algo! Hier gilt die STANDARD-Konvention: direction=1 -> lowerBand (bullisch, Linie unter dem
-    Kurs), direction=-1 -> upperBand (baerisch, Linie ueber dem Kurs) - im Original-Skript exakt
-    so verdrahtet (anders als beim Diamond-Algo-Original, das die Zuordnung vertauscht hatte).
-    'factor' darf ein fester Wert ODER eine pro-Kerze wechselnde Liste sein (fuer Auto-Sensitivity,
-    da die sich mit der Marktvolatilitaet Kerze fuer Kerze aendert)."""
-    n = len(closes)
-    if n == 0:
-        return [], []
-    is_series = isinstance(factor, (list, tuple))
-    ohlc4 = [(opens[i] + highs[i] + lows[i] + closes[i]) / 4 for i in range(n)]
-    atr = compute_atr(highs, lows, closes, atr_period)
-    lower_band_prev = 0.0
-    upper_band_prev = 0.0
-    st_prev = None
-    st_out = [0.0] * n
-    dir_out = [1] * n
-    for i in range(n):
-        f = factor[i] if is_series else factor
-        basic_upper = ohlc4[i] + f * atr[i]
-        basic_lower = ohlc4[i] - f * atr[i]
-        prev_close = closes[i - 1] if i > 0 else closes[i]
-
-        lower_band = basic_lower if (basic_lower > lower_band_prev or prev_close < lower_band_prev) else lower_band_prev
-        upper_band = basic_upper if (basic_upper < upper_band_prev or prev_close > upper_band_prev) else upper_band_prev
-
-        if i == 0:
-            direction = 1
-        elif st_prev == upper_band_prev:
-            direction = 1 if closes[i] > upper_band else -1
-        else:
-            direction = -1 if closes[i] < lower_band else 1
-
-        st = lower_band if direction == 1 else upper_band
-        st_out[i] = st
-        dir_out[i] = direction
-
-        lower_band_prev = lower_band
-        upper_band_prev = upper_band
-        st_prev = st
-    return st_out, dir_out
-
-
-def compute_es_auto_sensitivity(closes, vol_period, vol_ma_len):
-    """Portiert aus 'ELTE SMART' - EWMA-Volatilitaet (Lambda-gewichteter gleitender Durchschnitt
-    der quadrierten Log-Returns), dann Vergleich mit dem eigenen 55er-Durchschnitt in relativen
-    Baendern (60%/20%/140%/180%/240%) -> daraus ergibt sich automatisch ein SuperTrend-
-    Sensitivity-Wert zwischen 2.85 und 4.0, je nachdem ob die aktuelle Volatilitaet ueber/unter
-    ihrem eigenen historischen Schnitt liegt. Der Annualisierungsfaktor (sqrt(365)*100 im
-    Original) kuerzt sich in den relativen Bandvergleichen komplett heraus und wird hier deshalb
-    weggelassen (aendert das Ergebnis nicht, nur die absolute Hv-Skala)."""
-    n = len(closes)
-    if n < 2:
-        return [3.0] * n
-    lam = (vol_period - 1) / (vol_period + 1)
-    logr = [0.0] + [math.log(closes[i] / closes[i - 1]) if closes[i - 1] > 0 else 0.0 for i in range(1, n)]
-    squared = [x * x for x in logr]
-    v = [0.0] * n
-    for i in range(n):
-        v[i] = squared[i] if i == 0 else lam * v[i - 1] + (1 - lam) * squared[i]
-    hv = [math.sqrt(x) for x in v]
-    avg_hv = _sma_series(hv, vol_ma_len)
-
-    sensitivity = [3.0] * n
-    for i in range(n):
-        h, a = hv[i], avg_hv[i]
-        maa, mab, mac = a * 1.40, a * 1.80, a * 2.40
-        mad_, mae_ = a * 0.60, a * 0.20
-        if h < maa and h > a:
-            sensitivity[i] = 3.15
-        elif h < mab and h > maa:
-            sensitivity[i] = 3.5
-        elif h < mac and h > mab:
-            sensitivity[i] = 3.6
-        elif h > mac:
-            sensitivity[i] = 4.0
-        elif h < maa and h > mad_:
-            sensitivity[i] = 3.0
-        elif h < mad_ and h > mae_:
-            sensitivity[i] = 2.85
-        elif h < mae_:
-            sensitivity[i] = 3.0
-    return sensitivity
-
-
-def compute_diamond_signal(highs, lows, closes, atr_period, sensitivity, sma_period, ema_trend_period):
-    """Komplettes Diamond-Algo-Signal: SuperTrend-Crossover + SMA-Filter (Basis-Signal), plus
-    200er-EMA-Trendfilter fuer die 'Smart'-Qualifizierung (im Original nur Label-Text, hier ein
-    echter, waehlbarer Filter - siehe da_signal_mode). Gibt (buy, sell, smart_buy, smart_sell)
-    als Bool-Listen zurueck."""
-    n = len(closes)
-    factor = sensitivity * 2
-    st_line, _ = compute_diamond_supertrend(highs, lows, closes, factor, atr_period)
-    sma = _sma_series(closes, sma_period)
-    ema200 = _ema_series(closes, ema_trend_period)
-
-    buy = [False] * n
-    sell = [False] * n
-    smart_buy = [False] * n
-    smart_sell = [False] * n
-    for i in range(1, n):
-        crossover = closes[i - 1] <= st_line[i - 1] and closes[i] > st_line[i]
-        crossunder = closes[i - 1] >= st_line[i - 1] and closes[i] < st_line[i]
-        buy[i] = crossover and closes[i] >= sma[i]
-        sell[i] = crossunder and closes[i] <= sma[i]
-        smart_buy[i] = buy[i] and closes[i] > ema200[i]
-        smart_sell[i] = sell[i] and closes[i] < ema200[i]
-    return buy, sell, smart_buy, smart_sell
-
-
-def compute_halftrend(highs, lows, closes, amplitude, channel_deviation):
-    """Portiert aus 'HalfTrend Long/Short Signal Engine [BigBeluga]' (Basis-Trendlogik von
-    everget's originalem HalfTrend-Indikator) - nur der Teil, der tatsaechlich Long/Short
-    bestimmt (Swing-Hoch/-Tief-Vergleich gegen gleitende Durchschnitte). Die Risk-Management-
-    und Dashboard-Teile des Original-Skripts sind rein visuell und wurden weggelassen.
-    ATR-Periode ist im Original FEST auf 100 (ta.atr(100)/2 als 'atr2') - nur amplitude
-    (Swing-Lookback-Fenster) ist ein echter Signal-Parameter. channel_deviation beeinflusst im
-    Original NUR die geplotteten Kanal-Baender, nicht das Signal selbst - in diesem Bot wird es
-    stattdessen als SL-Abstand (in ATR2-Vielfachen) verwendet (siehe backtest_halftrend/
-    check_ht_entry), damit der Parameter hier tatsaechlich etwas bewirkt.
-    Gibt (ht_line, trend, atr2) zurueck - trend 0 = bullisch (Long), 1 = baerisch (Short), wie
-    im Original-Skript. atr2 wird fuer die SL-/TP-Abstandsberechnung (Base Risk) mitgeliefert."""
-    n = len(closes)
-    if n == 0:
-        return [], [], []
-    atr = compute_atr(highs, lows, closes, 100)
-    atr2 = [a / 2.0 for a in atr]
-    highma = _sma_series(highs, amplitude)
-    lowma = _sma_series(lows, amplitude)
-
-    trend = 0
-    next_trend = 0
-    max_low_price = lows[0]
-    min_high_price = highs[0]
-    up = 0.0
-    down = 0.0
-    prev_trend_final = None
-
-    ht_line = [0.0] * n
-    trend_out = [0] * n
-
-    for i in range(n):
-        start = max(0, i - amplitude + 1)
-        high_price = max(highs[start:i + 1])
-        low_price = min(lows[start:i + 1])
-        prev_low = lows[i - 1] if i > 0 else lows[i]
-        prev_high = highs[i - 1] if i > 0 else highs[i]
-
-        if next_trend == 1:
-            max_low_price = max(low_price, max_low_price)
-            if highma[i] < max_low_price and closes[i] < prev_low:
-                trend = 1
-                next_trend = 0
-                min_high_price = high_price
-        else:
-            min_high_price = min(high_price, min_high_price)
-            if lowma[i] > min_high_price and closes[i] > prev_high:
-                trend = 0
-                next_trend = 1
-                max_low_price = low_price
-
-        up_before, down_before = up, down
-
-        if trend == 0:
-            if i > 0 and prev_trend_final is not None and prev_trend_final != 0:
-                up = down_before
-            else:
-                up = max_low_price if i == 0 else max(max_low_price, up_before)
-            ht_line[i] = up
-        else:
-            if i > 0 and prev_trend_final is not None and prev_trend_final != 1:
-                down = up_before
-            else:
-                down = min_high_price if i == 0 else min(min_high_price, down_before)
-            ht_line[i] = down
-
-        trend_out[i] = trend
-        prev_trend_final = trend
-
-    return ht_line, trend_out, atr2
-
-
-def compute_rsi(closes, period):
-    """Standard-RSI mit Wilder-Glaettung (wie Pine's ta.rsi)."""
-    n = len(closes)
-    if n < 2:
-        return [50.0] * n
-    gains = [0.0] * n
-    losses = [0.0] * n
-    for i in range(1, n):
-        diff = closes[i] - closes[i - 1]
-        gains[i] = diff if diff > 0 else 0.0
-        losses[i] = -diff if diff < 0 else 0.0
-
-    def _wilder_rma(values):
-        out = [values[0]] * n
-        for i in range(1, n):
-            if i < period:
-                out[i] = sum(values[:i + 1]) / (i + 1)
-            else:
-                out[i] = (out[i - 1] * (period - 1) + values[i]) / period
-        return out
-
-    avg_gain = _wilder_rma(gains)
-    avg_loss = _wilder_rma(losses)
-    rsi = [50.0] * n
-    for i in range(n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0 if avg_gain[i] > 0 else 50.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-    return rsi
-
-
-def compute_mfi(highs, lows, closes, volumes, period):
-    """Money Flow Index: RSI-artiger Oszillator auf Basis von volumengewichtetem
-    typischem Preis (hlc3) statt reinem Schlusskurs - misst Geldfluss statt Preis."""
-    n = len(closes)
-    if n < 2:
-        return [50.0] * n
-    typical = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n)]
-    raw_flow = [typical[i] * volumes[i] for i in range(n)]
-    pos_flow = [0.0] * n
-    neg_flow = [0.0] * n
-    for i in range(1, n):
-        if typical[i] > typical[i - 1]:
-            pos_flow[i] = raw_flow[i]
-        elif typical[i] < typical[i - 1]:
-            neg_flow[i] = raw_flow[i]
-
-    def _rolling_sum(values):
-        out = [0.0] * n
-        for i in range(n):
-            start = max(0, i - period + 1)
-            out[i] = sum(values[start:i + 1])
-        return out
-
-    pos_sum = _rolling_sum(pos_flow)
-    neg_sum = _rolling_sum(neg_flow)
-    mfi = [50.0] * n
-    for i in range(n):
-        if neg_sum[i] == 0:
-            mfi[i] = 100.0 if pos_sum[i] > 0 else 50.0
-        else:
-            money_ratio = pos_sum[i] / neg_sum[i]
-            mfi[i] = 100 - (100 / (1 + money_ratio))
-    return mfi
-
-
-def compute_macd_line_and_signal(closes, fast, slow, signal_period):
-    """Rohe MACD-Linie und Signal-Linie (SMA-basiert, wie im BLSH-Original) - fuer den
-    reinen Crossover-Modus (gruener/roter Punkt: MACD kreuzt seine Signal-Linie),
-    unabhaengig von der Composite-Schwelle."""
-    ema_f = _ema_series(closes, fast)
-    ema_s = _ema_series(closes, slow)
-    macd = [ema_f[i] - ema_s[i] for i in range(len(closes))]
-    macd_signal = []
-    for i in range(len(macd)):
-        start = max(0, i - signal_period + 1)
-        window = macd[start:i + 1]
-        macd_signal.append(sum(window) / len(window))
-    return macd, macd_signal
-
-
-def _ht_reset_state(st):
-    """Setzt alle SL-/TP-Preise und Teilverkauf-Flags zurueck (bei jedem vollstaendigen
-    Ausstieg noetig, egal ob durch SL, TP3 oder Flip-Exit)."""
-    st["ht_sl_price"] = None
-    st["ht_tp1_price"] = None
-    st["ht_tp2_price"] = None
-    st["ht_tp3_price"] = None
-    st["ht_tp1_done"] = False
-    st["ht_tp2_done"] = False
-
-
-async def check_ht_sl_tp(symbol, price):
-    """Prueft SL sowie die drei Teilgewinn-Stufen TP1/TP2/TP3 aus dem Original-Skript (dort nur
-    Statistik-Tracking, hier als echte Teilverkaeufe umgesetzt - siehe Skript-Tooltip 'Base Risk':
-    'Sets SL distance from HalfTrend line, and TP1 distance from entry. TP2 is 2x, TP3 is 3x.'):
-    TP1 -> Teilverkauf (ht_tp1_close_pct % der Position) + SL springt auf Ø-Einstieg (Break-Even),
-    TP2 -> weiterer Teilverkauf (ht_tp2_close_pct % der VERBLEIBENDEN Position),
-    TP3 -> Rest vollstaendig schliessen. SL wird zuerst geprueft (hat Vorrang vor TP-Treffern im
-    selben Tick)."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    sl_price = st.get("ht_sl_price")
-    if sl_price is not None:
-        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-        if hit_sl:
-            reason = "BREAKEVEN" if st.get("ht_tp1_done") else "SL"
-            debug_log(f"🚪 [{symbol}] HalfTrend {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-            await execute_exit(symbol, price, reason)
-            st["ht_sl_cooldown_until"] = time.time() + cfg.get("ht_sl_cooldown_seconds", 30)
-            _ht_reset_state(st)
-            return
-
-    if not cfg.get("ht_tp_enabled", True):
-        return
-
-    if not st.get("ht_tp1_done") and st.get("ht_tp1_price") is not None:
-        tp1_price = st["ht_tp1_price"]
-        if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
-            fraction = cfg.get("ht_tp1_close_pct", 33) / 100
-            ok = await execute_partial_exit(symbol, price, fraction, "TP1")
-            if ok:
-                st["ht_tp1_done"] = True
-                st["ht_sl_price"] = st["avg_entry_price"]  # Break-Even
-                debug_log(f"📡 [{symbol}] HalfTrend TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'],4)}) gesetzt")
-        return
-
-    if not st.get("ht_tp2_done") and st.get("ht_tp2_price") is not None:
-        tp2_price = st["ht_tp2_price"]
-        if (pos == "long" and price >= tp2_price) or (pos == "short" and price <= tp2_price):
-            fraction = cfg.get("ht_tp2_close_pct", 50) / 100
-            ok = await execute_partial_exit(symbol, price, fraction, "TP2")
-            if ok:
-                st["ht_tp2_done"] = True
-        return
-
-    tp3_price = st.get("ht_tp3_price")
-    if tp3_price is not None:
-        if (pos == "long" and price >= tp3_price) or (pos == "short" and price <= tp3_price):
-            debug_log(f"🚪 [{symbol}] HalfTrend TP3 (Rest): {pos.upper()} @ {price}")
-            await execute_exit(symbol, price, "TP3")
-            _ht_reset_state(st)
-
-
-async def check_ht_entry(symbol, buy_signal, sell_signal, price, atr2_now):
-    """Einstieg beim HalfTrend-Flip-Signal. Setzt bei erfolgreichem Einstieg SL sowie alle drei
-    TP-Stufen fest (ATR2 zum Einstiegszeitpunkt * Channel-Deviation bzw. Base-Risk-Multiplikator,
-    TP2 = 2x, TP3 = 3x Base-Risk-Abstand) - bleiben bis zum jeweiligen Treffer unveraendert
-    (kein Nachziehen), analog zum Original-Skript."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is not None or price is None:
-        return
-    if time.time() < st.get("ht_sl_cooldown_until", 0.0):
-        return
-    if not (buy_signal or sell_signal):
-        return
-    direction = "long" if buy_signal else "short"
-    debug_log(f"📡 [{symbol}] HalfTrend Signal: {direction.upper()} @ {price}")
-    await execute_entry(symbol, direction, price, is_add_on=False)
-    if st["position"] is None:
-        return  # Einstieg (z.B. dry_run-Fehler) hat nicht geklappt
-    _ht_reset_state(st)
-    if cfg.get("ht_sl_enabled", True) and atr2_now is not None:
-        dist_sl = atr2_now * cfg.get("ht_channel_deviation", 2.0)
-        st["ht_sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
-    if cfg.get("ht_tp_enabled", True) and atr2_now is not None:
-        dist = atr2_now * cfg.get("ht_base_risk_mult", 3.0)
-        if direction == "long":
-            st["ht_tp1_price"] = price + dist
-            st["ht_tp2_price"] = price + dist * 2
-            st["ht_tp3_price"] = price + dist * 3
-        else:
-            st["ht_tp1_price"] = price - dist
-            st["ht_tp2_price"] = price - dist * 2
-            st["ht_tp3_price"] = price - dist * 3
-
-
-async def check_ht_exit(symbol, buy_signal, sell_signal, price):
-    """Ausstieg immer beim Gegen-Signal - Flip-System wie Chandelier/UT-Bot, unabhaengig davon,
-    welche TP-Stufe gerade aktiv ist (schliesst dann den kompletten Rest der Position)."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is None or price is None:
-        return
-    if st["position"] == "long" and sell_signal:
-        debug_log(f"🚪 [{symbol}] HalfTrend Exit: LONG @ {price} (Sell-Signal)")
-        await execute_exit(symbol, price, "HT-FLIP-EXIT")
-        _ht_reset_state(st)
-    elif st["position"] == "short" and buy_signal:
-        debug_log(f"🚪 [{symbol}] HalfTrend Exit: SHORT @ {price} (Buy-Signal)")
-        await execute_exit(symbol, price, "HT-FLIP-EXIT")
-        _ht_reset_state(st)
-
-
-async def ht_poll_loop(symbol):
-    """HalfTrend (portiert aus 'HalfTrend Long/Short Signal Engine [BigBeluga]', Basis: everget's
-    HalfTrend). Swing-Hoch/-Tief-Vergleich gegen SMA(amplitude) bestimmt den Trend, Flip = Signal.
-    ATR-Periode ist im Original fest auf 100. SL (Channel-Deviation * ATR2) und TP (Base-Risk-
-    Multiplikator * ATR2) sind optional und werden einmalig bei Einstieg berechnet, Ausstieg
-    sonst immer beim Gegen-Signal (Flip-System wie Chandelier/UT-Bot). Ein-/Ausstieg je einzeln
-    tick-/kerzenbasiert, alle Zeitrahmen, Backtest-faehig."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "halftrend" and cfg["bot_active"]:
-                resolution = cfg["ht_resolution"]
-                amplitude = cfg["ht_amplitude"]
-                min_needed = max(100, amplitude) + 5
-                needed_bars = min(1000, max(min_needed * 2, 200))
-                st = b["state"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, _, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    signal_key = closed_ts[-1]
-                    is_new_candle = last_processed_ts != signal_key
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-
-                    keep = min_needed + 5
-                    st["ht_highs"] = closed_h[-keep:]
-                    st["ht_lows"] = closed_l[-keep:]
-                    st["ht_closes"] = closed_c[-keep:]
-
-                    ht_line, trend, atr2 = compute_halftrend(closed_h, closed_l, closed_c, amplitude, cfg["ht_channel_deviation"])
-                    invert = cfg.get("ht_invert_direction", False)
-                    dir_now = trend[-1]
-                    st["ht_direction"] = (1 if dir_now == 0 else -1) * (-1 if invert else 1)
-                    st["ht_atr2_last"] = atr2[-1]
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] HalfTrend aktiv: Trend={'AUFWÄRTS' if dir_now==0 else 'ABWÄRTS'}, "
-                                  f"ATR2={round(atr2[-1],4)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    # Nachhol-Mechanismus (siehe ELTE Smart fuer die ausfuehrliche Begruendung):
-                    # normalerweise hoechstens EINE neue Kerze zwischen zwei 5-Sekunden-Polls,
-                    # aber bei kurzen Aufloesungen kann der Loop mal hinterherhinken - ohne diesen
-                    # Nachholmechanismus gingen dazwischenliegende Signale fuer immer verloren.
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 1:
-                            continue
-                        buy_signal = trend[idx] == 0 and trend[idx - 1] == 1
-                        sell_signal = trend[idx] == 1 and trend[idx - 1] == 0
-                        if invert:
-                            buy_signal, sell_signal = sell_signal, buy_signal
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        if cfg.get("ht_exit_trigger", "candle_close") == "candle_close":
-                            await check_ht_exit(symbol, buy_signal, sell_signal, price_i)
-                        if cfg.get("ht_entry_trigger", "candle_close") == "candle_close":
-                            await check_ht_entry(symbol, buy_signal, sell_signal, price_i, atr2[idx])
-
-                    await check_ht_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] HalfTrend wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] HalfTrend wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] HalfTrend-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-# ============================================================================
-# Al-Shatri Breakout (portiert aus Pine-Script "Al-Shatri | Arabic Breakout •
-# Entry & 3 Targets (Presets)"). Range-Breakout (Kerzenschluss ueber/unter dem
-# Hoch/Tief der letzten 'lookback' Kerzen, OHNE die aktuelle Kerze selbst - wie
-# Pine's ta.highest(...)[1]) + EMA-Trendbestaetigung (schnelle ueber/unter
-# langsamer EMA) + RSI-Schwelle + optionaler Volumen-Filter (aktuelles Volumen
-# >= Vielfaches des 20er-Durchschnitts).
-#
-# AUSSTIEG - zwei waehlbare Modi (ab_exit_mode):
-#  * "flip" (Standard): Wechsel-System - immer im Markt. Der erste Buy bleibt offen, bis
-#    das erste Sell kommt; das Sell schliesst ihn und oeffnet direkt die Gegenrichtung
-#    (und umgekehrt). Optional EIN fester Dollar-SL (Verlust der Position in USD, wie bei
-#    MO7/UTB u.a.: Abstand = SL-Betrag / Positionsgroesse), abschaltbar. Keine Targets.
-#  * "plan": wie das Original-Skript - SL = ATR x Multiplikator, TP1/TP2/TP3 = Risiko x
-#    1/2/3 (echte Teilverkaeufe, SL-Nachzug auf Break-Even/TP1 einzeln abschaltbar);
-#    solange ein Plan laeuft (bis SL oder TP3), wird kein neues Signal angenommen.
-# ============================================================================
-
-AB_PRESETS = {
-    "scalping": {"lookback": 10, "fast_len": 9, "slow_len": 21, "rsi_len": 14, "rsi_gate": 52,
-                 "use_volume": False, "vol_mult": 1.0, "atr_len": 14, "atr_mult": 1.0,
-                 "r1": 0.5, "r2": 1.0, "r3": 1.5},
-    "intraday": {"lookback": 20, "fast_len": 20, "slow_len": 50, "rsi_len": 14, "rsi_gate": 55,
-                 "use_volume": False, "vol_mult": 1.5, "atr_len": 14, "atr_mult": 1.5,
-                 "r1": 1.0, "r2": 2.0, "r3": 3.0},
-    "swing": {"lookback": 50, "fast_len": 50, "slow_len": 200, "rsi_len": 14, "rsi_gate": 58,
-              "use_volume": True, "vol_mult": 1.5, "atr_len": 21, "atr_mult": 2.0,
-              "r1": 1.5, "r2": 3.0, "r3": 5.0},
-}
-
-
-def _ab_effective_params(cfg):
-    """Preset 'Scalping'/'Intraday'/'Swing' uebernimmt die Original-Presets aus dem Pine-Script
-    1:1 (siehe Preset-Logik dort), 'custom' nutzt die frei eingestellten ab_*-Werte."""
-    preset = cfg.get("ab_preset", "intraday")
-    if preset in AB_PRESETS:
-        return AB_PRESETS[preset]
-    return {
-        "lookback": cfg.get("ab_lookback", 20), "fast_len": cfg.get("ab_fast_len", 20),
-        "slow_len": cfg.get("ab_slow_len", 50), "rsi_len": cfg.get("ab_rsi_len", 14),
-        "rsi_gate": cfg.get("ab_rsi_gate", 55), "use_volume": cfg.get("ab_use_volume", False),
-        "vol_mult": cfg.get("ab_vol_mult", 1.5), "atr_len": cfg.get("ab_atr_len", 14),
-        "atr_mult": cfg.get("ab_atr_mult", 1.5), "r1": cfg.get("ab_r1", 1.0),
-        "r2": cfg.get("ab_r2", 2.0), "r3": cfg.get("ab_r3", 3.0),
-    }
-
-
-def compute_ab_breakout_signals(highs, lows, closes, volumes, params):
-    """Liefert (long_setup[], short_setup[], atr[]) je Kerze. long_setup/short_setup sind die
-    ROHEN Bedingungen (Pine 'longSetup'/'shortSetup', noch KEINE Flanken-Erkennung) - der
-    tatsaechliche Trigger ist erst 'jetzt erfuellt, letzte Kerze nicht' (siehe ab_poll_loop /
-    _simulate_ab_trades, analog zu Pine's 'longSetup and not longSetup[1]')."""
-    n = len(closes)
-    lookback, fast_len, slow_len = params["lookback"], params["fast_len"], params["slow_len"]
-    rsi_len, rsi_gate = params["rsi_len"], params["rsi_gate"]
-    use_volume, vol_mult = params["use_volume"], params["vol_mult"]
-    atr_len = params["atr_len"]
-
-    ema_fast = _ema_series(closes, fast_len)
-    ema_slow = _ema_series(closes, slow_len)
-    rsi = compute_rsi(closes, rsi_len)
-    atr = compute_atr(highs, lows, closes, atr_len)
-    _, highs_roll_max = _rolling_min_max(highs, lookback)
-    lows_roll_min, _ = _rolling_min_max(lows, lookback)
-    vol_avg = _sma_series(volumes, 20) if volumes else [0.0] * n
-
-    warmup = max(slow_len, lookback, atr_len, rsi_len)
-    long_setup = [False] * n
-    short_setup = [False] * n
-    for i in range(n):
-        if i < warmup or i < 1:
-            continue
-        if atr[i] is None or atr[i] <= 0:
-            continue
-        # [1]-Verschiebung wie im Original: das Range-Hoch/-Tief und der Volumen-Durchschnitt
-        # der VORHERIGEN Kerze werden gegen den AKTUELLEN Schlusskurs geprueft, damit die
-        # gerade schliessende Kerze ihre eigene Range nicht mitzaehlt (sonst waere ein Ausbruch
-        # trivial immer "wahr").
-        upper = highs_roll_max[i - 1]
-        lower = lows_roll_min[i - 1]
-        if upper is None or lower is None:
-            continue
-        if use_volume:
-            v_avg_prev = vol_avg[i - 1] if i - 1 < len(vol_avg) else 0.0
-            vol_ok = v_avg_prev is not None and v_avg_prev > 0 and volumes[i] >= v_avg_prev * vol_mult
-        else:
-            vol_ok = True
-
-        long_setup[i] = (closes[i] > upper and closes[i] > ema_fast[i] and ema_fast[i] > ema_slow[i]
-                          and rsi[i] >= rsi_gate and vol_ok)
-        short_setup[i] = (closes[i] < lower and closes[i] < ema_fast[i] and ema_fast[i] < ema_slow[i]
-                           and rsi[i] <= 100 - rsi_gate and vol_ok)
-    return long_setup, short_setup, atr
-
-
-def _ab_reset_state(st):
-    st["ab_sl_price"] = None
-    st["ab_tp1_price"] = None
-    st["ab_tp2_price"] = None
-    st["ab_tp3_price"] = None
-    st["ab_tp1_done"] = False
-    st["ab_tp2_done"] = False
-    st["ab_be_done"] = False
-
-
-async def check_ab_sl_tp(symbol, price):
-    """SL zuerst, dann TP1 (Teilverkauf + optional SL->Break-Even), TP2 (weiterer Teilverkauf +
-    optional SL->TP1), TP3 (Rest schliessen) - identisches Muster zu check_ht_sl_tp, nur mit
-    zwei EINZELN abschaltbaren Nachzieh-Stufen statt fest immer Break-Even bei TP1."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    sl_price = st.get("ab_sl_price")
-    if sl_price is not None:
-        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-        if hit_sl:
-            if st.get("ab_tp2_done"):
-                reason = "SL-AUF-TP1"
-            elif st.get("ab_tp1_done"):
-                reason = "BREAKEVEN"
-            else:
-                reason = "SL"
-            debug_log(f"🚪 [{symbol}] Al-Shatri Breakout {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-            await execute_exit(symbol, price, reason)
-            st["ab_sl_cooldown_until"] = time.time() + cfg.get("ab_sl_cooldown_seconds", 30)
-            _ab_reset_state(st)
-            return
-
-    # TP1/TP2 faellt bewusst OHNE Return direkt zur naechsten Stufe durch, falls der Kurs seit dem
-    # letzten Check (alle ~5s live, oder innerhalb einer Kerze im Backtest) so weit gesprungen ist,
-    # dass mehrere Ziele auf einmal erreicht wurden - vorher wurde pro Aufruf nur EINE Stufe
-    # verarbeitet, wodurch eine uebersprungene Stufe (z.B. TP2) nie nachgeholt wurde, wenn der Kurs
-    # bis zum naechsten Check schon wieder zurueckgelaufen war.
-    if not st.get("ab_tp1_done") and st.get("ab_tp1_price") is not None:
-        tp1_price = st["ab_tp1_price"]
-        if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
-            fraction = cfg.get("ab_tp1_close_pct", 33) / 100
-            ok = await execute_partial_exit(symbol, price, fraction, "TP1")
-            if ok:
-                st["ab_tp1_done"] = True
-                if cfg.get("ab_sl_to_breakeven_on_tp1", True):
-                    st["ab_sl_price"] = st["avg_entry_price"]
-                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'],4)}) gesetzt")
-                else:
-                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
-            else:
-                return  # Teilverkauf fehlgeschlagen - nicht so tun als waere TP1 schon durch
-        else:
-            return  # TP1 noch nicht erreicht -> TP2/TP3 koennen es dann erst recht nicht sein
-
-    if not st.get("ab_tp2_done") and st.get("ab_tp2_price") is not None:
-        tp2_price = st["ab_tp2_price"]
-        if (pos == "long" and price >= tp2_price) or (pos == "short" and price <= tp2_price):
-            fraction = cfg.get("ab_tp2_close_pct", 50) / 100
-            ok = await execute_partial_exit(symbol, price, fraction, "TP2")
-            if ok:
-                st["ab_tp2_done"] = True
-                if cfg.get("ab_sl_to_tp1_on_tp2", True) and st.get("ab_tp1_price") is not None:
-                    st["ab_sl_price"] = st["ab_tp1_price"]
-                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL auf TP1 ({round(st['ab_tp1_price'],4)}) gesetzt")
-                else:
-                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
-            else:
-                return
-        else:
-            return
-
-    tp3_price = st.get("ab_tp3_price")
-    if tp3_price is not None:
-        if (pos == "long" and price >= tp3_price) or (pos == "short" and price <= tp3_price):
-            debug_log(f"🚪 [{symbol}] Al-Shatri Breakout TP3 (Rest): {pos.upper()} @ {price}")
-            await execute_exit(symbol, price, "TP3")
-            _ab_reset_state(st)
-
-
-async def check_ab_sl(symbol, price):
-    """Wechsel-Modus: optionaler fester Dollar-SL (ab_sl_enabled/ab_sl_manual_usd) und optional
-    'SL auf Einstieg' (ab_be_enabled/ab_be_trigger_usd): sobald die Position um den eingestellten
-    Dollar-Betrag im Gewinn ist (Preisabstand = Betrag / Positionsgroesse, wie beim SL), wird der SL auf
-    den Einstiegskurs gesetzt (Break-Even) - auch wenn der feste $-SL abgeschaltet ist, dann entsteht
-    der SL erst mit dem Break-Even. Wird bei jedem Loop-Durchlauf gegen den Live-Preis geprueft
-    (unabhaengig vom Kerzen-Abruf, siehe ab_poll_loop). Schlaegt der Exit fehl (Position bleibt
-    offen), bleibt der SL bestehen und wird beim naechsten Durchlauf erneut versucht - statt ihn
-    faelschlich als erledigt zu vergessen."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-    if not cfg.get("ab_sl_enabled", True) and not st.get("ab_be_done"):
-        st["ab_sl_price"] = None  # SL wurde bei offener Position abgeschaltet (ein Break-Even-SL bleibt)
-    if cfg.get("ab_be_enabled", False) and not st.get("ab_be_done"):
-        size = st.get("total_coin_size") or 0
-        entry_ref = st.get("avg_entry_price")
-        if size > 0 and entry_ref:
-            dist_be = cfg.get("ab_be_trigger_usd", 5.0) / size
-            reached = price >= entry_ref + dist_be if pos == "long" else price <= entry_ref - dist_be
-            if reached:
-                st["ab_sl_price"] = entry_ref
-                st["ab_be_done"] = True
-                debug_log(f"📡 [{symbol}] Al-Shatri Breakout: ${cfg.get('ab_be_trigger_usd', 5.0)} Gewinn erreicht - SL auf Einstieg ({round(entry_ref, 4)}) gesetzt")
-    sl_price = st.get("ab_sl_price")
-    if sl_price is None:
-        return
-    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-    if not hit_sl:
-        return
-    reason = "BREAKEVEN" if st.get("ab_be_done") else "SL"
-    debug_log(f"🚪 [{symbol}] Al-Shatri Breakout {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-    await execute_exit(symbol, price, reason)
-    if st["position"] is None:
-        st["ab_sl_cooldown_until"] = time.time() + cfg.get("ab_sl_cooldown_seconds", 30)
-        _ab_reset_state(st)
-
-
-async def _check_ab_flip(symbol, buy_signal, sell_signal, price):
-    """Wechsel-System: immer im Markt. Ein Signal in Richtung der schon offenen Position tut
-    nichts; das Gegen-Signal schliesst die Position (Grund 'AB-FLIP') und oeffnet im selben Schritt
-    die Gegenrichtung - der erste Buy bleibt also offen, bis das erste Sell kommt, usw.
-    Richtung 'nur Long'/'nur Short': das Gegen-Signal schliesst weiterhin, eroeffnet aber keine
-    Position in der gesperrten Richtung (danach flach bis zum naechsten erlaubten Signal).
-    Alle Filter (EMA/RSI/Volumen/SuperTrend/ASO) wirken bereits VOR dieser Funktion auf die
-    Setup-Serien - ein vom Filter blockiertes Gegen-Signal dreht die Position also nicht.
-    Nach dem Einstieg wird (falls aktiv) der feste Dollar-SL gesetzt: SL-Betrag / Positionsgroesse
-    = Preisabstand, d.h. der Verlust der GESAMTEN Position betraegt beim SL genau den Betrag."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None:
-        return
-    if buy_signal:
-        target = "long"
-    elif sell_signal:
-        target = "short"
-    else:
-        return
-    pos = st["position"]
-    if pos == target:
-        return  # schon in dieser Richtung offen - nur das Gegen-Signal zaehlt
-
-    direction_mode = cfg.get("ab_direction_mode", "both")
-    can_open = (direction_mode == "both"
-                or (direction_mode == "long_only" and target == "long")
-                or (direction_mode == "short_only" and target == "short"))
-
-    if pos is not None:
-        debug_log(f"🔄 [{symbol}] Al-Shatri Breakout Wechsel: {pos.upper()} -> {target.upper() if can_open else 'FLACH'} @ {price}")
-        await execute_exit(symbol, price, "AB-FLIP")
-        if st["position"] is not None:
-            # Exit fehlgeschlagen (Details im execute_exit-Log) - Position bleibt offen, deshalb
-            # KEIN Gegen-Einstieg, sonst waeren beide Richtungen gleichzeitig im Bestand.
-            return
-        _ab_reset_state(st)
-    elif time.time() < st.get("ab_sl_cooldown_until", 0.0):
-        return  # flach nach einem SL - Cooldown laeuft noch
-
-    if not can_open:
-        return
-    debug_log(f"📡 [{symbol}] Al-Shatri Breakout Signal: {target.upper()} @ {price}")
-    await execute_entry(symbol, target, price, is_add_on=False)
-    if st["position"] is None:
-        return  # Einstieg (z.B. dry_run-Fehler) hat nicht geklappt
-    _ab_reset_state(st)
-    size = st.get("total_coin_size") or 0
-    if cfg.get("ab_sl_enabled", True) and size > 0:
-        entry_ref = st.get("avg_entry_price") or price
-        dist_sl = cfg.get("ab_sl_manual_usd", 5.0) / size
-        st["ab_sl_price"] = entry_ref - dist_sl if target == "long" else entry_ref + dist_sl
-
-
-async def _check_ab_plan_entry(symbol, buy_signal, sell_signal, price, atr_now):
-    """Plan-Modus (wie Original-Skript): Einstieg nur wenn flach (kein 'active'-Plan laeuft) - das
-    Original zeichnet waehrend eines laufenden Plans keine neuen Linien. SL/TP1/TP2/TP3 werden
-    einmalig aus dem ATR-Risk-Abstand zum Einstiegszeitpunkt berechnet (kein Nachziehen ausser den
-    beiden abschaltbaren SL-Stufen nach TP1/TP2, siehe check_ab_sl_tp)."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is not None or price is None:
-        return
-    if time.time() < st.get("ab_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("ab_direction_mode", "both")
-    if direction_mode == "long_only":
-        sell_signal = False
-    elif direction_mode == "short_only":
-        buy_signal = False
-    if not (buy_signal or sell_signal):
-        return
-    if atr_now is None or atr_now <= 0:
-        return
-    direction = "long" if buy_signal else "short"
-    debug_log(f"📡 [{symbol}] Al-Shatri Breakout Signal: {direction.upper()} @ {price}")
-    await execute_entry(symbol, direction, price, is_add_on=False)
-    if st["position"] is None:
-        return  # Einstieg (z.B. dry_run-Fehler) hat nicht geklappt
-    _ab_reset_state(st)
-    params = _ab_effective_params(cfg)
-    risk = atr_now * params["atr_mult"]
-    st["ab_sl_price"] = price - risk if direction == "long" else price + risk
-    r1, r2, r3 = params["r1"], params["r2"], params["r3"]
-    if direction == "long":
-        st["ab_tp1_price"] = price + risk * r1
-        st["ab_tp2_price"] = price + risk * r2
-        st["ab_tp3_price"] = price + risk * r3
-    else:
-        st["ab_tp1_price"] = price - risk * r1
-        st["ab_tp2_price"] = price - risk * r2
-        st["ab_tp3_price"] = price - risk * r3
-
-
-async def check_ab_entry(symbol, buy_signal, sell_signal, price, atr_now):
-    """Waehlt je nach ab_exit_mode: 'plan' (ATR-SL + TP1/TP2/TP3 wie im Original-Skript) oder
-    'flip' (Standard: Wechsel bei Gegen-Signal + optionaler fester Dollar-SL)."""
-    if BOTS[symbol]["config"].get("ab_exit_mode", "flip") == "plan":
-        await _check_ab_plan_entry(symbol, buy_signal, sell_signal, price, atr_now)
-    else:
-        await _check_ab_flip(symbol, buy_signal, sell_signal, price)
-
-
 async def ab_poll_loop(symbol):
     """Al-Shatri Breakout - siehe Kommentar-Block oben fuer die Signal-Logik. Ein-/Ausstieg (Wechsel bei
     Gegen-Signal) immer bei Kerzenschluss, Flanken-Erkennung (jetzt erfuellt, letzte Kerze nicht) wie im
@@ -2219,5506 +1062,6 @@ async def ab_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
-def _da_reset_state(st):
-    st["da_sl_price"] = None
-    st["da_tp_price"] = None
-
-
-async def check_da_sl_tp(symbol, price):
-    """Prueft SL/TP - beide als fester $-Betrag auf die GESAMTE Position, bei Einstieg einmalig
-    aus ATR(da_risk_atr_period)*da_risk_mult berechnet (wie im Original: atrBand = ta.atr(atrLen)
-    * atrRisk), TP-Abstand = SL-Abstand * da_tp_rr (Original hat TP1/TP2/TP3 bei 1:1/2:1/3:1 -
-    hier ein frei waehlbarer einzelner R:R-Multiplikator statt gestufter Teilverkaeufe)."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-    sl_price = st.get("da_sl_price")
-    tp_price = st.get("da_tp_price")
-    if sl_price is None and tp_price is None:
-        return
-    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
-    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
-    if hit_sl:
-        debug_log(f"🚪 [{symbol}] Diamond Algo SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
-        st["da_sl_cooldown_until"] = time.time() + cfg.get("da_sl_cooldown_seconds", 30)
-        _da_reset_state(st)
-    elif hit_tp:
-        debug_log(f"🚪 [{symbol}] Diamond Algo TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-        await execute_exit(symbol, price, "TP")
-        _da_reset_state(st)
-
-
-async def check_da_entry(symbol, buy_signal, sell_signal, price, atr_risk_now):
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is not None or price is None:
-        return
-    if time.time() < st.get("da_sl_cooldown_until", 0.0):
-        return
-    if not (buy_signal or sell_signal):
-        return
-    direction = "long" if buy_signal else "short"
-    debug_log(f"📡 [{symbol}] Diamond Algo Signal: {direction.upper()} @ {price}")
-    await execute_entry(symbol, direction, price, is_add_on=False)
-    if st["position"] is None:
-        return
-    _da_reset_state(st)
-    if cfg.get("da_sl_enabled", True) and atr_risk_now is not None:
-        dist_sl = atr_risk_now * cfg.get("da_risk_mult", 1.0)
-        st["da_sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
-        if cfg.get("da_tp_enabled", True):
-            dist_tp = dist_sl * cfg.get("da_tp_rr", 1.0)
-            st["da_tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
-    elif cfg.get("da_tp_enabled", True) and atr_risk_now is not None:
-        # TP auch ohne SL moeglich (dann wird der R:R-Multiplikator direkt auf den Risiko-ATR-
-        # Abstand angewandt, ohne dass ein SL tatsaechlich gesetzt wird)
-        dist_tp = atr_risk_now * cfg.get("da_risk_mult", 1.0) * cfg.get("da_tp_rr", 1.0)
-        st["da_tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
-
-
-async def check_da_exit(symbol, buy_signal, sell_signal, price):
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is None or price is None:
-        return
-    if st["position"] == "long" and sell_signal:
-        debug_log(f"🚪 [{symbol}] Diamond Algo Exit: LONG @ {price} (Sell-Signal)")
-        await execute_exit(symbol, price, "DA-FLIP-EXIT")
-        _da_reset_state(st)
-    elif st["position"] == "short" and buy_signal:
-        debug_log(f"🚪 [{symbol}] Diamond Algo Exit: SHORT @ {price} (Buy-Signal)")
-        await execute_exit(symbol, price, "DA-FLIP-EXIT")
-        _da_reset_state(st)
-
-
-async def da_poll_loop(symbol):
-    """Diamond Algo (portiert aus dem gleichnamigen Pine-v5-Indikator) - nur der Signal-Kern:
-    SuperTrend(Sensitivity*2, ATR-Periode) mit SMA-Filter fuer Buy/Sell, plus optionaler 200er-
-    EMA-Trendfilter fuer 'Smart'-Signale (im Original nur Label-Text, hier ein echter waehlbarer
-    Filter - siehe da_signal_mode). SL/TP optional, ATR-basiert (wie im Original: atrBand =
-    ta.atr(atrLen) * atrRisk), TP als R:R-Vielfaches vom SL-Abstand. Ausstieg sonst immer beim
-    Gegen-Signal (Flip-System). Kein Supply/Demand, keine Trend Cloud/Session-Anzeige - das war
-    im Original rein optisch/Beiwerk ohne Einfluss auf Buy/Sell."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "diamond_algo" and cfg["bot_active"]:
-                resolution = cfg["da_resolution"]
-                atr_period = cfg["da_atr_period"]
-                risk_atr_period = cfg.get("da_risk_atr_period", 14)
-                sma_period = cfg["da_sma_period"]
-                ema_trend_period = cfg["da_ema_trend_period"]
-                min_needed = max(atr_period, risk_atr_period, sma_period, ema_trend_period) + 5
-                needed_bars = min(1000, max(min_needed * 2, 200))
-                st = b["state"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    signal_key = closed_ts[-1]
-                    is_new_candle = last_processed_ts != signal_key
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-
-                    if cfg.get("da_use_heikin_ashi", False):
-                        # Heikin-Ashi-Umrechnung VOR der Signal-Berechnung - wie bei TradingView,
-                        # wenn man den Chart-Typ umstellt. Reale Preise (price/last_price) bleiben
-                        # fuer die tatsaechliche Order-Ausfuehrung unveraendert, nur das SIGNAL
-                        # selbst rechnet auf den geglaetteten HA-Kerzen.
-                        _, sig_h, sig_l, sig_c = compute_heikin_ashi(closed_o, closed_h, closed_l, closed_c)
-                    else:
-                        sig_h, sig_l, sig_c = closed_h, closed_l, closed_c
-
-                    buy, sell, smart_buy, smart_sell = compute_diamond_signal(
-                        sig_h, sig_l, sig_c, atr_period, cfg["da_sensitivity"], sma_period, ema_trend_period)
-                    atr_risk_series = compute_atr(sig_h, sig_l, sig_c, risk_atr_period)
-                    keep = min_needed + 5
-                    st["da_opens"] = closed_o[-keep:]
-                    st["da_highs"] = closed_h[-keep:]
-                    st["da_lows"] = closed_l[-keep:]
-                    st["da_closes"] = closed_c[-keep:]
-                    invert = cfg.get("da_invert_direction", False)
-                    signal_mode = cfg.get("da_signal_mode", "all")
-                    raw_direction = 1 if buy[-1] else (-1 if sell[-1] else st.get("da_direction"))
-                    st["da_direction"] = raw_direction * (-1 if invert else 1) if raw_direction is not None else None
-                    st["da_atr_risk_last"] = atr_risk_series[-1]
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] Diamond Algo aktiv: Preis={closed_c[-1]}, ATR-Risk={round(atr_risk_series[-1],4)}, "
-                                  f"Modus={signal_mode}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    # Nachhol-Mechanismus (siehe ELTE Smart fuer die ausfuehrliche Begruendung):
-                    # normalerweise hoechstens EINE neue Kerze zwischen zwei 5-Sekunden-Polls,
-                    # aber bei kurzen Aufloesungen kann der Loop mal hinterherhinken - ohne diesen
-                    # Nachholmechanismus gingen dazwischenliegende Signale fuer immer verloren.
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 1:
-                            continue
-                        buy_i = smart_buy[idx] if signal_mode == "smart_only" else buy[idx]
-                        sell_i = smart_sell[idx] if signal_mode == "smart_only" else sell[idx]
-                        if invert:
-                            buy_i, sell_i = sell_i, buy_i
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        if cfg.get("da_exit_trigger", "candle_close") == "candle_close":
-                            await check_da_exit(symbol, buy_i, sell_i, price_i)
-                        if cfg.get("da_entry_trigger", "candle_close") == "candle_close":
-                            await check_da_entry(symbol, buy_i, sell_i, price_i, atr_risk_series[idx])
-
-                    await check_da_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] Diamond Algo wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] Diamond Algo wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Diamond-Algo-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def _es_reset_state(st):
-    st["es_sl_price"] = None
-    st["es_tp1_price"] = None
-    st["es_tp2_price"] = None
-    st["es_tp3_price"] = None
-    st["es_tp1_done"] = False
-    st["es_tp2_done"] = False
-    st["es_breakeven_pct_done"] = False
-
-
-async def check_es_sl_tp(symbol, price):
-    """Prueft SL sowie TP1/TP2/TP3 (im Original nur Preis-Linien zur Orientierung, hier als
-    echte Teilverkaeufe umgesetzt - analog HalfTrend, aber mit einem zusaetzlichen Schritt, den
-    das Original nicht hat: SL springt nach TP1 auf Break-Even UND nach TP2 nochmal weiter auf
-    den TP1-Preis (statt auf Break-Even stehen zu bleiben) - so ist ab TP2 immer schon ein
-    Teilgewinn abgesichert, nicht nur die Einstiegsposition."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    # Prozent-Break-Even (eigenstaendig, unabhaengig vom TP1-Break-Even): sobald sich der Kurs
-    # um X% in die richtige Richtung bewegt hat, SL sofort auf Einstieg ziehen - auch wenn TP1
-    # noch laengst nicht erreicht ist. Verbessert den SL nur (nie verschlechtern), laeuft nur
-    # einmal pro Position.
-    if cfg.get("es_breakeven_pct_enabled", False) and not st.get("es_breakeven_pct_done"):
-        entry = st["avg_entry_price"]
-        trigger_pct = cfg.get("es_breakeven_trigger_pct", 0.1) / 100
-        moved_pct = (price - entry) / entry if pos == "long" else (entry - price) / entry
-        if moved_pct >= trigger_pct:
-            current_sl = st.get("es_sl_price")
-            if current_sl is None or (pos == "long" and entry > current_sl) or (pos == "short" and entry < current_sl):
-                st["es_sl_price"] = entry
-                debug_log(f"📡 [{symbol}] ELTE Smart Prozent-Break-Even ausgelöst ({trigger_pct*100:.2f}% erreicht) - SL auf Einstieg ({round(entry,4)}) gesetzt")
-            st["es_breakeven_pct_done"] = True
-
-    sl_price = st.get("es_sl_price")
-    if sl_price is not None:
-        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-        if hit_sl:
-            if st.get("es_tp2_done"):
-                reason = "TP1-LOCK"
-            elif st.get("es_tp1_done"):
-                reason = "BREAKEVEN"
-            elif st.get("es_breakeven_pct_done") and abs(sl_price - st["avg_entry_price"]) < 1e-9:
-                reason = "BREAKEVEN-PCT"
-            else:
-                reason = "SL"
-            debug_log(f"🚪 [{symbol}] ELTE Smart {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-            await execute_exit(symbol, price, reason)
-            if reason == "SL":
-                st["es_sl_cooldown_until"] = time.time() + cfg.get("es_sl_cooldown_seconds", 30)
-            _es_reset_state(st)
-            return
-
-    if not st.get("es_tp1_done") and st.get("es_tp1_price") is not None:
-        tp1_price = st["es_tp1_price"]
-        if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
-            if cfg.get("es_tp_mode", "atr") == "manual":
-                # Fester TP-$-Betrag = EIN einzelnes Ziel, komplette Position schliesst dort -
-                # kein Teilverkauf, kein TP2/TP3 (die sind in diesem Modus ohnehin nicht gesetzt),
-                # genau wie beim festen SL auch nur ein einzelner Wert ist.
-                debug_log(f"🚪 [{symbol}] ELTE Smart TP (fest): {pos.upper()} @ {price} (Ziel war {round(tp1_price, 4)})")
-                await execute_exit(symbol, price, "TP")
-                _es_reset_state(st)
-                return
-            fraction = cfg.get("es_tp1_close_pct", 50) / 100
-            ok = await execute_partial_exit(symbol, price, fraction, "TP1")
-            if ok:
-                st["es_tp1_done"] = True
-                st["es_sl_price"] = st["avg_entry_price"]  # Break-Even
-                debug_log(f"📡 [{symbol}] ELTE Smart TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'],4)}) gesetzt")
-        return
-
-    if not st.get("es_tp2_done") and st.get("es_tp2_price") is not None:
-        tp2_price = st["es_tp2_price"]
-        if (pos == "long" and price >= tp2_price) or (pos == "short" and price <= tp2_price):
-            fraction = cfg.get("es_tp2_close_pct", 50) / 100
-            ok = await execute_partial_exit(symbol, price, fraction, "TP2")
-            if ok:
-                st["es_tp2_done"] = True
-                st["es_sl_price"] = st["es_tp1_price"]  # SL zieht weiter auf TP1-Preis
-                debug_log(f"📡 [{symbol}] ELTE Smart TP2 erreicht - SL auf TP1-Preis ({round(st['es_tp1_price'],4)}) gezogen")
-        return
-
-    tp3_price = st.get("es_tp3_price")
-    if tp3_price is not None:
-        if (pos == "long" and price >= tp3_price) or (pos == "short" and price <= tp3_price):
-            debug_log(f"🚪 [{symbol}] ELTE Smart TP3 (Rest): {pos.upper()} @ {price}")
-            await execute_exit(symbol, price, "TP3")
-            _es_reset_state(st)
-
-
-async def check_es_entry(symbol, buy_signal, sell_signal, price, risk_atr_now, signal_low=None, signal_high=None):
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is not None or price is None:
-        return
-    if time.time() < st.get("es_sl_cooldown_until", 0.0):
-        return
-    if not (buy_signal or sell_signal):
-        return
-    direction = "long" if buy_signal else "short"
-    debug_log(f"📡 [{symbol}] ELTE Smart Signal: {direction.upper()} @ {price}")
-    await execute_entry(symbol, direction, price, is_add_on=False)
-    if st["position"] is None:
-        return
-    _es_reset_state(st)
-
-    sl_enabled = cfg.get("es_sl_enabled", True)
-    tp_enabled = cfg.get("es_tp_enabled", True)
-    if not sl_enabled and not tp_enabled:
-        return  # reines Flip-System - keine SL-/TP-Preise setzen, check_es_sl_tp hat dann nichts zu tun
-
-    if risk_atr_now is not None:
-        atr_band = risk_atr_now * cfg.get("es_risk_mult", 2.2)
-
-        # Original-Formel: atrStop = trigger ? low - atrBand : high + atrBand - der SL geht vom
-        # TIEF/HOCH der Signalkerze aus, NICHT vom Schlusskurs (Entry). TP1/TP2/TP3 sind dann
-        # Vielfache des TATSAECHLICHEN Einstieg-zu-SL-Abstands (der dadurch groesser ist als der
-        # reine ATR-Wert, wegen des Kerzendochts) - nicht des reinen ATR-Bands. Fallback auf die
-        # alte, einfachere Rechnung, falls kein Tief/Hoch übergeben wurde (z.B. Tick-Trigger ohne
-        # Kerzendaten).
-        if sl_enabled and cfg.get("es_sl_mode", "atr") == "manual":
-            size = st.get("total_coin_size") or 0
-            manual_usd = cfg.get("es_sl_manual_usd", 5.0)
-            dist_sl = (manual_usd / size) if size > 0 else atr_band  # fester $-Verlust auf die GESAMTE Position umgerechnet in Preisabstand
-            sl_price = price - dist_sl if direction == "long" else price + dist_sl
-            dist_for_tp = atr_band  # TP bleibt bei manuellem SL rein ATR-basiert, wie besprochen
-        else:
-            if direction == "long" and signal_low is not None:
-                sl_price = signal_low - atr_band
-            elif direction == "short" and signal_high is not None:
-                sl_price = signal_high + atr_band
-            else:
-                sl_price = price - atr_band if direction == "long" else price + atr_band
-            dist_for_tp = abs(price - sl_price)  # ECHTER Einstieg-zu-SL-Abstand, wie im Original
-
-        if direction == "long":
-            if sl_enabled:
-                st["es_sl_price"] = sl_price
-            if tp_enabled:
-                if cfg.get("es_tp_mode", "atr") == "manual":
-                    size = st.get("total_coin_size") or 0
-                    tp_manual_usd = cfg.get("es_tp_manual_usd", 5.0)
-                    dist_tp = (tp_manual_usd / size) if size > 0 else dist_for_tp
-                    st["es_tp1_price"] = price + dist_tp  # EIN Ziel, TP2/TP3 bleiben unbenutzt (None)
-                else:
-                    st["es_tp1_price"] = price + dist_for_tp * cfg.get("es_tp1_rr", 1.0)
-                    st["es_tp2_price"] = price + dist_for_tp * cfg.get("es_tp2_rr", 2.0)
-                    st["es_tp3_price"] = price + dist_for_tp * cfg.get("es_tp3_rr", 3.0)
-        else:
-            if sl_enabled:
-                st["es_sl_price"] = sl_price
-            if tp_enabled:
-                if cfg.get("es_tp_mode", "atr") == "manual":
-                    size = st.get("total_coin_size") or 0
-                    tp_manual_usd = cfg.get("es_tp_manual_usd", 5.0)
-                    dist_tp = (tp_manual_usd / size) if size > 0 else dist_for_tp
-                    st["es_tp1_price"] = price - dist_tp
-                else:
-                    st["es_tp1_price"] = price - dist_for_tp * cfg.get("es_tp1_rr", 1.0)
-                    st["es_tp2_price"] = price - dist_for_tp * cfg.get("es_tp2_rr", 2.0)
-                    st["es_tp3_price"] = price - dist_for_tp * cfg.get("es_tp3_rr", 3.0)
-
-
-async def check_es_exit(symbol, buy_signal, sell_signal, price):
-    """Ausstieg immer beim Gegen-Signal (schliesst den kompletten Rest, egal welche TP-Stufe
-    gerade aktiv ist). Gibt True zurueck, wenn gerade ein Flip-Exit passiert ist - der Aufrufer
-    nutzt das, um (falls es_reenter_on_flip aus ist, Standard) den Einstieg fuer DIESEN Bar zu
-    ueberspringen, auch wenn dasselbe Signal technisch auch eine neue Position eroeffnen wuerde.
-    So wird auf ein wirklich NEUES Signal gewartet, statt sofort in die Gegenrichtung zu drehen."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is None or price is None:
-        return False
-    if st["position"] == "long" and sell_signal:
-        debug_log(f"🚪 [{symbol}] ELTE Smart Exit: LONG @ {price} (Sell-Signal)")
-        await execute_exit(symbol, price, "ES-FLIP-EXIT")
-        _es_reset_state(st)
-        return True
-    elif st["position"] == "short" and buy_signal:
-        debug_log(f"🚪 [{symbol}] ELTE Smart Exit: SHORT @ {price} (Buy-Signal)")
-        await execute_exit(symbol, price, "ES-FLIP-EXIT")
-        _es_reset_state(st)
-        return True
-    return False
-
-
-async def es_poll_loop(symbol):
-    """ELTE Smart (portiert aus dem gleichnamigen Pine-v5-Indikator, nur 'Normal'-Modus + Auto-
-    Sensitivity) - SuperTrend(ohlc4) mit automatisch aus der Marktvolatilitaet abgeleiteter
-    Sensitivity (siehe compute_es_auto_sensitivity), reiner Crossover-Trigger ohne Zusatzfilter.
-    TP1(50%)->Break-Even, TP2(50% vom Rest)->SL auf TP1, TP3(Rest) - alles ATR-basiert
-    (Risiko-ATR-Periode x Risiko-Multiplikator), Ausstieg sonst immer beim Gegen-Signal."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "elte_smart" and cfg["bot_active"]:
-                resolution = cfg["es_resolution"]
-                atr_period = cfg["es_atr_period"]
-                risk_atr_period = cfg.get("es_risk_atr_period", 14)
-                vol_period = cfg.get("es_vol_period", 10)
-                vol_ma_len = cfg.get("es_vol_ma_len", 55)
-                min_needed = max(atr_period, risk_atr_period, vol_ma_len + vol_period) + 5
-                needed_bars = min(1000, max(min_needed * 2, 200))
-                st = b["state"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    signal_key = closed_ts[-1]
-                    is_new_candle = last_processed_ts != signal_key
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-
-                    if cfg.get("es_auto_sensitivity", True):
-                        sensitivity = compute_es_auto_sensitivity(closed_c, vol_period, vol_ma_len)
-                    else:
-                        sensitivity = cfg.get("es_sensitivity", 3.0)
-                    st_line, direction = compute_elte_supertrend(closed_o, closed_h, closed_l, closed_c, sensitivity, atr_period)
-                    risk_atr_series = compute_atr(closed_h, closed_l, closed_c, risk_atr_period)
-
-                    keep = min_needed + 5
-                    st["es_opens"] = closed_o[-keep:]
-                    st["es_highs"] = closed_h[-keep:]
-                    st["es_lows"] = closed_l[-keep:]
-                    st["es_closes"] = closed_c[-keep:]
-
-                    invert = cfg.get("es_invert_direction", False)
-                    st["es_direction"] = direction[-1] * (-1 if invert else 1)
-                    st["es_sensitivity_last"] = sensitivity[-1] if isinstance(sensitivity, list) else sensitivity
-                    st["es_risk_atr_last"] = risk_atr_series[-1]
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] ELTE Smart aktiv: Preis={closed_c[-1]}, Sensitivity={round(st['es_sensitivity_last'],2)}, "
-                                  f"Risk-ATR={round(risk_atr_series[-1],4)}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    # Nachhol-Mechanismus: normalerweise ist zwischen zwei 5-Sekunden-Polls
-                    # hoechstens EINE neue Kerze fertig geworden - aber bei kurzen Aufloesungen
-                    # (10s/15s) und vielen gleichzeitig laufenden Coins/Strategien im selben
-                    # Event-Loop kann der Poll-Loop mal kurz hinterherhinken. Wuerde man dann nur
-                    # die JEWEILS NEUESTE Kerze pruefen, gingen alle dazwischenliegenden Kerzen
-                    # (und moegliche Signale darauf) fuer immer verloren - das erklaerte den
-                    # beobachteten Unterschied zwischen Live (wenige Trades) und Backtest (viele
-                    # Trades) fuer denselben Zeitraum, da der Backtest jede Kerze einzeln abarbeitet.
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]  # alter Zeitstempel aus dem Fenster gefallen
-
-                    for idx in new_indices:
-                        if idx < 1:
-                            continue
-                        buy_i = closed_c[idx - 1] <= st_line[idx - 1] and closed_c[idx] > st_line[idx]
-                        sell_i = closed_c[idx - 1] >= st_line[idx - 1] and closed_c[idx] < st_line[idx]
-                        if invert:
-                            buy_i, sell_i = sell_i, buy_i
-                        # Bei der neuesten Kerze den aktuellen Live-Preis nutzen (praeziser),
-                        # bei nachtraeglich aufgeholten (bereits vergangenen) Kerzen deren
-                        # eigenen Schlusskurs - der Live-Preis hat sich ja laengst weiterbewegt.
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        just_flipped = False
-                        if cfg.get("es_exit_trigger", "candle_close") == "candle_close":
-                            just_flipped = await check_es_exit(symbol, buy_i, sell_i, price_i)
-                        if cfg.get("es_entry_trigger", "candle_close") == "candle_close":
-                            if not just_flipped or cfg.get("es_reenter_on_flip", False):
-                                await check_es_entry(symbol, buy_i, sell_i, price_i, risk_atr_series[idx], signal_low=closed_l[idx], signal_high=closed_h[idx])
-
-                    await check_es_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] ELTE Smart wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] ELTE Smart wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] ELTE-Smart-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def compute_smma_series(values, length):
-    """Smoothed Moving Average (Pine f_smma) - Startwert ist der einfache SMA der ersten
-    `length` Werte, danach rekursiv smma[i] = (smma[i-1]*(length-1) + value[i]) / length.
-    Wird nur fuer den optionalen 'Strict'-Filter des Engulfing-Patterns gebraucht (MA1/MA4)."""
-    n = len(values)
-    out = [None] * n
-    if n < length:
-        return out
-    out[length - 1] = sum(values[:length]) / length
-    for i in range(length, n):
-        out[i] = (out[i - 1] * (length - 1) + values[i]) / length
-    return out
-
-
-def compute_three_line_strike(opens, closes, rsi=None, strict=True):
-    """3 Line Strike (portiert aus dem TMA-Overlay-Pine-Script): bullSig = 3 rote Kerzen in Folge,
-    danach eine gruene Kerze die ueber das Open der 1. der 3 roten Kerzen schliesst (bearSig
-    spiegelverkehrt). Im 'Strict'-Modus zusaetzlich wie im Pine-Script: RSI(14) muss zur
-    Signalrichtung passen (bullisch nur wenn RSI > 50, bearisch nur wenn RSI < 50) - das raw
-    Muster feuert sonst auf kurzen Zeitrahmen viel zu oft/zu ungefiltert."""
-    n = len(closes)
-    bull = [False] * n
-    bear = [False] * n
-    for i in range(3, n):
-        bull_raw = (closes[i - 3] < opens[i - 3] and closes[i - 2] < opens[i - 2]
-                    and closes[i - 1] < opens[i - 1] and closes[i] > opens[i - 1])
-        bear_raw = (closes[i - 3] > opens[i - 3] and closes[i - 2] > opens[i - 2]
-                    and closes[i - 1] > opens[i - 1] and closes[i] < opens[i - 1])
-        if strict and rsi is not None and rsi[i] is not None:
-            bull[i] = bull_raw and rsi[i] > 50
-            bear[i] = bear_raw and rsi[i] < 50
-        elif strict:
-            continue  # RSI noch nicht verfuegbar (Warmup) -> kein Signal
-        else:
-            bull[i] = bull_raw
-            bear[i] = bear_raw
-    return bull, bear
-
-
-def compute_engulfing(opens, closes, ma1=None, ma4=None, strict=True):
-    """Engulfing ('Big A$$ Candles', portiert aus dem TMA-Overlay-Pine-Script). Im 'Strict'-Modus
-    zusaetzlich verlangt: Schlusskurs zwischen MA1(21, SMMA) und MA4(200, SMMA) - genau wie im
-    Original (typeofMA1-Default war SMMA, hier fest so uebernommen statt aller 9 waehlbaren
-    MA-Typen aus dem Original, um den Umfang nicht zu sprengen)."""
-    n = len(closes)
-    bull = [False] * n
-    bear = [False] * n
-    for i in range(1, n):
-        open_cur, close_cur = opens[i], closes[i]
-        open_prev, close_prev = opens[i - 1], closes[i - 1]
-        base_bull = open_cur <= close_prev and open_cur < open_prev and close_cur > open_prev
-        base_bear = open_cur >= close_prev and open_cur > open_prev and close_cur < open_prev
-        if strict:
-            if ma1 is None or ma4 is None or ma1[i] is None or ma4[i] is None:
-                continue
-            bull[i] = base_bull and close_cur < ma1[i] and close_cur > ma4[i]
-            bear[i] = base_bear and close_cur > ma1[i] and close_cur < ma4[i]
-        else:
-            bull[i] = base_bull
-            bear[i] = base_bear
-    return bull, bear
-
-
-def compute_cp_signals(opens, highs, lows, closes, cfg):
-    """Kombiniert die gewaehlte(n) Signalquelle(n) (cp_signal_source: three_line_strike /
-    engulfing / both) zu einem gemeinsamen Buy/Sell-Signal-Array."""
-    source = cfg.get("cp_signal_source", "three_line_strike")
-    n = len(closes)
-    bull = [False] * n
-    bear = [False] * n
-    if source in ("three_line_strike", "both"):
-        tls_strict = cfg.get("cp_three_line_strict", True)
-        rsi = compute_rsi(closes, 14) if tls_strict else None
-        b1, s1 = compute_three_line_strike(opens, closes, rsi=rsi, strict=tls_strict)
-        bull = [a or b for a, b in zip(bull, b1)]
-        bear = [a or b for a, b in zip(bear, s1)]
-    if source in ("engulfing", "both"):
-        strict = cfg.get("cp_engulfing_strict", True)
-        ma1 = compute_smma_series(closes, 21) if strict else None
-        ma4 = compute_smma_series(closes, 200) if strict else None
-        b2, s2 = compute_engulfing(opens, closes, ma1, ma4, strict)
-        bull = [a or b for a, b in zip(bull, b2)]
-        bear = [a or b for a, b in zip(bear, s2)]
-    return bull, bear
-
-
-def _cp_reset_state(st):
-    st["cp_sl_price"] = None
-    st["cp_tp_price"] = None
-    st["cp_breakeven_done"] = False
-
-
-async def check_cp_sl_tp(symbol, price):
-    """SL/TP je einzeln (ATR-basiert ODER fester $-Betrag, siehe check_cp_entry) plus optionaler
-    ATR-Breakeven: sobald sich der Kurs um cp_breakeven_trigger_mult x Risiko-ATR in die richtige
-    Richtung bewegt hat, wandert der SL auf den Einstiegspreis (wie bei 'The Phoenix', dort fest
-    0.5x - hier einstellbar). Verbessert den SL nur, verschlechtert ihn nie."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    if cfg.get("cp_breakeven_enabled", True) and not st.get("cp_breakeven_done") and st.get("cp_risk_atr_last") is not None:
-        entry = st["avg_entry_price"]
-        trigger_dist = st["cp_risk_atr_last"] * cfg.get("cp_breakeven_trigger_mult", 0.5)
-        moved = (price - entry) if pos == "long" else (entry - price)
-        if trigger_dist > 0 and moved >= trigger_dist:
-            current_sl = st.get("cp_sl_price")
-            if current_sl is None or (pos == "long" and entry > current_sl) or (pos == "short" and entry < current_sl):
-                st["cp_sl_price"] = entry
-                debug_log(f"📡 [{symbol}] Candle-Patterns Breakeven ausgelöst - SL auf Einstieg ({round(entry,4)}) gesetzt")
-            st["cp_breakeven_done"] = True
-
-    sl_price = st.get("cp_sl_price")
-    tp_price = st.get("cp_tp_price")
-    if sl_price is None and tp_price is None:
-        return
-    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
-    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
-    if hit_sl:
-        reason = "BREAKEVEN" if st.get("cp_breakeven_done") and abs(sl_price - st["avg_entry_price"]) < 1e-9 else "SL"
-        debug_log(f"🚪 [{symbol}] Candle-Patterns {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, reason)
-        if reason == "SL":
-            st["cp_sl_cooldown_until"] = time.time() + cfg.get("cp_sl_cooldown_seconds", 30)
-        _cp_reset_state(st)
-    elif hit_tp:
-        debug_log(f"🚪 [{symbol}] Candle-Patterns TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-        await execute_exit(symbol, price, "TP")
-        _cp_reset_state(st)
-
-
-async def check_cp_entry(symbol, buy_signal, sell_signal, price, risk_atr_now):
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is not None or price is None:
-        return
-    if time.time() < st.get("cp_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("cp_direction_mode", "both")
-    if direction_mode == "long_only":
-        sell_signal = False
-    elif direction_mode == "short_only":
-        buy_signal = False
-    if not (buy_signal or sell_signal):
-        return
-    direction = "long" if buy_signal else "short"
-    debug_log(f"📡 [{symbol}] Candle-Patterns Signal: {direction.upper()} @ {price}")
-    await execute_entry(symbol, direction, price, is_add_on=False)
-    if st["position"] is None:
-        return
-    _cp_reset_state(st)
-    st["cp_risk_atr_last"] = risk_atr_now
-
-    sl_enabled = cfg.get("cp_sl_enabled", True)
-    tp_enabled = cfg.get("cp_tp_enabled", True)
-    if not sl_enabled and not tp_enabled:
-        return  # reines Flip-System - keine SL-/TP-Preise setzen
-    if risk_atr_now is None:
-        return
-
-    size = st.get("total_coin_size") or 0
-    atr_band = risk_atr_now * cfg.get("cp_risk_mult", 1.5)
-    dist_for_tp = atr_band
-    if sl_enabled:
-        if cfg.get("cp_sl_mode", "atr") == "manual":
-            manual_usd = cfg.get("cp_sl_manual_usd", 5.0)
-            dist_sl = (manual_usd / size) if size > 0 else atr_band
-            dist_for_tp = dist_sl  # TP-Basis folgt dem manuellen SL-Abstand, wie bei ELTE Smart
-        else:
-            dist_sl = atr_band
-        st["cp_sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
-    if tp_enabled:
-        if cfg.get("cp_tp_mode", "atr") == "manual":
-            manual_usd = cfg.get("cp_tp_manual_usd", 5.0)
-            dist_tp = (manual_usd / size) if size > 0 else dist_for_tp
-        else:
-            dist_tp = dist_for_tp * cfg.get("cp_tp_rr", 1.0)
-        st["cp_tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
-
-
-async def check_cp_exit(symbol, buy_signal, sell_signal, price):
-    """Optionaler Flip-Exit beim Gegen-Signal (cp_flip_exit_enabled, Standard An). Gibt True
-    zurueck wenn gerade geflippt wurde, damit derselbe Bar nicht sofort wieder einen Einstieg
-    ausloest."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is None or price is None or not cfg.get("cp_flip_exit_enabled", True):
-        return False
-    if st["position"] == "long" and sell_signal:
-        debug_log(f"🚪 [{symbol}] Candle-Patterns Exit: LONG @ {price} (Gegen-Signal)")
-        await execute_exit(symbol, price, "CP-FLIP-EXIT")
-        _cp_reset_state(st)
-        return True
-    elif st["position"] == "short" and buy_signal:
-        debug_log(f"🚪 [{symbol}] Candle-Patterns Exit: SHORT @ {price} (Gegen-Signal)")
-        await execute_exit(symbol, price, "CP-FLIP-EXIT")
-        _cp_reset_state(st)
-        return True
-    return False
-
-
-async def cp_poll_loop(symbol):
-    """Candle-Patterns (3 Line Strike / Engulfing, portiert aus dem TMA-Overlay-Pine-Script) als
-    eigenstaendige Einstiegs-Strategie, Risk-Management-Rahmen 1:1 nach dem Vorbild von ELTE
-    Smart (SL/TP je einzeln ATR-basiert ODER fester $-Betrag, Cooldown nach SL) plus einem
-    ATR-basierten Breakeven (wie bei 'The Phoenix'). Einstieg/Ausstieg immer bei Kerzenschluss
-    (kein Tick-Trigger, anders als bei Diamond Algo/ELTE Smart - Candle-Patterns brauchen per
-    Definition eine abgeschlossene Kerze)."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "candle_patterns" and cfg["bot_active"]:
-                resolution = cfg.get("cp_resolution", "5m")
-                risk_atr_period = cfg.get("cp_risk_atr_period", 14)
-                source = cfg.get("cp_signal_source", "three_line_strike")
-                needs_ma = source in ("engulfing", "both") and cfg.get("cp_engulfing_strict", True)
-                needs_rsi = source in ("three_line_strike", "both") and cfg.get("cp_three_line_strict", True)
-                min_needed = max(risk_atr_period, 14 if needs_rsi else 3, 200 if needs_ma else 3) + 5
-                needed_bars = min(1000, max(min_needed * 2, 220))
-                st = b["state"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    bull, bear = compute_cp_signals(closed_o, closed_h, closed_l, closed_c, cfg)
-                    risk_atr_series = compute_atr(closed_h, closed_l, closed_c, risk_atr_period)
-
-                    keep = min_needed + 5
-                    st["cp_opens"] = closed_o[-keep:]
-                    st["cp_highs"] = closed_h[-keep:]
-                    st["cp_lows"] = closed_l[-keep:]
-                    st["cp_closes"] = closed_c[-keep:]
-                    st["cp_risk_atr_last"] = risk_atr_series[-1]
-                    st["cp_last_signal"] = "long" if bull[-1] else ("short" if bear[-1] else st.get("cp_last_signal"))
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] Candle-Patterns aktiv: Preis={closed_c[-1]}, Quelle={source}, "
-                                  f"Risk-ATR={round(risk_atr_series[-1] or 0,4)}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 3:
-                            continue
-                        buy_i, sell_i = bull[idx], bear[idx]
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        just_flipped = await check_cp_exit(symbol, buy_i, sell_i, price_i)
-                        if not just_flipped:
-                            await check_cp_entry(symbol, buy_i, sell_i, price_i, risk_atr_series[idx])
-
-                    await check_cp_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] Candle-Patterns wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] Candle-Patterns wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Candle-Patterns-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def compute_wpr(highs, lows, closes, period):
-    """Williams %R (Pine's ta.wpr): -100 bis 0, misst Abstand des Schlusskurses vom
-    Hoch-/Tief-Bereich der letzten `period` Kerzen."""
-    n = len(closes)
-    out = [-50.0] * n
-    for i in range(n):
-        start = max(0, i - period + 1)
-        hh = max(highs[start:i + 1])
-        ll = min(lows[start:i + 1])
-        out[i] = -50.0 if hh == ll else -100 * (hh - closes[i]) / (hh - ll)
-    return out
-
-
-def compute_percentrank(values, period):
-    """Perzentil-Rang (Pine's ta.percentrank): Anteil der letzten `period` Werte (VOR dem
-    aktuellen), die kleiner sind als der aktuelle Wert, in Prozent (0-100)."""
-    n = len(values)
-    out = [50.0] * n
-    for i in range(n):
-        window = values[max(0, i - period):i]
-        if not window:
-            continue
-        count = sum(1 for v in window if v < values[i])
-        out[i] = 100.0 * count / len(window)
-    return out
-
-
-def _rolling_min_max(values, window):
-    """Effizientes gleitendes Minimum/Maximum (monotone Deque, O(n) statt O(n*window)) - noetig
-    weil MO7 ein 500-Kerzen-Fenster fuer MACD-/ROC-Normierung braucht und das bei 100.000
-    Backtest-Kerzen sonst zu langsam waere."""
-    n = len(values)
-    mins = [None] * n
-    maxs = [None] * n
-    min_dq = deque()
-    max_dq = deque()
-    for i in range(n):
-        v = values[i]
-        while min_dq and values[min_dq[-1]] >= v:
-            min_dq.pop()
-        min_dq.append(i)
-        while max_dq and values[max_dq[-1]] <= v:
-            max_dq.pop()
-        max_dq.append(i)
-        while min_dq[0] <= i - window:
-            min_dq.popleft()
-        while max_dq[0] <= i - window:
-            max_dq.popleft()
-        mins[i] = values[min_dq[0]]
-        maxs[i] = values[max_dq[0]]
-    return mins, maxs
-
-
-def compute_mo7_series_novolume(highs, lows, closes, cfg):
-    """Wie compute_mo7_series, aber OHNE den MFI-Bestandteil (Mittel aus 6 statt 7 Komponenten) -
-    fuer die Sekunden-Zeitrahmen im Scalp-Board, deren Kerzen-Puffer (siehe get_seconds_candles/
-    binance_1s_poll_loop) kein Volumen mitfuehrt. Leicht ungenauer als das Original, aber fuer die
-    rein manuelle Entscheidungshilfe im Scalp-Board ausreichend."""
-    n = len(closes)
-    rsi = compute_rsi(closes, cfg.get("mo7_rsi_len", 14))
-    stoch_k, _ = compute_stochastic(highs, lows, closes, cfg.get("mo7_stoch_len", 14), 1, 1)
-    wpr_raw = compute_wpr(highs, lows, closes, cfg.get("mo7_wpr_len", 14))
-    wpr_val = [100 + w for w in wpr_raw]
-    macd_line, _ = compute_macd_line_and_signal(closes, cfg.get("mo7_macd_fast", 12), cfg.get("mo7_macd_slow", 26), 9)
-    macd_mins, macd_maxs = _rolling_min_max(macd_line, 500)
-    macd_norm = [50.0 if macd_maxs[i] == macd_mins[i] else (macd_line[i] - macd_mins[i]) / (macd_maxs[i] - macd_mins[i]) * 100 for i in range(n)]
-    roc = [0.0] * n
-    for i in range(1, n):
-        roc[i] = (closes[i] - closes[i - 1]) / closes[i - 1] * 100 if closes[i - 1] != 0 else 0.0
-    roc_mins, roc_maxs = _rolling_min_max(roc, 500)
-    roc_norm = [50.0 if roc_maxs[i] == roc_mins[i] else (roc[i] - roc_mins[i]) / (roc_maxs[i] - roc_mins[i]) * 100 for i in range(n)]
-    pr = compute_percentrank(closes, 100)
-    return [(rsi[i] + stoch_k[i] + wpr_val[i] + macd_norm[i] + roc_norm[i] + pr[i]) / 6 for i in range(n)]
-
-
-def compute_mo7_series(highs, lows, closes, volumes, cfg):
-    """MO7-Composite-Score (portiert aus dem 'MO7 Buy/Sell Signal'-Pine-Script): Mittelwert aus
-    RSI, Stochastic %K, Williams %R (normiert 0-100), MFI, MACD-Linie (normiert 0-100 ueber ein
-    500-Kerzen-Fenster), ROC (normiert 0-100 ueber ein 500-Kerzen-Fenster) und Percent-Rank(100).
-    Ergebnis 0-100, wie im Original."""
-    n = len(closes)
-    rsi = compute_rsi(closes, cfg.get("mo7_rsi_len", 14))
-    stoch_k, _ = compute_stochastic(highs, lows, closes, cfg.get("mo7_stoch_len", 14), 1, 1)
-    wpr_raw = compute_wpr(highs, lows, closes, cfg.get("mo7_wpr_len", 14))
-    wpr_val = [100 + w for w in wpr_raw]
-    mfi = compute_mfi(highs, lows, closes, volumes, cfg.get("mo7_mfi_len", 14))
-    macd_line, _ = compute_macd_line_and_signal(closes, cfg.get("mo7_macd_fast", 12), cfg.get("mo7_macd_slow", 26), 9)
-    macd_mins, macd_maxs = _rolling_min_max(macd_line, 500)
-    macd_norm = [50.0 if macd_maxs[i] == macd_mins[i] else (macd_line[i] - macd_mins[i]) / (macd_maxs[i] - macd_mins[i]) * 100 for i in range(n)]
-    roc = [0.0] * n
-    for i in range(1, n):
-        roc[i] = (closes[i] - closes[i - 1]) / closes[i - 1] * 100 if closes[i - 1] != 0 else 0.0
-    roc_mins, roc_maxs = _rolling_min_max(roc, 500)
-    roc_norm = [50.0 if roc_maxs[i] == roc_mins[i] else (roc[i] - roc_mins[i]) / (roc_maxs[i] - roc_mins[i]) * 100 for i in range(n)]
-    pr = compute_percentrank(closes, 100)
-
-    return [(rsi[i] + stoch_k[i] + wpr_val[i] + mfi[i] + macd_norm[i] + roc_norm[i] + pr[i]) / 7 for i in range(n)]
-
-
-def compute_mo7_signals(mo7, cfg):
-    """Drei waehlbare Einstiegsmodi (mo7_entry_mode):
-    - 'threshold_cross': Einstieg nur beim UEBERSCHREITEN der Schwelle (wie das Alert-Cooldown im
-      Original), nicht bei jeder Kerze innerhalb der Zone -> BUY wenn MO7 gerade unter
-      mo7_buy_threshold faellt, SELL wenn gerade ueber mo7_sell_threshold steigt.
-    - 'five_candle_sum': eigene Idee - Summe der letzten 5 MO7-Werte < mo7_sum_low (stark
-      ueberverkauft ueber mehrere Kerzen hinweg) -> Long, > mo7_sum_high (stark ueberkauft) -> Short.
-    - 'trend_state': eigene Idee - MO7 als durchgehender Trend-Regime-Zustand statt Einzelsignal:
-      ueber der Schwelle (Default 55) = Uptrend-Zustand -> Long, darunter = Downtrend-Zustand ->
-      Short. Anders als bei den anderen Modi ist das NICHT nur ein Momentan-Ereignis, sondern gilt
-      fuer JEDE Kerze in der jeweiligen Zone - der Bot bleibt dadurch quasi immer entsprechend dem
-      aktuellen Regime positioniert (Flip erfolgt mit ~1 Kerze Verzoegerung: Exit auf dieser Kerze,
-      Wiedereinstieg auf der naechsten, weil check_mo7_exit/check_mo7_entry im selben Tick nicht
-      beides gleichzeitig ausloesen). Optionale Totzone (mo7_trend_deadband) um die Schwelle herum
-      reduziert Hin-und-Her bei Werten, die genau um die Schwelle pendeln."""
-    n = len(mo7)
-    bull = [False] * n
-    bear = [False] * n
-    mode = cfg.get("mo7_entry_mode", "threshold_cross")
-    if mode == "five_candle_sum":
-        sum_low = cfg.get("mo7_sum_low", 100.0)
-        sum_high = cfg.get("mo7_sum_high", 400.0)
-        for i in range(4, n):
-            window_sum = sum(mo7[i - 4:i + 1])
-            bull[i] = window_sum < sum_low
-            bear[i] = window_sum > sum_high
-    elif mode == "trend_state":
-        threshold = cfg.get("mo7_trend_threshold", 55.0)
-        deadband = cfg.get("mo7_trend_deadband", 0.0)
-        for i in range(n):
-            bull[i] = mo7[i] > threshold + deadband
-            bear[i] = mo7[i] < threshold - deadband
-    else:
-        buy_th = cfg.get("mo7_buy_threshold", 20.0)
-        sell_th = cfg.get("mo7_sell_threshold", 85.0)
-        for i in range(1, n):
-            bull[i] = mo7[i] < buy_th and mo7[i - 1] >= buy_th
-            bear[i] = mo7[i] > sell_th and mo7[i - 1] <= sell_th
-    return bull, bear
-
-
-def _mo7_reset_state(st):
-    st["mo7_sl_price"] = None
-    st["mo7_tp_price"] = None
-
-
-async def check_mo7_sl_tp(symbol, price):
-    """Nur fester SL/TP (kein ATR-Modus, wie explizit gewuenscht) - simpler als bei Candle
-    Patterns/ELTE Smart: kein Breakeven."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-    sl_price = st.get("mo7_sl_price")
-    tp_price = st.get("mo7_tp_price")
-    if sl_price is None and tp_price is None:
-        return
-    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
-    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
-    if hit_sl:
-        debug_log(f"🚪 [{symbol}] MO7 SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
-        st["mo7_sl_cooldown_until"] = time.time() + cfg.get("mo7_sl_cooldown_seconds", 30)
-        _mo7_reset_state(st)
-    elif hit_tp:
-        debug_log(f"🚪 [{symbol}] MO7 TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-        await execute_exit(symbol, price, "TP")
-        _mo7_reset_state(st)
-
-
-async def check_mo7_entry(symbol, buy_signal, sell_signal, price):
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is not None or price is None:
-        return
-    if time.time() < st.get("mo7_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("mo7_direction_mode", "both")
-    if direction_mode == "long_only":
-        sell_signal = False
-    elif direction_mode == "short_only":
-        buy_signal = False
-    if not (buy_signal or sell_signal):
-        return
-    direction = "long" if buy_signal else "short"
-    debug_log(f"📡 [{symbol}] MO7 Signal: {direction.upper()} @ {price}")
-    await execute_entry(symbol, direction, price, is_add_on=False)
-    if st["position"] is None:
-        return
-    _mo7_reset_state(st)
-    size = st.get("total_coin_size") or 0
-    if cfg.get("mo7_sl_enabled", True) and size > 0:
-        dist_sl = cfg.get("mo7_sl_manual_usd", 5.0) / size
-        st["mo7_sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
-    if cfg.get("mo7_tp_enabled", True) and size > 0:
-        dist_tp = cfg.get("mo7_tp_manual_usd", 5.0) / size
-        st["mo7_tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
-
-
-async def check_mo7_exit(symbol, buy_signal, sell_signal, price):
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or st["position"] is None or price is None or not cfg.get("mo7_flip_exit_enabled", True):
-        return False
-    if st["position"] == "long" and sell_signal:
-        debug_log(f"🚪 [{symbol}] MO7 Exit: LONG @ {price} (Gegen-Signal)")
-        await execute_exit(symbol, price, "MO7-FLIP-EXIT")
-        _mo7_reset_state(st)
-        return True
-    elif st["position"] == "short" and buy_signal:
-        debug_log(f"🚪 [{symbol}] MO7 Exit: SHORT @ {price} (Gegen-Signal)")
-        await execute_exit(symbol, price, "MO7-FLIP-EXIT")
-        _mo7_reset_state(st)
-        return True
-    return False
-
-
-async def mo7_poll_loop(symbol):
-    """MO7-Composite-Oszillator (portiert aus dem 'MO7 Buy/Sell Signal'-Pine-Script) als eigene
-    Strategie. NUR native Binance-Zeitrahmen (kein 2m/10s/15s/30s/45s/custom), weil MFI
-    Handelsvolumen braucht und das nur fuer native Intervalle unkompliziert abrufbar ist."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "mo7_scalp" and cfg["bot_active"]:
-                resolution = cfg.get("mo7_resolution", "5m")
-                needed_bars = 520  # 500er-Normierungsfenster + Puffer
-                st = b["state"]
-
-                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
-                if data:
-                    timestamps, opens, highs, lows, closes, volumes = data
-                    closed_ts, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
-                else:
-                    closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > 20:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    mo7 = compute_mo7_series(closed_h, closed_l, closed_c, closed_v, cfg)
-                    bull, bear = compute_mo7_signals(mo7, cfg)
-
-                    st["mo7_last_value"] = mo7[-1]
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] MO7 aktiv: Preis={closed_c[-1]}, MO7={round(mo7[-1],2)}, "
-                                  f"Modus={cfg.get('mo7_entry_mode')}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 4:
-                            continue
-                        buy_i, sell_i = bull[idx], bear[idx]
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        just_flipped = await check_mo7_exit(symbol, buy_i, sell_i, price_i)
-                        if not just_flipped:
-                            await check_mo7_entry(symbol, buy_i, sell_i, price_i)
-
-                    await check_mo7_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    debug_log(f"⏳ [{symbol}] MO7 wartet: keine/zu wenig Kerzen erhalten (Auflösung {resolution})")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] MO7-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def compute_ut_hull_flip_signals(buy, sell, hull_green, cfg):
-    """Bestimmt WANN geflippt wird - waehlbar (utb_flip_trigger):
-    - 'hull_color': sobald die Hull-MA-Farbe wechselt (UT-Bot-Signal wird nur fuer den
-      allerersten Einstieg gebraucht, danach entscheidet nur noch Hull).
-    - 'hull_and_signal': Hull-Farbe UND UT-Bot-Signal muessen am selben Balken beide da sein.
-    - 'opposite_signal': nur das naechste Gegen-Signal von UT-Bot zaehlt, Hull spielt beim Flip
-      keine Rolle mehr (nur beim allerersten Einstieg als Filter).
-    - 'signal_only': NUR UT-Bot Buy/Sell im Wechsel, Hull spielt ueberhaupt keine Rolle - auch
-      nicht beim Ersteinstieg (siehe check_uh_signal/_simulate_uh_trades)."""
-    trigger = cfg.get("utb_flip_trigger", "hull_color")
-    n = len(buy)
-    long_flip = [False] * n
-    short_flip = [False] * n
-    if trigger in ("opposite_signal", "signal_only"):
-        for i in range(n):
-            long_flip[i] = buy[i]
-            short_flip[i] = sell[i]
-    elif trigger == "hull_and_signal":
-        for i in range(n):
-            if hull_green[i] is None:
-                continue
-            long_flip[i] = buy[i] and hull_green[i]
-            short_flip[i] = sell[i] and not hull_green[i]
-    else:  # "hull_color"
-        for i in range(1, n):
-            if hull_green[i] is None or hull_green[i - 1] is None:
-                continue
-            long_flip[i] = hull_green[i] and not hull_green[i - 1]
-            short_flip[i] = (not hull_green[i]) and hull_green[i - 1]
-    return long_flip, short_flip
-
-
-def _uh_set_sl(st, cfg, direction, entry_price):
-    """Setzt den festen SL-Preis (fester $-Betrag, wie bei den anderen Strategien) fuer die
-    gerade eroeffnete Position - oder loescht ihn, falls SL deaktiviert/Positionsgroesse
-    unbekannt ist."""
-    if not cfg.get("utb_sl_enabled", False):
-        st["utb_sl_price"] = None
-        return
-    size = st.get("total_coin_size") or 0
-    if size <= 0:
-        st["utb_sl_price"] = None
-        return
-    dist_sl = cfg.get("utb_sl_manual_usd", 5.0) / size
-    st["utb_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
-
-
-def _uh_set_tp(st, cfg, direction, entry_price):
-    """Setzt den festen TP-Preis (fester $-Betrag, analog zu _uh_set_sl) und setzt den
-    Trailing-TP-Zustand fuer die neue Position zurueck. Fester TP und Trailing-TP sind
-    unabhaengig voneinander kombinierbar - beide koennen gleichzeitig aktiv sein, je
-    nachdem welcher zuerst ausgeloest wird."""
-    if not cfg.get("utb_tp_enabled", False):
-        st["utb_tp_price"] = None
-    else:
-        size = st.get("total_coin_size") or 0
-        if size <= 0:
-            st["utb_tp_price"] = None
-        else:
-            dist_tp = cfg.get("utb_tp_manual_usd", 10.0) / size
-            st["utb_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
-    st["utb_trail_active"] = False
-    st["utb_trail_best_price"] = entry_price
-    st["utb_trail_tp_price"] = None
-
-
-def _uh_apply_trail_tp(st, cfg, direction, entry_price, price):
-    """Trailing-TP auf Prozent-Basis (wie bei Pieki Algo's Trailing-Stop, aber als
-    Gewinn-Exit statt als nachgezogener SL): sobald der Trade um utb_trail_tp_activation_pct %
-    im Profit war, wird ein Exit-Preis im Abstand von utb_trail_tp_step_pct % zum bisher besten
-    erreichten Preis nachgezogen. Verbessert den Trailing-Exit nur, verschlechtert ihn nie."""
-    if not cfg.get("utb_trail_tp_enabled", False):
-        return
-    best = st.get("utb_trail_best_price")
-    if best is None:
-        best = entry_price
-    best = max(best, price) if direction == "long" else min(best, price)
-    st["utb_trail_best_price"] = best
-
-    activation_pct = cfg.get("utb_trail_tp_activation_pct", 0.5)
-    step_pct = cfg.get("utb_trail_tp_step_pct", 0.3)
-    profit_pct = ((best - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - best) / entry_price * 100)
-
-    if not st.get("utb_trail_active") and profit_pct >= activation_pct:
-        st["utb_trail_active"] = True
-
-    if st.get("utb_trail_active"):
-        trail_price = best * (1 - step_pct / 100) if direction == "long" else best * (1 + step_pct / 100)
-        current = st.get("utb_trail_tp_price")
-        if direction == "long":
-            st["utb_trail_tp_price"] = trail_price if current is None else max(current, trail_price)
-        else:
-            st["utb_trail_tp_price"] = trail_price if current is None else min(current, trail_price)
-
-
-async def check_uh_sl(symbol, price):
-    """Optionaler fester SL (fester $-Betrag, eingebbar). Anders als der Flip-Mechanismus geht
-    die Position bei SL-Treffer erstmal GLATT (nicht direkt in die Gegenrichtung) und wartet -
-    nach einem kurzen Cooldown - auf das naechste gueltige Ersteinstiegs-Signal, genau wie bei
-    Candle Patterns/MO7. Das durchbricht das 'immer im Markt'-Prinzip bewusst nur im
-    SL-Fall - ein Trailing-Loss soll die Position tatsaechlich beenden koennen."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    sl_price = st.get("utb_sl_price")
-    if sl_price is None:
-        return
-    pos = st["position"]
-    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-    if hit_sl:
-        debug_log(f"🚪 [{symbol}] UT-Bot+Hull SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
-        st["utb_sl_price"] = None
-        st["utb_sl_cooldown_until"] = time.time() + cfg.get("utb_sl_cooldown_seconds", 30)
-
-
-async def check_uh_tp(symbol, price):
-    """Optionaler fester TP (fester $-Betrag) UND optionaler Trailing-TP (Prozent-basiert,
-    siehe _uh_apply_trail_tp) - unabhaengig voneinander kombinierbar, es gewinnt wer zuerst
-    trifft. Wie beim SL geht die Position bei Treffer GLATT (nicht direkt in die Gegenrichtung)
-    und wartet auf das naechste gueltige Ersteinstiegs-Signal - hier bewusst OHNE Cooldown
-    (ein Gewinnmitnahme-Exit soll den naechsten Einstieg nicht kuenstlich verzoegern)."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-    entry_price = st.get("avg_entry_price")
-    if entry_price is not None:
-        _uh_apply_trail_tp(st, cfg, pos, entry_price, price)
-
-    tp_price = st.get("utb_tp_price")
-    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
-
-    trail_price = st.get("utb_trail_tp_price")
-    hit_trail = st.get("utb_trail_active") and trail_price is not None and \
-        ((pos == "long" and price <= trail_price) or (pos == "short" and price >= trail_price))
-
-    if hit_tp:
-        debug_log(f"🎯 [{symbol}] UT-Bot+Hull TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-        await execute_exit(symbol, price, "TP")
-        st["utb_tp_price"] = None
-        st["utb_trail_tp_price"] = None
-        st["utb_trail_active"] = False
-    elif hit_trail:
-        debug_log(f"🎯 [{symbol}] UT-Bot+Hull Trailing-TP: {pos.upper()} @ {price} (Nachzieh-Ziel war {round(trail_price, 4)})")
-        await execute_exit(symbol, price, "TRAIL-TP")
-        st["utb_tp_price"] = None
-        st["utb_trail_tp_price"] = None
-        st["utb_trail_active"] = False
-
-
-async def check_uh_signal(symbol, buy_i, sell_i, long_flip_i, short_flip_i, hull_green_i, price, trend_pct=None, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
-    """Immer-im-Markt-System: beim allerersten Einstieg braucht es ein echtes UT-Bot-Signal PLUS
-    passende Hull-Farbe - AUSSER im Modus 'signal_only', da zaehlt nur das UT-Bot-Signal, Hull
-    wird komplett ignoriert. Danach entscheidet nur noch der gewaehlte Flip-Trigger
-    (compute_ut_hull_flip_signals) ueber den naechsten Richtungswechsel. Bei Long-/Short-only
-    wird bei einem Gegen-Flip nicht auf die andere Seite gedreht, sondern nur glattgestellt
-    (echtes 'immer im Markt' ergibt bei einseitiger Richtung ja keinen Sinn). Optionaler fester
-    SL (siehe check_uh_sl) unterbricht 'immer im Markt' nur im SL-Fall. Optionaler MTF-Trend%-
-    Filter (wie bei Pieki Algo), optionaler Z-Score-Filter, optionaler RSI-Regime-Filter und
-    optionaler ADX/DI-Trendfilter (alle wie bei Kerzen-DNA/Range Filter) gelten fuer JEDEN
-    Einstieg, auch beim Flip in die Gegenrichtung - unabhaengig voneinander kombinierbar."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None:
-        return
-    if time.time() < st.get("utb_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("utb_direction_mode", "both")
-    signal_only = cfg.get("utb_flip_trigger", "hull_color") == "signal_only"
-    mtf_enabled = cfg.get("utb_mtf_filter_enabled", False)
-    long_thr = cfg.get("utb_mtf_long_threshold", 0.5)
-    short_thr = cfg.get("utb_mtf_short_threshold", -0.5)
-    zscore_enabled = cfg.get("utb_zscore_filter_enabled", False)
-    rsi_enabled = cfg.get("utb_rsi_filter_enabled", False)
-    rsi_midline = cfg.get("utb_rsi_midline", 50)
-    adx_enabled = cfg.get("utb_adx_filter_enabled", False)
-    adx_threshold = cfg.get("utb_adx_threshold", 20)
-    adx_missing = adx is None or plus_di is None or minus_di is None
-    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
-    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
-    long_ok = (direction_mode != "short_only"
-               and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
-               and (not zscore_enabled or zscore is None or zscore > 0)
-               and (not rsi_enabled or rsi is None or rsi > rsi_midline)
-               and adx_long_ok)
-    short_ok = (direction_mode != "long_only"
-                and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
-                and (not zscore_enabled or zscore is None or zscore < 0)
-                and (not rsi_enabled or rsi is None or rsi < rsi_midline)
-                and adx_short_ok)
-    pos = st["position"]
-
-    if pos is None:
-        if signal_only:
-            if buy_i and long_ok:
-                debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg (nur Signal): LONG @ {price}")
-                await execute_entry(symbol, "long", price, is_add_on=False)
-                if st["position"] is not None:
-                    _uh_set_sl(st, cfg, "long", price)
-                    _uh_set_tp(st, cfg, "long", price)
-            elif sell_i and short_ok:
-                debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg (nur Signal): SHORT @ {price}")
-                await execute_entry(symbol, "short", price, is_add_on=False)
-                if st["position"] is not None:
-                    _uh_set_sl(st, cfg, "short", price)
-                    _uh_set_tp(st, cfg, "short", price)
-            return
-        if hull_green_i is None:
-            return
-        if buy_i and hull_green_i and long_ok:
-            debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg: LONG @ {price}")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _uh_set_sl(st, cfg, "long", price)
-                _uh_set_tp(st, cfg, "long", price)
-        elif sell_i and not hull_green_i and short_ok:
-            debug_log(f"📡 [{symbol}] UT-Bot+Hull Ersteinstieg: SHORT @ {price}")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _uh_set_sl(st, cfg, "short", price)
-                _uh_set_tp(st, cfg, "short", price)
-        return
-
-    if pos == "long" and short_flip_i:
-        if direction_mode == "long_only":
-            reason = "UTB-HULL-EXIT-DIR"
-        elif not short_ok:
-            if mtf_enabled and not (trend_pct is None or trend_pct < short_thr):
-                reason = "UTB-HULL-EXIT-MTF"
-            elif zscore_enabled and not (zscore is None or zscore < 0):
-                reason = "UTB-HULL-EXIT-ZSCORE"
-            elif rsi_enabled and not (rsi is None or rsi < rsi_midline):
-                reason = "UTB-HULL-EXIT-RSI"
-            else:
-                reason = "UTB-HULL-EXIT-ADX"
-        else:
-            reason = None
-        if reason is not None:
-            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit ({reason}): LONG @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["utb_sl_price"] = None
-            st["utb_tp_price"] = None
-            st["utb_trail_tp_price"] = None
-            st["utb_trail_active"] = False
-        else:
-            debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: LONG -> SHORT @ {price}")
-            await execute_exit(symbol, price, "UTB-HULL-FLIP")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _uh_set_sl(st, cfg, "short", price)
-                _uh_set_tp(st, cfg, "short", price)
-    elif pos == "short" and long_flip_i:
-        if direction_mode == "short_only":
-            reason = "UTB-HULL-EXIT-DIR"
-        elif not long_ok:
-            if mtf_enabled and not (trend_pct is None or trend_pct > long_thr):
-                reason = "UTB-HULL-EXIT-MTF"
-            elif zscore_enabled and not (zscore is None or zscore > 0):
-                reason = "UTB-HULL-EXIT-ZSCORE"
-            elif rsi_enabled and not (rsi is None or rsi > rsi_midline):
-                reason = "UTB-HULL-EXIT-RSI"
-            else:
-                reason = "UTB-HULL-EXIT-ADX"
-        else:
-            reason = None
-        if reason is not None:
-            debug_log(f"🚪 [{symbol}] UT-Bot+Hull Exit ({reason}): SHORT @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["utb_sl_price"] = None
-            st["utb_tp_price"] = None
-            st["utb_trail_tp_price"] = None
-            st["utb_trail_active"] = False
-        else:
-            debug_log(f"🔄 [{symbol}] UT-Bot+Hull Flip: SHORT -> LONG @ {price}")
-            await execute_exit(symbol, price, "UTB-HULL-FLIP")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _uh_set_sl(st, cfg, "long", price)
-                _uh_set_tp(st, cfg, "long", price)
-
-
-async def utb_poll_loop(symbol):
-    """UT Bot Alerts (ATR-Trailing-Stop) + Hull-MA-Filter, immer im Markt (Flip statt Exit),
-    optional mit festem SL (fester $-Betrag, siehe check_uh_sl - unterbricht 'immer im Markt'
-    nur im SL-Fall). Nutzt dieselbe Kerzenquelle/Aufloesungs-Logik wie Candle Patterns (inkl.
-    Sekunden-Aufloesungen und eigene Minuten), da hier - anders als bei MO7 - kein
-    Handelsvolumen gebraucht wird. Optionaler Sofort-Trigger (utb_instant_trigger_enabled):
-    wertet zusaetzlich die noch OFFENE, gerade laufende Kerze mit dem aktuellen Live-Preis aus
-    und feuert sofort bei einem neuen Flip, statt bis zum tatsaechlichen Kerzenschluss zu
-    warten - nur fuer normale Binance-Minuten-Aufloesungen moeglich (Sekunden-Aufloesungen
-    liefern ueber get_seconds_candles() ausschliesslich bereits abgeschlossene Buckets, es gibt
-    dort keine 'laufende' Kerze zum Anzapfen)."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "ut_bot_hull" and cfg["bot_active"]:
-                resolution = cfg.get("utb_resolution", "5m")
-                hull_period = cfg.get("utb_hull_period", 31)
-                atr_period = cfg.get("utb_atr_period", 1)
-                min_needed = max(atr_period, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 5
-                needed_bars = min(1000, max(min_needed * 2, 220))
-                st = b["state"]
-                instant_enabled = cfg.get("utb_instant_trigger_enabled", False)
-
-                forming_o = forming_h = forming_l = forming_c = forming_ts = None
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                        if instant_enabled and len(timestamps) >= 1:
-                            forming_ts, forming_o, forming_h, forming_l, forming_c = timestamps[-1], opens[-1], highs[-1], lows[-1], closes[-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    buy, sell, stop_line = compute_ut_bot(closed_o, closed_h, closed_l, closed_c, atr_period, cfg.get("utb_sensitivity", 1.0), cfg.get("utb_heikin_ashi", False))
-                    hma = compute_hull_ma(closed_c, hull_period)
-                    hull_green = [None] * len(closed_c)
-                    for i in range(1, len(closed_c)):
-                        if hma[i] is not None and hma[i - 1] is not None:
-                            hull_green[i] = hma[i] > hma[i - 1]
-                    long_flip, short_flip = compute_ut_hull_flip_signals(buy, sell, hull_green, cfg)
-
-                    st["utb_last_hull_green"] = hull_green[-1]
-
-                    mtf_fast = cfg.get("utb_mtf_fast_len", 5)
-                    mtf_slow = cfg.get("utb_mtf_slow_len", 9)
-                    mtf_atr = cfg.get("utb_mtf_atr_len", 14)
-                    active_tfs = [cfg.get(f"utb_mtf_tf{i}", "off") for i in (1, 2, 3)]
-                    active_tfs = [tf for tf in active_tfs if tf not in (None, "", "off")]
-                    tf_values = []  # letzter Trend%-Wert je aktiver Zeiteinheit - am Ende gemittelt (wie bei Pieki Algo)
-                    for tf in active_tfs:
-                        if tf == resolution:
-                            tf_h, tf_l, tf_c = closed_h, closed_l, closed_c
-                        else:
-                            mtf_needed = min(500, max(mtf_slow, mtf_atr, 5) * 3 + 20)
-                            if tf in SUB_MINUTE_RESOLUTIONS:
-                                mtf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf], mtf_needed)
-                                tf_h = mtf_local[2] if mtf_local else None
-                                tf_l = mtf_local[3] if mtf_local else None
-                                tf_c = mtf_local[4] if mtf_local else None
-                            else:
-                                mtf_data = await fetch_candles_binance_multi(symbol, tf, count_back=mtf_needed, market_type=cfg.get("binance_market_type", "spot"))
-                                if mtf_data:
-                                    _, _, tf_h, tf_l, tf_c = mtf_data
-                                    tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
-                                else:
-                                    tf_h = tf_l = tf_c = None
-                        if tf_c and len(tf_c) > max(mtf_slow, mtf_atr):
-                            tf_trend = compute_pk_trend_percent(tf_h, tf_l, tf_c, mtf_fast, mtf_slow, mtf_atr)
-                            tf_values.append(tf_trend[-1])
-                    if tf_values:
-                        trend_now = sum(tf_values) / len(tf_values)
-                    else:
-                        trend_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow, mtf_atr)[-1]
-                    st["utb_trend_pct_last"] = trend_now
-
-                    zs_lookback = cfg.get("utb_zscore_lookback", 20)
-                    zs_smooth = cfg.get("utb_zscore_smooth", 3)
-                    zscore_resolution = cfg.get("utb_zscore_resolution", "same")
-                    if not cfg.get("utb_zscore_filter_enabled", False):
-                        zscore_series = None
-                    elif zscore_resolution in (None, "", "same") or zscore_resolution == resolution:
-                        zscore_series = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)
-                    else:
-                        zs_needed = min(500, max(zs_lookback, zs_smooth, 5) * 3 + 20)
-                        if zscore_resolution in SUB_MINUTE_RESOLUTIONS:
-                            zs_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[zscore_resolution], zs_needed)
-                            zs_c = zs_local[4] if zs_local else None
-                        else:
-                            zs_data = await fetch_candles_binance_multi(symbol, zscore_resolution, count_back=zs_needed, market_type=cfg.get("binance_market_type", "spot"))
-                            zs_c = zs_data[4][:-1] if zs_data else None
-                        if zs_c and len(zs_c) > max(zs_lookback, zs_smooth):
-                            zscore_now = compute_rolling_zscore(zs_c, zs_lookback, zs_smooth)[-1]
-                        else:
-                            zscore_now = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)[-1]
-                        zscore_series = [zscore_now] * len(closed_c)
-
-                    rsi_enabled = cfg.get("utb_rsi_filter_enabled", False)
-                    rsi_series = compute_rsi(closed_c, cfg.get("utb_rsi_length", 14)) if rsi_enabled else None
-
-                    adx_enabled = cfg.get("utb_adx_filter_enabled", False)
-                    if adx_enabled:
-                        adx_series, plus_di_series, minus_di_series = compute_adx(closed_h, closed_l, closed_c, cfg.get("utb_adx_length", 14))
-                    else:
-                        adx_series, plus_di_series, minus_di_series = None, None, None
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        rsi_log = f", RSI={round(rsi_series[-1],1)}" if rsi_series else ""
-                        adx_log = f", ADX={round(adx_series[-1],1)} (+DI={round(plus_di_series[-1],1)}/-DI={round(minus_di_series[-1],1)})" if adx_series else ""
-                        debug_log(f"💓 [{symbol}] UT-Bot+Hull aktiv: Preis={closed_c[-1]}, Hull-grün={hull_green[-1]}, "
-                                  f"buy_i={buy[-1]}, sell_i={sell[-1]}, "
-                                  f"Trigger={cfg.get('utb_flip_trigger')}, Trend%={round(trend_now,2)}{rsi_log}{adx_log}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    # Sofort-Trigger: die noch offene Kerze (forming_*) wird mit dem aktuellen
-                    # Live-Preis als vorlaeufigem Schlusskurs an die geschlossene Historie
-                    # angehaengt und die komplette Signal-Kette darauf NEU berechnet. Feuert
-                    # der letzte (noch offene) Balken dabei einen frischen Flip, wird SOFORT
-                    # ausgefuehrt statt bis zum echten Kerzenschluss zu warten. utb_instant_fired_ts
-                    # merkt sich die Kerze, damit beim spaeteren echten Kerzenschluss nicht ein
-                    # zweites Mal fuer denselben Balken ausgefuehrt wird.
-                    if instant_enabled and forming_ts is not None and forming_ts != st.get("utb_instant_fired_ts"):
-                        live_price = price
-                        live_o = closed_o + [forming_o]
-                        live_h = closed_h + [max(forming_h, live_price)]
-                        live_l = closed_l + [min(forming_l, live_price)]
-                        live_c = closed_c + [live_price]
-                        buy2, sell2, _ = compute_ut_bot(live_o, live_h, live_l, live_c, atr_period, cfg.get("utb_sensitivity", 1.0), cfg.get("utb_heikin_ashi", False))
-                        hma2 = compute_hull_ma(live_c, hull_period)
-                        hull_green2 = [None] * len(live_c)
-                        for i in range(1, len(live_c)):
-                            if hma2[i] is not None and hma2[i - 1] is not None:
-                                hull_green2[i] = hma2[i] > hma2[i - 1]
-                        long_flip2, short_flip2 = compute_ut_hull_flip_signals(buy2, sell2, hull_green2, cfg)
-                        if long_flip2[-1] or short_flip2[-1]:
-                            debug_log(f"⚡ [{symbol}] UT-Bot+Hull Sofort-Trigger: neuer Flip in der laufenden Kerze erkannt @ {live_price}")
-                            st["utb_instant_fired_ts"] = forming_ts
-                            zs_i = zscore_series[-1] if zscore_series else None
-                            rsi_i2 = rsi_series[-1] if rsi_series else None
-                            adx_i2 = adx_series[-1] if adx_series else None
-                            plus_di_i2 = plus_di_series[-1] if plus_di_series else None
-                            minus_di_i2 = minus_di_series[-1] if minus_di_series else None
-                            await check_uh_signal(symbol, buy2[-1], sell2[-1], long_flip2[-1], short_flip2[-1], hull_green2[-1], live_price, trend_now, zs_i, rsi_i2, adx_i2, plus_di_i2, minus_di_i2)
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 2:
-                            continue
-                        ts_i = closed_ts[idx]
-                        last_processed_ts = ts_i
-                        if ts_i == st.get("utb_instant_fired_ts"):
-                            continue  # bereits per Sofort-Trigger ausgefuehrt, als die Kerze noch offen war
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        rsi_i = rsi_series[idx] if rsi_series else None
-                        adx_i = adx_series[idx] if adx_series else None
-                        plus_di_i = plus_di_series[idx] if plus_di_series else None
-                        minus_di_i = minus_di_series[idx] if minus_di_series else None
-                        zs_i = zscore_series[idx] if zscore_series else None
-                        await check_uh_signal(symbol, buy[idx], sell[idx], long_flip[idx], short_flip[idx], hull_green[idx], price_i, trend_now, zs_i, rsi_i, adx_i, plus_di_i, minus_di_i)
-
-                    await check_uh_sl(symbol, price)
-                    await check_uh_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] UT-Bot+Hull wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] UT-Bot+Hull wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] UT-Bot+Hull-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def compute_wavetrend(highs, lows, closes, chlen=9, avg=12, malen=3):
-    """WaveTrend-Oszillator (Kernbaustein von 'Cipher B'): esa=EMA(hlc3, chlen), de=EMA(|hlc3-esa|,
-    chlen), ci=(hlc3-esa)/(0.015*de), wt1=EMA(ci, avg), wt2=SMA(wt1, malen). Gibt (wt1, wt2)
-    zurueck (beide ungefaehr im Bereich -100..100, Nulllinien-Cross = Momentum-Wechsel)."""
-    n = len(closes)
-    hlc3 = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n)]
-    esa = _ema_series(hlc3, chlen)
-    de = _ema_series([abs(hlc3[i] - esa[i]) for i in range(n)], chlen)
-    ci = [(hlc3[i] - esa[i]) / (0.015 * de[i]) if de[i] else 0.0 for i in range(n)]
-    wt1 = _ema_series(ci, avg)
-    wt2 = _sma_series(wt1, malen)
-    return wt1, wt2
-
-
-def compute_wtc_signals(highs, lows, closes, cfg):
-    """WaveTrend-Cross-Signal (die gruenen/roten Punkte aus 'Cipher B'): wt1 kreuzt wt2. Im
-    Zonen-Modus (wtc_require_zone, Standard An) zaehlt der Cross nur, wenn er im
-    ueberverkauften (bullisch) bzw. ueberkauften (bearisch) Bereich passiert - wie im
-    Original-Script (buySignal/sellSignal). Ohne Zonen-Filter zaehlt jeder Cross."""
-    chlen = cfg.get("wtc_channel_len", 9)
-    avg = cfg.get("wtc_average_len", 12)
-    malen = cfg.get("wtc_ma_len", 3)
-    os_level = cfg.get("wtc_os_level", -53)
-    ob_level = cfg.get("wtc_ob_level", 53)
-    require_zone = cfg.get("wtc_require_zone", True)
-
-    wt1, wt2 = compute_wavetrend(highs, lows, closes, chlen, avg, malen)
-    n = len(closes)
-    bull = [False] * n
-    bear = [False] * n
-    for i in range(1, n):
-        diff_now = wt1[i] - wt2[i]
-        diff_prev = wt1[i - 1] - wt2[i - 1]
-        crossed = (diff_prev <= 0 and diff_now > 0) or (diff_prev >= 0 and diff_now < 0)
-        if not crossed:
-            continue
-        cross_up = diff_now > 0
-        if require_zone:
-            bull[i] = cross_up and wt2[i] <= os_level
-            bear[i] = (not cross_up) and wt2[i] >= ob_level
-        else:
-            bull[i] = cross_up
-            bear[i] = not cross_up
-    return bull, bear, wt1, wt2
-
-
-def _wtc_reset_state(st):
-    st["wtc_sl_price"] = None
-    st["wtc_tp_price"] = None
-
-
-def _wtc_set_sl_tp(st, cfg, direction, entry_price):
-    size = st.get("total_coin_size") or 0
-    if cfg.get("wtc_sl_enabled", True) and size > 0:
-        dist_sl = cfg.get("wtc_sl_manual_usd", 5.0) / size
-        st["wtc_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
-    else:
-        st["wtc_sl_price"] = None
-    if cfg.get("wtc_tp_enabled", True) and size > 0:
-        dist_tp = cfg.get("wtc_tp_manual_usd", 5.0) / size
-        st["wtc_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
-    else:
-        st["wtc_tp_price"] = None
-
-
-async def check_wtc_sl_tp(symbol, price):
-    """Fester SL/TP (fester $-Betrag, kein ATR-Modus - wie gewuenscht). Bei SL geht die Position
-    glatt + Cooldown, bei TP ebenso (auch im 'immer im Markt'-Modus - ein SL/TP-Treffer soll die
-    Position wirklich beenden koennen, genau wie beim optionalen SL bei UT Bot + Hull)."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-    sl_price = st.get("wtc_sl_price")
-    tp_price = st.get("wtc_tp_price")
-    if sl_price is None and tp_price is None:
-        return
-    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
-    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
-    if hit_sl:
-        debug_log(f"🚪 [{symbol}] WaveTrend-Cross SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
-        st["wtc_sl_cooldown_until"] = time.time() + cfg.get("wtc_sl_cooldown_seconds", 30)
-        _wtc_reset_state(st)
-    elif hit_tp:
-        debug_log(f"🚪 [{symbol}] WaveTrend-Cross TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-        await execute_exit(symbol, price, "TP")
-        _wtc_reset_state(st)
-
-
-async def check_wtc_signal(symbol, buy_i, sell_i, price):
-    """Zwei waehlbare Betriebsarten (wtc_always_in_market):
-    - Aus (Standard): normaler Einstieg nur wenn flach, Ausstieg via festem SL/TP, optional
-      zusaetzlich sofort bei Gegen-Signal (wtc_flip_exit_enabled) - danach wieder flach, wartet
-      auf das naechste frische Signal (wie bei Candle Patterns).
-    - An: immer im Markt (wie bei UT Bot + Hull) - Buy/Sell wechseln sich ab, dreht direkt bei
-      Gegen-Signal, SL/TP unterbricht 'immer im Markt' nur im Treffer-Fall."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None:
-        return
-    if time.time() < st.get("wtc_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("wtc_direction_mode", "both")
-    always_in_market = cfg.get("wtc_always_in_market", False)
-    # BUG GEFUNDEN+GEFIXT (live beobachtet: bei long_only kam im Backtest genau EIN Trade
-    # heraus): der Richtungsfilter hat sell_i/buy_i frueher GLOBAL ausgeknipst. sell_i ist
-    # aber nicht nur das Short-EINSTIEGSsignal, sondern weiter unten auch das AUSSTIEGS-
-    # signal einer Long-Position (Flip-Exit). Bei long_only war der Ausstieg damit tot, die
-    # erste Long-Position blieb fuer immer offen - und weil der feste SL in der Praxis nie
-    # ausloest, gab es nie einen zweiten Trade. Fix: Filter NUR auf die Einstiege anwenden,
-    # der Flip-Block unten arbeitet weiter mit den ungefilterten buy_i/sell_i.
-    entry_buy = buy_i and direction_mode != "short_only"
-    entry_sell = sell_i and direction_mode != "long_only"
-    pos = st["position"]
-
-    if pos is None:
-        if not (entry_buy or entry_sell):
-            return
-        direction = "long" if entry_buy else "short"
-        debug_log(f"📡 [{symbol}] WaveTrend-Cross Signal: {direction.upper()} @ {price}")
-        await execute_entry(symbol, direction, price, is_add_on=False)
-        if st["position"] is not None:
-            _wtc_reset_state(st)
-            _wtc_set_sl_tp(st, cfg, direction, price)
-        return
-
-    if always_in_market:
-        if pos == "long" and sell_i and direction_mode != "long_only":
-            debug_log(f"🔄 [{symbol}] WaveTrend-Cross Flip: LONG -> SHORT @ {price}")
-            await execute_exit(symbol, price, "WTC-FLIP")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _wtc_reset_state(st)
-                _wtc_set_sl_tp(st, cfg, "short", price)
-        elif pos == "short" and buy_i and direction_mode != "short_only":
-            debug_log(f"🔄 [{symbol}] WaveTrend-Cross Flip: SHORT -> LONG @ {price}")
-            await execute_exit(symbol, price, "WTC-FLIP")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _wtc_reset_state(st)
-                _wtc_set_sl_tp(st, cfg, "long", price)
-        elif (pos == "long" and sell_i) or (pos == "short" and buy_i):
-            # Gegen-Signal, aber die Gegenrichtung ist per direction_mode gesperrt.
-            # Nicht drehen (das waere ein verbotener Short/Long), sondern schliessen
-            # und flach auf das naechste erlaubte Signal warten. Ohne diesen Zweig
-            # bliebe die Position bei long_only/short_only ewig offen.
-            debug_log(f"\U0001f6aa [{symbol}] WaveTrend-Cross Exit: {pos.upper()} @ {price} "
-                      f"(Gegen-Signal, Drehen durch {direction_mode} gesperrt)")
-            await execute_exit(symbol, price, "WTC-FLIP-EXIT")
-            _wtc_reset_state(st)
-    else:
-        if not cfg.get("wtc_flip_exit_enabled", True):
-            return
-        if (pos == "long" and sell_i) or (pos == "short" and buy_i):
-            debug_log(f"🚪 [{symbol}] WaveTrend-Cross Exit: {pos.upper()} @ {price} (Gegen-Signal)")
-            await execute_exit(symbol, price, "WTC-FLIP-EXIT")
-            _wtc_reset_state(st)
-
-
-async def wtc_poll_loop(symbol):
-    """WaveTrend-Cross ('Cipher B'-Kernsignal): wt1/wt2-Cross, optional nur in Ueberkauft-/
-    Ueberverkauft-Zone (wtc_require_zone), optional 'immer im Markt' mit direktem Flip
-    (wtc_always_in_market) statt normalem Einstieg/Ausstieg. Fester SL/TP (fester $-Betrag)."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "wavetrend_cross" and cfg["bot_active"]:
-                resolution = cfg.get("wtc_resolution", "5m")
-                chlen = cfg.get("wtc_channel_len", 9)
-                avg = cfg.get("wtc_average_len", 12)
-                min_needed = max(chlen, avg, 20) + 10
-                needed_bars = min(1000, max(min_needed * 2, 220))
-                st = b["state"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    bull, bear, wt1, wt2 = compute_wtc_signals(closed_h, closed_l, closed_c, cfg)
-
-                    st["wtc_last_wt1"] = wt1[-1]
-                    st["wtc_last_wt2"] = wt2[-1]
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] WaveTrend-Cross aktiv: Preis={closed_c[-1]}, wt1={round(wt1[-1],2)}, wt2={round(wt2[-1],2)}, "
-                                  f"Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 2:
-                            continue
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        await check_wtc_signal(symbol, bull[idx], bear[idx], price_i)
-
-                    await check_wtc_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] WaveTrend-Cross wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] WaveTrend-Cross wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] WaveTrend-Cross-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def _resolution_ms(resolution):
-    """Kerzenlaenge einer Zeiteinheit in Millisekunden (10s/15s/30s/45s, native Binance-Intervalle
-    und beliebige Minutenwerte wie '8m'/'24m') - None bei unbekanntem Format."""
-    if resolution in SUB_MINUTE_RESOLUTIONS:
-        return SUB_MINUTE_RESOLUTIONS[resolution] * 1000
-    if resolution in BINANCE_INTERVAL_MS:
-        return BINANCE_INTERVAL_MS[resolution]
-    m = re.match(r"^(\d+)m$", resolution or "")
-    if m and int(m.group(1)) > 0:
-        return int(m.group(1)) * 60_000
-    return None
-
-
-_trend_filter_warn_last = {}
-
-
-async def _fetch_trend_filter_candles_live(symbol, st, cfg, tf_resolution, tf_atr_period):
-    """Liefert (highs, lows, closes) der ABGESCHLOSSENEN Kerzen der SuperTrend-Trendfilter-Zeiteinheit
-    (live, fuer ab_breakout und hvd_signal) - oder None, wenn (noch) nicht genug Daten da sind (der
-    Aufrufer laesst den Filter dann wie bisher durch). Unterstuetzt ALLE Zeiteinheiten der Strategien:
-    Sekunden-Zeitrahmen (10s/15s/30s/45s) kommen aus dem 1s-Puffer (wie beim eigenen Handels-Zeitrahmen,
-    kein REST-Traffic), native Minuten/Stunden aus dem Binance-Cache, eigene Minutenwerte (z.B. 8m, 24m)
-    werden aus 1m-Kerzen zusammengesetzt."""
-    tf_needed = min(500, tf_atr_period * 5 + 20)
-    tf_h = tf_l = tf_c = None
-    if tf_resolution in SUB_MINUTE_RESOLUTIONS:
-        local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf_resolution], tf_needed)
-        if local:
-            # get_seconds_candles liefert bereits nur abgeschlossene Buckets (der letzte muss
-            # vollstaendig sein) - deshalb hier KEIN "[:-1]" wie bei den Minuten-Zeitrahmen.
-            _, _, tf_h, tf_l, tf_c = local
-    else:
-        synth = resolve_synthetic_resolution(tf_resolution)
-        factor = synth[1] if synth else 1
-        # Zusammengesetzte Zeitrahmen (z.B. 24m) brauchen factor-mal so viele Basis-Kerzen - die
-        # Basis-Abfrage bleibt bewusst unter ~900 Kerzen (REST-Limit 1000), sonst kaeme gar nichts an.
-        count = tf_needed if factor == 1 else max(1, min(tf_needed, 900 // factor))
-        tf_data = await fetch_candles_binance_multi(symbol, tf_resolution, count_back=count, market_type=cfg.get("binance_market_type", "spot"))
-        if tf_data:
-            _, _, tf_h, tf_l, tf_c = tf_data
-            tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
-    if not tf_c or len(tf_c) <= tf_atr_period:
-        now = time.time()
-        key = (symbol, tf_resolution)
-        if now - _trend_filter_warn_last.get(key, 0.0) > 300:
-            _trend_filter_warn_last[key] = now
-            debug_log(f"⚠️ [{symbol}] SuperTrend-Trendfilter ({tf_resolution}): noch nicht genug Kerzen "
-                      f"({len(tf_c) if tf_c else 0}/{tf_atr_period + 1} nötig) - Filter lässt Signale vorerst durch.")
-        return None
-    return tf_h, tf_l, tf_c
-
-
-async def _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, tf_resolution, tf_atr_period):
-    """Backtest-Gegenstueck: holt die Kerzen der Trendfilter-Zeiteinheit passend zum ZEITRAUM der
-    Handels-Kerzen (base_ts) - plus Vorlauf fuer die SuperTrend-Einschwingphase. Liefert
-    (candles, None) oder (None, fertige Fehlermeldung). Vorher: feste 20.000-Kerzen-Grenze, bei
-    feinen Zeiteinheiten (z.B. 1m ueber 30 Tage) fehlte dadurch der Anfang des Zeitraums."""
-    tf_ms = _resolution_ms(tf_resolution)
-    if tf_ms is None:
-        return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): unbekanntes Format."
-
-    synth = resolve_synthetic_resolution(tf_resolution)
-    if synth and synth[0] == "1m":
-        # Aus 1m zusammengesetzte Minuten-Zeiteinheiten (6m-14m, 16m-20m, ...): die 1m-Historie wird
-        # EINMAL geladen (Cache-Schluessel gleich fuer alle diese Zeiteinheiten, weil das Fenster auf den
-        # Vorlauf von mindestens 20 Minuten-Kerzen ausgelegt ist) und hier lokal zusammengesetzt -
-        # statt fuer jede Zeiteinheit dieselben ~45 REST-Seiten (30 Tage) erneut zu holen.
-        wide_ms = max(tf_ms, 20 * 60_000)
-        fetch_ms = (base_ts[-1] - base_ts[0]) + (tf_atr_period * 5 + 20) * wide_ms + wide_ms
-        fetch_ms = -(-fetch_ms // 3_600_000) * 3_600_000  # auf ganze Stunden aufrunden -> gleicher Cache-Schluessel
-        needed_1m = int(fetch_ms // 60_000) + 10
-        base_1m, err, _ = await _fetch_cached_backtest_candles(
-            symbol, "1m", fetch_ms / 86_400_000, min(max(needed_1m, 200), 150_000),
-            market_type=cfg.get("binance_market_type", "spot"))
-        if err:
-            return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {err}"
-        candles = resample_candles(base_1m, synth[1]) if base_1m else None
-        if not candles or len(candles[4]) < tf_atr_period + 5:
-            return None, f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."
-        return candles, None
-
-    warm_ms = (tf_atr_period * 5 + 20) * tf_ms
-    span_ms = (base_ts[-1] - base_ts[0]) + warm_ms + tf_ms
-    needed = int(span_ms // tf_ms) + 10
-    if tf_resolution in SUB_MINUTE_RESOLUTIONS and needed > 5000:
-        cover_h = round(5000 * tf_ms / 3_600_000, 1)
-        return None, (f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): Sekunden-Zeiteinheiten sind im Backtest auf "
-                      f"5000 Kerzen (~{cover_h} Std.) begrenzt, der Backtest-Zeitraum ist länger. Kürzeren Zeitraum "
-                      f"oder eine Trendfilter-Zeiteinheit ab 1 Minute wählen.")
-    candles, err, _ = await _fetch_cached_backtest_candles(
-        symbol, tf_resolution, span_ms / 86_400_000, min(max(needed, 200), 100_000),
-        market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {err}"
-    if not candles or len(candles[4]) < tf_atr_period + 5:
-        return None, f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."
-    return candles, None
-
-
-def _min_ts_step(ts):
-    """Kleinster positiver Abstand zwischen zwei Zeitstempeln = Kerzenlaenge (auch bei Luecken)."""
-    best = None
-    for k in range(1, len(ts)):
-        d = ts[k] - ts[k - 1]
-        if d > 0 and (best is None or d < best):
-            best = d
-    return best
-
-
-def _trend_filter_ok_series(base_ts, tf_candles, tf_multiplier, tf_atr_period):
-    """(long_ok[], short_ok[]) je Handels-Kerze aus dem SuperTrend der Trendfilter-Zeiteinheit.
-
-    KEIN Look-Ahead: eine Filter-Kerze ist fuer eine Handels-Kerze erst verwendbar, wenn sie zu deren
-    SCHLUSS bereits geschlossen ist (Filter-Kerzenende <= Handels-Kerzenende) - genau wie live, wo nur
-    die letzte abgeschlossene Filter-Kerze zaehlt. Vorher wurde nach dem ERÖFFNUNGSzeitpunkt
-    zugeordnet: eine 15m-Kerze war damit schon ab ihrer ersten Minute mit ihrem spaeteren Schlusskurs
-    (und damit ihrer spaeteren SuperTrend-Richtung) sichtbar - der Backtest 'wusste' die Richtung der
-    laufenden Filter-Kerze im Voraus und war deutlich zu optimistisch (bei Sweeps besonders bei kleinen
-    Multiplikatoren, weil die den Look-Ahead am staerksten ausnutzen).
-    Handels-Kerzen VOR der ersten verwendbaren Filter-Kerze bekommen (False, False) = kein Signal."""
-    tf_ts, _o, tf_h, tf_l, tf_c = tf_candles
-    tf_st_line, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
-    tf_bullish = [tf_st_line[i] is not None and tf_c[i] > tf_st_line[i] for i in range(len(tf_c))]
-    base_ms = _min_ts_step(base_ts) or 60_000
-    tf_ms = _min_ts_step(tf_ts) or base_ms
-    # verwendbar ab: tf_ts[j] + tf_ms <= base_ts[i] + base_ms  <=>  (tf_ts[j] + tf_ms - base_ms) <= base_ts[i]
-    available_ts = [t + tf_ms - base_ms for t in tf_ts]
-    aligned = _align_htf_series(base_ts, available_ts, tf_bullish)
-    first_ts = available_ts[0]
-    long_ok = [bool(aligned[i]) and base_ts[i] >= first_ts for i in range(len(base_ts))]
-    short_ok = [(not aligned[i]) and base_ts[i] >= first_ts for i in range(len(base_ts))]
-    return long_ok, short_ok
-
-
-def _align_htf_series(base_ts, htf_ts, htf_vals):
-    """Bildet eine hoehere-Zeiteinheit-Werteserie (htf_ts/htf_vals, z.B. Trend% auf 1h-Kerzen) auf
-    die Zeitstempel einer feineren Serie (base_ts, z.B. 1m-Handels-Kerzen) ab - per Forward-Fill
-    (letzter zum Zeitpunkt base_ts[i] bereits GESCHLOSSENER htf-Wert). Bewusst kein Blick in die
-    Zukunft (kein Wert aus einer noch nicht geschlossenen hoeheren Kerze), sonst waere der Backtest
-    zu optimistisch (Look-Ahead-Bias)."""
-    n = len(base_ts)
-    m = len(htf_ts)
-    out = [0.0] * n
-    j = 0
-    last_val = 0.0
-    for i in range(n):
-        while j < m and htf_ts[j] <= base_ts[i]:
-            last_val = htf_vals[j]
-            j += 1
-        out[i] = last_val
-    return out
-
-
-def compute_pk_trend_percent(highs, lows, closes, fast_len, slow_len, atr_len):
-    """Vereinfachte, EIN-Zeitrahmen-Version des Trend%-Werts aus dem 'MTF EMA Spread'-Dashboard-
-    Indikator: (EMA_fast - EMA_slow) / ATR * 100, auf ±100 begrenzt. Das Original-Pine-Script
-    mittelt diesen Wert ueber 9 verschiedene Zeitrahmen (3 Bloecke a 3 TFs) - hier bewusst nur auf
-    dem eigenen Handels-Zeitrahmen der Strategie berechnet, um nicht fuer jeden Tick zusaetzliche
-    Anfragen auf 9 Aufloesungen zu brauchen. Dient nur als optionaler Richtungsfilter
-    (pk_mtf_filter_enabled), nicht als eigenstaendiges Signal."""
-    n = len(closes)
-    fast_ema = _ema_series(closes, fast_len)
-    slow_ema = _ema_series(closes, slow_len)
-    atr = compute_atr(highs, lows, closes, atr_len)
-    trend = [0.0] * n
-    for i in range(n):
-        a = atr[i]
-        raw = ((fast_ema[i] - slow_ema[i]) / a * 100) if a else 0.0
-        trend[i] = max(min(raw, 100), -100)
-    return trend
-
-
-def compute_pk_signals(highs, lows, closes, sensitivity, atr_period, sma_period):
-    """Portiert aus 'Pieki Algo | Signals & Overlays' (Pine v5): Standard-SuperTrend (Faktor =
-    Sensitivity*2, wie im Original 'supertrend(close, sigsensiviti*2, 11)') + SMA-Bestaetigung.
-    bull = Kurs kreuzt SuperTrend von unten nach oben UND Kurs >= SMA. bear = umgekehrt. Nutzt
-    denselben SuperTrend-Kernbaustein wie Diamond Algo (compute_diamond_supertrend), da beide
-    Pine-Scripts exakt dieselbe SuperTrend-Formel verwenden."""
-    n = len(closes)
-    factor = sensitivity * 2
-    st_line, st_dir = compute_diamond_supertrend(highs, lows, closes, factor, atr_period)
-    sma = _sma_series(closes, sma_period)
-    bull = [False] * n
-    bear = [False] * n
-    for i in range(1, n):
-        crossover = closes[i - 1] <= st_line[i - 1] and closes[i] > st_line[i]
-        crossunder = closes[i - 1] >= st_line[i - 1] and closes[i] < st_line[i]
-        bull[i] = crossover and closes[i] >= sma[i]
-        bear[i] = crossunder and closes[i] <= sma[i]
-    return bull, bear, st_line, sma
-
-
-def _pk_reset_state(st):
-    st["pk_sl_price"] = None
-    st["pk_tp_price"] = None
-    st["pk_trail_active"] = False
-    st["pk_trail_best_price"] = None
-
-
-def _pk_set_sl_tp(st, cfg, direction, entry_price):
-    """Fester SL/TP (fester $-Betrag) - wird NUR im Exit-Modus 'fixed_tp_sl' aufgerufen. Im
-    Exit-Modus 'flip' bleiben pk_sl_price/pk_tp_price immer None, check_pk_sl_tp greift dann
-    also nie ein."""
-    size = st.get("total_coin_size") or 0
-    if cfg.get("pk_sl_enabled", True) and size > 0:
-        dist_sl = cfg.get("pk_sl_manual_usd", 5.0) / size
-        st["pk_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
-    else:
-        st["pk_sl_price"] = None
-    if cfg.get("pk_tp_enabled", True) and size > 0:
-        dist_tp = cfg.get("pk_tp_manual_usd", 10.0) / size
-        st["pk_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
-    else:
-        st["pk_tp_price"] = None
-    st["pk_trail_active"] = False
-    st["pk_trail_best_price"] = entry_price
-
-
-def _pk_apply_trailing(st, cfg, direction, entry_price, price):
-    """Trailing-Stop auf Prozent-Basis (relativ zum Einstiegspreis, NICHT zum aktuellen Preis -
-    wie ueblich bei Trailing-Stops): sobald der Trade um pk_trailing_activation_pct % im Profit
-    war, springt der SL einmalig auf Breakeven (Einstiegspreis) und wird danach im Abstand von
-    pk_trailing_step_pct % zum bisher besten erreichten Preis nachgezogen. Verbessert den SL nur,
-    verschlechtert ihn nie (weder beim Aktivieren noch beim Nachziehen)."""
-    if not cfg.get("pk_trailing_enabled", False):
-        return
-    best = st.get("pk_trail_best_price")
-    if best is None:
-        best = entry_price
-    best = max(best, price) if direction == "long" else min(best, price)
-    st["pk_trail_best_price"] = best
-
-    activation_pct = cfg.get("pk_trailing_activation_pct", 0.2)
-    step_pct = cfg.get("pk_trailing_step_pct", 0.2)
-    profit_pct = ((best - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - best) / entry_price * 100)
-
-    if not st.get("pk_trail_active") and profit_pct >= activation_pct:
-        st["pk_trail_active"] = True
-        current_sl = st.get("pk_sl_price")
-        breakeven = entry_price
-        if direction == "long":
-            st["pk_sl_price"] = breakeven if current_sl is None else max(current_sl, breakeven)
-        else:
-            st["pk_sl_price"] = breakeven if current_sl is None else min(current_sl, breakeven)
-
-    if st.get("pk_trail_active"):
-        trail_sl = best * (1 - step_pct / 100) if direction == "long" else best * (1 + step_pct / 100)
-        current_sl = st.get("pk_sl_price")
-        if direction == "long":
-            st["pk_sl_price"] = trail_sl if current_sl is None else max(current_sl, trail_sl)
-        else:
-            st["pk_sl_price"] = trail_sl if current_sl is None else min(current_sl, trail_sl)
-
-
-async def check_pk_sl_tp(symbol, price):
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-    entry_price = st.get("avg_entry_price")
-    if entry_price is not None:
-        _pk_apply_trailing(st, cfg, pos, entry_price, price)
-    sl_price = st.get("pk_sl_price")
-    tp_price = st.get("pk_tp_price")
-    if sl_price is None and tp_price is None:
-        return
-    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
-    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
-    if hit_sl:
-        reason = "TRAIL-SL" if st.get("pk_trail_active") else "SL"
-        debug_log(f"🚪 [{symbol}] Pieki-Algo {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, reason)
-        st["pk_sl_cooldown_until"] = time.time() + cfg.get("pk_sl_cooldown_seconds", 30)
-        _pk_reset_state(st)
-    elif hit_tp:
-        debug_log(f"🚪 [{symbol}] Pieki-Algo TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-        await execute_exit(symbol, price, "TP")
-        _pk_reset_state(st)
-
-
-async def check_pk_signal(symbol, buy_i, sell_i, price, trend_pct):
-    """Exit-Modus waehlbar (pk_exit_mode):
-    - 'flip': immer im Markt, dreht direkt bei Gegen-Signal (wie UT Bot + Hull / WaveTrend-Cross
-      'immer im Markt'). Bei Long-/Short-only wird bei Gegen-Signal nur glattgestellt.
-    - 'fixed_tp_sl': normaler Ein-/Ausstieg, verlaesst die Position NUR ueber check_pk_sl_tp -
-      ein Gegen-Signal waehrend einer offenen Position wird ignoriert (wartet auf SL/TP).
-    Optionaler MTF-Trend%-Filter (pk_mtf_filter_enabled): Long nur wenn trend_pct > Long-Schwelle,
-    Short nur wenn trend_pct < Short-Schwelle - gilt fuer JEDEN Einstieg, auch beim Flip in die
-    Gegenrichtung."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None:
-        return
-    if time.time() < st.get("pk_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("pk_direction_mode", "both")
-    exit_mode = cfg.get("pk_exit_mode", "flip")
-    mtf_enabled = cfg.get("pk_mtf_filter_enabled", False)
-    long_thr = cfg.get("pk_mtf_long_threshold", 0.5)
-    short_thr = cfg.get("pk_mtf_short_threshold", -0.5)
-    long_ok = direction_mode != "short_only" and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
-    short_ok = direction_mode != "long_only" and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
-    pos = st["position"]
-
-    if pos is None:
-        if buy_i and long_ok:
-            debug_log(f"📡 [{symbol}] Pieki-Algo Signal: LONG @ {price}" + (f" (Trend%={round(trend_pct,2)})" if trend_pct is not None else ""))
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _pk_reset_state(st)
-                if exit_mode == "fixed_tp_sl":
-                    _pk_set_sl_tp(st, cfg, "long", price)
-        elif sell_i and short_ok:
-            debug_log(f"📡 [{symbol}] Pieki-Algo Signal: SHORT @ {price}" + (f" (Trend%={round(trend_pct,2)})" if trend_pct is not None else ""))
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _pk_reset_state(st)
-                if exit_mode == "fixed_tp_sl":
-                    _pk_set_sl_tp(st, cfg, "short", price)
-        return
-
-    if exit_mode != "flip":
-        return  # 'fixed_tp_sl': Gegen-Signal wird ignoriert, nur check_pk_sl_tp darf schliessen
-
-    if pos == "long" and sell_i:
-        if direction_mode == "long_only" or not short_ok:
-            debug_log(f"🚪 [{symbol}] Pieki-Algo Exit: LONG @ {price}")
-            await execute_exit(symbol, price, "PK-EXIT")
-            _pk_reset_state(st)
-        else:
-            debug_log(f"🔄 [{symbol}] Pieki-Algo Flip: LONG -> SHORT @ {price}")
-            await execute_exit(symbol, price, "PK-FLIP")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _pk_reset_state(st)
-    elif pos == "short" and buy_i:
-        if direction_mode == "short_only" or not long_ok:
-            debug_log(f"🚪 [{symbol}] Pieki-Algo Exit: SHORT @ {price}")
-            await execute_exit(symbol, price, "PK-EXIT")
-            _pk_reset_state(st)
-        else:
-            debug_log(f"🔄 [{symbol}] Pieki-Algo Flip: SHORT -> LONG @ {price}")
-            await execute_exit(symbol, price, "PK-FLIP")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _pk_reset_state(st)
-
-
-async def pk_poll_loop(symbol):
-    """Pieki Algo: SuperTrend+SMA9-Signal (siehe compute_pk_signals), Exit-Modus waehlbar
-    (Flip/Fest-SL-TP), optionaler MTF-Trend%-Filter (siehe compute_pk_trend_percent)."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "pieki_algo" and cfg["bot_active"]:
-                resolution = cfg.get("pk_resolution", "5m")
-                atr_period = cfg.get("pk_atr_period", 11)
-                sma_period = cfg.get("pk_sma_period", 13)
-                mtf_slow_len = cfg.get("pk_mtf_slow_len", 9)
-                mtf_atr_len = cfg.get("pk_mtf_atr_len", 14)
-                min_needed = max(atr_period, sma_period, mtf_slow_len, mtf_atr_len, 5) + 5
-                needed_bars = min(1000, max(min_needed * 2, 220))
-                st = b["state"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    bull, bear, st_line, sma = compute_pk_signals(closed_h, closed_l, closed_c, cfg.get("pk_sensitivity", 3.0), atr_period, sma_period)
-
-                    mtf_fast = cfg.get("pk_mtf_fast_len", 5)
-                    active_tfs = [cfg.get(f"pk_mtf_tf{i}", "off") for i in (1, 2, 3)]
-                    active_tfs = [tf for tf in active_tfs if tf not in (None, "", "off")]
-                    tf_values = []  # letzter Trend%-Wert je aktiver Zeiteinheit - am Ende gemittelt (wie "Block 1" im Original: avgB1 = Durchschnitt aus 3 TFs)
-                    for tf in active_tfs:
-                        if tf == resolution:
-                            tf_h, tf_l, tf_c = closed_h, closed_l, closed_c
-                        else:
-                            mtf_needed = min(500, max(mtf_slow_len, mtf_atr_len, 5) * 3 + 20)
-                            if tf in SUB_MINUTE_RESOLUTIONS:
-                                mtf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf], mtf_needed)
-                                tf_h = mtf_local[2] if mtf_local else None
-                                tf_l = mtf_local[3] if mtf_local else None
-                                tf_c = mtf_local[4] if mtf_local else None
-                            else:
-                                mtf_data = await fetch_candles_binance_multi(symbol, tf, count_back=mtf_needed, market_type=cfg.get("binance_market_type", "spot"))
-                                if mtf_data:
-                                    _, _, tf_h, tf_l, tf_c = mtf_data
-                                    tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
-                                else:
-                                    tf_h = tf_l = tf_c = None
-                        if tf_c and len(tf_c) > max(mtf_slow_len, mtf_atr_len):
-                            tf_trend = compute_pk_trend_percent(tf_h, tf_l, tf_c, mtf_fast, mtf_slow_len, mtf_atr_len)
-                            tf_values.append(tf_trend[-1])
-                        # fehlende/zu kurze TF-Kerzen werden einfach ausgelassen statt das Signal zu blockieren
-
-                    if tf_values:
-                        trend_now = sum(tf_values) / len(tf_values)
-                    else:
-                        # keine aktive TF konfiguriert (oder alle grad nicht verfuegbar) - Fallback auf
-                        # den eigenen Handels-Zeitrahmen, damit der Filter nie hart blockiert
-                        trend_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow_len, mtf_atr_len)[-1]
-                    trend_pct = [trend_now] * len(closed_c)  # konstant fuer diesen Durchlauf - siehe trend_pct_now unten
-
-                    st["pk_trend_pct_last"] = trend_now
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] Pieki-Algo aktiv: Preis={closed_c[-1]}, Trend%={round(trend_pct[-1],2)}, "
-                                  f"Exit-Modus={cfg.get('pk_exit_mode')}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 2:
-                            continue
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        # trend_pct[idx] nur bei GLEICHER Aufloesung sicher indizierbar (siehe oben) -
-                        # bei abweichender MTF-Zeiteinheit hat trend_pct eine andere Laenge/Taktung,
-                        # deshalb im Live-Betrieb immer den JEWEILS AKTUELLSTEN Trend%-Wert anwenden.
-                        trend_pct_now = trend_pct[idx] if len(trend_pct) == len(closed_c) else trend_pct[-1]
-                        await check_pk_signal(symbol, bull[idx], bear[idx], price_i, trend_pct_now)
-
-                    await check_pk_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] Pieki-Algo wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] Pieki-Algo wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Pieki-Algo-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def compute_fractals(highs, lows, n):
-    """Williams Fractals, portiert aus 'Williams Fractals' (Pine v6) - VEREINFACHT: das Original
-    hat zusaetzliche Gleichstand-Sonderfaelle (upflagUpFrontier1-4/downflagUpFrontier1-4), die bei
-    fast identischen Hoch-/Tiefwerten noch mehr Fraktale zulassen. Hier stattdessen die strengere
-    Standard-Definition: Pivot muss ECHT hoeher/tiefer sein als alle n Kerzen links UND rechts,
-    keine Gleichstaende erlaubt. Gibt (up_fractal, down_fractal) zurueck - beide als Bool-Listen,
-    wobei up_fractal[i]/down_fractal[i] bedeutet: die Kerze bei Index (i-n) wurde bei Index i als
-    Fraktal BESTAETIGT (man braucht ja die n Kerzen danach, um es zu wissen - kein Echtzeit-Signal,
-    immer n Kerzen im Nachhinein)."""
-    total = len(highs)
-    up_fractal = [False] * total
-    down_fractal = [False] * total
-    for i in range(2 * n, total):
-        pivot = i - n
-        if highs[pivot] > max(highs[pivot - n:pivot]) and highs[pivot] > max(highs[pivot + 1:pivot + n + 1]):
-            up_fractal[i] = True
-        if lows[pivot] < min(lows[pivot - n:pivot]) and lows[pivot] < min(lows[pivot + 1:pivot + n + 1]):
-            down_fractal[i] = True
-    return up_fractal, down_fractal
-
-
-def _fr_set_sl(st, cfg, direction, entry_price):
-    """Setzt den festen SL-Preis (fester $-Betrag) fuer die gerade eroeffnete Position - siehe
-    _uh_set_sl bei UT-Bot+Hull, identisches Muster."""
-    if not cfg.get("fr_sl_enabled", False):
-        st["fr_sl_price"] = None
-        return
-    size = st.get("total_coin_size") or 0
-    if size <= 0:
-        st["fr_sl_price"] = None
-        return
-    dist_sl = cfg.get("fr_sl_manual_usd", 5.0) / size
-    st["fr_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
-
-
-def _fr_set_tp(st, cfg, direction, entry_price):
-    """Setzt den festen TP-Preis (fester $-Betrag) - siehe _cd_set_tp/_rf_set_tp, identisches
-    Muster."""
-    if not cfg.get("fr_tp_enabled", False):
-        st["fr_tp_price"] = None
-        return
-    size = st.get("total_coin_size") or 0
-    if size <= 0:
-        st["fr_tp_price"] = None
-        return
-    dist_tp = cfg.get("fr_tp_manual_usd", 10.0) / size
-    st["fr_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
-
-
-async def check_fr_sl_tp(symbol, price):
-    """Optionaler fester SL UND optionaler fester TP (beide fester $-Betrag, unabhaengig
-    voneinander an/abschaltbar) - durchbricht 'immer im Markt' nur in diesen beiden Faellen,
-    Position geht dann glatt (nicht Flip). SL zusaetzlich mit Cooldown, TP ohne. Siehe
-    check_rf_sl_tp bei Range Filter, identisches Muster.
-
-    NACHTRAEGLICHES SETZEN (live beobachtet: TP auf $2 gesetzt, Position lief bis $17 Gewinn ohne
-    zu schliessen): _fr_set_sl/_fr_set_tp werden normalerweise nur beim Einstieg oder Nachkauf
-    aufgerufen. Wurde SL/TP aber erst AKTIVIERT, waehrend eine Position schon offen war, hatte
-    diese Position nie einen SL/TP-Preis bekommen - "an" ohne gesetzten Zielpreis aendert dann
-    nichts, ganz egal wie hoch der Gewinn/Verlust laeuft. Fix: hier bei jedem Aufruf pruefen und
-    fehlende SL/TP-Preise auf Basis des AKTUELLEN Durchschnittspreises nachtragen."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    if cfg.get("fr_tp_enabled", False) and st.get("fr_tp_price") is None and st.get("avg_entry_price") is not None:
-        _fr_set_tp(st, cfg, pos, st["avg_entry_price"])
-    if cfg.get("fr_sl_enabled", False) and st.get("fr_sl_price") is None and st.get("avg_entry_price") is not None:
-        _fr_set_sl(st, cfg, pos, st["avg_entry_price"])
-
-    tp_price = st.get("fr_tp_price")
-    if tp_price is not None:
-        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
-        if hit_tp:
-            debug_log(f"🎯 [{symbol}] Fractals TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-            await execute_exit(symbol, price, "TP")
-            st["fr_sl_price"] = None
-            st["fr_tp_price"] = None
-            return
-
-    sl_price = st.get("fr_sl_price")
-    if sl_price is None:
-        return
-    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-    if hit_sl:
-        debug_log(f"🚪 [{symbol}] Fractals SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
-        st["fr_sl_price"] = None
-        st["fr_tp_price"] = None
-        st["fr_sl_cooldown_until"] = time.time() + cfg.get("fr_sl_cooldown_seconds", 30)
-
-
-async def check_fr_signal(symbol, buy_i, sell_i, price, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None, is_latest_bar=True, aso_long_ok_i=True, aso_short_ok_i=True):
-    """Immer im Markt, reiner Buy/Sell-Wechsel: Tief-Fraktal (down_fractal) = Kauf-Signal,
-    Hoch-Fraktal (up_fractal) = Verkauf-Signal - oder umgekehrt, wenn fr_invert_direction an ist
-    (buy_i/sell_i kommen von fr_poll_loop bereits entsprechend vertauscht, siehe dort). Optionaler
-    Z-Score-Filter (fr_zscore_filter_enabled, siehe compute_rolling_zscore): Long nur wenn
-    zscore > 0, Short nur wenn zscore < 0. Optionaler ADX/DI-Trendfilter (fr_adx_filter_enabled,
-    wahlweise auf einer ABWEICHENDEN, i.d.R. groeberen Zeiteinheit als der Handels-Zeitrahmen -
-    siehe fr_adx_resolution): ADX ueber der Schwelle UND +DI ueber -DI -> nur Long erlaubt. ADX
-    ueber der Schwelle UND -DI ueber +DI -> nur Short erlaubt. Liegt der ADX UNTER der Schwelle
-    (kein klarer Trend), sind BEIDE Richtungen gesperrt - Fractals baut auf echten
-    Swing-Bewegungen auf, in totem Seitwaerts-Markt entstehen sonst nur Rausch-Fraktale.
-    Optionaler MTF-Trend%-Filter (fr_mtf_filter_enabled, wie bei Pieki Algo/UT-Bot+Hull): Long
-    nur wenn der uebergeordnete Zeitrahmen ueber der Long-Schwelle liegt, Short nur darunter -
-    filtert Fraktal-Signale gegen den groesseren Trend raus. Alle drei Filter unabhaengig
-    voneinander kombinierbar, gelten fuer JEDEN Einstieg, auch beim Flip. Optionaler fester
-    SL/TP (siehe check_fr_sl_tp) unterbricht 'immer im Markt' nur in diesen Faellen - dreht
-    sonst beim jeweils naechsten (erlaubten) Gegen-Signal direkt.
-
-    fr_flatten_on_block_enabled steuert, was passiert, wenn ein Gegen-Signal kommt, aber die
-    Richtung (Long-/Short-only) oder ein Filter das Drehen in die neue Richtung verbietet:
-    AN (Standard) = wie bisher glattstellen (Position schliessen, auf naechstes Ersteinstiegs-
-    Signal warten). AUS = Signal wird komplett IGNORIERT, die laufende Position bleibt einfach
-    unangetastet offen (nur SL/TP koennen sie noch beenden) - bis irgendwann ein Gegen-Signal
-    kommt, bei dem ALLE Bedingungen fuer die neue Richtung gleichzeitig erfuellt sind und
-    tatsaechlich geflippt werden kann.
-
-    fr_dca_enabled (Nachkauf/DCA): kommt WAEHREND einer offenen Position ein weiteres Signal in
-    DERSELBEN Richtung (z.B. noch ein Tief-Fraktal waehrend Long), wird nachgekauft statt das
-    Signal zu ignorieren - bis zu fr_dca_max_entries mal (insgesamt also 1+N Einstiege), UND nur
-    wenn der Kurs sich seit dem aktuellen Durchschnittspreis um mindestens fr_dca_step_usd
-    (Preis-Distanz in $, nicht PnL) in die Nachkauf-Richtung bewegt hat - wie ein Grid-Abstand.
-    Verhindert, dass mehrere Fraktal-Signale kurz hintereinander auf fast demselben Kursniveau
-    unnoetig viele Nachkauf-Stufen verbrauchen. Nach jedem Nachkauf werden SL/TP auf Basis des NEUEN Durchschnittspreises neu gesetzt (siehe
-    _fr_set_sl/_fr_set_tp) - der feste TP wird dadurch effektiv zu einem 'sobald die
-    Gesamtposition im Plus ist'-Ausstieg, je mehr nachgekauft wurde, desto naeher liegt er am
-    aktuellen Kurs. Nachkaeufe respektieren dieselben Filter (Z-Score/ADX/MTF) wie Ersteinstiege.
-    SICHERHEITSNETZ (live beobachtet: 20 echte Nachkauf-Orders in 79 Sekunden auf 1m-Kerzen - technisch
-    unmoeglich bei echtzeitnaher Verarbeitung): haengt der Poll-Loop mal hinterher (z.B. durch
-    WS-Cache-Aussetzer) und verarbeitet dadurch einen ganzen Rueckstand an neuen Kerzen in einer
-    engen Schleife OHNE echten Zeitabstand dazwischen, wuerde jede darin bereits bestaetigte
-    Fraktal-Wiederholung einen SOFORTIGEN Nachkauf ausloesen - bei Flip-Logik ist das
-    selbstkorrigierend (unschoen, aber nicht gefaehrlich), bei DCA blaeht das die Positionsgroesse
-    dagegen unkontrolliert auf. Nachkauf feuert deshalb NUR, wenn is_latest_bar=True ist (die
-    gerade verarbeitete Kerze ist wirklich die neueste, kein nachgeholter Rueckstand) - normale
-    Ersteinstiege/Flips/Exits sind davon nicht betroffen und laufen wie gehabt auch fuer
-    nachgeholte Kerzen.
-    WICHTIG: solange fr_dca_enabled an ist, werden Gegen-Signale (die sonst einen Flip/Exit
-    ausloesen wuerden) komplett IGNORIERT - die Position kann dann ausschliesslich ueber SL/TP
-    beendet werden. Sonst wuerde das naechstbeste Gegen-Fraktal die nachgekaufte Position
-    wegreissen, bevor sie ueberhaupt die Chance hatte, durchschnittlich ins Plus zu laufen."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None:
-        return
-    if time.time() < st.get("fr_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("fr_direction_mode", "both")
-    flatten_on_block = cfg.get("fr_flatten_on_block_enabled", True)
-    zscore_enabled = cfg.get("fr_zscore_filter_enabled", False)
-    adx_enabled = cfg.get("fr_adx_filter_enabled", False)
-    adx_threshold = cfg.get("fr_adx_threshold", 20)
-    adx_invert = cfg.get("fr_adx_invert_enabled", False)
-    adx_missing = adx is None or plus_di is None or minus_di is None
-    # WICHTIG: adx_missing MUSS zuerst geprueft werden - "A if C1 else B if C2 else D" wertet in
-    # Python als "A if C1 else (B if C2 else D)" aus, das heisst die alte Reihenfolge hat bei
-    # adx_invert=True den None-Check komplett uebersprungen und direkt "minus_di > plus_di" mit
-    # zwei None-Werten verglichen, sobald der ADX-Filter selbst aus war (aber adx_invert noch
-    # gespeichert auf "An" stand) - live abgestuerzt mit "'>' not supported between NoneType and
-    # NoneType". Fix: erst auf fehlende Daten pruefen, DANACH ggf. invertieren.
-    if adx_missing:
-        adx_di_long = False
-        adx_di_short = False
-    elif adx_invert:
-        adx_di_long = minus_di > plus_di
-        adx_di_short = plus_di > minus_di
-    else:
-        adx_di_long = plus_di > minus_di
-        adx_di_short = minus_di > plus_di
-    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and adx_di_long)
-    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and adx_di_short)
-    mtf_enabled = cfg.get("fr_mtf_filter_enabled", False)
-    long_thr = cfg.get("fr_mtf_long_threshold", 0.5)
-    short_thr = cfg.get("fr_mtf_short_threshold", -0.5)
-    long_ok = (direction_mode != "short_only"
-               and (not zscore_enabled or zscore is None or zscore > 0)
-               and adx_long_ok
-               and (not mtf_enabled or trend_pct is None or trend_pct > long_thr)
-               and aso_long_ok_i)
-    short_ok = (direction_mode != "long_only"
-                and (not zscore_enabled or zscore is None or zscore < 0)
-                and adx_short_ok
-                and (not mtf_enabled or trend_pct is None or trend_pct < short_thr)
-                and aso_short_ok_i)
-    pos = st["position"]
-
-    if pos is None:
-        if buy_i and long_ok:
-            debug_log(f"📡 [{symbol}] Fractals Ersteinstieg: LONG @ {price}")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _fr_set_sl(st, cfg, "long", price)
-                _fr_set_tp(st, cfg, "long", price)
-        elif sell_i and short_ok:
-            debug_log(f"📡 [{symbol}] Fractals Ersteinstieg: SHORT @ {price}")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _fr_set_sl(st, cfg, "short", price)
-                _fr_set_tp(st, cfg, "short", price)
-        return
-
-    if pos == "long" and buy_i:
-        dca_enabled = cfg.get("fr_dca_enabled", False)
-        max_entries = cfg.get("fr_dca_max_entries", 3)
-        step_usd = cfg.get("fr_dca_step_usd", 250.0)
-        far_enough = step_usd <= 0 or st["avg_entry_price"] is None or (st["avg_entry_price"] - price) >= step_usd
-        if dca_enabled and is_latest_bar and long_ok and far_enough and st["entry_count"] < 1 + max_entries:
-            debug_log(f"📥 [{symbol}] Fractals Nachkauf: LONG @ {price} (Stufe {st['entry_count'] + 1}/{1 + max_entries})")
-            await execute_entry(symbol, "long", price, is_add_on=True)
-            if st["position"] is not None:
-                _fr_set_sl(st, cfg, "long", st["avg_entry_price"])
-                _fr_set_tp(st, cfg, "long", st["avg_entry_price"])
-        return
-
-    if pos == "short" and sell_i:
-        dca_enabled = cfg.get("fr_dca_enabled", False)
-        max_entries = cfg.get("fr_dca_max_entries", 3)
-        step_usd = cfg.get("fr_dca_step_usd", 250.0)
-        far_enough = step_usd <= 0 or st["avg_entry_price"] is None or (price - st["avg_entry_price"]) >= step_usd
-        if dca_enabled and is_latest_bar and short_ok and far_enough and st["entry_count"] < 1 + max_entries:
-            debug_log(f"📥 [{symbol}] Fractals Nachkauf: SHORT @ {price} (Stufe {st['entry_count'] + 1}/{1 + max_entries})")
-            await execute_entry(symbol, "short", price, is_add_on=True)
-            if st["position"] is not None:
-                _fr_set_sl(st, cfg, "short", st["avg_entry_price"])
-                _fr_set_tp(st, cfg, "short", st["avg_entry_price"])
-        return
-
-    if pos == "long" and sell_i:
-        if cfg.get("fr_dca_enabled", False):
-            return  # Solange DCA aktiv ist, ergibt Flip/Exit ueber Gegen-Signale keinen Sinn
-            # mehr - die (evtl. nachgekaufte) Position soll ausschliesslich ueber SL/TP wieder
-            # rausgehen, nicht durch das naechstbeste Gegen-Fraktal weggerissen werden.
-        if direction_mode == "long_only":
-            reason = "FR-EXIT-DIR"
-        elif not short_ok:
-            if zscore_enabled and not (zscore is None or zscore < 0):
-                reason = "FR-EXIT-ZSCORE"
-            elif adx_enabled and not adx_short_ok:
-                reason = "FR-EXIT-ADX"
-            elif not aso_short_ok_i:
-                reason = "FR-EXIT-ASO"
-            else:
-                reason = "FR-EXIT-MTF"
-        else:
-            reason = None
-        if reason is not None:
-            if not flatten_on_block:
-                return  # Signal ignorieren, Position bleibt unangetastet offen
-            debug_log(f"🚪 [{symbol}] Fractals Exit ({reason}): LONG @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["fr_sl_price"] = None
-            st["fr_tp_price"] = None
-        else:
-            debug_log(f"🔄 [{symbol}] Fractals Flip: LONG -> SHORT @ {price}")
-            await execute_exit(symbol, price, "FR-FLIP")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _fr_set_sl(st, cfg, "short", price)
-                _fr_set_tp(st, cfg, "short", price)
-    elif pos == "short" and buy_i:
-        if cfg.get("fr_dca_enabled", False):
-            return  # siehe long-Zweig oben - identische Begruendung
-        if direction_mode == "short_only":
-            reason = "FR-EXIT-DIR"
-        elif not long_ok:
-            if zscore_enabled and not (zscore is None or zscore > 0):
-                reason = "FR-EXIT-ZSCORE"
-            elif adx_enabled and not adx_long_ok:
-                reason = "FR-EXIT-ADX"
-            elif not aso_long_ok_i:
-                reason = "FR-EXIT-ASO"
-            else:
-                reason = "FR-EXIT-MTF"
-        else:
-            reason = None
-        if reason is not None:
-            if not flatten_on_block:
-                return  # Signal ignorieren, Position bleibt unangetastet offen
-            debug_log(f"🚪 [{symbol}] Fractals Exit ({reason}): SHORT @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["fr_sl_price"] = None
-            st["fr_tp_price"] = None
-        else:
-            debug_log(f"🔄 [{symbol}] Fractals Flip: SHORT -> LONG @ {price}")
-            await execute_exit(symbol, price, "FR-FLIP")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _fr_set_sl(st, cfg, "long", price)
-                _fr_set_tp(st, cfg, "long", price)
-
-
-async def fr_poll_loop(symbol):
-    """Williams Fractals: Tief-Fraktal = Kauf, Hoch-Fraktal = Verkauf, immer im Markt, reiner
-    Buy/Sell-Wechsel (siehe check_fr_signal/compute_fractals)."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "fractals_flip" and cfg["bot_active"]:
-                resolution = cfg.get("fr_resolution", "5m")
-                n = cfg.get("fr_periods", 2)
-                min_needed = 2 * n + 5
-                needed_bars = min(1000, max(min_needed * 2, 220))
-                st = b["state"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    up_fractal, down_fractal = compute_fractals(closed_h, closed_l, n)
-                    buy_signal, sell_signal = (up_fractal, down_fractal) if cfg.get("fr_invert_direction", False) else (down_fractal, up_fractal)
-
-                    zs_lookback = cfg.get("fr_zscore_lookback", 20)
-                    zs_smooth = cfg.get("fr_zscore_smooth", 3)
-                    zscore_resolution = cfg.get("fr_zscore_resolution", "same")
-                    if zscore_resolution in (None, "", "same") or zscore_resolution == resolution:
-                        zscore_series = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)
-                    else:
-                        zs_needed = min(500, max(zs_lookback, zs_smooth, 5) * 3 + 20)
-                        if zscore_resolution in SUB_MINUTE_RESOLUTIONS:
-                            zs_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[zscore_resolution], zs_needed)
-                            zs_c = zs_local[4] if zs_local else None
-                        else:
-                            zs_data = await fetch_candles_binance_multi(symbol, zscore_resolution, count_back=zs_needed, market_type=cfg.get("binance_market_type", "spot"))
-                            zs_c = zs_data[4][:-1] if zs_data else None
-                        if zs_c and len(zs_c) > max(zs_lookback, zs_smooth):
-                            zscore_now = compute_rolling_zscore(zs_c, zs_lookback, zs_smooth)[-1]
-                        else:
-                            zscore_now = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)[-1]  # Fallback, falls (noch) keine Daten
-                        zscore_series = [zscore_now] * len(closed_c)  # abweichende Zeiteinheit: nur der aktuellste Wert zaehlt live (siehe unten)
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] Fractals aktiv: Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    adx_enabled = cfg.get("fr_adx_filter_enabled", False)
-                    if adx_enabled:
-                        adx_resolution = cfg.get("fr_adx_resolution", "same")
-                        adx_length = cfg.get("fr_adx_length", 14)
-                        if adx_resolution in (None, "", "same") or adx_resolution == resolution:
-                            adx_series, plus_di_series, minus_di_series = compute_adx(closed_h, closed_l, closed_c, adx_length)
-                        else:
-                            adx_needed = min(500, adx_length * 5 + 20)
-                            if adx_resolution in SUB_MINUTE_RESOLUTIONS:
-                                adx_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[adx_resolution], adx_needed)
-                                adx_h = adx_local[2] if adx_local else None
-                                adx_l = adx_local[3] if adx_local else None
-                                adx_c = adx_local[4] if adx_local else None
-                            else:
-                                adx_data = await fetch_candles_binance_multi(symbol, adx_resolution, count_back=adx_needed, market_type=cfg.get("binance_market_type", "spot"))
-                                if adx_data:
-                                    _, _, adx_h, adx_l, adx_c = adx_data
-                                    adx_h, adx_l, adx_c = adx_h[:-1], adx_l[:-1], adx_c[:-1]
-                                else:
-                                    adx_h = adx_l = adx_c = None
-                            if adx_c and len(adx_c) > adx_length:
-                                adx_now, plus_di_now, minus_di_now = compute_adx(adx_h, adx_l, adx_c, adx_length)
-                                adx_series = [adx_now[-1]] * len(closed_c)
-                                plus_di_series = [plus_di_now[-1]] * len(closed_c)
-                                minus_di_series = [minus_di_now[-1]] * len(closed_c)
-                            else:
-                                adx_series, plus_di_series, minus_di_series = compute_adx(closed_h, closed_l, closed_c, adx_length)  # Fallback, falls (noch) keine Daten
-                    else:
-                        adx_series, plus_di_series, minus_di_series = None, None, None
-
-                    mtf_enabled = cfg.get("fr_mtf_filter_enabled", False)
-                    trend_now = None
-                    if mtf_enabled:
-                        mtf_fast = cfg.get("fr_mtf_fast_len", 5)
-                        mtf_slow = cfg.get("fr_mtf_slow_len", 9)
-                        mtf_atr = cfg.get("fr_mtf_atr_len", 14)
-                        mtf_tf = cfg.get("fr_mtf_tf1", "off")
-                        if mtf_tf in (None, "", "off") or mtf_tf == resolution:
-                            trend_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow, mtf_atr)[-1]
-                        else:
-                            mtf_needed = min(500, max(mtf_slow, mtf_atr, 5) * 3 + 20)
-                            if mtf_tf in SUB_MINUTE_RESOLUTIONS:
-                                mtf_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[mtf_tf], mtf_needed)
-                                tf_h = mtf_local[2] if mtf_local else None
-                                tf_l = mtf_local[3] if mtf_local else None
-                                tf_c = mtf_local[4] if mtf_local else None
-                            else:
-                                mtf_data = await fetch_candles_binance_multi(symbol, mtf_tf, count_back=mtf_needed, market_type=cfg.get("binance_market_type", "spot"))
-                                if mtf_data:
-                                    _, _, tf_h, tf_l, tf_c = mtf_data
-                                    tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
-                                else:
-                                    tf_h = tf_l = tf_c = None
-                            if tf_c and len(tf_c) > max(mtf_slow, mtf_atr):
-                                trend_now = compute_pk_trend_percent(tf_h, tf_l, tf_c, mtf_fast, mtf_slow, mtf_atr)[-1]
-                            else:
-                                trend_now = compute_pk_trend_percent(closed_h, closed_l, closed_c, mtf_fast, mtf_slow, mtf_atr)[-1]
-                        st["fr_trend_pct_last"] = trend_now
-
-                    # Optionaler ASO-Sentiment-Filter (Nutzer-Idee, aus eigenem 'Average Sentiment
-                    # Oscillator'-Pine-Script portiert, siehe compute_aso_filter): Long nur wenn
-                    # ASOBulls>ASOBears, Short nur umgekehrt. Immer auf derselben Zeiteinheit wie
-                    # die Fraktal-Erkennung selbst (keine MTF-Option, anders als Z-Score/ADX/MTF
-                    # oben), da der ASO als Kerzen-Sentiment gedacht ist, nicht als groesserer
-                    # Trendfilter auf hoeherer Zeiteinheit.
-                    aso_enabled = cfg.get("fr_aso_filter_enabled", False)
-                    if aso_enabled:
-                        aso_long_ok_series, aso_short_ok_series = compute_aso_filter(
-                            closed_o, closed_h, closed_l, closed_c,
-                            cfg.get("fr_aso_filter_length", 10), cfg.get("fr_aso_filter_mode", 0),
-                            cfg.get("fr_aso_filter_confirm_bars", 1))
-                    else:
-                        aso_long_ok_series, aso_short_ok_series = None, None
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 2 * n:
-                            continue
-                        # Bewusst ANDERS als bei den anderen Strategien: hier IMMER der
-                        # tatsaechliche Kerzenschlusskurs, nicht der aktuelle Live-Preis fuer die
-                        # juengste Kerze - Fraktal-Bestaetigung soll exakt zum Kerzenschluss
-                        # ausgefuehrt werden, nicht zum Preis im Moment der Abfrage (bis zu 5 Sek.
-                        # nach dem eigentlichen Schluss).
-                        price_i = closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        adx_i = adx_series[idx] if adx_series else None
-                        plus_di_i = plus_di_series[idx] if plus_di_series else None
-                        minus_di_i = minus_di_series[idx] if minus_di_series else None
-                        aso_long_ok_i = aso_long_ok_series[idx] if aso_long_ok_series else True
-                        aso_short_ok_i = aso_short_ok_series[idx] if aso_short_ok_series else True
-                        is_latest_bar = idx == len(closed_ts) - 1
-                        await check_fr_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], adx_i, plus_di_i, minus_di_i, trend_now, is_latest_bar, aso_long_ok_i, aso_short_ok_i)
-
-                    await check_fr_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] Fractals wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] Fractals wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Fractals-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def compute_vw_avdev(closes, volumes, length):
-    """Portiert aus '[Hoss] VWAP Deviation' (pine_vwmean + pine_vwavdev, 'Average Deviation'
-    ist dort fest kodiert, 'Standard Deviation' ist im Original toter Code): volumengewichteter
-    gleitender Mittelwert (VWMA) ueber die letzten 'length' Kerzen plus volumengewichtete
-    durchschnittliche Abweichung davon. Gibt (vwmean, dev) OHNE Bandmultiplikator zurueck - die
-    Baender (siehe vwap_bands_from_dev) werden mit unterschiedlichen Multiplikatoren daraus
-    abgeleitet (Bestaetigungs-Band vs. SL-Band/"Ende der Wolke"), ohne vwmean/dev doppelt zu
-    berechnen. Bewusst OHNE Log-Space-Option (im Original per Toggle 'ls' waehlbar) - hier immer
-    im normalen Preis-Raum, haelt die Konfiguration einfach."""
-    n = len(closes)
-    vwmean = [0.0] * n
-    dev = [0.0] * n
-    for i in range(n):
-        lo = max(0, i - length + 1)
-        window_c = closes[lo:i + 1]
-        window_v = volumes[lo:i + 1]
-        w_sum = sum(window_v)
-        if w_sum <= 0:
-            vwmean[i] = closes[i]
-            dev[i] = 0.0
-            continue
-        m = sum(cc * vv for cc, vv in zip(window_c, window_v)) / w_sum
-        vwmean[i] = m
-        dev[i] = sum(abs(cc - m) * vv for cc, vv in zip(window_c, window_v)) / w_sum
-    return vwmean, dev
-
-
-def vwap_bands_from_dev(vwmean, dev, mult):
-    """upper/lower = Mittelwert +/- Abweichung*mult (mult=2 entspricht der Original-"Upper/Lower
-    dev 2"-Linie/dem inneren Rand der roten/gruenen Wolke, mult=3 dem AEUSSEREN Rand - "Ende der
-    Wolke", siehe sr_vwap_sl_mult)."""
-    n = len(vwmean)
-    upper = [vwmean[i] + dev[i] * mult for i in range(n)]
-    lower = [vwmean[i] - dev[i] * mult for i in range(n)]
-    return upper, lower
-
-
-def compute_vwap_dev_arm(closes, upper, lower):
-    """Zustandsmaschine (nach Nutzer-Vorgabe, kein fester Lookback): schliesst eine Kerze ÜBER
-    dem oberen Band (rote Wolke) -> Zustand 'upper' (Short vorbereitet). Schliesst eine Kerze
-    UNTER dem unteren Band (gruene Wolke) -> Zustand 'lower' (Long vorbereitet) - das hebt einen
-    vorher gesetzten 'upper'-Zustand SOFORT auf, egal wie viele Kerzen seitdem vergangen sind.
-    Ohne neuen Bandkontakt bleibt der letzte Zustand unbegrenzt bestehen. Gibt pro Kerze den
-    Zustand ZUM SCHLUSS dieser Kerze zurueck - fuer die Signalpruefung an Kerze i zaehlt der
-    Zustand VOR dieser Kerze (arm[i-1]), siehe check_sr_signal/backtest_sr_signal."""
-    n = len(closes)
-    arm = [None] * n
-    state = None
-    for i in range(n):
-        if closes[i] > upper[i]:
-            state = "upper"
-        elif closes[i] < lower[i]:
-            state = "lower"
-        arm[i] = state
-    return arm
-
-
-def _align_generic_series(base_ts, htf_ts, htf_vals, default=None):
-    """Wie _align_htf_series, aber mit frei waehlbarem Default-Wert (statt fest 0.0) - noetig
-    fuer Nicht-Zahlen-Serien wie den VWAP-Dev-Zustand ('upper'/'lower'/None)."""
-    n = len(base_ts)
-    m = len(htf_ts)
-    out = [default] * n
-    j = 0
-    last_val = default
-    for i in range(n):
-        while j < m and htf_ts[j] <= base_ts[i]:
-            last_val = htf_vals[j]
-            j += 1
-        out[i] = last_val
-    return out
-
-
-async def _build_vwap_dev_data_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix, need_arm, need_sl_bands, need_midline, need_midline_series):
-    """Holt die historischen Kerzen MIT Volumen EINMAL (wie beim frueheren Volumen-Filter, siehe
-    fetch_historical_candles_binance_vol) auf dem eigenen Handels-Zeitrahmen und liefert je nach
-    Bedarf den Bestaetigungs-Zustand (need_arm, siehe compute_vwap_dev_arm), die SL-Baender der
-    aeusseren Wolke (need_sl_bands, siehe sr_vwap_sl_mult), die Mittellinien-Totzone (need_midline,
-    siehe sr_vwap_midline_mult - blockiert Einstiege zu nah an der VWAP-Basislinie) und/oder die
-    ROHE Mittellinie selbst (need_midline_series, fuer den Breakeven-bei-Mittellinien-Beruehrung -
-    siehe sr_vwap_midline_breakeven_enabled) daraus ab - EIN Fetch fuer alles, kein doppelter
-    API-Call. Alles per Forward-Fill auf die Zeitstempel der Einstiegs-Kerzen ausgerichtet. Gibt
-    (arm_oder_None, sl_lower_oder_None, sl_upper_oder_None, midline_ok_oder_None,
-    midline_series_oder_None, error) zurueck."""
-    length = cfg.get(f"{prefix}_vwap_dev_length", 60)
-    dev_mult = cfg.get(f"{prefix}_vwap_dev_mult", 2.0)
-    sl_mult = cfg.get(f"{prefix}_vwap_sl_mult", 3.0)
-    midline_mult = cfg.get(f"{prefix}_vwap_midline_mult", 0.3)
-    tf_candles, err = await fetch_historical_candles_binance_vol(symbol, primary_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return None, None, None, None, None, f"VWAP-Deviation-Zeiteinheit ({primary_resolution}): {err}"
-    if not tf_candles or len(tf_candles[4]) < length + 5:
-        return None, None, None, None, None, "Zu wenig historische Kerzen (mit Volumen) für VWAP-Deviation erhalten."
-    t_ts, t_o, t_h, t_l, t_c, t_v = tf_candles
-    vwmean, dev = compute_vw_avdev(t_c, t_v, length)
-
-    arm_aligned = None
-    if need_arm:
-        upper_dev, lower_dev = vwap_bands_from_dev(vwmean, dev, dev_mult)
-        arm_htf = compute_vwap_dev_arm(t_c, upper_dev, lower_dev)
-        arm_aligned = _align_generic_series(base_ts, t_ts, arm_htf, default=None)
-
-    sl_lower_aligned = sl_upper_aligned = None
-    if need_sl_bands:
-        upper_sl, lower_sl = vwap_bands_from_dev(vwmean, dev, sl_mult)
-        sl_lower_aligned = _align_generic_series(base_ts, t_ts, lower_sl, default=None)
-        sl_upper_aligned = _align_generic_series(base_ts, t_ts, upper_sl, default=None)
-
-    midline_ok_aligned = None
-    if need_midline:
-        midline_ok_htf = [abs(t_c[i] - vwmean[i]) >= dev[i] * midline_mult for i in range(len(t_c))]
-        midline_ok_aligned = _align_generic_series(base_ts, t_ts, midline_ok_htf, default=None)
-
-    midline_series_aligned = None
-    if need_midline_series:
-        midline_series_aligned = _align_generic_series(base_ts, t_ts, vwmean, default=None)
-
-    return arm_aligned, sl_lower_aligned, sl_upper_aligned, midline_ok_aligned, midline_series_aligned, None
-
-
-def compute_rsi_arm(rsi, overbought, oversold):
-    """Zustandsmaschine fuer den RSI-Extremwert-Modus (nach Nutzer-Vorgabe, identisches Prinzip
-    zu compute_vwap_dev_arm - kein fester Lookback): steigt RSI ueber 'overbought' (Standard 70)
-    -> Zustand 'short_ready' (Short ab jetzt erlaubt). Faellt RSI unter 'oversold' (Standard 30)
-    -> Zustand 'long_ready' (Long ab jetzt erlaubt) - hebt einen vorher gesetzten 'short_ready'-
-    Zustand SOFORT auf, egal wie viele Kerzen seitdem vergangen sind. Ohne neuen Extremwert-
-    Kontakt bleibt der letzte Zustand unbegrenzt bestehen. Gibt pro Kerze den Zustand ZUM SCHLUSS
-    dieser Kerze zurueck - fuer die Signalpruefung an Kerze i zaehlt der Zustand VOR dieser Kerze
-    (arm[i-1]), siehe check_sr_signal/backtest_sr_signal."""
-    n = len(rsi)
-    arm = [None] * n
-    state = None
-    for i in range(n):
-        if rsi[i] > overbought:
-            state = "short_ready"
-        elif rsi[i] < oversold:
-            state = "long_ready"
-        arm[i] = state
-    return arm
-
-
-def compute_sr_signals(highs, lows, closes, atr_period, multiplier, rsi_period):
-    """SuperTrend(ATR-Periode, Multiplikator) + RSI - nach Nutzer-Vorgabe (kein Pine-Script-Port,
-    eigene Kombination). Nutzt denselben SuperTrend-Kernbaustein wie Diamond Algo/Pieki Algo
-    (compute_diamond_supertrend). bull = klassisches SuperTrend-Long-Signal (Kurs kreuzt die
-    SuperTrend-Linie von unten nach oben). bear = umgekehrt. RSI wird hier nur berechnet, NICHT
-    gefiltert - die RSI>Mittellinie/<Mittellinie-Bestaetigung passiert erst in check_sr_signal/
-    backtest_sr_signal (der RSI-Wert zum Signal-Zeitpunkt zaehlt, nicht der beim Crossover)."""
-    n = len(closes)
-    st_line, _ = compute_diamond_supertrend(highs, lows, closes, multiplier, atr_period)
-    rsi = compute_rsi(closes, rsi_period)
-    bull = [False] * n
-    bear = [False] * n
-    for i in range(1, n):
-        bull[i] = closes[i - 1] <= st_line[i - 1] and closes[i] > st_line[i]
-        bear[i] = closes[i - 1] >= st_line[i - 1] and closes[i] < st_line[i]
-    return bull, bear, rsi, st_line
-
-
-def _sr_set_sl_tp(st, cfg, direction, entry_price, cloud_sl_lower=None, cloud_sl_upper=None, st_line_val=None):
-    """Drei SL/TP-Varianten (per sr_sl_tp_mode): 'fixed' = fester $-Betrag (wie bei UT-Bot+Hull/
-    Pieki Algo/Fractals). 'vwap_cloud' (nach Nutzer-Vorgabe): SL am AEUSSEREN Rand der VWAP-
-    Wolke ("Ende der Wolke", cloud_sl_lower/cloud_sl_upper - siehe sr_vwap_sl_mult), TP als
-    einstellbares Risk-Reward-Vielfaches (sr_vwap_tp_rr, z.B. 1.0 = 1:1, 1.5 = 1:1,5) des
-    daraus resultierenden SL-Abstands vom Einstieg. 'supertrend' (nach Nutzer-Vorgabe): SL auf
-    der SuperTrend-Linie SELBST zum Einstiegszeitpunkt (st_line_val - bei Long liegt sie als
-    Unterstuetzung unter dem Kurs, bei Short als Widerstand darueber, da der Einstieg ja genau
-    beim Ueberqueren dieser Linie ausgeloest wurde) PLUS einem optionalen zusaetzlichen
-    $-Puffer (sr_st_sl_buffer_usd, nach Nutzer-Vorgabe - mehr Abstand/Sicherheitsmarge, damit der
-    SL nicht exakt auf der Linie selbst liegt), TP ebenfalls als einstellbares Risk-Reward-
-    Vielfaches (sr_st_tp_rr) des daraus resultierenden SL-Abstands. sr_vwap_breakeven_done wird
-    bei JEDEM Neueinstieg zurueckgesetzt (siehe check_sr_sl_tp fuer den VWAP-Mittellinien-
-    Breakeven, unabhaengig von der hier gewaehlten SL/TP-Variante nutzbar)."""
-    st["sr_vwap_breakeven_done"] = False
-    mode = cfg.get("sr_sl_tp_mode", "fixed")
-    if mode == "vwap_cloud":
-        cloud_sl = cloud_sl_lower if direction == "long" else cloud_sl_upper
-        if cloud_sl is not None:
-            rr = cfg.get("sr_vwap_tp_rr", 1.5)
-            if direction == "long":
-                risk = entry_price - cloud_sl
-                st["sr_sl_price"] = cloud_sl
-                st["sr_tp_price"] = entry_price + risk * rr if risk > 0 else None
-            else:
-                risk = cloud_sl - entry_price
-                st["sr_sl_price"] = cloud_sl
-                st["sr_tp_price"] = entry_price - risk * rr if risk > 0 else None
-            return
-        # Kein Wolken-Wert verfuegbar (z.B. zu wenig Kerzen fuer VWAP-Deviation) - kein SL/TP
-        st["sr_sl_price"] = None
-        st["sr_tp_price"] = None
-        return
-
-    if mode == "supertrend":
-        if st_line_val is not None:
-            rr = cfg.get("sr_st_tp_rr", 1.5)
-            buffer_usd = cfg.get("sr_st_sl_buffer_usd", 0.0)
-            size = st.get("total_coin_size") or 0
-            buffer_dist = (buffer_usd / size) if buffer_usd and size > 0 else 0.0
-            if direction == "long":
-                sl_price = st_line_val - buffer_dist
-                risk = entry_price - sl_price
-                st["sr_sl_price"] = sl_price
-                st["sr_tp_price"] = entry_price + risk * rr if risk > 0 else None
-            else:
-                sl_price = st_line_val + buffer_dist
-                risk = sl_price - entry_price
-                st["sr_sl_price"] = sl_price
-                st["sr_tp_price"] = entry_price - risk * rr if risk > 0 else None
-            return
-        st["sr_sl_price"] = None
-        st["sr_tp_price"] = None
-        return
-
-    size = st.get("total_coin_size") or 0
-    if cfg.get("sr_sl_enabled", True) and size > 0:
-        dist_sl = cfg.get("sr_sl_manual_usd", 5.0) / size
-        st["sr_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
-    else:
-        st["sr_sl_price"] = None
-    if cfg.get("sr_tp_enabled", True) and size > 0:
-        dist_tp = cfg.get("sr_tp_manual_usd", 10.0) / size
-        st["sr_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
-    else:
-        st["sr_tp_price"] = None
-
-
-async def check_sr_sl_tp(symbol, price, vwap_midline_now=None):
-    """Optionaler fester SL/TP (fester $-Betrag/VWAP-Wolke/SuperTrend-Band) - wie bei UT-Bot+Hull
-    geht die Position bei Treffer GLATT (nicht sofort in die Gegenrichtung); SL hat einen kurzen
-    Cooldown, TP nicht. VWAP-Mittellinien-Breakeven (nach Nutzer-Vorgabe, unabhaengig von der
-    SL/TP-Variante zuschaltbar): sobald der Kurs die VWAP-Basislinie beruehrt (bei Long: Kurs
-    steigt bis zur/uber die Mittellinie, bei Short: Kurs faellt bis zur/unter die Mittellinie),
-    wird der SL auf den Einstiegspreis gezogen - EINMALIG pro Position, verbessert den SL nur
-    (nie verschlechtern), identisches Prinzip wie der ELTE-Smart-Prozent-Breakeven."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    if cfg.get("sr_vwap_midline_breakeven_enabled", False) and not st.get("sr_vwap_breakeven_done") and vwap_midline_now is not None:
-        entry = st.get("avg_entry_price")
-        if entry is not None:
-            touched = (pos == "long" and price >= vwap_midline_now) or (pos == "short" and price <= vwap_midline_now)
-            if touched:
-                current_sl = st.get("sr_sl_price")
-                if current_sl is None or (pos == "long" and entry > current_sl) or (pos == "short" and entry < current_sl):
-                    st["sr_sl_price"] = entry
-                    debug_log(f"📡 [{symbol}] SuperTrend+RSI VWAP-Mittellinien-Breakeven ausgelöst - SL auf Einstieg ({round(entry, 4)}) gesetzt")
-                st["sr_vwap_breakeven_done"] = True
-
-    sl_price = st.get("sr_sl_price")
-    if sl_price is not None:
-        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-        if hit_sl:
-            entry = st.get("avg_entry_price")
-            reason = "BREAKEVEN" if st.get("sr_vwap_breakeven_done") and entry is not None and abs(sl_price - entry) < 1e-9 else "SL"
-            debug_log(f"🚪 [{symbol}] SuperTrend+RSI {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-            await execute_exit(symbol, price, reason)
-            st["sr_sl_price"] = None
-            st["sr_tp_price"] = None
-            st["sr_vwap_breakeven_done"] = False
-            if reason == "SL":
-                st["sr_sl_cooldown_until"] = time.time() + cfg.get("sr_sl_cooldown_seconds", 30)
-            return
-
-    tp_price = st.get("sr_tp_price")
-    if tp_price is not None:
-        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
-        if hit_tp:
-            debug_log(f"🎯 [{symbol}] SuperTrend+RSI TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-            await execute_exit(symbol, price, "TP")
-            st["sr_sl_price"] = None
-            st["sr_vwap_breakeven_done"] = False
-            st["sr_tp_price"] = None
-
-
-async def check_sr_signal(symbol, bull_i, bear_i, price, rsi_val, adx=None, plus_di=None, minus_di=None, vwap_arm=None, cloud_sl_lower=None, cloud_sl_upper=None, ema_val=None, rsi_arm=None, vwap_midline_ok=None, st_line_val=None, mo7_val=None, mo7_arm=None):
-    """Kernsignal (nach Nutzer-Vorgabe): SuperTrend dreht bullisch UND RSI-Bedingung erfuellt ->
-    Long. SuperTrend dreht baerisch UND RSI-Bedingung erfuellt -> Short. RSI-Bedingung ist
-    ueber sr_rsi_mode waehlbar: 'midline' (Standard) = RSI > Mittellinie fuer Long / < Mittellinie
-    fuer Short (Wert an DIESER Kerze). 'extreme_arm' = RSI muss VORHER ueber sr_rsi_overbought
-    (Standard 70) gewesen sein fuer Short bzw. VORHER unter sr_rsi_oversold (Standard 30) fuer
-    Long (rsi_arm, siehe compute_rsi_arm - identisches Zustandsmaschine-Prinzip wie beim
-    VWAP-Deviation-Filter, kein fester Lookback). Zusaetzlich fuenf unabhaengig voneinander
-    zuschaltbare Filter (wie bei UT-Bot+Hull/Fractals/Kerzen-DNA/Range Filter): ADX/DI-
-    Trendfilter, EMA-Trendfilter (ema_val: Long nur ueber der EMA, Short nur darunter),
-    VWAP-Deviation-Bestaetigung (vwap_arm: 'upper' -> Short erlaubt, 'lower' -> Long erlaubt,
-    siehe compute_vwap_dev_arm - wird VOR dieser Kerze ausgewertet, "vorher im Band
-    geschlossen"), VWAP-Mittellinien-Totzone (nach Nutzer-Vorgabe: vwap_midline_ok=False blockiert
-    BEIDE Richtungen, wenn der Kurs zu nah an der VWAP-Basislinie liegt - siehe
-    sr_vwap_midline_mult), MO7-Extremwert-Bestaetigung (nach Nutzer-Vorgabe, wie eine Art
-    Pullback-/Erschoepfungsfilter - siehe compute_mo7_series_novolume). sr_mo7_mode waehlbar:
-    'arm' (Standard, empfohlen) = MO7 muss VORHER unter sr_mo7_buy_threshold gewesen sein fuer
-    Long bzw. VORHER ueber sr_mo7_sell_threshold fuer Short (mo7_arm, identisches Zustandsmaschine-
-    Prinzip wie bei RSI-Extremwert/VWAP-Deviation - kein fester Lookback). 'instant' = MO7 muss
-    AN DIESER Kerze unter/ueber der Schwelle liegen (praktisch fast nie gleichzeitig mit einem
-    frischen SuperTrend-Flip erfuellt, da ein Flip meist schon bei staerkerem Momentum passiert -
-    bewusst als Option belassen, 'arm' ist aber der sinnvollere Standard).
-    Ein Gegen-Signal ist NUR gueltig, wenn ALLE Bedingungen fuer die Gegenrichtung erfuellt sind -
-    dann wird gedreht (Flip). Sind sie es nicht, passiert GAR NICHTS (nach Nutzer-Vorgabe: kein
-    Exit bei jedem beliebigen SuperTrend-Wechsel, die Position bleibt unangetastet offen und kann
-    nur ueber SL/TP oder ein spaeteres GUELTIGES Gegen-Signal beendet werden). cloud_sl_lower/
-    cloud_sl_upper werden nur bei sr_sl_tp_mode='vwap_cloud' fuer den SL gebraucht (siehe
-    _sr_set_sl_tp)."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None or rsi_val is None:
-        return
-    if time.time() < st.get("sr_sl_cooldown_until", 0.0):
-        return
-
-    direction_mode = cfg.get("sr_direction_mode", "both")
-    rsi_mode = cfg.get("sr_rsi_mode", "midline")
-    rsi_midline = cfg.get("sr_rsi_midline", 50)
-    if rsi_mode == "extreme_arm":
-        rsi_long_ok = rsi_arm == "long_ready"
-        rsi_short_ok = rsi_arm == "short_ready"
-    else:
-        rsi_long_ok = rsi_val > rsi_midline
-        rsi_short_ok = rsi_val < rsi_midline
-    adx_enabled = cfg.get("sr_adx_filter_enabled", False)
-    adx_threshold = cfg.get("sr_adx_threshold", 20)
-    adx_invert = cfg.get("sr_adx_invert_enabled", False)
-    adx_missing = adx is None or plus_di is None or minus_di is None
-    adx_strength_ok = False if adx_missing else ((adx < adx_threshold) if adx_invert else (adx > adx_threshold))
-    adx_long_ok = not adx_enabled or adx_missing or (adx_strength_ok and plus_di > minus_di)
-    adx_short_ok = not adx_enabled or adx_missing or (adx_strength_ok and minus_di > plus_di)
-    vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
-    ema_enabled = cfg.get("sr_ema_filter_enabled", False)
-    ema_long_ok = not ema_enabled or ema_val is None or price > ema_val
-    ema_short_ok = not ema_enabled or ema_val is None or price < ema_val
-    vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
-    midline_ok = not vwap_midline_enabled or vwap_midline_ok is None or vwap_midline_ok
-    mo7_enabled = cfg.get("sr_mo7_filter_enabled", False)
-    mo7_mode = cfg.get("sr_mo7_mode", "arm")
-    mo7_buy_threshold = cfg.get("sr_mo7_buy_threshold", 35)
-    mo7_sell_threshold = cfg.get("sr_mo7_sell_threshold", 75)
-    if mo7_mode == "arm":
-        mo7_long_ok = not mo7_enabled or mo7_arm == "long_ready"
-        mo7_short_ok = not mo7_enabled or mo7_arm == "short_ready"
-    else:
-        mo7_long_ok = not mo7_enabled or mo7_val is None or mo7_val < mo7_buy_threshold
-        mo7_short_ok = not mo7_enabled or mo7_val is None or mo7_val > mo7_sell_threshold
-
-    long_ok = (direction_mode != "short_only"
-               and rsi_long_ok
-               and (not vwap_dev_enabled or vwap_arm == "lower")
-               and ema_long_ok
-               and midline_ok
-               and mo7_long_ok
-               and adx_long_ok)
-    short_ok = (direction_mode != "long_only"
-                and rsi_short_ok
-                and (not vwap_dev_enabled or vwap_arm == "upper")
-                and ema_short_ok
-                and midline_ok
-                and mo7_short_ok
-                and adx_short_ok)
-    pos = st["position"]
-
-    if pos is None:
-        if bull_i and long_ok:
-            debug_log(f"📡 [{symbol}] SuperTrend+RSI Ersteinstieg: LONG @ {price} (RSI={round(rsi_val, 1)})")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper, st_line_val)
-        elif bear_i and short_ok:
-            debug_log(f"📡 [{symbol}] SuperTrend+RSI Ersteinstieg: SHORT @ {price} (RSI={round(rsi_val, 1)})")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper, st_line_val)
-        return
-
-    if pos == "long" and bear_i and short_ok:
-        debug_log(f"🔄 [{symbol}] SuperTrend+RSI Flip: LONG -> SHORT @ {price}")
-        await execute_exit(symbol, price, "SR-FLIP")
-        await execute_entry(symbol, "short", price, is_add_on=False)
-        if st["position"] is not None:
-            _sr_set_sl_tp(st, cfg, "short", price, cloud_sl_lower, cloud_sl_upper, st_line_val)
-    elif pos == "short" and bull_i and long_ok:
-        debug_log(f"🔄 [{symbol}] SuperTrend+RSI Flip: SHORT -> LONG @ {price}")
-        await execute_exit(symbol, price, "SR-FLIP")
-        await execute_entry(symbol, "long", price, is_add_on=False)
-        if st["position"] is not None:
-            _sr_set_sl_tp(st, cfg, "long", price, cloud_sl_lower, cloud_sl_upper, st_line_val)
-    # Gegen-Signal kam, aber Bedingungen nicht erfuellt -> bewusst KEINE Aktion (siehe Docstring)
-
-
-async def sr_poll_loop(symbol):
-    """SuperTrend(ATR-Periode, Multiplikator)+RSI, nach Nutzer-Vorgabe. Geruest identisch zu
-    pk_poll_loop/fr_poll_loop (Kerzen holen, neue abgeschlossene Kerzen seit dem letzten
-    Durchlauf verarbeiten). ADX-Filter/VWAP-Deviation werden bewusst NUR auf dem eigenen
-    Handels-Zeitrahmen berechnet (kein eigenes Zeiteinheit-Feld dafuer, haelt die Konfiguration
-    einfach). sr_immediate_signal_enabled (nach Nutzer-Vorgabe, optional): Standardmaessig wird
-    das Kernsignal nur auf ABGESCHLOSSENEN Kerzen ausgewertet (verzoegert um bis zu eine
-    Kerzenlaenge, aber ohne Repainting-Risiko). Mit dieser Option wird zusaetzlich JEDEN
-    Poll-Durchlauf (alle 5 Sekunden) die GERADE LAUFENDE Kerze live geprueft - Kernsignal
-    (SuperTrend-Flip+RSI) und SuperTrend-Band-SL reagieren dann sofort auf den aktuellen Kurs
-    statt erst beim Kerzenschluss, die anderen Filter (ADX/EMA/VWAP-Arm/Mittellinien) nutzen
-    dabei noch die Werte der letzten abgeschlossenen Kerze als Naeherung. Bei Sekunden-
-    Aufloesungen nicht verfuegbar (keine 'laufende' Kerze zum Anzapfen)."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "st_rsi_signal" and cfg["bot_active"]:
-                resolution = cfg.get("sr_resolution", "5m")
-                atr_period = cfg.get("sr_st_atr_period", 10)
-                multiplier = cfg.get("sr_st_multiplier", 2.0)
-                rsi_period = cfg.get("sr_rsi_period", 9)
-                adx_enabled = cfg.get("sr_adx_filter_enabled", False)
-                adx_length = cfg.get("sr_adx_length", 14)
-                vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
-                vwap_dev_length = cfg.get("sr_vwap_dev_length", 60)
-                vwap_dev_mult = cfg.get("sr_vwap_dev_mult", 2.0)
-                sl_tp_mode = cfg.get("sr_sl_tp_mode", "fixed")
-                vwap_sl_mult = cfg.get("sr_vwap_sl_mult", 3.0)
-                vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
-                vwap_midline_mult = cfg.get("sr_vwap_midline_mult", 0.3)
-                vwap_breakeven_enabled = cfg.get("sr_vwap_midline_breakeven_enabled", False)
-                need_vwap_data = vwap_dev_enabled or sl_tp_mode == "vwap_cloud" or vwap_midline_enabled or vwap_breakeven_enabled
-                ema_enabled = cfg.get("sr_ema_filter_enabled", False)
-                ema_length = cfg.get("sr_ema_length", 200)
-                rsi_mode = cfg.get("sr_rsi_mode", "midline")
-                rsi_overbought = cfg.get("sr_rsi_overbought", 70)
-                rsi_oversold = cfg.get("sr_rsi_oversold", 30)
-                immediate_enabled = cfg.get("sr_immediate_signal_enabled", False)
-                mo7_enabled = cfg.get("sr_mo7_filter_enabled", False)
-                mo7_mode = cfg.get("sr_mo7_mode", "arm")
-                mo7_buy_threshold = cfg.get("sr_mo7_buy_threshold", 35)
-                mo7_sell_threshold = cfg.get("sr_mo7_sell_threshold", 75)
-                min_needed = max(atr_period, rsi_period, adx_length, vwap_dev_length, ema_length if ema_enabled else 0, 5) + 5
-                needed_bars = min(1000, max(min_needed * 2, 220, 500 if mo7_enabled else 0))
-                st = b["state"]
-                live_h_raw = live_l_raw = live_c_raw = None  # aktuell noch laufende (nicht geschlossene) Kerze - nur fuer "Sofort ausloesen"
-
-                if need_vwap_data:
-                    data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
-                    if data:
-                        timestamps, opens, highs, lows, closes, volumes = data
-                        closed_ts, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
-                        if immediate_enabled and highs:
-                            live_h_raw, live_l_raw, live_c_raw = highs[-1], lows[-1], closes[-1]
-                    else:
-                        closed_ts = closed_h = closed_l = closed_c = closed_v = None
-                elif resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, _, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = closed_h = closed_l = closed_c = None
-                    closed_v = None
-                    # "Sofort ausloesen" wird bei Sekunden-Aufloesungen bewusst NICHT unterstuetzt
-                    # (get_seconds_candles liefert nur bereits abgeschlossene, synthetisch
-                    # zusammengesetzte Kerzen - keine "gerade laufende" Kerze zum Anzapfen).
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_h, closed_l, closed_c = timestamps[:-1], highs[:-1], lows[:-1], closes[:-1]
-                        if immediate_enabled and highs:
-                            live_h_raw, live_l_raw, live_c_raw = highs[-1], lows[-1], closes[-1]
-                    else:
-                        closed_ts = closed_h = closed_l = closed_c = None
-                    closed_v = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    bull, bear, rsi, st_line = compute_sr_signals(closed_h, closed_l, closed_c, atr_period, multiplier, rsi_period)
-
-                    adx = plus_di = minus_di = None
-                    if adx_enabled:
-                        adx_resolution = cfg.get("sr_adx_resolution", "same")
-                        if adx_resolution in (None, "", "same") or adx_resolution == resolution:
-                            adx, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
-                        else:
-                            adx_needed = min(500, adx_length * 5 + 20)
-                            if adx_resolution in SUB_MINUTE_RESOLUTIONS:
-                                adx_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[adx_resolution], adx_needed)
-                                adx_h = adx_local[2] if adx_local else None
-                                adx_l = adx_local[3] if adx_local else None
-                                adx_c = adx_local[4] if adx_local else None
-                            else:
-                                adx_data = await fetch_candles_binance_multi(symbol, adx_resolution, count_back=adx_needed, market_type=cfg.get("binance_market_type", "spot"))
-                                if adx_data:
-                                    _, _, adx_h, adx_l, adx_c = adx_data
-                                    adx_h, adx_l, adx_c = adx_h[:-1], adx_l[:-1], adx_c[:-1]
-                                else:
-                                    adx_h = adx_l = adx_c = None
-                            if adx_c and len(adx_c) > adx_length:
-                                adx_now, plus_di_now, minus_di_now = compute_adx(adx_h, adx_l, adx_c, adx_length)
-                                adx = [adx_now[-1]] * len(closed_c)
-                                plus_di = [plus_di_now[-1]] * len(closed_c)
-                                minus_di = [minus_di_now[-1]] * len(closed_c)
-                            else:
-                                adx, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)  # Fallback, falls (noch) keine Daten
-
-                    ema = None
-                    if ema_enabled:
-                        ema_resolution = cfg.get("sr_ema_resolution", "same")
-                        if ema_resolution in (None, "", "same") or ema_resolution == resolution:
-                            ema = _ema_series(closed_c, ema_length)
-                        else:
-                            ema_needed = min(500, ema_length * 3 + 20)
-                            if ema_resolution in SUB_MINUTE_RESOLUTIONS:
-                                ema_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[ema_resolution], ema_needed)
-                                ema_c = ema_local[4] if ema_local else None
-                            else:
-                                ema_data = await fetch_candles_binance_multi(symbol, ema_resolution, count_back=ema_needed, market_type=cfg.get("binance_market_type", "spot"))
-                                if ema_data:
-                                    _, _, _, _, ema_c = ema_data
-                                    ema_c = ema_c[:-1]
-                                else:
-                                    ema_c = None
-                            if ema_c and len(ema_c) > ema_length:
-                                ema_now = _ema_series(ema_c, ema_length)
-                                ema = [ema_now[-1]] * len(closed_c)
-                            else:
-                                ema = _ema_series(closed_c, ema_length)  # Fallback, falls (noch) keine Daten
-
-                    rsi_arm_series = None
-                    if rsi_mode == "extreme_arm":
-                        rsi_arm_series = compute_rsi_arm(rsi, rsi_overbought, rsi_oversold)
-
-                    mo7 = None
-                    if mo7_enabled:
-                        mo7 = compute_mo7_series_novolume(closed_h, closed_l, closed_c, cfg)
-
-                    vwap_upper = vwap_lower = None  # Bestaetigungs-Band (dev_mult, "Wolke betreten")
-                    sl_lower = sl_upper = None  # SL-Band (vwap_sl_mult, "Ende der Wolke")
-                    midline_ok = None  # Mittellinien-Totzone (midline_mult, "zu nah an der Basislinie")
-                    vwmean_now = None  # Rohe Mittellinie (fuer VWAP-Mittellinien-Breakeven)
-                    if need_vwap_data and closed_v:
-                        vwmean, dev = compute_vw_avdev(closed_c, closed_v, vwap_dev_length)
-                        vwmean_now = vwmean[-1]
-                        if vwap_dev_enabled:
-                            vwap_upper, vwap_lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
-                        if sl_tp_mode == "vwap_cloud":
-                            sl_upper, sl_lower = vwap_bands_from_dev(vwmean, dev, vwap_sl_mult)
-                        if vwap_midline_enabled:
-                            midline_ok = [abs(closed_c[i] - vwmean[i]) >= dev[i] * vwap_midline_mult for i in range(len(closed_c))]
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] SuperTrend+RSI aktiv: Preis={closed_c[-1]}, RSI={round(rsi[-1], 1)}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 1:
-                            continue
-                        price_i = closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-
-                        vwap_arm_before = st.get("sr_vwap_arm") if vwap_dev_enabled else None
-                        if vwap_dev_enabled and vwap_upper is not None:
-                            if closed_c[idx] > vwap_upper[idx]:
-                                st["sr_vwap_arm"] = "upper"
-                            elif closed_c[idx] < vwap_lower[idx]:
-                                st["sr_vwap_arm"] = "lower"
-
-                        rsi_arm_before = st.get("sr_rsi_arm") if rsi_mode == "extreme_arm" else None
-                        if rsi_mode == "extreme_arm" and rsi_arm_series is not None:
-                            if rsi[idx] > rsi_overbought:
-                                st["sr_rsi_arm"] = "short_ready"
-                            elif rsi[idx] < rsi_oversold:
-                                st["sr_rsi_arm"] = "long_ready"
-
-                        mo7_arm_before = st.get("sr_mo7_arm") if (mo7_enabled and mo7_mode == "arm") else None
-                        if mo7_enabled and mo7_mode == "arm" and mo7 is not None:
-                            if mo7[idx] > mo7_sell_threshold:
-                                st["sr_mo7_arm"] = "short_ready"
-                            elif mo7[idx] < mo7_buy_threshold:
-                                st["sr_mo7_arm"] = "long_ready"
-
-                        await check_sr_signal(
-                            symbol, bull[idx], bear[idx], price_i, rsi[idx],
-                            adx=adx[idx] if adx is not None else None,
-                            plus_di=plus_di[idx] if plus_di is not None else None,
-                            minus_di=minus_di[idx] if minus_di is not None else None,
-                            vwap_arm=vwap_arm_before,
-                            cloud_sl_lower=sl_lower[idx] if sl_lower is not None else None,
-                            cloud_sl_upper=sl_upper[idx] if sl_upper is not None else None,
-                            ema_val=ema[idx] if ema is not None else None,
-                            rsi_arm=rsi_arm_before,
-                            vwap_midline_ok=midline_ok[idx] if midline_ok is not None else None,
-                            st_line_val=st_line[idx],
-                            mo7_val=mo7[idx] if mo7 is not None else None,
-                            mo7_arm=mo7_arm_before,
-                        )
-
-                    await check_sr_sl_tp(symbol, price, vwap_midline_now=vwmean_now)
-
-                    if immediate_enabled and live_c_raw is not None:
-                        live_price = st["last_price"] if st["last_price"] is not None else live_c_raw
-                        live_h_val = max(live_h_raw, live_price) if live_h_raw is not None else live_price
-                        live_l_val = min(live_l_raw, live_price) if live_l_raw is not None else live_price
-                        probe_h = closed_h + [live_h_val]
-                        probe_l = closed_l + [live_l_val]
-                        probe_c = closed_c + [live_price]
-                        live_bull, live_bear, live_rsi, live_st_line = compute_sr_signals(probe_h, probe_l, probe_c, atr_period, multiplier, rsi_period)
-                        live_idx = len(probe_c) - 1
-                        if live_bull[live_idx] or live_bear[live_idx]:
-                            # Filter (ADX/EMA/VWAP-Arm/Mittellinien-Totzone) nutzen bewusst noch die
-                            # Werte der letzten ABGESCHLOSSENEN Kerze (Naeherung) - nur das Kernsignal
-                            # (SuperTrend-Flip+RSI) und der SuperTrend-Band-SL reagieren live auf die
-                            # gerade laufende Kerze, das war der eigentliche Zweck dieser Option.
-                            await check_sr_signal(
-                                symbol, live_bull[live_idx], live_bear[live_idx], live_price, live_rsi[live_idx],
-                                adx=adx[-1] if adx is not None else None,
-                                plus_di=plus_di[-1] if plus_di is not None else None,
-                                minus_di=minus_di[-1] if minus_di is not None else None,
-                                vwap_arm=st.get("sr_vwap_arm") if vwap_dev_enabled else None,
-                                cloud_sl_lower=sl_lower[-1] if sl_lower is not None else None,
-                                cloud_sl_upper=sl_upper[-1] if sl_upper is not None else None,
-                                ema_val=ema[-1] if ema is not None else None,
-                                rsi_arm=st.get("sr_rsi_arm") if rsi_mode == "extreme_arm" else None,
-                                vwap_midline_ok=midline_ok[-1] if midline_ok is not None else None,
-                                st_line_val=live_st_line[live_idx],
-                                mo7_val=mo7[-1] if mo7 is not None else None,
-                                mo7_arm=st.get("sr_mo7_arm") if (mo7_enabled and mo7_mode == "arm") else None,
-                            )
-                            await check_sr_sl_tp(symbol, live_price, vwap_midline_now=vwmean_now)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] SuperTrend+RSI wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] SuperTrend+RSI wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] SuperTrend+RSI-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-async def _build_volume_ok_series_for_backtest(symbol, cfg, days, base_ts, primary_resolution, prefix):
-    """Baut die 'genug relatives Volumen'-Boolean-Serie fuer den Backtest: holt die historischen
-    Kerzen MIT Volumen (fetch_historical_candles_binance_vol - der normale Backtest-Kerzen-Fetch
-    liefert kein Volumen), berechnet volume > SMA(volume, laenge)*multiplikator, bildet das per
-    Forward-Fill (siehe _align_htf_series) auf die Zeitstempel der Einstiegs-Kerzen ab. Bewusst
-    IMMER auf dem eigenen Handels-Zeitrahmen (kein eigenes Zeiteinheit-Feld dafuer, wie bei
-    ADX/Z-Score). Gibt (volume_ok, error) zurueck."""
-    length = cfg.get(f"{prefix}_volume_length", 20)
-    mult = cfg.get(f"{prefix}_volume_mult", 1.3)
-    tf_candles, err = await fetch_historical_candles_binance_vol(symbol, primary_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return None, f"Volumen-Zeiteinheit ({primary_resolution}): {err}"
-    if not tf_candles or len(tf_candles[4]) < length + 5:
-        return None, f"Zu wenig historische Kerzen (mit Volumen) für den Volumen-Filter erhalten."
-    t_ts, t_o, t_h, t_l, t_c, t_v = tf_candles
-    vol_ma = _sma_series(t_v, length)
-    volume_ok_htf = [t_v[i] > vol_ma[i] * mult for i in range(len(t_v))]
-    return _align_htf_series(base_ts, t_ts, volume_ok_htf), None
-
-
-def backtest_sr_signal(candles, cfg):
-    """Backtest-Pendant zu check_sr_signal/check_sr_sl_tp/sr_poll_loop - identische Logik, siehe
-    dort fuer Kommentare. ADX/VWAP-Deviation-Serien werden - falls die jeweiligen Filter/Modi
-    aktiv sind - von run_backtest VORAB async berechnet und unter cfg['_sr_*_precomputed']
-    uebergeben (EMA/RSI-Extremwert-Zustand brauchen kein async Precompute, da sie direkt aus
-    Preis/RSI berechenbar sind, siehe _ema_series/compute_rsi_arm). Diese Funktion selbst ist
-    NICHT async, einheitliche BACKTEST_FUNCS-Signatur."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    atr_period = cfg.get("sr_st_atr_period", 10)
-    multiplier = cfg.get("sr_st_multiplier", 2.0)
-    rsi_period = cfg.get("sr_rsi_period", 9)
-    rsi_midline = cfg.get("sr_rsi_midline", 50)
-    rsi_mode = cfg.get("sr_rsi_mode", "midline")
-    rsi_overbought = cfg.get("sr_rsi_overbought", 70)
-    rsi_oversold = cfg.get("sr_rsi_oversold", 30)
-    direction_mode = cfg.get("sr_direction_mode", "both")
-    sl_tp_mode = cfg.get("sr_sl_tp_mode", "fixed")
-    sl_enabled = cfg.get("sr_sl_enabled", True)
-    tp_enabled = cfg.get("sr_tp_enabled", True)
-    sl_usd = cfg.get("sr_sl_manual_usd", 5.0)
-    tp_usd = cfg.get("sr_tp_manual_usd", 10.0)
-    vwap_tp_rr = cfg.get("sr_vwap_tp_rr", 1.5)
-    st_tp_rr = cfg.get("sr_st_tp_rr", 1.5)
-    st_sl_buffer_usd = cfg.get("sr_st_sl_buffer_usd", 0.0)
-    sl_cooldown_ms = cfg.get("sr_sl_cooldown_seconds", 30) * 1000
-
-    adx_enabled = cfg.get("sr_adx_filter_enabled", False)
-    adx_threshold = cfg.get("sr_adx_threshold", 20)
-    adx_invert = cfg.get("sr_adx_invert_enabled", False)
-    vwap_dev_enabled = cfg.get("sr_vwap_dev_filter_enabled", False)
-    ema_enabled = cfg.get("sr_ema_filter_enabled", False)
-    ema_length = cfg.get("sr_ema_length", 200)
-    vwap_midline_enabled = cfg.get("sr_vwap_midline_filter_enabled", False)
-    vwap_breakeven_enabled = cfg.get("sr_vwap_midline_breakeven_enabled", False)
-    mo7_enabled = cfg.get("sr_mo7_filter_enabled", False)
-    mo7_mode = cfg.get("sr_mo7_mode", "arm")
-    mo7_buy_threshold = cfg.get("sr_mo7_buy_threshold", 35)
-    mo7_sell_threshold = cfg.get("sr_mo7_sell_threshold", 75)
-
-    bull, bear, rsi, st_line = compute_sr_signals(h, l, c, atr_period, multiplier, rsi_period)
-
-    adx_data = cfg.get("_sr_adx_precomputed") if adx_enabled else None
-    adx_series, plus_di_series, minus_di_series = adx_data if adx_data else (None, None, None)
-    vwap_arm_series = cfg.get("_sr_vwap_arm_precomputed") if vwap_dev_enabled else None
-    sl_lower_series = cfg.get("_sr_vwap_sl_lower_precomputed") if sl_tp_mode == "vwap_cloud" else None
-    sl_upper_series = cfg.get("_sr_vwap_sl_upper_precomputed") if sl_tp_mode == "vwap_cloud" else None
-    ema_series = cfg.get("_sr_ema_precomputed") if ema_enabled else None
-    rsi_arm_series = compute_rsi_arm(rsi, rsi_overbought, rsi_oversold) if rsi_mode == "extreme_arm" else None
-    midline_ok_series = cfg.get("_sr_vwap_midline_precomputed") if vwap_midline_enabled else None
-    midline_series = cfg.get("_sr_vwap_midline_series_precomputed") if vwap_breakeven_enabled else None
-    mo7_series = compute_mo7_series_novolume(h, l, c, cfg) if mo7_enabled else None
-    mo7_arm_series = compute_rsi_arm(mo7_series, mo7_sell_threshold, mo7_buy_threshold) if (mo7_enabled and mo7_mode == "arm" and mo7_series is not None) else None
-
-    warmup = max(atr_period, rsi_period, cfg.get("sr_adx_length", 14), cfg.get("sr_vwap_dev_length", 60), ema_length if ema_enabled else 0, 500 if mo7_enabled else 0, 5) + 2
-
-    def arm_before(i):
-        """VWAP-Deviation-Zustand VOR Kerze i (siehe compute_vwap_dev_arm - 'vorher im Band
-        geschlossen')."""
-        if vwap_arm_series is None or i < 1:
-            return None
-        return vwap_arm_series[i - 1]
-
-    def rsi_arm_before(i):
-        """RSI-Extremwert-Zustand VOR Kerze i (siehe compute_rsi_arm - 'vorher ueber 70/unter
-        30 gewesen')."""
-        if rsi_arm_series is None or i < 1:
-            return None
-        return rsi_arm_series[i - 1]
-
-    def mo7_arm_before(i):
-        """MO7-Extremwert-Zustand VOR Kerze i (siehe compute_rsi_arm - 'vorher unter/ueber der
-        Schwelle gewesen')."""
-        if mo7_arm_series is None or i < 1:
-            return None
-        return mo7_arm_series[i - 1]
-
-    def midline_ok(i):
-        """VWAP-Mittellinien-Totzone AN Kerze i (nach Nutzer-Vorgabe - blockiert BEIDE Richtungen
-        gleichermassen, siehe sr_vwap_midline_mult)."""
-        return midline_ok_series is None or midline_ok_series[i] is None or midline_ok_series[i]
-
-    def eval_ok(i, want_long):
-        adx_missing = adx_series is None or plus_di_series is None or minus_di_series is None
-        adx_strength_ok = False if adx_missing else ((adx_series[i] < adx_threshold) if adx_invert else (adx_series[i] > adx_threshold))
-        if not mo7_enabled:
-            mo7_ok = True
-        elif mo7_mode == "arm":
-            mo7_ok = (mo7_arm_before(i) == "long_ready") if want_long else (mo7_arm_before(i) == "short_ready")
-        else:
-            mo7_ok = mo7_series is None or (mo7_series[i] < mo7_buy_threshold if want_long else mo7_series[i] > mo7_sell_threshold)
-        if want_long:
-            rsi_ok = (rsi_arm_before(i) == "long_ready") if rsi_mode == "extreme_arm" else (rsi[i] > rsi_midline)
-            ema_ok = not ema_enabled or ema_series is None or c[i] > ema_series[i]
-            adx_ok = not adx_enabled or adx_missing or (adx_strength_ok and plus_di_series[i] > minus_di_series[i])
-            return (direction_mode != "short_only"
-                    and rsi_ok
-                    and (not vwap_dev_enabled or arm_before(i) == "lower")
-                    and ema_ok
-                    and midline_ok(i)
-                    and mo7_ok
-                    and adx_ok)
-        else:
-            rsi_ok = (rsi_arm_before(i) == "short_ready") if rsi_mode == "extreme_arm" else (rsi[i] < rsi_midline)
-            ema_ok = not ema_enabled or ema_series is None or c[i] < ema_series[i]
-            adx_ok = not adx_enabled or adx_missing or (adx_strength_ok and minus_di_series[i] > plus_di_series[i])
-            return (direction_mode != "long_only"
-                    and rsi_ok
-                    and (not vwap_dev_enabled or arm_before(i) == "upper")
-                    and ema_ok
-                    and midline_ok(i)
-                    and mo7_ok
-                    and adx_ok)
-
-    def make_sl_tp(i, direction, entry_price):
-        """Drei SL/TP-Varianten, siehe _sr_set_sl_tp (Live-Pendant) fuer Kommentare."""
-        if sl_tp_mode == "vwap_cloud":
-            cloud_sl = (sl_lower_series[i] if sl_lower_series is not None else None) if direction == "long" else (sl_upper_series[i] if sl_upper_series is not None else None)
-            if cloud_sl is None:
-                return None, None
-            if direction == "long":
-                risk = entry_price - cloud_sl
-                return (cloud_sl, entry_price + risk * vwap_tp_rr) if risk > 0 else (None, None)
-            else:
-                risk = cloud_sl - entry_price
-                return (cloud_sl, entry_price - risk * vwap_tp_rr) if risk > 0 else (None, None)
-        if sl_tp_mode == "supertrend":
-            st_sl = st_line[i]
-            size = (margin * leverage) / entry_price
-            buffer_dist = (st_sl_buffer_usd / size) if st_sl_buffer_usd and size > 0 else 0.0
-            if direction == "long":
-                sl_price = st_sl - buffer_dist
-                risk = entry_price - sl_price
-                return (sl_price, entry_price + risk * st_tp_rr) if risk > 0 else (None, None)
-            else:
-                sl_price = st_sl + buffer_dist
-                risk = sl_price - entry_price
-                return (sl_price, entry_price - risk * st_tp_rr) if risk > 0 else (None, None)
-        size = (margin * leverage) / entry_price
-        if direction == "long":
-            sl_price = (entry_price - sl_usd / size) if sl_enabled else None
-            tp_price = (entry_price + tp_usd / size) if tp_enabled else None
-        else:
-            sl_price = (entry_price + sl_usd / size) if sl_enabled else None
-            tp_price = (entry_price - tp_usd / size) if tp_enabled else None
-        return sl_price, tp_price
-
-    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price","breakeven_done"}
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-
-        if position is not None:
-            if vwap_breakeven_enabled and not position["breakeven_done"] and midline_series is not None and midline_series[i] is not None:
-                mid = midline_series[i]
-                touched = (position["dir"] == "long" and h[i] >= mid) or (position["dir"] == "short" and l[i] <= mid)
-                if touched:
-                    entry = position["entry"]
-                    current_sl = position["sl_price"]
-                    if current_sl is None or (position["dir"] == "long" and entry > current_sl) or (position["dir"] == "short" and entry < current_sl):
-                        position["sl_price"] = entry
-                    position["breakeven_done"] = True
-
-            sl_price, tp_price = position["sl_price"], position["tp_price"]
-            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
-            if hit_sl:
-                reason = "BREAKEVEN" if position["breakeven_done"] and abs(sl_price - position["entry"]) < 1e-9 else "SL"
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
-                position = None
-                if reason == "SL":
-                    sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-
-        in_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-
-        if position is None:
-            if in_cooldown:
-                continue
-            if bull[i] and eval_ok(i, True):
-                size = (margin * leverage) / price
-                sl_price, tp_price = make_sl_tp(i, "long", price)
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
-            elif bear[i] and eval_ok(i, False):
-                size = (margin * leverage) / price
-                sl_price, tp_price = make_sl_tp(i, "short", price)
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
-            continue
-
-        if position["dir"] == "long" and bear[i] and eval_ok(i, False):
-            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
-            size = (margin * leverage) / price
-            sl_price, tp_price = make_sl_tp(i, "short", price)
-            position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
-        elif position["dir"] == "short" and bull[i] and eval_ok(i, True):
-            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "SR-FLIP", ts=ts)
-            size = (margin * leverage) / price
-            sl_price, tp_price = make_sl_tp(i, "long", price)
-            position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
-        # Gegen-Signal kam, aber Bedingungen nicht erfuellt -> bewusst KEINE Aktion (siehe
-        # check_sr_signal-Docstring, identische Logik)
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def compute_hvd_arm(closes, highs, lows, upper, lower, rsi, overbought, oversold, touch_mode=False):
-    """Scharfschaltung fuer '[Hoss] VWAP+RSI+Hull+DI' (nach Nutzer-Vorgabe gelockert): Band-
-    Beruehrung und RSI-Extremwert muessen NICHT mehr auf derselben Kerze passieren - stattdessen
-    werden zwei UNABHAENGIGE Zustaende gefuehrt (band_state: zuletzt oberes oder unteres Band
-    beruehrt; rsi_state: zuletzt ueberkauft oder ueberverkauft), die jeweils bestehen bleiben, bis
-    die Gegenseite eintritt. Der Arm-Zustand ist scharf, SOLANGE beide Zustaende gleichzeitig auf
-    derselben Seite stehen ('im selben Zyklus da sein', nach Nutzer-Vorgabe) - z.B. Band beruehrt
-    ueber dem oberen VWAP-Band, danach (auch mehrere Kerzen spaeter) wird OBV-RSI > 'overbought' ->
-    Zustand 1 (nur Short erlaubt). Sobald EINER der beiden Zustaende auf die Gegenseite wechselt,
-    faellt die Scharfschaltung sofort weg. Kein fester Lookback, kein Reset nach einem
-    ausgefuehrten Trade (nach Nutzer-Vorgabe: 'bleibt scharf bis es dreht') - der Bot kann also
-    mehrfach hintereinander in dieselbe Richtung feuern, solange die Gegenbedingung nicht
-    eintritt. touch_mode (nach Nutzer-Vorgabe, optional): standardmaessig (False) muss eine Kerze
-    ueber/unter dem Band SCHLIESSEN (close); mit touch_mode=True reicht schon eine reine
-    Docht-Beruehrung (high >= oberes Band bzw. low <= unteres Band), auch ohne dass die Kerze
-    darueber/darunter schliesst."""
-    n = len(closes)
-    arm = [0] * n
-    band_state = 0  # 1 = zuletzt oberes Band beruehrt, -1 = zuletzt unteres Band beruehrt
-    rsi_state = 0   # 1 = zuletzt ueberkauft, -1 = zuletzt ueberverkauft
-    state = 0
-    for i in range(n):
-        if touch_mode:
-            red_touched = highs[i] >= upper[i]
-            green_touched = lows[i] <= lower[i]
-        else:
-            red_touched = closes[i] > upper[i]
-            green_touched = closes[i] < lower[i]
-
-        if red_touched:
-            band_state = 1
-        elif green_touched:
-            band_state = -1
-
-        if rsi[i] > overbought:
-            rsi_state = 1
-        elif rsi[i] < oversold:
-            rsi_state = -1
-
-        if band_state == 1 and rsi_state == 1:
-            state = 1
-        elif band_state == -1 and rsi_state == -1:
-            state = -1
-        arm[i] = state
-    return arm
-
-
-def _hvd_arm_flip_series(arm):
-    """Erkennt PRO KERZE, ob der Arm-Zustand genau JETZT auf 1 (Short-Konfirmation) bzw. -1
-    (Long-Konfirmation) NEU gewechselt ist (nach Nutzer-Vorgabe: 'eine neue Konfirmation
-    aktiviert' - der Uebergangsmoment, nicht der Dauerzustand). Basis fuer den optionalen
-    Arm-Flip-Exit (siehe check_hvd_signal/_simulate_hvd_trades): ist z.B. eine Short-Position
-    offen und just jetzt kippt der Arm auf Long-Konfirmation, wird die Short-Position sofort
-    beendet - unabhaengig vom Hull-Farbwechsel."""
-    n = len(arm)
-    flip_to_short = [False] * n
-    flip_to_long = [False] * n
-    prev = 0
-    for i in range(n):
-        if arm[i] == 1 and prev != 1:
-            flip_to_short[i] = True
-        elif arm[i] == -1 and prev != -1:
-            flip_to_long[i] = True
-        prev = arm[i]
-    return flip_to_short, flip_to_long
-
-
-def _hvd_make_sl_tp(hull_val, atr_val, direction, entry_price, atr_min_mult, risk_reward):
-    """SL = aktueller Hull-Wert - AUSSER er liegt naeher am Einstieg als der ATR-basierte
-    Mindestabstand (atr_val * atr_min_mult), dann wird stattdessen dieser Mindestabstand
-    verwendet (nach Nutzer-Vorgabe: verhindert einen zu enges/wertloses SL, wenn Hull gerade sehr
-    nah am Kurs liegt). TP als einstellbares Risk-Reward-Vielfaches des daraus resultierenden
-    SL-Abstands (1.0 = 1:1, 1.5 = 1:1,5, ...). Gibt (None, None) zurueck, wenn kein Hull-Wert
-    oder kein positiver Risikoabstand vorliegt (z.B. ganz am Anfang der Serie)."""
-    if hull_val is None:
-        return None, None
-    min_distance = (atr_val or 0.0) * atr_min_mult
-    if direction == "long":
-        hull_distance = entry_price - hull_val
-        sl_price = entry_price - min_distance if hull_distance < min_distance else hull_val
-        risk = entry_price - sl_price
-        return (sl_price, entry_price + risk * risk_reward) if risk > 0 else (None, None)
-    else:
-        hull_distance = hull_val - entry_price
-        sl_price = entry_price + min_distance if hull_distance < min_distance else hull_val
-        risk = sl_price - entry_price
-        return (sl_price, entry_price - risk * risk_reward) if risk > 0 else (None, None)
-
-
-def _hvd_set_sl_tp(st, cfg, direction, entry_price, hull_val, atr_val):
-    """Live-Pendant zu _hvd_make_sl_tp - schreibt SL/TP direkt in den Bot-State."""
-    atr_min_mult = cfg.get("hvd_atr_min_mult", 1.0)
-    risk_reward = cfg.get("hvd_risk_reward", 1.5)
-    sl_price, tp_price = _hvd_make_sl_tp(hull_val, atr_val, direction, entry_price, atr_min_mult, risk_reward)
-    st["hvd_sl_price"] = sl_price
-    st["hvd_tp_price"] = tp_price
-
-
-async def check_hvd_sl_tp(symbol, price):
-    """Kein Flip-Exit (nach Nutzer-Vorgabe) - eine offene Position wird ausschliesslich von SL
-    oder TP beendet, analog zu UT-Bot+Hull/Fractals fester SL/TP, aber hier IMMER aktiv (kein
-    Ein-/Ausschalter, da SL/TP hier die einzige Exit-Moeglichkeit ueberhaupt sind)."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    sl_price = st.get("hvd_sl_price")
-    if sl_price is not None:
-        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-        if hit_sl:
-            debug_log(f"🚪 [{symbol}] Hoss VWAP+RSI+Hull+DI SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-            await execute_exit(symbol, price, "SL")
-            st["hvd_sl_price"] = None
-            st["hvd_tp_price"] = None
-            st["hvd_sl_cooldown_until"] = time.time() + cfg.get("hvd_sl_cooldown_seconds", 30)
-            return
-
-    tp_price = st.get("hvd_tp_price")
-    if tp_price is not None:
-        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
-        if hit_tp:
-            debug_log(f"🎯 [{symbol}] Hoss VWAP+RSI+Hull+DI TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-            await execute_exit(symbol, price, "TP")
-            st["hvd_sl_price"] = None
-            st["hvd_tp_price"] = None
-
-
-async def check_hvd_signal(symbol, price, long_flip_i, short_flip_i, arm_i, plus_di_i, minus_di_i, hull_i, atr_i,
-                            arm_flip_to_short_i=False, arm_flip_to_long_i=False, adx_filter_ok_i=True,
-                            trend_filter_long_ok_i=True, trend_filter_short_ok_i=True, candle_index=None):
-    """Kernsignal (1:1 aus dem Nutzer-Pine-Script '[Hoss] VWAP+RSI+Hull+DI System' portiert):
-    Hull-Farbwechsel auf gruen + Zustand -1 (siehe compute_hvd_arm - vorher gruenes Band UND
-    OBV-RSI ueberverkauft) + DI+ > DI- -> Long. Hull-Farbwechsel auf rot + Zustand 1 (vorher
-    rotes Band UND OBV-RSI ueberkauft) + DI- > DI+ -> Short. Nur EIN Einstieg auf einmal (nach
-    Nutzer-Vorgabe kein Nachkauf/Pyramiding) - ist bereits eine Position offen, wird ein neues
-    Signal ignoriert. adx_filter_ok_i (nach Nutzer-Vorgabe, optional, siehe hvd_adx_filter_enabled):
-    zusaetzlicher Seitwaerts-Filter, UNABHAENGIG von den DI-Werten fuer die Richtungsbestaetigung -
-    ein eigener ADX-Wert (eigene Laenge/Zeiteinheit) muss ueber einer Schwelle liegen, sonst wird
-    KEIN Einstieg ausgeloest (Default True = Filter aus/nicht relevant). Zwei unabhaengige,
-    optionale Exit-Schalter (Standard beide aus - ohne sie beendet ausschliesslich SL/TP eine
-    offene Position, siehe check_hvd_sl_tp):
-    - hvd_flip_exit_enabled: wechselt die Hull-Linie waehrend einer offenen Position die Farbe
-      GEGEN die Positionsrichtung, wird sofort glatt gestellt - unabhaengig von Arm-Zustand/DI.
-    - hvd_arm_flip_exit_enabled (nach Nutzer-Vorgabe): aktiviert sich waehrend einer offenen
-      Position eine NEUE Gegen-Konfirmation (der Arm-Zustand wechselt frisch auf die andere
-      Richtung, siehe _hvd_arm_flip_series), wird sofort glatt gestellt - unabhaengig vom
-      Hull-Farbwechsel. Ist z.B. eine Short-Position offen und der Arm kippt gerade neu auf
-      Long-Konfirmation (gruenes Band + OBV-RSI ueberverkauft im selben Zyklus), wird die Short-
-      Position sofort beendet - und symmetrisch andersrum bei einer offenen Long-Position.
-
-    hvd_trend_filter_signal_window_candles (nach Nutzer-Vorgabe, nur relevant bei aktivem
-    hvd_trend_filter_enabled): bestaetigt der SuperTrend-Trendfilter ein Hull+DI-Signal nicht
-    SOFORT auf derselben Kerze, verfaellt es bei 0 (Standard-Verhalten wie bisher) sofort. Bei
-    einem Wert > 0 wird das Signal stattdessen als 'ausstehend' gemerkt (st['hvd_pending_signal'])
-    und bei jeder folgenden Kerze erneut geprueft, ob der Trendfilter jetzt (innerhalb des
-    Fensters) die passende Richtung bestaetigt - dann wird ERST JETZT eingestiegen, zum dann
-    aktuellen Kurs/Hull/ATR (nicht rueckwirkend zur urspruenglichen Signalkerze). Ein neues
-    Gegensignal waehrend der Wartezeit ersetzt das alte ausstehende Signal. candle_index (noetig
-    fuer die Fensterberechnung) ist bei hvd_poll_loop der laufende Kerzenindex - bei der 'Sofort
-    ausloesen'-Live-Probe (noch nicht abgeschlossene Kerze) wird ein STABILER Index fuer die
-    gesamte Dauer dieser einen Kerze uebergeben (kein neuer Indexschritt pro Poll-Durchlauf)."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None:
-        return
-
-    pos = st["position"]
-    if pos is not None:
-        exit_reason = None
-        if cfg.get("hvd_flip_exit_enabled", False) and ((pos == "long" and short_flip_i) or (pos == "short" and long_flip_i)):
-            exit_reason = "HULL-FLIP-EXIT"
-        elif cfg.get("hvd_arm_flip_exit_enabled", False) and ((pos == "long" and arm_flip_to_short_i) or (pos == "short" and arm_flip_to_long_i)):
-            exit_reason = "ARM-FLIP-EXIT"
-        if exit_reason is not None:
-            debug_log(f"🔄 [{symbol}] Hoss VWAP+RSI+Hull+DI {exit_reason}: {pos.upper()} @ {price}")
-            await execute_exit(symbol, price, exit_reason)
-            st["hvd_sl_price"] = None
-            st["hvd_tp_price"] = None
-        return
-
-    if time.time() < st.get("hvd_sl_cooldown_until", 0.0):
-        return
-
-    direction_mode = cfg.get("hvd_direction_mode", "both")
-    signal_window = cfg.get("hvd_trend_filter_signal_window_candles", 10)
-
-    # Zuerst: gibt es ein ausstehendes Signal, das JETZT durch den Trendfilter bestaetigt wird?
-    pending = st.get("hvd_pending_signal")
-    if pending and candle_index is not None:
-        age = candle_index - pending["candle_index"]
-        if age > signal_window:
-            st["hvd_pending_signal"] = None  # Fenster abgelaufen, verfaellt ohne Einstieg
-        else:
-            p_dir = pending["direction"]
-            confirmed = (p_dir == "long" and trend_filter_long_ok_i) or (p_dir == "short" and trend_filter_short_ok_i)
-            if confirmed:
-                debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg (verzögert bestätigt nach {age} Kerze(n)): {p_dir.upper()} @ {price}")
-                await execute_entry(symbol, p_dir, price, is_add_on=False)
-                if st["position"] is not None:
-                    _hvd_set_sl_tp(st, cfg, p_dir, price, hull_i, atr_i)
-                st["hvd_pending_signal"] = None
-                return
-
-    long_ok_base = direction_mode != "short_only" and arm_i == -1 and plus_di_i > minus_di_i and adx_filter_ok_i
-    short_ok_base = direction_mode != "long_only" and arm_i == 1 and minus_di_i > plus_di_i and adx_filter_ok_i
-
-    if long_flip_i and long_ok_base:
-        if trend_filter_long_ok_i:
-            debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: LONG @ {price}")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _hvd_set_sl_tp(st, cfg, "long", price, hull_i, atr_i)
-        elif signal_window > 0 and candle_index is not None:
-            st["hvd_pending_signal"] = {"direction": "long", "candle_index": candle_index}
-            debug_log(f"⏳ [{symbol}] Hoss VWAP+RSI+Hull+DI Signal LONG wartet auf SuperTrend-Bestätigung (max. {signal_window} Kerzen)")
-    elif short_flip_i and short_ok_base:
-        if trend_filter_short_ok_i:
-            debug_log(f"📡 [{symbol}] Hoss VWAP+RSI+Hull+DI Einstieg: SHORT @ {price}")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _hvd_set_sl_tp(st, cfg, "short", price, hull_i, atr_i)
-        elif signal_window > 0 and candle_index is not None:
-            st["hvd_pending_signal"] = {"direction": "short", "candle_index": candle_index}
-            debug_log(f"⏳ [{symbol}] Hoss VWAP+RSI+Hull+DI Signal SHORT wartet auf SuperTrend-Bestätigung (max. {signal_window} Kerzen)")
-
-
-async def hvd_poll_loop(symbol):
-    """'[Hoss] VWAP+RSI+Hull+DI' als eigene Strategie (Nutzer-Idee, 1:1 aus dessen eigenem
-    Pine-Script portiert - siehe compute_hvd_arm/check_hvd_signal/check_hvd_sl_tp). Braucht wie
-    MO7/Maverick Edge echtes Handelsvolumen (VWAP-Deviation + OBV), holt deshalb IMMER per
-    fetch_candles_binance_vol - anders als bei SuperTrend+RSI (zwei getrennte Fetches fuer
-    Kern-Zeitrahmen und VWAP-Zeitrahmen) reicht hier EIN Fetch auf dem Handels-Zeitrahmen fuer
-    alle Bausteine (Hull/VWAP-Baender/OBV-RSI/DI/ATR), da alles auf demselben Zeitrahmen laeuft.
-    hvd_immediate_signal_enabled (nach Nutzer-Vorgabe, optional, wie sr_immediate_signal_enabled
-    bei SuperTrend+RSI): Standardmaessig wird das Kernsignal (Hull-Flip+DI) nur auf ABGESCHLOSSENEN
-    Kerzen ausgewertet. Mit dieser Option wird zusaetzlich JEDEN Poll-Durchlauf die GERADE
-    LAUFENDE Kerze live angezapft (probe_*) - Hull-Flip und DI+/DI- reagieren dann sofort auf den
-    aktuellen Kurs statt erst beim Kerzenschluss. Die Scharfschaltung (VWAP-Band+OBV-RSI-Arm)
-    bleibt bewusst auf dem Stand der letzten abgeschlossenen Kerze eingefroren (Naeherung,
-    identisches Prinzip wie ADX/EMA/VWAP-Arm bei SuperTrend+RSI's Sofort-Modus) - sie aendert sich
-    ohnehin nur selten und braucht keine Intrabar-Reaktion."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "hvd_signal" and cfg["bot_active"]:
-                resolution = cfg.get("hvd_resolution", "1m")
-                hull_length = cfg.get("hvd_hull_length", 88)
-                vwap_length = cfg.get("hvd_vwap_length", 60)
-                adx_length = cfg.get("hvd_adx_length", 14)
-                atr_period = cfg.get("hvd_atr_period", 14)
-                rsi_length = cfg.get("hvd_rsi_length", 5)
-                immediate_enabled = cfg.get("hvd_immediate_signal_enabled", False)
-                needed_bars = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 50
-                st = b["state"]
-                live_h_raw = live_l_raw = live_c_raw = None  # aktuell noch laufende (nicht geschlossene) Kerze - nur fuer "Sofort ausloesen"
-
-                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
-                if data:
-                    timestamps, opens, highs, lows, closes, volumes = data
-                    closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
-                    if immediate_enabled and highs:
-                        live_h_raw, live_l_raw, live_c_raw = highs[-1], lows[-1], closes[-1]
-                else:
-                    closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > max(20, hull_length // 2 + 2):
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    n = len(closed_c)
-
-                    hull = compute_hull_ma(closed_c, hull_length)
-                    hull_green = [None] * n
-                    for i in range(1, n):
-                        if hull[i] is None or hull[i - 1] is None:
-                            continue
-                        hull_green[i] = hull[i] > hull[i - 1]
-                    long_flip, short_flip = compute_ut_hull_flip_signals([False] * n, [False] * n, hull_green, {"utb_flip_trigger": "hull_color"})
-
-                    obv = compute_obv(closed_c, closed_v)
-                    rsi = compute_rsi(obv, rsi_length)
-                    vwmean, dev = compute_vw_avdev(closed_c, closed_v, vwap_length)
-                    upper, lower = vwap_bands_from_dev(vwmean, dev, cfg.get("hvd_vwap_dev_mult", 2.0))
-                    arm = compute_hvd_arm(closed_c, closed_h, closed_l, upper, lower, rsi, cfg.get("hvd_rsi_overbought", 70), cfg.get("hvd_rsi_oversold", 30), cfg.get("hvd_touch_arm_enabled", False))
-                    arm_flip_to_short, arm_flip_to_long = _hvd_arm_flip_series(arm)
-                    _adx_series, plus_di, minus_di = compute_adx(closed_h, closed_l, closed_c, adx_length)
-                    atr = compute_atr(closed_h, closed_l, closed_c, atr_period)
-
-                    # Optionaler Seitwaerts-Filter (nach Nutzer-Vorgabe): eigener ADX-Wert (eigene
-                    # Laenge/Zeiteinheit, unabhaengig von hvd_adx_length der DI-Bestaetigung) muss
-                    # ueber einer Schwelle liegen. Gleiches "letzten Wert breitstreuen"-Muster wie
-                    # bei SuperTrend+RSI's ADX-Filter fuer eine ABWEICHENDE Zeiteinheit.
-                    adx_filter_enabled = cfg.get("hvd_adx_filter_enabled", False)
-                    adx_filter_ok_series = None
-                    if adx_filter_enabled:
-                        filter_length = cfg.get("hvd_adx_filter_length", 14)
-                        filter_threshold = cfg.get("hvd_adx_filter_threshold", 20)
-                        filter_resolution = cfg.get("hvd_adx_filter_resolution", "same")
-                        if filter_resolution in (None, "", "same") or filter_resolution == resolution:
-                            filter_adx, _fpd, _fmd = compute_adx(closed_h, closed_l, closed_c, filter_length)
-                            adx_filter_ok_series = [v is not None and v > filter_threshold for v in filter_adx]
-                        else:
-                            filter_needed = min(500, filter_length * 5 + 20)
-                            filter_data = await fetch_candles_binance_multi(symbol, filter_resolution, count_back=filter_needed, market_type=cfg.get("binance_market_type", "spot"))
-                            if filter_data:
-                                _, _, filter_h, filter_l, filter_c = filter_data
-                                filter_h, filter_l, filter_c = filter_h[:-1], filter_l[:-1], filter_c[:-1]
-                            else:
-                                filter_h = filter_l = filter_c = None
-                            if filter_c and len(filter_c) > filter_length:
-                                filter_adx_now, _fpd, _fmd = compute_adx(filter_h, filter_l, filter_c, filter_length)
-                                adx_filter_ok_series = [filter_adx_now[-1] is not None and filter_adx_now[-1] > filter_threshold] * n
-                            else:
-                                adx_filter_ok_series = [True] * n  # Fallback, falls (noch) keine Daten
-
-                    # Optionaler uebergeordneter SuperTrend-Trendfilter (eigene, hoehere Zeiteinheit,
-                    # nach Nutzer-Vorgabe): Long nur wenn SuperTrend dort bullisch, Short nur wenn
-                    # baerisch. Gleiches "gleiche oder abweichende Zeiteinheit"-Muster wie beim
-                    # ADX-Filter oben - liefert aber ZWEI getrennte Serien (long_ok/short_ok), da
-                    # SuperTrend eine Richtung vorgibt statt nur eines generischen ok/nicht-ok.
-                    trend_filter_enabled = cfg.get("hvd_trend_filter_enabled", False)
-                    trend_filter_long_ok_series = None
-                    trend_filter_short_ok_series = None
-                    if trend_filter_enabled:
-                        tf_resolution = cfg.get("hvd_trend_filter_resolution", "15m")
-                        tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
-                        tf_multiplier = cfg.get("hvd_trend_filter_multiplier", 3.0)
-                        if tf_resolution == resolution:
-                            tf_st_line, _ = compute_diamond_supertrend(closed_h, closed_l, closed_c, tf_multiplier, tf_atr_period)
-                            trend_filter_long_ok_series = [tf_st_line[i] is not None and closed_c[i] > tf_st_line[i] for i in range(n)]
-                            trend_filter_short_ok_series = [tf_st_line[i] is not None and closed_c[i] < tf_st_line[i] for i in range(n)]
-                        else:
-                            tf_closed = await _fetch_trend_filter_candles_live(symbol, st, cfg, tf_resolution, tf_atr_period)
-                            if tf_closed:
-                                tf_h, tf_l, tf_c = tf_closed
-                                tf_st_line_now, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
-                                tf_bullish_now = tf_st_line_now[-1] is not None and tf_c[-1] > tf_st_line_now[-1]
-                                trend_filter_long_ok_series = [tf_bullish_now] * n
-                                trend_filter_short_ok_series = [not tf_bullish_now] * n
-                            else:
-                                trend_filter_long_ok_series = [True] * n  # Fallback, falls (noch) keine Daten
-                                trend_filter_short_ok_series = [True] * n
-
-                    # Optionaler ASO-Sentiment-Filter (Nutzer-Idee, siehe compute_aso_filter) - wird
-                    # in denselben trend_filter_long_ok_series/short_ok_series-Slot eingehaengt wie
-                    # der SuperTrend-Trendfilter oben (per AND kombiniert falls beide aktiv), damit
-                    # er automatisch dieselbe Wartefenster-Logik (hvd_trend_filter_signal_window_candles)
-                    # in check_hvd_signal mitnutzt. Immer auf derselben Zeiteinheit, keine MTF-Option.
-                    if cfg.get("hvd_aso_filter_enabled", False):
-                        aso_bull_ok, aso_bear_ok = compute_aso_filter(
-                            closed_o, closed_h, closed_l, closed_c,
-                            cfg.get("hvd_aso_filter_length", 10), cfg.get("hvd_aso_filter_mode", 0),
-                            cfg.get("hvd_aso_filter_confirm_bars", 1))
-                        if trend_filter_long_ok_series is None:
-                            trend_filter_long_ok_series = aso_bull_ok
-                            trend_filter_short_ok_series = aso_bear_ok
-                        else:
-                            trend_filter_long_ok_series = [trend_filter_long_ok_series[i] and aso_bull_ok[i] for i in range(n)]
-                            trend_filter_short_ok_series = [trend_filter_short_ok_series[i] and aso_bear_ok[i] for i in range(n)]
-
-                    st["hvd_last_hull"] = hull[-1]
-                    st["hvd_last_arm"] = arm[-1]
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] Hoss VWAP+RSI+Hull+DI aktiv: Preis={closed_c[-1]}, "
-                                  f"Hull={round(hull[-1], 4) if hull[-1] is not None else None}, ArmState={arm[-1]}, "
-                                  f"Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 2:
-                            continue
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        adx_filter_ok_i = True if adx_filter_ok_series is None else adx_filter_ok_series[idx]
-                        trend_filter_long_ok_i = True if trend_filter_long_ok_series is None else trend_filter_long_ok_series[idx]
-                        trend_filter_short_ok_i = True if trend_filter_short_ok_series is None else trend_filter_short_ok_series[idx]
-                        await check_hvd_signal(symbol, price_i, long_flip[idx], short_flip[idx], arm[idx],
-                                                plus_di[idx], minus_di[idx], hull[idx], atr[idx],
-                                                arm_flip_to_short[idx], arm_flip_to_long[idx], adx_filter_ok_i,
-                                                trend_filter_long_ok_i, trend_filter_short_ok_i, candle_index=idx)
-
-                    await check_hvd_sl_tp(symbol, price)
-
-                    if immediate_enabled and live_c_raw is not None:
-                        live_price = st["last_price"] if st["last_price"] is not None else live_c_raw
-                        live_h_val = max(live_h_raw, live_price) if live_h_raw is not None else live_price
-                        live_l_val = min(live_l_raw, live_price) if live_l_raw is not None else live_price
-                        probe_c = closed_c + [live_price]
-                        probe_h = closed_h + [live_h_val]
-                        probe_l = closed_l + [live_l_val]
-                        probe_n = len(probe_c)
-                        probe_hull = compute_hull_ma(probe_c, hull_length)
-                        probe_hull_green = [None] * probe_n
-                        for i in range(1, probe_n):
-                            if probe_hull[i] is None or probe_hull[i - 1] is None:
-                                continue
-                            probe_hull_green[i] = probe_hull[i] > probe_hull[i - 1]
-                        probe_long_flip, probe_short_flip = compute_ut_hull_flip_signals([False] * probe_n, [False] * probe_n, probe_hull_green, {"utb_flip_trigger": "hull_color"})
-                        probe_idx = probe_n - 1
-                        if probe_long_flip[probe_idx] or probe_short_flip[probe_idx]:
-                            # Arm-Zustand (VWAP-Band+OBV-RSI) bleibt bewusst auf dem Stand der letzten
-                            # abgeschlossenen Kerze eingefroren (Naeherung, siehe Docstring). Nur
-                            # Hull-Flip und DI+/DI- reagieren live auf die laufende Kerze - das war
-                            # der eigentliche Zweck dieser Option.
-                            _adx_probe, plus_di_probe, minus_di_probe = compute_adx(probe_h, probe_l, probe_c, adx_length)
-                            frozen_adx_filter_ok = True if adx_filter_ok_series is None else adx_filter_ok_series[-1]
-                            frozen_trend_filter_long_ok = True if trend_filter_long_ok_series is None else trend_filter_long_ok_series[-1]
-                            frozen_trend_filter_short_ok = True if trend_filter_short_ok_series is None else trend_filter_short_ok_series[-1]
-                            await check_hvd_signal(symbol, live_price, probe_long_flip[probe_idx], probe_short_flip[probe_idx],
-                                                    st.get("hvd_last_arm", 0), plus_di_probe[probe_idx], minus_di_probe[probe_idx],
-                                                    probe_hull[probe_idx], atr[-1] if atr else None,
-                                                    False, False, frozen_adx_filter_ok,
-                                                    frozen_trend_filter_long_ok, frozen_trend_filter_short_ok,
-                                                    candle_index=len(closed_ts))
-                            await check_hvd_sl_tp(symbol, live_price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    debug_log(f"⏳ [{symbol}] Hoss VWAP+RSI+Hull+DI wartet: keine/zu wenig Kerzen erhalten (Auflösung {resolution})")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Hoss VWAP+RSI+Hull+DI-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
-                          margin, leverage, direction_mode, atr_min_mult, risk_reward, sl_cooldown_ms, warmup,
-                          flip_exit_enabled=False, arm_flip_exit_enabled=False, arm_flip_to_short=None, arm_flip_to_long=None,
-                          adx_filter_ok=None, trend_filter_long_ok=None, trend_filter_short_ok=None, signal_window=0):
-    """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp - identische Logik, siehe dort fuer
-    Kommentare. Von backtest_hvd_signal UND run_hvd_sweep genutzt (wie _simulate_mo7_trades bei
-    MO7), damit der Sweep nicht Hull/VWAP/OBV-RSI/DI/ATR-unabhaengige Berechnungen dupliziert.
-    flip_exit_enabled (nach Nutzer-Vorgabe, optional): wechselt die Hull-Linie waehrend einer
-    offenen Position die Farbe GEGEN die Positionsrichtung, wird sofort glatt gestellt -
-    unabhaengig von Arm-Zustand/DI. arm_flip_exit_enabled (nach Nutzer-Vorgabe, optional):
-    aktiviert sich waehrend einer offenen Position eine NEUE Gegen-Konfirmation (arm_flip_to_short/
-    arm_flip_to_long, siehe _hvd_arm_flip_series), wird sofort glatt gestellt - unabhaengig vom
-    Hull-Farbwechsel. adx_filter_ok (nach Nutzer-Vorgabe, optional): Liste - True/False pro Kerze,
-    ob der zusaetzliche Seitwaerts-Filter (eigener ADX-Wert ueber Schwelle, siehe
-    hvd_adx_filter_enabled) einen Einstieg an dieser Stelle erlaubt; None = Filter aus (alles
-    erlaubt). signal_window (nach Nutzer-Vorgabe, nur relevant bei gesetztem trend_filter_long_ok/
-    trend_filter_short_ok): siehe check_hvd_signal - 0 = Signal muss exakt mit dem Trendfilter
-    zusammenfallen (wie bisher), > 0 = Signal 'wartet' bis zu so viele Kerzen auf eine
-    Trendfilter-Bestaetigung, bevor es verfaellt. Beide Exits siehe check_hvd_signal fuer
-    identische Live-Logik."""
-    n = len(c)
-    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price"}
-    trades = []
-    sl_cooldown_until_ts = None
-    pending_signal = None  # {"dir", "signal_i"}
-
-    for i in range(warmup, n):
-        price = c[i]
-
-        if position is not None:
-            sl_price, tp_price = position["sl_price"], position["tp_price"]
-            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
-            hit_arm_flip = arm_flip_exit_enabled and (
-                (position["dir"] == "long" and arm_flip_to_short is not None and arm_flip_to_short[i]) or
-                (position["dir"] == "short" and arm_flip_to_long is not None and arm_flip_to_long[i])
-            )
-            if hit_sl:
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-            elif flip_exit_enabled and ((position["dir"] == "long" and short_flip[i]) or (position["dir"] == "short" and long_flip[i])):
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "HULL-FLIP-EXIT", ts=ts)
-                position = None
-            elif hit_arm_flip:
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ARM-FLIP-EXIT", ts=ts)
-                position = None
-
-        in_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-
-        if position is None:
-            if in_cooldown:
-                continue
-            filter_ok = adx_filter_ok is None or adx_filter_ok[i]
-            trend_long_ok = trend_filter_long_ok is None or trend_filter_long_ok[i]
-            trend_short_ok = trend_filter_short_ok is None or trend_filter_short_ok[i]
-
-            # Ausstehendes Signal: wird JETZT vom Trendfilter bestaetigt?
-            if pending_signal is not None:
-                age = i - pending_signal["signal_i"]
-                if age > signal_window:
-                    pending_signal = None
-                else:
-                    p_dir = pending_signal["dir"]
-                    confirmed = (p_dir == "long" and trend_long_ok) or (p_dir == "short" and trend_short_ok)
-                    if confirmed:
-                        sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], p_dir, price, atr_min_mult, risk_reward)
-                        if sl_price is not None:
-                            size = (margin * leverage) / price
-                            position = {"dir": p_dir, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
-                        pending_signal = None
-                        continue
-
-            long_ok = direction_mode != "short_only" and arm[i] == -1 and plus_di[i] > minus_di[i] and filter_ok
-            short_ok = direction_mode != "long_only" and arm[i] == 1 and minus_di[i] > plus_di[i] and filter_ok
-            if long_flip[i] and long_ok:
-                if trend_long_ok:
-                    sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "long", price, atr_min_mult, risk_reward)
-                    if sl_price is not None:
-                        size = (margin * leverage) / price
-                        position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
-                elif signal_window > 0:
-                    pending_signal = {"dir": "long", "signal_i": i}
-            elif short_flip[i] and short_ok:
-                if trend_short_ok:
-                    sl_price, tp_price = _hvd_make_sl_tp(hull[i], atr[i], "short", price, atr_min_mult, risk_reward)
-                    if sl_price is not None:
-                        size = (margin * leverage) / price
-                        position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
-                elif signal_window > 0:
-                    pending_signal = {"dir": "short", "signal_i": i}
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_hvd_signal(candles, cfg, adx_filter_ok=None, trend_filter_long_ok=None, trend_filter_short_ok=None):
-    """Backtest-Pendant zu check_hvd_signal/check_hvd_sl_tp/hvd_poll_loop. 'candles' ist hier
-    (anders als die generische BACKTEST_FUNCS-Signatur) ein 6er-Tupel MIT Volumen (ts,o,h,l,c,v)
-    wie bei MO7/Maverick Edge, deshalb in run_backtest als Sonderfall behandelt statt ueber den
-    generischen 5er-Tupel-Dispatch. adx_filter_ok (optional): vorab berechnete Liste fuer den
-    Seitwaerts-Filter bei ABWEICHENDER Zeiteinheit (siehe run_backtest - dort async vorbereitet,
-    da diese Funktion selbst synchron bleibt); bei gleicher Zeiteinheit/deaktiviertem Filter wird
-    hier intern berechnet."""
-    ts, o, h, l, c, v = candles
-    hull_length = cfg.get("hvd_hull_length", 88)
-    vwap_length = cfg.get("hvd_vwap_length", 60)
-    vwap_dev_mult = cfg.get("hvd_vwap_dev_mult", 2.0)
-    rsi_length = cfg.get("hvd_rsi_length", 5)
-    rsi_overbought = cfg.get("hvd_rsi_overbought", 70)
-    rsi_oversold = cfg.get("hvd_rsi_oversold", 30)
-    adx_length = cfg.get("hvd_adx_length", 14)
-    atr_period = cfg.get("hvd_atr_period", 14)
-    atr_min_mult = cfg.get("hvd_atr_min_mult", 1.0)
-    risk_reward = cfg.get("hvd_risk_reward", 1.5)
-    direction_mode = cfg.get("hvd_direction_mode", "both")
-    sl_cooldown_ms = cfg.get("hvd_sl_cooldown_seconds", 30) * 1000
-    flip_exit_enabled = cfg.get("hvd_flip_exit_enabled", False)
-    arm_flip_exit_enabled = cfg.get("hvd_arm_flip_exit_enabled", False)
-    n = len(c)
-
-    hull = compute_hull_ma(c, hull_length)
-    hull_green = [None] * n
-    for i in range(1, n):
-        if hull[i] is None or hull[i - 1] is None:
-            continue
-        hull_green[i] = hull[i] > hull[i - 1]
-    long_flip, short_flip = compute_ut_hull_flip_signals([False] * n, [False] * n, hull_green, {"utb_flip_trigger": "hull_color"})
-
-    obv = compute_obv(c, v)
-    rsi = compute_rsi(obv, rsi_length)
-    vwmean, dev = compute_vw_avdev(c, v, vwap_length)
-    upper, lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
-    arm = compute_hvd_arm(c, h, l, upper, lower, rsi, rsi_overbought, rsi_oversold, cfg.get("hvd_touch_arm_enabled", False))
-    arm_flip_to_short, arm_flip_to_long = _hvd_arm_flip_series(arm)
-    _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
-    atr = compute_atr(h, l, c, atr_period)
-
-    if adx_filter_ok is None and cfg.get("hvd_adx_filter_enabled", False):
-        filter_resolution = cfg.get("hvd_adx_filter_resolution", "same")
-        if filter_resolution in (None, "", "same"):
-            filter_length = cfg.get("hvd_adx_filter_length", 14)
-            filter_threshold = cfg.get("hvd_adx_filter_threshold", 20)
-            filter_adx, _fpd, _fmd = compute_adx(h, l, c, filter_length)
-            adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx]
-        # Bei ABWEICHENDER Zeiteinheit wird adx_filter_ok von run_backtest (async) uebergeben.
-
-    if trend_filter_long_ok is None and cfg.get("hvd_trend_filter_enabled", False):
-        tf_resolution = cfg.get("hvd_trend_filter_resolution", "15m")
-        if tf_resolution in (None, "", "same") or tf_resolution == cfg.get("hvd_resolution", "1m"):
-            tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
-            tf_multiplier = cfg.get("hvd_trend_filter_multiplier", 3.0)
-            tf_st_line, _ = compute_diamond_supertrend(h, l, c, tf_multiplier, tf_atr_period)
-            trend_filter_long_ok = [tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(n)]
-            trend_filter_short_ok = [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(n)]
-        # Bei ABWEICHENDER Zeiteinheit wird trend_filter_long_ok/short_ok von run_backtest (async) uebergeben.
-
-    if cfg.get("hvd_aso_filter_enabled", False):
-        aso_bull_ok, aso_bear_ok = compute_aso_filter(
-            o, h, l, c, cfg.get("hvd_aso_filter_length", 10), cfg.get("hvd_aso_filter_mode", 0),
-            cfg.get("hvd_aso_filter_confirm_bars", 1))
-        if trend_filter_long_ok is None:
-            trend_filter_long_ok = aso_bull_ok
-            trend_filter_short_ok = aso_bear_ok
-        else:
-            trend_filter_long_ok = [trend_filter_long_ok[i] and aso_bull_ok[i] for i in range(n)]
-            trend_filter_short_ok = [trend_filter_short_ok[i] and aso_bear_ok[i] for i in range(n)]
-
-    warmup = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 5
-    return _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
-                                 cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, risk_reward,
-                                 sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
-                                 arm_flip_to_short, arm_flip_to_long, adx_filter_ok,
-                                 trend_filter_long_ok, trend_filter_short_ok,
-                                 cfg.get("hvd_trend_filter_signal_window_candles", 10))
-
-
-HVD_SWEEP_MAX_COMBOS = 500
-HVD_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
-async def run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step, rr_min, rr_max, rr_step, exclude_top_n=1,
-                         st_mult_min=None, st_mult_max=None, st_mult_step=0.1):
-    """'Monte-Carlo'-Parametersweep fuer '[Hoss] VWAP+RSI+Hull+DI' (Nutzer-Vorgabe): testet einen
-    Bereich von Hull-Laenge und Risk:Reward gegeneinander. VWAP-Deviation/OBV-RSI/ADX-DI/ATR
-    haengen NICHT von der Hull-Laenge ab und werden nur EINMAL berechnet und fuer alle
-    Kombinationen wiederverwendet (wie der MO7-Score bei run_mo7_sum_sweep) - nur die Hull-Linie
-    selbst und die Trade-Simulation (_simulate_hvd_trades) laufen pro Kombination neu.
-
-    st_mult_min/st_mult_max (nach Nutzer-Vorgabe, optional, dritte Sweep-Dimension): testet
-    zusaetzlich den SuperTrend-Trendfilter-Multiplikator ueber einen Bereich (Standard-Vorschlag
-    1.0 bis 5.0 in 0.1-Schritten - NICHT automatisch aktiv, siehe handle_hvd_sweep). ATR-Periode/
-    Zeiteinheit des Trendfilters bleiben dabei FEST auf dem konfigurierten Wert (cfg), nur der
-    Multiplikator wird durchprobiert - haelt die Kombinationsanzahl im Rahmen. Beide Parameter
-    None (Standard) = Trendfilter-Multiplikator NICHT als Sweep-Dimension, bleibt konstant auf
-    cfg-Wert (2D-Sweep wie bisher, unveraenderte Geschwindigkeit). Wichtig fuer die Performance:
-    der SuperTrend-Trendfilter haengt NICHT von Hull-Laenge/Risk:Reward ab, wird also pro
-    Multiplikator-Wert nur EINMAL berechnet (nicht pro hull*rr-Kombination) - die Simulation
-    selbst (_simulate_hvd_trades) laeuft aber pro vollstaendiger (hull, rr, multiplier)-
-    Kombination, die Gesamtlaufzeit skaliert also MIT der Anzahl Multiplikator-Werte."""
-    max_candles = BACKTEST_MAX_CANDLES.get("hvd_signal", 100_000)
-    resolution = cfg.get("hvd_resolution", "1m")
-    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    if not candles or len(candles[4]) < max(hull_max, cfg.get("hvd_vwap_length", 60)) + 20:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-    ts, o, h, l, c, v = candles
-    n = len(c)
-
-    hull_lengths = sorted(set(int(round(hull_min + i * hull_step))
-                               for i in range(int((hull_max - hull_min) / max(hull_step, 1e-9)) + 1)
-                               if hull_min + i * hull_step <= hull_max + 1e-9))
-    hull_lengths = [x for x in hull_lengths if x >= 2]
-    risk_rewards = sorted(set(round(rr_min + i * rr_step, 2)
-                               for i in range(int((rr_max - rr_min) / max(rr_step, 1e-9)) + 1)
-                               if rr_min + i * rr_step <= rr_max + 1e-9))
-    risk_rewards = [x for x in risk_rewards if x > 0]
-
-    sweep_st_mult = st_mult_min is not None and st_mult_max is not None
-    if sweep_st_mult:
-        st_multipliers = sorted(set(round(st_mult_min + i * st_mult_step, 2)
-                                     for i in range(int((st_mult_max - st_mult_min) / max(st_mult_step, 1e-9)) + 1)
-                                     if st_mult_min + i * st_mult_step <= st_mult_max + 1e-9))
-        st_multipliers = [x for x in st_multipliers if x > 0]
-        if not st_multipliers:
-            return {"error": "Der eingestellte SuperTrend-Multiplikator-Bereich ergibt keine gültigen Werte."}
-    else:
-        st_multipliers = [cfg.get("hvd_trend_filter_multiplier", 3.0)]  # konstant, keine echte Sweep-Dimension
-
-    total_combos = len(hull_lengths) * len(risk_rewards) * len(st_multipliers)
-    if total_combos == 0:
-        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
-    if total_combos > HVD_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {HVD_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern (bei aktivem SuperTrend-Multiplikator-Sweep zusätzlich dessen Bereich verkleinern oder Hull-/Risk:Reward-Bereich verkleinern)."}
-
-    vwap_length = cfg.get("hvd_vwap_length", 60)
-    vwap_dev_mult = cfg.get("hvd_vwap_dev_mult", 2.0)
-    rsi_length = cfg.get("hvd_rsi_length", 5)
-    rsi_overbought = cfg.get("hvd_rsi_overbought", 70)
-    rsi_oversold = cfg.get("hvd_rsi_oversold", 30)
-    adx_length = cfg.get("hvd_adx_length", 14)
-    atr_period = cfg.get("hvd_atr_period", 14)
-    atr_min_mult = cfg.get("hvd_atr_min_mult", 1.0)
-    direction_mode = cfg.get("hvd_direction_mode", "both")
-    sl_cooldown_ms = cfg.get("hvd_sl_cooldown_seconds", 30) * 1000
-    flip_exit_enabled = cfg.get("hvd_flip_exit_enabled", False)
-    arm_flip_exit_enabled = cfg.get("hvd_arm_flip_exit_enabled", False)
-
-    obv = compute_obv(c, v)
-    rsi = compute_rsi(obv, rsi_length)
-    vwmean, dev = compute_vw_avdev(c, v, vwap_length)
-    upper, lower = vwap_bands_from_dev(vwmean, dev, vwap_dev_mult)
-    arm = compute_hvd_arm(c, h, l, upper, lower, rsi, rsi_overbought, rsi_oversold, cfg.get("hvd_touch_arm_enabled", False))
-    arm_flip_to_short, arm_flip_to_long = _hvd_arm_flip_series(arm)
-    _adx_series, plus_di, minus_di = compute_adx(h, l, c, adx_length)
-    atr = compute_atr(h, l, c, atr_period)
-
-    adx_filter_ok = None
-    if cfg.get("hvd_adx_filter_enabled", False):
-        filter_resolution = cfg.get("hvd_adx_filter_resolution", "same")
-        filter_length = cfg.get("hvd_adx_filter_length", 14)
-        filter_threshold = cfg.get("hvd_adx_filter_threshold", 20)
-        if filter_resolution in (None, "", "same") or filter_resolution == resolution:
-            filter_adx, _fpd, _fmd = compute_adx(h, l, c, filter_length)
-            adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx]
-        else:
-            filter_candles, filter_err, _ = await _fetch_cached_backtest_candles(symbol, filter_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-            if filter_err:
-                return {"error": f"ADX-Filter-Zeiteinheit ({filter_resolution}): {filter_err}"}
-            if not filter_candles or len(filter_candles[4]) < filter_length + 5:
-                return {"error": f"Zu wenig historische Kerzen für die ADX-Filter-Zeiteinheit ({filter_resolution}) erhalten."}
-            ft_ts, ft_o, ft_h, ft_l, ft_c = filter_candles
-            filter_adx_htf, _fpd, _fmd = compute_adx(ft_h, ft_l, ft_c, filter_length)
-            filter_adx_aligned = _align_htf_series(ts, ft_ts, filter_adx_htf)
-            adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx_aligned]
-
-    # SuperTrend-Trendfilter: nur EINMAL PRO MULTIPLIKATOR-WERT berechnet (nicht pro hull/rr-
-    # Kombination), da er weder von der Hull-Laenge noch von Risk:Reward abhaengt. Bei
-    # deaktiviertem Filter bzw. wenn der Multiplikator nicht als Sweep-Dimension laeuft, gibt es
-    # nur einen einzigen Eintrag in trend_filter_by_mult (Schluessel = st_multipliers[0]).
-    trend_filter_by_mult = {}
-    if cfg.get("hvd_trend_filter_enabled", False):
-        tf_resolution = cfg.get("hvd_trend_filter_resolution", "15m")
-        tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
-        tf_same_resolution = tf_resolution in (None, "", "same") or tf_resolution == resolution
-        tf_candles = None
-        if not tf_same_resolution:
-            tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, ts, tf_resolution, tf_atr_period)
-            if tf_err:
-                return {"error": tf_err}
-        for st_mult in st_multipliers:
-            if tf_same_resolution:
-                tf_st_line, _ = compute_diamond_supertrend(h, l, c, st_mult, tf_atr_period)
-                tf_long_ok = [tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(n)]
-                tf_short_ok = [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(n)]
-            else:
-                tf_long_ok, tf_short_ok = _trend_filter_ok_series(ts, tf_candles, st_mult, tf_atr_period)
-            trend_filter_by_mult[st_mult] = (tf_long_ok, tf_short_ok)
-
-    results = []
-    for hull_length in hull_lengths:
-        hull = compute_hull_ma(c, hull_length)
-        hull_green = [None] * n
-        for i in range(1, n):
-            if hull[i] is None or hull[i - 1] is None:
-                continue
-            hull_green[i] = hull[i] > hull[i - 1]
-        long_flip, short_flip = compute_ut_hull_flip_signals([False] * n, [False] * n, hull_green, {"utb_flip_trigger": "hull_color"})
-        warmup = max(hull_length, vwap_length, adx_length, atr_period, rsi_length) + 5
-
-        for rr in risk_rewards:
-            for st_mult in st_multipliers:
-                tf_long_ok, tf_short_ok = trend_filter_by_mult.get(st_mult, (None, None))
-                trades = _simulate_hvd_trades(ts, h, l, c, hull, long_flip, short_flip, arm, plus_di, minus_di, atr,
-                                               cfg["margin"], cfg["leverage"], direction_mode, atr_min_mult, rr,
-                                               sl_cooldown_ms, warmup, flip_exit_enabled, arm_flip_exit_enabled,
-                                               arm_flip_to_short, arm_flip_to_long, adx_filter_ok,
-                                               tf_long_ok, tf_short_ok,
-                                               cfg.get("hvd_trend_filter_signal_window_candles", 10))
-                stats = summarize_backtest_trades(trades, exclude_top_n)
-                row = {"hvd_hull_length": hull_length, "hvd_risk_reward": rr, **stats}
-                if sweep_st_mult:
-                    row["hvd_trend_filter_multiplier"] = st_mult
-                results.append(row)
-
-    best_sorted = sorted(results, key=lambda r: (r["trades"] >= HVD_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-
-    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": len(c),
-        "min_reliable_trades": HVD_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": total_combos,
-        "results": best_sorted[:30],
-        "worst_results": worst_sorted[:20],
-    }
-
-
-AB_SWEEP_MAX_COMBOS = 600
-AB_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
-def _ab_sweep_compute(candles, cfg, tf_data, multipliers, tf_atr_period, exclude_top_n):
-    """Rechenteil des Al-Shatri-Sweeps (reine CPU-Arbeit, laeuft ausserhalb des Event-Loops im Thread,
-    damit die Live-Loops waehrend eines grossen Sweeps nicht blockiert werden). Die rohen Breakout-
-    Setups (Range/EMA/RSI/Volumen + optional ASO) sind unabhaengig vom SuperTrend und werden nur
-    EINMAL berechnet; je (Zeiteinheit, Multiplikator) werden nur noch SuperTrend-Filter und
-    Trade-Simulation neu gerechnet. tf_data = [(zeiteinheit, kerzen | None)] - None = gleiche
-    Zeiteinheit wie der Handels-Zeitrahmen."""
-    ts, o, h, l, c, v = candles
-    n = len(c)
-    params = _ab_effective_params(cfg)
-    if cfg.get("ab_use_heikin_ashi", False):
-        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
-    else:
-        sig_h, sig_l, sig_c = h, l, c
-    long_raw, short_raw, _atr = compute_ab_breakout_signals(sig_h, sig_l, sig_c, v, params)
-    if cfg.get("ab_aso_filter_enabled", False):
-        aso_bull_ok, aso_bear_ok = compute_aso_filter(
-            o, h, l, c, cfg.get("ab_aso_filter_length", 10), cfg.get("ab_aso_filter_mode", 0),
-            cfg.get("ab_aso_filter_confirm_bars", 1))
-        long_raw = [long_raw[i] and aso_bull_ok[i] for i in range(n)]
-        short_raw = [short_raw[i] and aso_bear_ok[i] for i in range(n)]
-    warmup = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 5
-
-    results = []
-    for tf_resolution, tf_candles in tf_data:
-        for mult in multipliers:
-            if tf_candles is None:
-                st_line, _ = compute_diamond_supertrend(h, l, c, mult, tf_atr_period)
-                long_ok = [st_line[i] is not None and c[i] > st_line[i] for i in range(n)]
-                short_ok = [st_line[i] is not None and c[i] < st_line[i] for i in range(n)]
-            else:
-                long_ok, short_ok = _trend_filter_ok_series(ts, tf_candles, mult, tf_atr_period)
-            long_setup = [long_raw[i] and long_ok[i] for i in range(n)]
-            short_setup = [short_raw[i] and short_ok[i] for i in range(n)]
-            trades = _simulate_ab_trades(candles, cfg, long_setup, short_setup, _atr, warmup)
-            stats = summarize_backtest_trades(trades, exclude_top_n)
-            results.append({"ab_trend_filter_resolution": tf_resolution, "ab_trend_filter_multiplier": mult, **stats})
-    return results
-
-
-async def run_ab_sweep(symbol, cfg, days, timeframes, st_mult_min=0.1, st_mult_max=3.0, st_mult_step=0.1, exclude_top_n=1):
-    """'Monte-Carlo'-Parametersweep fuer Al-Shatri Breakout (Nutzer-Vorgabe): testet den
-    uebergeordneten SuperTrend-Trendfilter ueber ALLE gewaehlten Zeiteinheiten x einen Bereich von
-    Multiplikatoren (Standard 0.1 bis 3.0 in 0.1-Schritten). Der Filter wird dabei fuer jede
-    Kombination fest eingeschaltet (unabhaengig vom Schalter im Strategie-Panel); alles andere -
-    Signal-Parameter, fester Dollar-SL, Richtung, ASO-Filter, ATR-Periode des SuperTrends - kommt aus
-    der aktuellen Config. Zeiteinheiten, die sich nicht laden lassen (z.B. Sekunden-Zeitrahmen bei zu
-    langem Zeitraum), werden uebersprungen und separat gemeldet statt den ganzen Sweep abzubrechen."""
-    max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
-    resolution = cfg.get("ab_resolution", "1m")
-    if resolution in SUB_MINUTE_RESOLUTIONS:
-        max_candles = min(max_candles, 5000)
-    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    params = _ab_effective_params(cfg)
-    min_needed = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 10
-    if not candles or len(candles[4]) < min_needed:
-        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~{min_needed} nötig)."}
-    ts = candles[0]
-
-    # +1e-9 gegen Gleitkomma-Abrundung: (3.0 - 0.1) / 0.1 ergibt 28.999999999999996 -> ohne die
-    # Korrektur fehlte der Endwert 3.0 im Sweep.
-    multipliers = sorted(set(round(st_mult_min + i * st_mult_step, 2)
-                              for i in range(int((st_mult_max - st_mult_min) / max(st_mult_step, 1e-9) + 1e-9) + 1)
-                              if st_mult_min + i * st_mult_step <= st_mult_max + 1e-9))
-    multipliers = [m for m in multipliers if m > 0]
-    if not multipliers:
-        return {"error": "Der eingestellte SuperTrend-Multiplikator-Bereich ergibt keine gültigen Werte."}
-
-    tfs, skipped = [], []
-    for tf in timeframes or []:
-        tf = str(tf).strip().lower()
-        if not tf or tf in tfs:
-            continue
-        if _resolution_ms(tf) is None:
-            skipped.append({"timeframe": tf, "reason": "unbekanntes Format (erlaubt: 10s/15s/30s/45s, 1m, 5m, 15m, 30m, 1h, 4h oder eigene Minuten wie 8m)"})
-            continue
-        tfs.append(tf)
-    if not tfs:
-        return {"error": "Keine gültige Zeiteinheit für den SuperTrend ausgewählt."}
-
-    total_combos = len(tfs) * len(multipliers)
-    if total_combos > AB_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {AB_SWEEP_MAX_COMBOS}) - weniger Zeiteinheiten wählen oder die Multiplikator-Schrittweite vergrößern."}
-
-    tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
-    tf_data = []
-    for tf in tfs:
-        if tf == resolution:
-            tf_data.append((tf, None))
-            continue
-        tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, ts, tf, tf_atr_period)
-        if tf_err:
-            skipped.append({"timeframe": tf, "reason": tf_err})
-            continue
-        tf_data.append((tf, tf_candles))
-    if not tf_data:
-        return {"error": "Keine der gewählten SuperTrend-Zeiteinheiten ließ sich laden: " + "; ".join(f"{x['timeframe']}: {x['reason']}" for x in skipped)}
-
-    loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(None, _ab_sweep_compute, candles, cfg, tf_data, multipliers, tf_atr_period, exclude_top_n)
-
-    rank_key = lambda r: (r["trades"] >= AB_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
-    best_sorted = sorted(results, key=rank_key, reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-    best_per_tf = []
-    for tf, _tfc in tf_data:
-        rows = [r for r in results if r["ab_trend_filter_resolution"] == tf]
-        if rows:
-            best_per_tf.append(max(rows, key=rank_key))
-    best_per_tf.sort(key=rank_key, reverse=True)
-
-    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": len(ts),
-        "min_reliable_trades": AB_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": len(results), "multipliers_tested": len(multipliers),
-        "timeframes_tested": [tf for tf, _c in tf_data], "skipped_timeframes": skipped,
-        "exit_mode": cfg.get("ab_exit_mode", "flip"),
-        "sl_enabled": cfg.get("ab_sl_enabled", True), "sl_usd": cfg.get("ab_sl_manual_usd", 5.0),
-        "results": best_sorted[:30], "worst_results": worst_sorted[:20], "best_per_timeframe": best_per_tf,
-    }
-
-
-AB_SIGNAL_SWEEP_MAX_COMBOS = 600
-AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
-def _ab_signal_sweep_compute(candles, cfg, base_params, trend_ok, aso_ok, combos, exclude_top_n):
-    """Rechenteil des Al-Shatri Signal-Sweeps (Breakout-Range x schnelle EMA x langsame EMA),
-    reine CPU-Arbeit im Thread. Der SuperTrend-Trendfilter und der ASO-Filter sind hier FEST -
-    sie werden genau EINMAL vorab berechnet (trend_ok/aso_ok, je nach Config an/aus) und dann bei
-    jeder Kombination unveraendert per AND auf die Signale gelegt; nur Range/EMA/RSI/Volumen aus
-    compute_ab_breakout_signals wird je Kombination neu gerechnet. 'unabhaengig vom SuperTrend'
-    (Nutzer-Vorgabe): dieser Sweep variiert den Trendfilter NICHT mit, anders als der bestehende
-    SuperTrend-Sweep (run_ab_sweep) - er bleibt exakt so, wie im Strategie-Panel eingestellt."""
-    ts, o, h, l, c, v = candles
-    n = len(c)
-    if cfg.get("ab_use_heikin_ashi", False):
-        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
-    else:
-        sig_h, sig_l, sig_c = h, l, c
-    results = []
-    for lookback, fast_len, slow_len in combos:
-        params = dict(base_params, lookback=lookback, fast_len=fast_len, slow_len=slow_len)
-        long_setup, short_setup, atr = compute_ab_breakout_signals(sig_h, sig_l, sig_c, v, params)
-        if trend_ok is not None:
-            trend_long_ok, trend_short_ok = trend_ok
-            long_setup = [long_setup[i] and trend_long_ok[i] for i in range(n)]
-            short_setup = [short_setup[i] and trend_short_ok[i] for i in range(n)]
-        if aso_ok is not None:
-            aso_bull_ok, aso_bear_ok = aso_ok
-            long_setup = [long_setup[i] and aso_bull_ok[i] for i in range(n)]
-            short_setup = [short_setup[i] and aso_bear_ok[i] for i in range(n)]
-        warmup = max(slow_len, lookback, params["atr_len"], params["rsi_len"]) + 5
-        trades = _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup)
-        stats = summarize_backtest_trades(trades, exclude_top_n)
-        results.append({"ab_lookback": lookback, "ab_fast_len": fast_len, "ab_slow_len": slow_len, **stats})
-    return results
-
-
-async def run_ab_signal_sweep(symbol, cfg, days, lookback_min=10, lookback_max=60, lookback_step=10,
-                               fast_min=10, fast_max=60, fast_step=10, slow_min=30, slow_max=150,
-                               slow_step=20, exclude_top_n=1):
-    """'Monte-Carlo'-Sweep fuer Al-Shatri Breakout ueber Breakout-Range (Kerzen), schnelle EMA und
-    langsame EMA (Nutzer-Vorgabe) - unabhaengig vom SuperTrend-Trendfilter: der bleibt exakt so, wie
-    im Strategie-Panel eingestellt (an oder aus, mit seiner konfigurierten Zeiteinheit/Multiplikator),
-    und wird hier NICHT mitvariiert - dafuer gibt es den separaten run_ab_sweep. RSI/Volumen/ATR-
-    Periode und der optionale ASO-Filter kommen ebenfalls unveraendert aus der aktuellen Config.
-    Kombinationen mit schneller >= langsamer EMA werden uebersprungen (ungueltig, siehe Validierung
-    im Original-Skript)."""
-    max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
-    resolution = cfg.get("ab_resolution", "1m")
-    if resolution in SUB_MINUTE_RESOLUTIONS:
-        max_candles = min(max_candles, 5000)
-    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    ts, o, h, l, c, v = candles
-    n = len(c)
-    if n < max(slow_max, lookback_max) + 10:
-        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~{max(slow_max, lookback_max) + 10} nötig)."}
-
-    def _int_range(lo, hi, step):
-        lo, hi, step = int(lo), int(hi), max(1, int(step))
-        return sorted(set(v for v in range(lo, hi + 1, step) if v >= 2))
-
-    lookbacks = _int_range(lookback_min, lookback_max, lookback_step)
-    fasts = _int_range(fast_min, fast_max, fast_step)
-    slows = _int_range(slow_min, slow_max, slow_step)
-    if not lookbacks or not fasts or not slows:
-        return {"error": "Die eingestellten Bereiche für Breakout-Range/EMA ergeben keine gültigen Werte."}
-
-    combos = [(lb, f, sl) for lb in lookbacks for f in fasts for sl in slows if f < sl]
-    if not combos:
-        return {"error": "Keine gültige Kombination: die schnelle EMA muss in jeder Kombination kleiner als die langsame sein - Bereiche prüfen."}
-    if len(combos) > AB_SIGNAL_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Kombinationen ({len(combos)}, Limit {AB_SIGNAL_SWEEP_MAX_COMBOS}) - Bereiche verkleinern oder Schrittweiten vergrößern."}
-
-    base_params = dict(_ab_effective_params(cfg))  # rsi_len/rsi_gate/use_volume/vol_mult/atr_len bleiben fest
-
-    trend_ok = None
-    if cfg.get("ab_trend_filter_enabled", False):
-        tf_resolution = cfg.get("ab_trend_filter_resolution", "15m")
-        tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
-        tf_multiplier = cfg.get("ab_trend_filter_multiplier", 3.0)
-        if tf_resolution in (None, "", "same") or tf_resolution == resolution:
-            tf_st_line, _ = compute_diamond_supertrend(h, l, c, tf_multiplier, tf_atr_period)
-            trend_ok = ([tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(n)],
-                        [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(n)])
-        else:
-            tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, ts, tf_resolution, tf_atr_period)
-            if tf_err:
-                return {"error": f"SuperTrend-Trendfilter ({tf_resolution}): {tf_err}"}
-            trend_ok = _trend_filter_ok_series(ts, tf_candles, tf_multiplier, tf_atr_period)
-
-    aso_ok = None
-    if cfg.get("ab_aso_filter_enabled", False):
-        aso_ok = compute_aso_filter(o, h, l, c, cfg.get("ab_aso_filter_length", 10),
-                                     cfg.get("ab_aso_filter_mode", 0), cfg.get("ab_aso_filter_confirm_bars", 1))
-
-    loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(None, _ab_signal_sweep_compute, candles, cfg, base_params, trend_ok, aso_ok, combos, exclude_top_n)
-
-    rank_key = lambda r: (r["trades"] >= AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
-    best_sorted = sorted(results, key=rank_key, reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-
-    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": n,
-        "min_reliable_trades": AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": len(results), "lookbacks_tested": lookbacks, "fasts_tested": fasts, "slows_tested": slows,
-        "exit_mode": cfg.get("ab_exit_mode", "flip"),
-        "sl_enabled": cfg.get("ab_sl_enabled", True), "sl_usd": cfg.get("ab_sl_manual_usd", 5.0),
-        "trend_filter_enabled": cfg.get("ab_trend_filter_enabled", False),
-        "trend_filter_resolution": cfg.get("ab_trend_filter_resolution", "15m") if cfg.get("ab_trend_filter_enabled", False) else None,
-        "results": best_sorted[:30], "worst_results": worst_sorted[:20],
-    }
-
-
-def compute_candle_dna(opens, highs, lows, closes, rejection_mult):
-    """Eigene Entwicklung (kein Port): Konviktions-Score je Kerze von -100 (voll bearisch) bis
-    +100 (voll bullisch). Basis: Koerper-Anteil an der Hoch-Tief-Spanne (100*body/range,
-    vorzeichenbehaftet - Marubozu-artige Kerzen landen nah an +-100, Doji-artige nah an 0). Dazu
-    ein Bonus/Abzug, wenn ein Docht auf der Gegenseite mindestens 'rejection_mult'-mal so lang
-    wie der Koerper ist (Hammer = bullischer Bonus, Shooting Star = bearischer Abzug) - reine
-    Preisaktion, kein nachlaufender Indikator."""
-    n = len(closes)
-    score = [0.0] * n
-    for i in range(n):
-        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
-        rng = h - l
-        if rng <= 0:
-            continue
-        body = c - o
-        base = 100 * body / rng
-        upper_wick = h - max(o, c)
-        lower_wick = min(o, c) - l
-        body_abs = abs(body)
-        bonus = 0.0
-        if lower_wick > body_abs * rejection_mult and lower_wick > upper_wick:
-            bonus += 30.0  # Hammer-artige Ablehnung nach unten -> zusaetzlich bullisch
-        if upper_wick > body_abs * rejection_mult and upper_wick > lower_wick:
-            bonus -= 30.0  # Shooting-Star-artige Ablehnung nach oben -> zusaetzlich bearisch
-        score[i] = max(-100.0, min(100.0, base + bonus))
-    return score
-
-
-def compute_cd_signals(opens, highs, lows, closes, rejection_mult, threshold):
-    """buy_i/sell_i = Score kreuzt die Schwelle (bzw. -Schwelle) von innen nach aussen -
-    verhindert, dass er bei jeder Kerze ueber der Schwelle neu feuert, solange er dort bleibt."""
-    score = compute_candle_dna(opens, highs, lows, closes, rejection_mult)
-    n = len(score)
-    buy_i = [False] * n
-    sell_i = [False] * n
-    for i in range(1, n):
-        if score[i - 1] <= threshold and score[i] > threshold:
-            buy_i[i] = True
-        if score[i - 1] >= -threshold and score[i] < -threshold:
-            sell_i[i] = True
-    return buy_i, sell_i, score
-
-
-def compute_maverick_signals(o, h, l, c, v, fast_len, slow_len, guide_len, atr_len, strong_mult, use_volume, vol_len, vol_mult):
-    """Portiert aus 'Maverick Edge Style - Modul 1' (Pine v5): Trend-Kontrolle aus zwei EMAs
-    (schneller EMA ueber/unter langsamem UND steigend/fallend = Bulle/Baer-Kontrolle), eine
-    'Guide-Linie' (EMA, Standard-Laenge 34) als Richtungs-Schwelle, und eine Kerzenstaerke-
-    Klassifizierung (Kerzenkoerper im Verhaeltnis zum ATR, optional zusaetzlich Mindest-Volumen).
-    longCondition/shortCondition im Original feuern JEDEN Balken, an dem die Bedingungen
-    zutreffen (kein einmaliges Kreuzungs-Ereignis) - hier bewusst als FLANKE (erst True, wenn es
-    im Balken davor noch False war) umgesetzt, damit nicht bei jeder neuen Kerze im selben Trend
-    erneut ein Signal gezaehlt wird. Gibt (long_entry, short_entry, guide_line) zurueck."""
-    n = len(c)
-    if n < 2:
-        return [False] * n, [False] * n, [None] * n
-
-    ema_fast = _ema_series(c, fast_len)
-    ema_slow = _ema_series(c, slow_len)
-    guide_line = _ema_series(c, guide_len)
-    atr = compute_atr(h, l, c, atr_len)
-    avg_vol = _sma_series(v, vol_len) if (use_volume and v) else None
-
-    bull_control = [False] * n
-    bear_control = [False] * n
-    for i in range(1, n):
-        bull_control[i] = ema_fast[i] > ema_slow[i] and ema_fast[i] > ema_fast[i - 1]
-        bear_control[i] = ema_fast[i] < ema_slow[i] and ema_fast[i] < ema_fast[i - 1]
-
-    long_cond = [False] * n
-    short_cond = [False] * n
-    for i in range(n):
-        above_guide = c[i] > guide_line[i]
-        below_guide = c[i] < guide_line[i]
-        body_size = abs(c[i] - o[i])
-        body_to_atr = (body_size / atr[i]) if atr[i] and atr[i] > 0 else 0
-        vol_ok = (v[i] > avg_vol[i] * vol_mult) if avg_vol is not None else True
-        strength_ge_2 = body_to_atr >= strong_mult and vol_ok
-        is_bull = c[i] > o[i]
-        is_bear = c[i] < o[i]
-        long_cond[i] = bull_control[i] and above_guide and strength_ge_2 and is_bull
-        short_cond[i] = bear_control[i] and below_guide and strength_ge_2 and is_bear
-
-    long_entry = [False] * n
-    short_entry = [False] * n
-    for i in range(1, n):
-        long_entry[i] = long_cond[i] and not long_cond[i - 1]
-        short_entry[i] = short_cond[i] and not short_cond[i - 1]
-
-    return long_entry, short_entry, guide_line
-
-
-def _mv_set_sl_tp(st, cfg, direction, entry_price, guide_now):
-    """Setzt SL (fester $-Betrag ODER Guide-Linie als Trail-Stop) und TP (fester $-Betrag).
-    Bei sl_mode='guide_trail' TRACKT der SL direkt den aktuellen Guide-Linien-Wert (keine
-    'nur verbessern'-Klammer wie bei einem ATR-Trailing-Stop - die Guide-Linie ist selbst schon
-    eine geglaettete EMA und bewegt sich von Haus aus nur mit dem Trend mit)."""
-    sl_mode = cfg.get("mv_sl_mode", "fixed")
-    if sl_mode == "guide_trail":
-        st["mv_sl_price"] = guide_now
-    elif cfg.get("mv_sl_enabled", True):
-        size = st.get("total_coin_size") or 0
-        if size <= 0:
-            st["mv_sl_price"] = None
-        else:
-            dist_sl = cfg.get("mv_sl_manual_usd", 5.0) / size
-            st["mv_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
-    else:
-        st["mv_sl_price"] = None
-
-    if not cfg.get("mv_tp_enabled", False):
-        st["mv_tp_price"] = None
-        return
-    size = st.get("total_coin_size") or 0
-    if size <= 0:
-        st["mv_tp_price"] = None
-        return
-    dist_tp = cfg.get("mv_tp_manual_usd", 10.0) / size
-    st["mv_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
-
-
-async def check_mv_sl_tp(symbol, price, guide_now):
-    """Prueft SL (fest ODER Guide-Linien-Trail) und TP (fest). Bei sl_mode='guide_trail' wird
-    der SL-Preis JEDE neue geschlossene Kerze auf den aktuellen Guide-Linien-Wert nachgezogen -
-    Position schliesst, sobald der Kurs die Guide-Linie durchbricht."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    if cfg.get("mv_sl_mode", "fixed") == "guide_trail" and guide_now is not None:
-        st["mv_sl_price"] = guide_now
-
-    tp_price = st.get("mv_tp_price")
-    if tp_price is not None:
-        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
-        if hit_tp:
-            debug_log(f"🎯 [{symbol}] Maverick TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-            await execute_exit(symbol, price, "TP")
-            st["mv_sl_price"] = None
-            st["mv_tp_price"] = None
-            return
-
-    sl_price = st.get("mv_sl_price")
-    if sl_price is None:
-        return
-    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-    if hit_sl:
-        reason = "SL" if cfg.get("mv_sl_mode", "fixed") == "fixed" else "GUIDE-SL"
-        debug_log(f"🚪 [{symbol}] Maverick {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, reason)
-        st["mv_sl_price"] = None
-        st["mv_tp_price"] = None
-        if cfg.get("mv_sl_mode", "fixed") == "fixed":
-            st["mv_sl_cooldown_until"] = time.time() + cfg.get("mv_sl_cooldown_seconds", 30)
-
-
-async def check_mv_entry(symbol, long_entry_i, short_entry_i, price, guide_now):
-    """Reiner Signal-Einstieg (kein Flip-System): Long/Short nur bei frischem Setup-Signal,
-    solange keine Position offen ist. Ausstieg ausschliesslich ueber SL/TP (siehe
-    check_mv_sl_tp), kein Exit durch ein Gegen-Signal - passend zum Original, das explizit nur
-    Einstiegs-Setups markiert, keine Exit-Logik definiert."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None or st["position"] is not None:
-        return
-    if time.time() < st.get("mv_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("mv_direction_mode", "both")
-
-    if long_entry_i and direction_mode != "short_only":
-        debug_log(f"📡 [{symbol}] Maverick Ersteinstieg: LONG @ {price}")
-        await execute_entry(symbol, "long", price, is_add_on=False)
-        if st["position"] is not None:
-            _mv_set_sl_tp(st, cfg, "long", price, guide_now)
-    elif short_entry_i and direction_mode != "long_only":
-        debug_log(f"📡 [{symbol}] Maverick Ersteinstieg: SHORT @ {price}")
-        await execute_entry(symbol, "short", price, is_add_on=False)
-        if st["position"] is not None:
-            _mv_set_sl_tp(st, cfg, "short", price, guide_now)
-
-
-async def mv_poll_loop(symbol):
-    """Maverick Edge Style (siehe compute_maverick_signals): Trend-EMA-Kontrolle + Guide-Linie
-    + Kerzenstaerke (ATR/Volumen) als Einstiegsfilter, reiner Signal-Einstieg ohne Flip, Ausstieg
-    ausschliesslich ueber SL (fest ODER Guide-Linie als Trail-Stop) und TP (fest). Braucht
-    Handelsvolumen (siehe fetch_candles_binance_vol) - wie MO7, deshalb bewusst NUR normale
-    Binance-Minuten-Aufloesungen (kein Sekunden-/Lighter-Tick-Fallback, da dort kein Volumen
-    vorliegt)."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "maverick_edge" and cfg["bot_active"]:
-                resolution = cfg.get("mv_resolution", "5m")
-                fast_len = cfg.get("mv_fast_len", 9)
-                slow_len = cfg.get("mv_slow_len", 21)
-                guide_len = cfg.get("mv_guide_len", 34)
-                atr_len = cfg.get("mv_atr_len", 14)
-                strong_mult = cfg.get("mv_strong_mult", 1.5)
-                use_volume = cfg.get("mv_use_volume_enabled", True)
-                vol_len = cfg.get("mv_vol_len", 20)
-                vol_mult = cfg.get("mv_vol_mult", 1.3)
-                min_needed = max(slow_len, guide_len, atr_len, vol_len) + 5
-                needed_bars = min(1000, max(min_needed * 2, 220))
-                st = b["state"]
-
-                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
-                if data:
-                    timestamps, opens, highs, lows, closes, volumes = data
-                    closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
-                else:
-                    closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    long_entry, short_entry, guide_line = compute_maverick_signals(
-                        closed_o, closed_h, closed_l, closed_c, closed_v,
-                        fast_len, slow_len, guide_len, atr_len, strong_mult, use_volume, vol_len, vol_mult)
-                    if cfg.get("mv_invert_direction", False):
-                        long_entry, short_entry = short_entry, long_entry
-                    guide_now = guide_line[-1]
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        debug_log(f"💓 [{symbol}] Maverick aktiv: Preis={closed_c[-1]}, Guide-Linie={round(guide_now,4) if guide_now is not None else '-'}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 1:
-                            continue
-                        price_i = price if idx == len(closed_ts) - 1 else closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        await check_mv_entry(symbol, long_entry[idx], short_entry[idx], price_i, guide_line[idx])
-
-                    await check_mv_sl_tp(symbol, price, guide_now)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] Maverick wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] Maverick wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Maverick-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-def compute_range_filter(closes, period, qty):
-    """Portiert aus 'Range Filter - B&S Signals' (DonovanWall, Pine v4): eine sich selbst
-    nachziehende Glaettungslinie (filt), die sich nur bewegt, wenn der Kurs die aktuelle
-    Bandbreite (rng, aus einer doppelt geglaetteten EMA der Kursaenderung) verlaesst -
-    aehnlich einer Chandelier-/SuperTrend-Linie, aber symmetrisch um den Kurs statt am
-    Hoch/Tief. long_flip/short_flip feuern beim naechsten qualifizierten Richtungswechsel,
-    NACHDEM zuvor der jeweils andere Zustand aktiv war (wie longCondition/shortCondition im
-    Original via CondIni) - verhindert wiederholtes Feuern in dieselbe Richtung, solange der
-    Kurs auf derselben Seite des Filters bleibt. longCond/shortCond im Original vereinfachen
-    sich algebraisch zu genau 'Kurs > filt UND Filter steigend' bzw. 'Kurs < filt UND Filter
-    fallend' (die Original-Bedingung deckt beide Faelle rng_src>rng_src[1] und <rng_src[1] ab,
-    was zusammen bereits 'ungleich' abdeckt)."""
-    n = len(closes)
-    if n < 2:
-        return [False] * n, [False] * n
-
-    wper = period * 2 - 1
-    diffs = [0.0] + [abs(closes[i] - closes[i - 1]) for i in range(1, n)]
-    avrng = _ema_series(diffs, period)
-    ac = _ema_series(avrng, wper)
-    rng = [v * qty for v in ac]
-
-    filt = [0.0] * n
-    filt[0] = closes[0]
-    for i in range(1, n):
-        r = rng[i]
-        prev = filt[i - 1]
-        x = closes[i]
-        if x - r > prev:
-            filt[i] = x - r
-        elif x + r < prev:
-            filt[i] = x + r
-        else:
-            filt[i] = prev
-
-    fdir = [0] * n
-    for i in range(1, n):
-        if filt[i] > filt[i - 1]:
-            fdir[i] = 1
-        elif filt[i] < filt[i - 1]:
-            fdir[i] = -1
-        else:
-            fdir[i] = fdir[i - 1]
-
-    long_cond = [False] * n
-    short_cond = [False] * n
-    for i in range(1, n):
-        long_cond[i] = closes[i] > filt[i] and fdir[i] == 1
-        short_cond[i] = closes[i] < filt[i] and fdir[i] == -1
-
-    cond_ini = [0] * n
-    for i in range(1, n):
-        if long_cond[i]:
-            cond_ini[i] = 1
-        elif short_cond[i]:
-            cond_ini[i] = -1
-        else:
-            cond_ini[i] = cond_ini[i - 1]
-
-    long_flip = [False] * n
-    short_flip = [False] * n
-    for i in range(1, n):
-        long_flip[i] = long_cond[i] and cond_ini[i - 1] == -1
-        short_flip[i] = short_cond[i] and cond_ini[i - 1] == 1
-
-    return long_flip, short_flip
-
-
-def _rf_set_sl(st, cfg, direction, entry_price):
-    """Setzt den festen SL-Preis (fester $-Betrag) - siehe _cd_set_sl, identisches Muster."""
-    if not cfg.get("rf_sl_enabled", False):
-        st["rf_sl_price"] = None
-        return
-    size = st.get("total_coin_size") or 0
-    if size <= 0:
-        st["rf_sl_price"] = None
-        return
-    dist_sl = cfg.get("rf_sl_manual_usd", 5.0) / size
-    st["rf_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
-
-
-def _rf_set_tp(st, cfg, direction, entry_price):
-    """Setzt den festen TP-Preis (fester $-Betrag) - siehe _cd_set_tp, identisches Muster."""
-    if not cfg.get("rf_tp_enabled", False):
-        st["rf_tp_price"] = None
-        return
-    size = st.get("total_coin_size") or 0
-    if size <= 0:
-        st["rf_tp_price"] = None
-        return
-    dist_tp = cfg.get("rf_tp_manual_usd", 10.0) / size
-    st["rf_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
-
-
-async def check_rf_sl_tp(symbol, price):
-    """Optionaler fester SL UND optionaler fester TP - siehe check_cd_sl_tp, identisches
-    Muster. Beide unabhaengig voneinander an/abschaltbar."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    tp_price = st.get("rf_tp_price")
-    if tp_price is not None:
-        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
-        if hit_tp:
-            debug_log(f"🎯 [{symbol}] Range Filter TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-            await execute_exit(symbol, price, "TP")
-            st["rf_sl_price"] = None
-            st["rf_tp_price"] = None
-            return
-
-    sl_price = st.get("rf_sl_price")
-    if sl_price is None:
-        return
-    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-    if hit_sl:
-        debug_log(f"🚪 [{symbol}] Range Filter SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
-        st["rf_sl_price"] = None
-        st["rf_tp_price"] = None
-        st["rf_sl_cooldown_until"] = time.time() + cfg.get("rf_sl_cooldown_seconds", 30)
-
-
-async def check_rf_signal(symbol, long_flip_i, short_flip_i, price, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
-    """Immer im Markt, reiner Buy/Sell-Wechsel - siehe check_cd_signal, identisches Muster
-    inkl. optionalem Z-Score-Filter (rf_zscore_filter_enabled), optionalem RSI-Regime-Filter
-    (rf_rsi_filter_enabled), optionalem ADX/DI-Trendfilter (rf_adx_filter_enabled) und
-    optionalem festem SL (rf_sl_enabled, siehe check_rf_sl_tp). Alle drei Filter sind
-    unabhaengig voneinander kombinierbar - sind mehrere an, muessen alle zustimmen."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None:
-        return
-    if time.time() < st.get("rf_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("rf_direction_mode", "both")
-    zscore_enabled = cfg.get("rf_zscore_filter_enabled", False)
-    rsi_enabled = cfg.get("rf_rsi_filter_enabled", False)
-    rsi_midline = cfg.get("rf_rsi_midline", 50)
-    adx_enabled = cfg.get("rf_adx_filter_enabled", False)
-    adx_threshold = cfg.get("rf_adx_threshold", 20)
-    adx_missing = adx is None or plus_di is None or minus_di is None
-    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
-    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
-    long_ok = (direction_mode != "short_only"
-               and (not zscore_enabled or zscore is None or zscore > 0)
-               and (not rsi_enabled or rsi is None or rsi > rsi_midline)
-               and adx_long_ok)
-    short_ok = (direction_mode != "long_only"
-                and (not zscore_enabled or zscore is None or zscore < 0)
-                and (not rsi_enabled or rsi is None or rsi < rsi_midline)
-                and adx_short_ok)
-    pos = st["position"]
-
-    if pos is None:
-        if long_flip_i and long_ok:
-            debug_log(f"📡 [{symbol}] Range Filter Ersteinstieg: LONG @ {price}")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _rf_set_sl(st, cfg, "long", price)
-                _rf_set_tp(st, cfg, "long", price)
-        elif short_flip_i and short_ok:
-            debug_log(f"📡 [{symbol}] Range Filter Ersteinstieg: SHORT @ {price}")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _rf_set_sl(st, cfg, "short", price)
-                _rf_set_tp(st, cfg, "short", price)
-        return
-
-    if pos == "long" and short_flip_i:
-        if direction_mode == "long_only" or not short_ok:
-            if direction_mode == "long_only":
-                reason = "RF-EXIT-DIR"
-            elif rsi_enabled and not (rsi is None or rsi < rsi_midline):
-                reason = "RF-EXIT-RSI"
-            elif adx_enabled and not adx_short_ok:
-                reason = "RF-EXIT-ADX"
-            else:
-                reason = "RF-EXIT-ZSCORE"
-            debug_log(f"🚪 [{symbol}] Range Filter Exit: LONG @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["rf_sl_price"] = None
-            st["rf_tp_price"] = None
-        else:
-            debug_log(f"🔄 [{symbol}] Range Filter Flip: LONG -> SHORT @ {price}")
-            await execute_exit(symbol, price, "RF-FLIP")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _rf_set_sl(st, cfg, "short", price)
-                _rf_set_tp(st, cfg, "short", price)
-    elif pos == "short" and long_flip_i:
-        if direction_mode == "short_only" or not long_ok:
-            if direction_mode == "short_only":
-                reason = "RF-EXIT-DIR"
-            elif rsi_enabled and not (rsi is None or rsi > rsi_midline):
-                reason = "RF-EXIT-RSI"
-            elif adx_enabled and not adx_long_ok:
-                reason = "RF-EXIT-ADX"
-            else:
-                reason = "RF-EXIT-ZSCORE"
-            debug_log(f"🚪 [{symbol}] Range Filter Exit: SHORT @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["rf_sl_price"] = None
-            st["rf_tp_price"] = None
-        else:
-            debug_log(f"🔄 [{symbol}] Range Filter Flip: SHORT -> LONG @ {price}")
-            await execute_exit(symbol, price, "RF-FLIP")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _rf_set_sl(st, cfg, "long", price)
-                _rf_set_tp(st, cfg, "long", price)
-
-
-async def rf_poll_loop(symbol):
-    """Range Filter (DonovanWall, siehe compute_range_filter/check_rf_signal): immer im Markt,
-    reiner Buy/Sell-Wechsel. Wie bei Kerzen-DNA/Fractals: Ausfuehrung IMMER zum tatsaechlichen
-    Kerzenschlusskurs, nicht zum Live-Preis."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "range_filter" and cfg["bot_active"]:
-                resolution = cfg.get("rf_resolution", "5m")
-                period = cfg.get("rf_period", 20)
-                qty = cfg.get("rf_qty", 3.5)
-                min_needed = max(period * 3, 30)
-                needed_bars = min(1000, max(min_needed * 2, 220))
-                st = b["state"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    long_flip, short_flip = compute_range_filter(closed_c, period, qty)
-
-                    zs_lookback = cfg.get("rf_zscore_lookback", 20)
-                    zs_smooth = cfg.get("rf_zscore_smooth", 3)
-                    zscore_resolution = cfg.get("rf_zscore_resolution", "same")
-                    if zscore_resolution in (None, "", "same") or zscore_resolution == resolution:
-                        zscore_series = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)
-                    else:
-                        zs_needed = min(500, max(zs_lookback, zs_smooth, 5) * 3 + 20)
-                        if zscore_resolution in SUB_MINUTE_RESOLUTIONS:
-                            zs_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[zscore_resolution], zs_needed)
-                            zs_c = zs_local[4] if zs_local else None
-                        else:
-                            zs_data = await fetch_candles_binance_multi(symbol, zscore_resolution, count_back=zs_needed, market_type=cfg.get("binance_market_type", "spot"))
-                            zs_c = zs_data[4][:-1] if zs_data else None
-                        if zs_c and len(zs_c) > max(zs_lookback, zs_smooth):
-                            zscore_now = compute_rolling_zscore(zs_c, zs_lookback, zs_smooth)[-1]
-                        else:
-                            zscore_now = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)[-1]
-                        zscore_series = [zscore_now] * len(closed_c)
-
-                    rsi_enabled = cfg.get("rf_rsi_filter_enabled", False)
-                    rsi_series = compute_rsi(closed_c, cfg.get("rf_rsi_length", 14)) if rsi_enabled else None
-
-                    adx_enabled = cfg.get("rf_adx_filter_enabled", False)
-                    if adx_enabled:
-                        adx_series, plus_di_series, minus_di_series = compute_adx(closed_h, closed_l, closed_c, cfg.get("rf_adx_length", 14))
-                    else:
-                        adx_series, plus_di_series, minus_di_series = None, None, None
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        rsi_log = f", RSI={round(rsi_series[-1],1)}" if rsi_series else ""
-                        adx_log = f", ADX={round(adx_series[-1],1)} (+DI={round(plus_di_series[-1],1)}/-DI={round(minus_di_series[-1],1)})" if adx_series else ""
-                        debug_log(f"💓 [{symbol}] Range Filter aktiv: Preis={closed_c[-1]}{rsi_log}{adx_log}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 1:
-                            continue
-                        price_i = closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        rsi_i = rsi_series[idx] if rsi_series else None
-                        adx_i = adx_series[idx] if adx_series else None
-                        plus_di_i = plus_di_series[idx] if plus_di_series else None
-                        minus_di_i = minus_di_series[idx] if minus_di_series else None
-                        await check_rf_signal(symbol, long_flip[idx], short_flip[idx], price_i, zscore_series[idx], rsi_i, adx_i, plus_di_i, minus_di_i)
-
-                    await check_rf_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] Range Filter wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] Range Filter wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Range-Filter-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
-
-    """Setzt den festen SL-Preis (fester $-Betrag) - siehe _fr_set_sl/_uh_set_sl, identisches
-    Muster."""
-    if not cfg.get("cd_sl_enabled", False):
-        st["cd_sl_price"] = None
-        return
-    size = st.get("total_coin_size") or 0
-    if size <= 0:
-        st["cd_sl_price"] = None
-        return
-    dist_sl = cfg.get("cd_sl_manual_usd", 5.0) / size
-    st["cd_sl_price"] = entry_price - dist_sl if direction == "long" else entry_price + dist_sl
-
-
-def _cd_set_tp(st, cfg, direction, entry_price):
-    """Setzt den festen TP-Preis (fester $-Betrag), identisches Muster zu _cd_set_sl. Ohne TP
-    ist der einzige Ausstieg bei Kerzen-DNA die naechste GEGENSAETZLICHE Extrem-Kerze - ein
-    bereits profitabler Trade kann so komplett wieder zurücklaufen, bevor ueberhaupt ein
-    Gegensignal kommt. Der TP realisiert Gewinne, sobald das Ziel erreicht ist, unabhaengig
-    davon, ob/wann ein Flip-Signal folgt."""
-    if not cfg.get("cd_tp_enabled", False):
-        st["cd_tp_price"] = None
-        return
-    size = st.get("total_coin_size") or 0
-    if size <= 0:
-        st["cd_tp_price"] = None
-        return
-    dist_tp = cfg.get("cd_tp_manual_usd", 10.0) / size
-    st["cd_tp_price"] = entry_price + dist_tp if direction == "long" else entry_price - dist_tp
-
-
-async def check_cd_sl_tp(symbol, price):
-    """Optionaler fester SL UND optionaler fester TP - siehe _cd_set_sl/_cd_set_tp. Beide
-    unabhaengig voneinander an/abschaltbar."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if st["position"] is None or price is None:
-        return
-    pos = st["position"]
-
-    tp_price = st.get("cd_tp_price")
-    if tp_price is not None:
-        hit_tp = (pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)
-        if hit_tp:
-            debug_log(f"🎯 [{symbol}] Kerzen-DNA TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
-            await execute_exit(symbol, price, "TP")
-            st["cd_sl_price"] = None
-            st["cd_tp_price"] = None
-            return
-
-    sl_price = st.get("cd_sl_price")
-    if sl_price is None:
-        return
-    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-    if hit_sl:
-        debug_log(f"🚪 [{symbol}] Kerzen-DNA SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
-        st["cd_sl_price"] = None
-        st["cd_tp_price"] = None
-        st["cd_sl_cooldown_until"] = time.time() + cfg.get("cd_sl_cooldown_seconds", 30)
-
-
-async def check_cd_signal(symbol, buy_i, sell_i, price, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
-    """Immer im Markt, reiner Buy/Sell-Wechsel - siehe check_fr_signal, identisches Muster
-    inkl. optionalem Z-Score-Filter (cd_zscore_filter_enabled), optionalem RSI-Regime-Filter
-    (cd_rsi_filter_enabled - RSI ueber Mittellinie -> nur Long, darunter -> nur Short), optionalem
-    ADX/DI-Trendfilter (cd_adx_filter_enabled - ADX ueber Schwelle UND +DI>-DI -> nur Long, ADX
-    ueber Schwelle UND -DI>+DI -> nur Short; unter der Schwelle gilt der Markt als trendlos und
-    BEIDE Richtungen werden gesperrt) und optionalem festem SL (cd_sl_enabled, siehe check_cd_sl).
-    Alle drei Filter sind unabhaengig voneinander kombinierbar - sind mehrere an, muessen alle
-    zustimmen."""
-    b = BOTS[symbol]
-    st, cfg = b["state"], b["config"]
-    if not cfg["bot_active"] or price is None:
-        return
-    if time.time() < st.get("cd_sl_cooldown_until", 0.0):
-        return
-    direction_mode = cfg.get("cd_direction_mode", "both")
-    zscore_enabled = cfg.get("cd_zscore_filter_enabled", False)
-    rsi_enabled = cfg.get("cd_rsi_filter_enabled", False)
-    rsi_midline = cfg.get("cd_rsi_midline", 50)
-    adx_enabled = cfg.get("cd_adx_filter_enabled", False)
-    adx_threshold = cfg.get("cd_adx_threshold", 20)
-    adx_missing = adx is None or plus_di is None or minus_di is None
-    adx_long_ok = not adx_enabled or adx_missing or (adx > adx_threshold and plus_di > minus_di)
-    adx_short_ok = not adx_enabled or adx_missing or (adx > adx_threshold and minus_di > plus_di)
-    long_ok = (direction_mode != "short_only"
-               and (not zscore_enabled or zscore is None or zscore > 0)
-               and (not rsi_enabled or rsi is None or rsi > rsi_midline)
-               and adx_long_ok)
-    short_ok = (direction_mode != "long_only"
-                and (not zscore_enabled or zscore is None or zscore < 0)
-                and (not rsi_enabled or rsi is None or rsi < rsi_midline)
-                and adx_short_ok)
-    pos = st["position"]
-
-    if pos is None:
-        if buy_i and long_ok:
-            debug_log(f"📡 [{symbol}] Kerzen-DNA Ersteinstieg: LONG @ {price}")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _cd_set_sl(st, cfg, "long", price)
-                _cd_set_tp(st, cfg, "long", price)
-        elif sell_i and short_ok:
-            debug_log(f"📡 [{symbol}] Kerzen-DNA Ersteinstieg: SHORT @ {price}")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _cd_set_sl(st, cfg, "short", price)
-                _cd_set_tp(st, cfg, "short", price)
-        return
-
-    if pos == "long" and sell_i:
-        if direction_mode == "long_only" or not short_ok:
-            if direction_mode == "long_only":
-                reason = "CD-EXIT-DIR"
-            elif rsi_enabled and not (rsi is None or rsi < rsi_midline):
-                reason = "CD-EXIT-RSI"
-            elif adx_enabled and not adx_short_ok:
-                reason = "CD-EXIT-ADX"
-            else:
-                reason = "CD-EXIT-ZSCORE"
-            debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: LONG @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["cd_sl_price"] = None
-            st["cd_tp_price"] = None
-        else:
-            debug_log(f"🔄 [{symbol}] Kerzen-DNA Flip: LONG -> SHORT @ {price}")
-            await execute_exit(symbol, price, "CD-FLIP")
-            await execute_entry(symbol, "short", price, is_add_on=False)
-            if st["position"] is not None:
-                _cd_set_sl(st, cfg, "short", price)
-                _cd_set_tp(st, cfg, "short", price)
-    elif pos == "short" and buy_i:
-        if direction_mode == "short_only" or not long_ok:
-            if direction_mode == "short_only":
-                reason = "CD-EXIT-DIR"
-            elif rsi_enabled and not (rsi is None or rsi > rsi_midline):
-                reason = "CD-EXIT-RSI"
-            elif adx_enabled and not adx_long_ok:
-                reason = "CD-EXIT-ADX"
-            else:
-                reason = "CD-EXIT-ZSCORE"
-            debug_log(f"🚪 [{symbol}] Kerzen-DNA Exit: SHORT @ {price}")
-            await execute_exit(symbol, price, reason)
-            st["cd_sl_price"] = None
-            st["cd_tp_price"] = None
-        else:
-            debug_log(f"🔄 [{symbol}] Kerzen-DNA Flip: SHORT -> LONG @ {price}")
-            await execute_exit(symbol, price, "CD-FLIP")
-            await execute_entry(symbol, "long", price, is_add_on=False)
-            if st["position"] is not None:
-                _cd_set_sl(st, cfg, "long", price)
-                _cd_set_tp(st, cfg, "long", price)
-
-
-async def cd_poll_loop(symbol):
-    """Kerzen-DNA: eigener Konviktions-Score aus Koerper+Docht je Kerze, immer im Markt, reiner
-    Buy/Sell-Wechsel (siehe check_cd_signal/compute_cd_signals). Wie bei Fractals: Ausfuehrung
-    IMMER zum tatsaechlichen Kerzenschlusskurs, nicht zum Live-Preis - passend zur reinen
-    Preisaktions-Philosophie (die abgeschlossene Kerze selbst IST das Signal)."""
-    b = BOTS[symbol]
-    last_processed_ts = None
-    last_heartbeat = 0.0
-
-    while True:
-        try:
-            cfg = b["config"]
-            if cfg["entry_mode"] == "candle_dna" and cfg["bot_active"]:
-                resolution = cfg.get("cd_resolution", "1m")
-                threshold = cfg.get("cd_threshold", 50)
-                rejection_mult = cfg.get("cd_rejection_mult", 1.5)
-                min_needed = 5
-                needed_bars = min(1000, max(min_needed * 2, 220))
-                st = b["state"]
-
-                if resolution in SUB_MINUTE_RESOLUTIONS:
-                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
-                    if local:
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
-                    else:
-                        closed_ts = None
-                else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
-                    if data:
-                        timestamps, opens, highs, lows, closes = data
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
-                    else:
-                        closed_ts = None
-
-                now = time.time()
-                due_heartbeat = now - last_heartbeat > 300
-
-                if closed_ts and len(closed_c) > min_needed:
-                    price = st["last_price"] if st["last_price"] is not None else closed_c[-1]
-                    if cfg.get("cd_use_heikin_ashi", False):
-                        sig_o, sig_h, sig_l, sig_c = compute_heikin_ashi(closed_o, closed_h, closed_l, closed_c)
-                    else:
-                        sig_o, sig_h, sig_l, sig_c = closed_o, closed_h, closed_l, closed_c
-                    buy_signal, sell_signal, score = compute_cd_signals(sig_o, sig_h, sig_l, sig_c, rejection_mult, threshold)
-                    if cfg.get("cd_invert_direction", False):
-                        buy_signal, sell_signal = sell_signal, buy_signal
-                    zs_lookback = cfg.get("cd_zscore_lookback", 20)
-                    zs_smooth = cfg.get("cd_zscore_smooth", 3)
-                    zscore_resolution = cfg.get("cd_zscore_resolution", "same")
-                    if zscore_resolution in (None, "", "same") or zscore_resolution == resolution:
-                        zscore_series = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)
-                    else:
-                        zs_needed = min(500, max(zs_lookback, zs_smooth, 5) * 3 + 20)
-                        if zscore_resolution in SUB_MINUTE_RESOLUTIONS:
-                            zs_local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[zscore_resolution], zs_needed)
-                            zs_c = zs_local[4] if zs_local else None
-                        else:
-                            zs_data = await fetch_candles_binance_multi(symbol, zscore_resolution, count_back=zs_needed, market_type=cfg.get("binance_market_type", "spot"))
-                            zs_c = zs_data[4][:-1] if zs_data else None
-                        if zs_c and len(zs_c) > max(zs_lookback, zs_smooth):
-                            zscore_now = compute_rolling_zscore(zs_c, zs_lookback, zs_smooth)[-1]
-                        else:
-                            zscore_now = compute_rolling_zscore(closed_c, zs_lookback, zs_smooth)[-1]
-                        zscore_series = [zscore_now] * len(closed_c)
-
-                    rsi_enabled = cfg.get("cd_rsi_filter_enabled", False)
-                    if rsi_enabled:
-                        rsi_series = compute_rsi(closed_c, cfg.get("cd_rsi_length", 14))
-                    else:
-                        rsi_series = None
-
-                    adx_enabled = cfg.get("cd_adx_filter_enabled", False)
-                    if adx_enabled:
-                        adx_series, plus_di_series, minus_di_series = compute_adx(sig_h, sig_l, sig_c, cfg.get("cd_adx_length", 14))
-                    else:
-                        adx_series, plus_di_series, minus_di_series = None, None, None
-
-                    if due_heartbeat:
-                        last_heartbeat = now
-                        rsi_log = f", RSI={round(rsi_series[-1],1)}" if rsi_series else ""
-                        adx_log = f", ADX={round(adx_series[-1],1)} (+DI={round(plus_di_series[-1],1)}/-DI={round(minus_di_series[-1],1)})" if adx_series else ""
-                        debug_log(f"💓 [{symbol}] Kerzen-DNA aktiv: Preis={closed_c[-1]}, Score={round(score[-1],1)}{rsi_log}{adx_log}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
-
-                    if last_processed_ts is None:
-                        new_indices = [len(closed_ts) - 1]
-                    else:
-                        try:
-                            last_idx = closed_ts.index(last_processed_ts)
-                            new_indices = list(range(last_idx + 1, len(closed_ts)))
-                        except ValueError:
-                            new_indices = [len(closed_ts) - 1]
-
-                    for idx in new_indices:
-                        if idx < 1:
-                            continue
-                        price_i = closed_c[idx]
-                        last_processed_ts = closed_ts[idx]
-                        rsi_i = rsi_series[idx] if rsi_series else None
-                        adx_i = adx_series[idx] if adx_series else None
-                        plus_di_i = plus_di_series[idx] if plus_di_series else None
-                        minus_di_i = minus_di_series[idx] if minus_di_series else None
-                        await check_cd_signal(symbol, buy_signal[idx], sell_signal[idx], price_i, zscore_series[idx], rsi_i, adx_i, plus_di_i, minus_di_i)
-
-                    await check_cd_sl_tp(symbol, price)
-                elif due_heartbeat:
-                    last_heartbeat = now
-                    if not closed_ts:
-                        debug_log(f"⏳ [{symbol}] Kerzen-DNA wartet: keine Kerzen erhalten (Auflösung {resolution})")
-                    else:
-                        debug_log(f"⏳ [{symbol}] Kerzen-DNA wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Kerzen-DNA-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await asyncio.sleep(5)
-
-
 async def on_price_update(symbol, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -7768,163 +1111,6 @@ async def on_price_update(symbol, price):
         return
 
     bot_active = cfg["bot_active"]
-
-    if cfg["entry_mode"] == "fib_reversal":
-        fib = st.get("fib")
-        if fib is None:
-            return
-        direction = fib["direction"]
-        now = time.time()
-
-        if st["position"] is None:
-            if not bot_active or now - st["fib_last_trade_time"] < cfg["fib_cooldown_seconds"]:
-                return
-            reached = price <= fib["entry1_price"] if direction == "long" else price >= fib["entry1_price"]
-            if reached:
-                ok = await execute_entry(symbol, direction, price, is_add_on=False)
-                if ok:
-                    st["fib_entry1_done"] = True
-                    st["fib_sl_active_price"] = fib["sl_price"]
-                    debug_log(f"📡 [{symbol}] Fib-Reversal Einstieg 1: {direction.upper()} @ {price} "
-                              f"(Level {cfg['fib_entry1_level']}, High {fib['high']} / Low {fib['low']})")
-            return
-
-        # Nachkauf (Einstieg 2), falls Kurs noch tiefer ins Retracement laeuft
-        if not st["fib_entry2_done"]:
-            reached2 = price <= fib["entry2_price"] if direction == "long" else price >= fib["entry2_price"]
-            if reached2:
-                ok = await execute_entry(symbol, direction, price, is_add_on=True)
-                if ok:
-                    st["fib_entry2_done"] = True
-                    debug_log(f"📡 [{symbol}] Fib-Reversal Einstieg 2 (Nachkauf): {direction.upper()} @ {price} (Level {cfg['fib_entry2_level']})")
-
-        # Stop-Loss (springt nach TP1 auf Ø-Einstieg = Break-Even)
-        sl_price = st["fib_sl_active_price"]
-        sl_hit = price <= sl_price if direction == "long" else price >= sl_price
-        if sl_hit:
-            await execute_exit(symbol, price, "SL")
-            st["fib_entry1_done"] = False
-            st["fib_entry2_done"] = False
-            st["fib_tp1_done"] = False
-            st["fib_sl_active_price"] = None
-            st["fib_last_trade_time"] = now
-            st["fib"] = None
-            return
-
-        # TP1: Teilverkauf + SL auf Break-Even
-        if not st["fib_tp1_done"]:
-            tp1_hit = price >= fib["tp1_price"] if direction == "long" else price <= fib["tp1_price"]
-            if tp1_hit:
-                fraction = cfg["fib_tp1_close_pct"] / 100
-                ok = await execute_partial_exit(symbol, price, fraction, "TP1")
-                if ok:
-                    st["fib_tp1_done"] = True
-                    st["fib_sl_active_price"] = st["avg_entry_price"]
-                    debug_log(f"📡 [{symbol}] Fib-Reversal TP1 erreicht - SL auf Break-Even ({st['avg_entry_price']}) gesetzt")
-            return
-
-        # TP2: Rest schliessen
-        tp2_hit = price >= fib["tp2_price"] if direction == "long" else price <= fib["tp2_price"]
-        if tp2_hit:
-            await execute_exit(symbol, price, "TP2")
-            st["fib_entry1_done"] = False
-            st["fib_entry2_done"] = False
-            st["fib_tp1_done"] = False
-            st["fib_sl_active_price"] = None
-            st["fib"] = None
-        return
-
-    if cfg["entry_mode"] == "halftrend":
-        entry_trigger = cfg.get("ht_entry_trigger", "candle_close")
-        exit_trigger = cfg.get("ht_exit_trigger", "candle_close")
-        if entry_trigger == "tick" or exit_trigger == "tick":
-            try:
-                ch, cl, cc = st.get("ht_highs"), st.get("ht_lows"), st.get("ht_closes")
-                if ch and cl and cc and len(cc) >= 2:
-                    live_h = ch[:-1] + [max(ch[-1], price)]
-                    live_l = cl[:-1] + [min(cl[-1], price)]
-                    live_c = cc[:-1] + [price]
-                    _, trend, atr2 = compute_halftrend(live_h, live_l, live_c, cfg["ht_amplitude"], cfg["ht_channel_deviation"])
-                    buy_signal = trend[-1] == 0 and trend[-2] == 1
-                    sell_signal = trend[-1] == 1 and trend[-2] == 0
-                    if cfg.get("ht_invert_direction", False):
-                        buy_signal, sell_signal = sell_signal, buy_signal
-                    if exit_trigger == "tick":
-                        await check_ht_exit(symbol, buy_signal, sell_signal, price)
-                    if entry_trigger == "tick":
-                        await check_ht_entry(symbol, buy_signal, sell_signal, price, atr2[-1])
-            except Exception as e:
-                debug_log(f"⚠️ [{symbol}] HalfTrend Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await check_ht_sl_tp(symbol, price)
-        return
-
-    if cfg["entry_mode"] == "diamond_algo":
-        entry_trigger = cfg.get("da_entry_trigger", "candle_close")
-        exit_trigger = cfg.get("da_exit_trigger", "candle_close")
-        if entry_trigger == "tick" or exit_trigger == "tick":
-            try:
-                co, ch, cl, cc = st.get("da_opens"), st.get("da_highs"), st.get("da_lows"), st.get("da_closes")
-                if co and ch and cl and cc and len(cc) >= 2:
-                    live_o = co
-                    live_h = ch[:-1] + [max(ch[-1], price)]
-                    live_l = cl[:-1] + [min(cl[-1], price)]
-                    live_c = cc[:-1] + [price]
-                    if cfg.get("da_use_heikin_ashi", False):
-                        _, sig_h, sig_l, sig_c = compute_heikin_ashi(live_o, live_h, live_l, live_c)
-                    else:
-                        sig_h, sig_l, sig_c = live_h, live_l, live_c
-                    buy, sell, smart_buy, smart_sell = compute_diamond_signal(
-                        sig_h, sig_l, sig_c, cfg["da_atr_period"], cfg["da_sensitivity"],
-                        cfg["da_sma_period"], cfg["da_ema_trend_period"])
-                    signal_mode = cfg.get("da_signal_mode", "all")
-                    buy_now = smart_buy[-1] if signal_mode == "smart_only" else buy[-1]
-                    sell_now = smart_sell[-1] if signal_mode == "smart_only" else sell[-1]
-                    if cfg.get("da_invert_direction", False):
-                        buy_now, sell_now = sell_now, buy_now
-                    atr_risk_series = compute_atr(sig_h, sig_l, sig_c, cfg.get("da_risk_atr_period", 14))
-                    if exit_trigger == "tick":
-                        await check_da_exit(symbol, buy_now, sell_now, price)
-                    if entry_trigger == "tick":
-                        await check_da_entry(symbol, buy_now, sell_now, price, atr_risk_series[-1])
-            except Exception as e:
-                debug_log(f"⚠️ [{symbol}] Diamond Algo Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await check_da_sl_tp(symbol, price)
-        return
-
-    if cfg["entry_mode"] == "elte_smart":
-        entry_trigger = cfg.get("es_entry_trigger", "candle_close")
-        exit_trigger = cfg.get("es_exit_trigger", "candle_close")
-        if entry_trigger == "tick" or exit_trigger == "tick":
-            try:
-                co, ch, cl, cc = st.get("es_opens"), st.get("es_highs"), st.get("es_lows"), st.get("es_closes")
-                if co and ch and cl and cc and len(cc) >= 2:
-                    live_o = co
-                    live_h = ch[:-1] + [max(ch[-1], price)]
-                    live_l = cl[:-1] + [min(cl[-1], price)]
-                    live_c = cc[:-1] + [price]
-                    if cfg.get("es_auto_sensitivity", True):
-                        sensitivity = compute_es_auto_sensitivity(live_c, cfg.get("es_vol_period", 10), cfg.get("es_vol_ma_len", 55))
-                    else:
-                        sensitivity = cfg.get("es_sensitivity", 3.0)
-                    st_line, _ = compute_elte_supertrend(live_o, live_h, live_l, live_c, sensitivity, cfg["es_atr_period"])
-                    buy_now = live_c[-2] <= st_line[-2] and live_c[-1] > st_line[-1]
-                    sell_now = live_c[-2] >= st_line[-2] and live_c[-1] < st_line[-1]
-                    if cfg.get("es_invert_direction", False):
-                        buy_now, sell_now = sell_now, buy_now
-                    risk_atr_series = compute_atr(live_h, live_l, live_c, cfg.get("es_risk_atr_period", 14))
-                    just_flipped = False
-                    if exit_trigger == "tick":
-                        just_flipped = await check_es_exit(symbol, buy_now, sell_now, price)
-                    if entry_trigger == "tick":
-                        if not just_flipped or cfg.get("es_reenter_on_flip", False):
-                            await check_es_entry(symbol, buy_now, sell_now, price, risk_atr_series[-1], signal_low=live_l[-1], signal_high=live_h[-1])
-            except Exception as e:
-                debug_log(f"⚠️ [{symbol}] ELTE Smart Live-Tick-Auswertung fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-
-        await check_es_sl_tp(symbol, price)
-        return
 
     await check_grid_v2_tick(symbol, price)
 
@@ -8517,38 +1703,1238 @@ def _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup):
     return trades
 
 
-def backtest_elte_smart(candles, cfg):
-    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
-    atr_period = cfg["es_atr_period"]
-    risk_atr_period = cfg.get("es_risk_atr_period", 14)
-    vol_period = cfg.get("es_vol_period", 10)
-    vol_ma_len = cfg.get("es_vol_ma_len", 55)
-    if cfg.get("es_auto_sensitivity", True):
-        sensitivity = compute_es_auto_sensitivity(c, vol_period, vol_ma_len)
+def backtest_ab_breakout(candles, cfg, trend_filter_long_ok=None, trend_filter_short_ok=None):
+    """Backtest fuer Al-Shatri Breakout. Braucht (anders als die meisten anderen Strategien) eine
+    6er-Kerzenquelle MIT Volumen fuer den optionalen Volumen-Filter (Standard aus) - deshalb wie
+    mo7_scalp/maverick_edge in run_backtest() als Sonderfall behandelt statt ueber den generischen
+    5er-Tupel-Dispatch (BACKTEST_FUNCS). trend_filter_long_ok/short_ok (optional): vorab berechnete
+    Listen fuer den SuperTrend-Trendfilter bei ABWEICHENDER Zeiteinheit (von run_backtest async
+    vorbereitet und ausgerichtet, siehe _align_htf_series); bei gleicher Zeiteinheit/deaktiviertem
+    Filter wird hier intern berechnet - wie bei backtest_hvd_signal."""
+    o, h, l, c, v = candles[1], candles[2], candles[3], candles[4], candles[5]
+    params = _ab_effective_params(cfg)
+    if cfg.get("ab_use_heikin_ashi", False):
+        # Signal UND ATR (fuer den Plan-Modus) rechnen auf Heikin-Ashi-Kerzen, SL/TP-Ausloesung im
+        # Backtest bleibt trotzdem an den ECHTEN Kerzen (candles/_simulate_ab_trades), da im
+        # Live-Handel auch der echte Marktpreis ausloest, nicht der geglaettete HA-Wert - wie bei
+        # Diamond Algo (backtest_diamond_algo).
+        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
     else:
-        sensitivity = cfg.get("es_sensitivity", 3.0)
-    st_line, _ = compute_elte_supertrend(o, h, l, c, sensitivity, atr_period)
+        sig_h, sig_l, sig_c = h, l, c
+    long_setup, short_setup, atr = compute_ab_breakout_signals(sig_h, sig_l, sig_c, v, params)
+
+    if trend_filter_long_ok is None and cfg.get("ab_trend_filter_enabled", False):
+        tf_resolution = cfg.get("ab_trend_filter_resolution", "15m")
+        if tf_resolution in (None, "", "same") or tf_resolution == cfg.get("ab_resolution", "1m"):
+            tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
+            tf_multiplier = cfg.get("ab_trend_filter_multiplier", 3.0)
+            tf_st_line, _ = compute_diamond_supertrend(h, l, c, tf_multiplier, tf_atr_period)
+            trend_filter_long_ok = [tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(len(c))]
+            trend_filter_short_ok = [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(len(c))]
+        # Bei ABWEICHENDER Zeiteinheit wird trend_filter_long_ok/short_ok von run_backtest (async) uebergeben.
+
+    if trend_filter_long_ok is not None:
+        long_setup = [long_setup[i] and trend_filter_long_ok[i] for i in range(len(long_setup))]
+        short_setup = [short_setup[i] and trend_filter_short_ok[i] for i in range(len(short_setup))]
+
+    if cfg.get("ab_aso_filter_enabled", False):
+        o = candles[1]
+        aso_bull_ok, aso_bear_ok = compute_aso_filter(
+            o, h, l, c, cfg.get("ab_aso_filter_length", 10), cfg.get("ab_aso_filter_mode", 0),
+            cfg.get("ab_aso_filter_confirm_bars", 1))
+        long_setup = [long_setup[i] and aso_bull_ok[i] for i in range(len(long_setup))]
+        short_setup = [short_setup[i] and aso_bear_ok[i] for i in range(len(short_setup))]
+
+    warmup = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 5
+    return _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup)
+
+
+def _simulate_cp_trades(candles, cfg, bull, bear, risk_atr, warmup):
+    """Kern-Simulation fuer Candle-Patterns. Wie _simulate_es_trades, aber nur EIN SL/EIN TP
+    (keine TP1/TP2/TP3-Stufen - passt besser zu einem einzelnen, seltenen Umkehr-Signal statt
+    einem durchlaufenden Trend-System), dafuer mit ATR-Breakeven statt Prozent-Breakeven und
+    optionalem Flip-Exit."""
+    ts, o, h, l, c = candles
     n = len(c)
-    buy = [False] * n
-    sell = [False] * n
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    risk_mult = cfg.get("cp_risk_mult", 1.5)
+    tp_rr = cfg.get("cp_tp_rr", 1.0)
+    sl_enabled = cfg.get("cp_sl_enabled", True)
+    tp_enabled = cfg.get("cp_tp_enabled", True)
+    sl_mode = cfg.get("cp_sl_mode", "atr")
+    sl_manual_usd = cfg.get("cp_sl_manual_usd", 5.0)
+    tp_mode = cfg.get("cp_tp_mode", "atr")
+    tp_manual_usd = cfg.get("cp_tp_manual_usd", 5.0)
+    sl_cooldown_ms = cfg.get("cp_sl_cooldown_seconds", 30) * 1000
+    direction_mode = cfg.get("cp_direction_mode", "both")
+    flip_exit_enabled = cfg.get("cp_flip_exit_enabled", True)
+    breakeven_enabled = cfg.get("cp_breakeven_enabled", True)
+    breakeven_trigger_mult = cfg.get("cp_breakeven_trigger_mult", 0.5)
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(warmup, n):
+        price = c[i]
+
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+
+            if breakeven_enabled and not position.get("breakeven_done"):
+                atr_now = risk_atr[i] or 0
+                trigger_dist = atr_now * breakeven_trigger_mult
+                best_price = h[i] if pdir == "long" else l[i]
+                moved = (best_price - entry) if pdir == "long" else (entry - best_price)
+                if trigger_dist > 0 and moved >= trigger_dist:
+                    current_sl = position.get("sl_price")
+                    if current_sl is None or (pdir == "long" and entry > current_sl) or (pdir == "short" and entry < current_sl):
+                        position["sl_price"] = entry
+                    position["breakeven_done"] = True
+
+            sl_price = position.get("sl_price")
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            if hit_sl:
+                reason = "BREAKEVEN" if position.get("breakeven_done") and abs(sl_price - entry) < 1e-9 else "SL"
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            else:
+                tp_price = position.get("tp_price")
+                hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+                if hit_tp:
+                    _bt_close_trade(trades, pdir, entry, tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                    position = None
+
+        buy_signal, sell_signal = bull[i], bear[i]
+        if direction_mode == "long_only":
+            sell_signal = False
+        elif direction_mode == "short_only":
+            buy_signal = False
+
+        just_flipped = False
+        if position is not None and flip_exit_enabled:
+            if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
+                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "CP-FLIP-EXIT", ts=ts)
+                position = None
+                just_flipped = True
+
+        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
+        if position is None and not in_sl_cooldown and not just_flipped and (buy_signal or sell_signal):
+            direction = "long" if buy_signal else "short"
+            size = (margin * leverage) / price
+            sl_price = tp_price = None
+            if sl_enabled or tp_enabled:
+                atr_band = (risk_atr[i] or 0) * risk_mult
+                dist_for_tp = atr_band
+                if sl_enabled:
+                    if sl_mode == "manual" and size > 0:
+                        dist_sl = sl_manual_usd / size
+                        dist_for_tp = dist_sl
+                    else:
+                        dist_sl = atr_band
+                    sl_price = price - dist_sl if direction == "long" else price + dist_sl
+                if tp_enabled:
+                    if tp_mode == "manual" and size > 0:
+                        dist_tp = tp_manual_usd / size
+                    else:
+                        dist_tp = dist_for_tp * tp_rr
+                    tp_price = price + dist_tp if direction == "long" else price - dist_tp
+            position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
+                        "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
+    if entry_mode == "ab_breakout":
+        max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
+        resolution = cfg.get("ab_resolution", "15s")
+        if resolution in SUB_MINUTE_RESOLUTIONS:
+            # Sekunden-Aufloesungen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
+            # Obergrenze bewusst strenger, wie bei allen anderen Sub-Minuten-faehigen Strategien.
+            max_candles = min(max_candles, 5000)
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        params = _ab_effective_params(cfg)
+        min_needed = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 10
+        if not candles or len(candles[4]) < min_needed:
+            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+        n_candles = len(candles[4])
+
+        trend_filter_long_ok = None
+        trend_filter_short_ok = None
+        if cfg.get("ab_trend_filter_enabled", False):
+            tf_resolution = cfg.get("ab_trend_filter_resolution", "15m")
+            tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
+            tf_multiplier = cfg.get("ab_trend_filter_multiplier", 3.0)
+            if not (tf_resolution in (None, "", "same") or tf_resolution == resolution):
+                tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, candles[0], tf_resolution, tf_atr_period)
+                if tf_err:
+                    return {"error": tf_err}
+                trend_filter_long_ok, trend_filter_short_ok = _trend_filter_ok_series(candles[0], tf_candles, tf_multiplier, tf_atr_period)
+            # Bei gleicher Zeiteinheit: bleibt None, backtest_ab_breakout berechnet es selbst intern.
+
+        trades = backtest_ab_breakout(candles, cfg, trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok)
+        stats = summarize_backtest_trades(trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
+
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+AB_SWEEP_MAX_COMBOS = 600
+AB_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+def _ab_sweep_compute(candles, cfg, tf_data, multipliers, tf_atr_period, exclude_top_n):
+    """Rechenteil des Al-Shatri-Sweeps (reine CPU-Arbeit, laeuft ausserhalb des Event-Loops im Thread,
+    damit die Live-Loops waehrend eines grossen Sweeps nicht blockiert werden). Die rohen Breakout-
+    Setups (Range/EMA/RSI/Volumen + optional ASO) sind unabhaengig vom SuperTrend und werden nur
+    EINMAL berechnet; je (Zeiteinheit, Multiplikator) werden nur noch SuperTrend-Filter und
+    Trade-Simulation neu gerechnet. tf_data = [(zeiteinheit, kerzen | None)] - None = gleiche
+    Zeiteinheit wie der Handels-Zeitrahmen."""
+    ts, o, h, l, c, v = candles
+    n = len(c)
+    params = _ab_effective_params(cfg)
+    if cfg.get("ab_use_heikin_ashi", False):
+        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
+    else:
+        sig_h, sig_l, sig_c = h, l, c
+    long_raw, short_raw, _atr = compute_ab_breakout_signals(sig_h, sig_l, sig_c, v, params)
+    if cfg.get("ab_aso_filter_enabled", False):
+        aso_bull_ok, aso_bear_ok = compute_aso_filter(
+            o, h, l, c, cfg.get("ab_aso_filter_length", 10), cfg.get("ab_aso_filter_mode", 0),
+            cfg.get("ab_aso_filter_confirm_bars", 1))
+        long_raw = [long_raw[i] and aso_bull_ok[i] for i in range(n)]
+        short_raw = [short_raw[i] and aso_bear_ok[i] for i in range(n)]
+    warmup = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 5
+
+    results = []
+    for tf_resolution, tf_candles in tf_data:
+        for mult in multipliers:
+            if tf_candles is None:
+                st_line, _ = compute_diamond_supertrend(h, l, c, mult, tf_atr_period)
+                long_ok = [st_line[i] is not None and c[i] > st_line[i] for i in range(n)]
+                short_ok = [st_line[i] is not None and c[i] < st_line[i] for i in range(n)]
+            else:
+                long_ok, short_ok = _trend_filter_ok_series(ts, tf_candles, mult, tf_atr_period)
+            long_setup = [long_raw[i] and long_ok[i] for i in range(n)]
+            short_setup = [short_raw[i] and short_ok[i] for i in range(n)]
+            trades = _simulate_ab_trades(candles, cfg, long_setup, short_setup, _atr, warmup)
+            stats = summarize_backtest_trades(trades, exclude_top_n)
+            results.append({"ab_trend_filter_resolution": tf_resolution, "ab_trend_filter_multiplier": mult, **stats})
+    return results
+
+
+async def run_ab_sweep(symbol, cfg, days, timeframes, st_mult_min=0.1, st_mult_max=3.0, st_mult_step=0.1, exclude_top_n=1):
+    """'Monte-Carlo'-Parametersweep fuer Al-Shatri Breakout (Nutzer-Vorgabe): testet den
+    uebergeordneten SuperTrend-Trendfilter ueber ALLE gewaehlten Zeiteinheiten x einen Bereich von
+    Multiplikatoren (Standard 0.1 bis 3.0 in 0.1-Schritten). Der Filter wird dabei fuer jede
+    Kombination fest eingeschaltet (unabhaengig vom Schalter im Strategie-Panel); alles andere -
+    Signal-Parameter, fester Dollar-SL, Richtung, ASO-Filter, ATR-Periode des SuperTrends - kommt aus
+    der aktuellen Config. Zeiteinheiten, die sich nicht laden lassen (z.B. Sekunden-Zeitrahmen bei zu
+    langem Zeitraum), werden uebersprungen und separat gemeldet statt den ganzen Sweep abzubrechen."""
+    max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
+    resolution = cfg.get("ab_resolution", "1m")
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    params = _ab_effective_params(cfg)
+    min_needed = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 10
+    if not candles or len(candles[4]) < min_needed:
+        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~{min_needed} nötig)."}
+    ts = candles[0]
+
+    # +1e-9 gegen Gleitkomma-Abrundung: (3.0 - 0.1) / 0.1 ergibt 28.999999999999996 -> ohne die
+    # Korrektur fehlte der Endwert 3.0 im Sweep.
+    multipliers = sorted(set(round(st_mult_min + i * st_mult_step, 2)
+                              for i in range(int((st_mult_max - st_mult_min) / max(st_mult_step, 1e-9) + 1e-9) + 1)
+                              if st_mult_min + i * st_mult_step <= st_mult_max + 1e-9))
+    multipliers = [m for m in multipliers if m > 0]
+    if not multipliers:
+        return {"error": "Der eingestellte SuperTrend-Multiplikator-Bereich ergibt keine gültigen Werte."}
+
+    tfs, skipped = [], []
+    for tf in timeframes or []:
+        tf = str(tf).strip().lower()
+        if not tf or tf in tfs:
+            continue
+        if _resolution_ms(tf) is None:
+            skipped.append({"timeframe": tf, "reason": "unbekanntes Format (erlaubt: 10s/15s/30s/45s, 1m, 5m, 15m, 30m, 1h, 4h oder eigene Minuten wie 8m)"})
+            continue
+        tfs.append(tf)
+    if not tfs:
+        return {"error": "Keine gültige Zeiteinheit für den SuperTrend ausgewählt."}
+
+    total_combos = len(tfs) * len(multipliers)
+    if total_combos > AB_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {AB_SWEEP_MAX_COMBOS}) - weniger Zeiteinheiten wählen oder die Multiplikator-Schrittweite vergrößern."}
+
+    tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
+    tf_data = []
+    for tf in tfs:
+        if tf == resolution:
+            tf_data.append((tf, None))
+            continue
+        tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, ts, tf, tf_atr_period)
+        if tf_err:
+            skipped.append({"timeframe": tf, "reason": tf_err})
+            continue
+        tf_data.append((tf, tf_candles))
+    if not tf_data:
+        return {"error": "Keine der gewählten SuperTrend-Zeiteinheiten ließ sich laden: " + "; ".join(f"{x['timeframe']}: {x['reason']}" for x in skipped)}
+
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, _ab_sweep_compute, candles, cfg, tf_data, multipliers, tf_atr_period, exclude_top_n)
+
+    rank_key = lambda r: (r["trades"] >= AB_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
+    best_sorted = sorted(results, key=rank_key, reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+    best_per_tf = []
+    for tf, _tfc in tf_data:
+        rows = [r for r in results if r["ab_trend_filter_resolution"] == tf]
+        if rows:
+            best_per_tf.append(max(rows, key=rank_key))
+    best_per_tf.sort(key=rank_key, reverse=True)
+
+    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": len(ts),
+        "min_reliable_trades": AB_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": len(results), "multipliers_tested": len(multipliers),
+        "timeframes_tested": [tf for tf, _c in tf_data], "skipped_timeframes": skipped,
+        "exit_mode": cfg.get("ab_exit_mode", "flip"),
+        "sl_enabled": cfg.get("ab_sl_enabled", True), "sl_usd": cfg.get("ab_sl_manual_usd", 5.0),
+        "results": best_sorted[:30], "worst_results": worst_sorted[:20], "best_per_timeframe": best_per_tf,
+    }
+
+
+AB_SIGNAL_SWEEP_MAX_COMBOS = 600
+AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+def _ab_signal_sweep_compute(candles, cfg, base_params, trend_ok, aso_ok, combos, exclude_top_n):
+    """Rechenteil des Al-Shatri Signal-Sweeps (Breakout-Range x schnelle EMA x langsame EMA),
+    reine CPU-Arbeit im Thread. Der SuperTrend-Trendfilter und der ASO-Filter sind hier FEST -
+    sie werden genau EINMAL vorab berechnet (trend_ok/aso_ok, je nach Config an/aus) und dann bei
+    jeder Kombination unveraendert per AND auf die Signale gelegt; nur Range/EMA/RSI/Volumen aus
+    compute_ab_breakout_signals wird je Kombination neu gerechnet. 'unabhaengig vom SuperTrend'
+    (Nutzer-Vorgabe): dieser Sweep variiert den Trendfilter NICHT mit, anders als der bestehende
+    SuperTrend-Sweep (run_ab_sweep) - er bleibt exakt so, wie im Strategie-Panel eingestellt."""
+    ts, o, h, l, c, v = candles
+    n = len(c)
+    if cfg.get("ab_use_heikin_ashi", False):
+        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
+    else:
+        sig_h, sig_l, sig_c = h, l, c
+    results = []
+    for lookback, fast_len, slow_len in combos:
+        params = dict(base_params, lookback=lookback, fast_len=fast_len, slow_len=slow_len)
+        long_setup, short_setup, atr = compute_ab_breakout_signals(sig_h, sig_l, sig_c, v, params)
+        if trend_ok is not None:
+            trend_long_ok, trend_short_ok = trend_ok
+            long_setup = [long_setup[i] and trend_long_ok[i] for i in range(n)]
+            short_setup = [short_setup[i] and trend_short_ok[i] for i in range(n)]
+        if aso_ok is not None:
+            aso_bull_ok, aso_bear_ok = aso_ok
+            long_setup = [long_setup[i] and aso_bull_ok[i] for i in range(n)]
+            short_setup = [short_setup[i] and aso_bear_ok[i] for i in range(n)]
+        warmup = max(slow_len, lookback, params["atr_len"], params["rsi_len"]) + 5
+        trades = _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup)
+        stats = summarize_backtest_trades(trades, exclude_top_n)
+        results.append({"ab_lookback": lookback, "ab_fast_len": fast_len, "ab_slow_len": slow_len, **stats})
+    return results
+
+
+async def run_ab_signal_sweep(symbol, cfg, days, lookback_min=10, lookback_max=60, lookback_step=10,
+                               fast_min=10, fast_max=60, fast_step=10, slow_min=30, slow_max=150,
+                               slow_step=20, exclude_top_n=1):
+    """'Monte-Carlo'-Sweep fuer Al-Shatri Breakout ueber Breakout-Range (Kerzen), schnelle EMA und
+    langsame EMA (Nutzer-Vorgabe) - unabhaengig vom SuperTrend-Trendfilter: der bleibt exakt so, wie
+    im Strategie-Panel eingestellt (an oder aus, mit seiner konfigurierten Zeiteinheit/Multiplikator),
+    und wird hier NICHT mitvariiert - dafuer gibt es den separaten run_ab_sweep. RSI/Volumen/ATR-
+    Periode und der optionale ASO-Filter kommen ebenfalls unveraendert aus der aktuellen Config.
+    Kombinationen mit schneller >= langsamer EMA werden uebersprungen (ungueltig, siehe Validierung
+    im Original-Skript)."""
+    max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
+    resolution = cfg.get("ab_resolution", "1m")
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    ts, o, h, l, c, v = candles
+    n = len(c)
+    if n < max(slow_max, lookback_max) + 10:
+        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~{max(slow_max, lookback_max) + 10} nötig)."}
+
+    def _int_range(lo, hi, step):
+        lo, hi, step = int(lo), int(hi), max(1, int(step))
+        return sorted(set(v for v in range(lo, hi + 1, step) if v >= 2))
+
+    lookbacks = _int_range(lookback_min, lookback_max, lookback_step)
+    fasts = _int_range(fast_min, fast_max, fast_step)
+    slows = _int_range(slow_min, slow_max, slow_step)
+    if not lookbacks or not fasts or not slows:
+        return {"error": "Die eingestellten Bereiche für Breakout-Range/EMA ergeben keine gültigen Werte."}
+
+    combos = [(lb, f, sl) for lb in lookbacks for f in fasts for sl in slows if f < sl]
+    if not combos:
+        return {"error": "Keine gültige Kombination: die schnelle EMA muss in jeder Kombination kleiner als die langsame sein - Bereiche prüfen."}
+    if len(combos) > AB_SIGNAL_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({len(combos)}, Limit {AB_SIGNAL_SWEEP_MAX_COMBOS}) - Bereiche verkleinern oder Schrittweiten vergrößern."}
+
+    base_params = dict(_ab_effective_params(cfg))  # rsi_len/rsi_gate/use_volume/vol_mult/atr_len bleiben fest
+
+    trend_ok = None
+    if cfg.get("ab_trend_filter_enabled", False):
+        tf_resolution = cfg.get("ab_trend_filter_resolution", "15m")
+        tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
+        tf_multiplier = cfg.get("ab_trend_filter_multiplier", 3.0)
+        if tf_resolution in (None, "", "same") or tf_resolution == resolution:
+            tf_st_line, _ = compute_diamond_supertrend(h, l, c, tf_multiplier, tf_atr_period)
+            trend_ok = ([tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(n)],
+                        [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(n)])
+        else:
+            tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, ts, tf_resolution, tf_atr_period)
+            if tf_err:
+                return {"error": f"SuperTrend-Trendfilter ({tf_resolution}): {tf_err}"}
+            trend_ok = _trend_filter_ok_series(ts, tf_candles, tf_multiplier, tf_atr_period)
+
+    aso_ok = None
+    if cfg.get("ab_aso_filter_enabled", False):
+        aso_ok = compute_aso_filter(o, h, l, c, cfg.get("ab_aso_filter_length", 10),
+                                     cfg.get("ab_aso_filter_mode", 0), cfg.get("ab_aso_filter_confirm_bars", 1))
+
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, _ab_signal_sweep_compute, candles, cfg, base_params, trend_ok, aso_ok, combos, exclude_top_n)
+
+    rank_key = lambda r: (r["trades"] >= AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
+    best_sorted = sorted(results, key=rank_key, reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": n,
+        "min_reliable_trades": AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": len(results), "lookbacks_tested": lookbacks, "fasts_tested": fasts, "slows_tested": slows,
+        "exit_mode": cfg.get("ab_exit_mode", "flip"),
+        "sl_enabled": cfg.get("ab_sl_enabled", True), "sl_usd": cfg.get("ab_sl_manual_usd", 5.0),
+        "trend_filter_enabled": cfg.get("ab_trend_filter_enabled", False),
+        "trend_filter_resolution": cfg.get("ab_trend_filter_resolution", "15m") if cfg.get("ab_trend_filter_enabled", False) else None,
+        "results": best_sorted[:30], "worst_results": worst_sorted[:20],
+    }
+
+
+
+
+# ============================================================
+# Wiederhergestellte, von Al-Shatri Breakout / Grid mitgenutzte Hilfsfunktionen -
+# waren versehentlich mit dem entfernten fib_reversal/da..cd-Strategie-Bloecken
+# mitgeloescht worden (lagen dazwischen), sind aber gemeinsam genutzt.
+# ============================================================
+
+BACKTEST_CACHE_MAX_ENTRIES = 5
+
+
+BACKTEST_CACHE_TTL_SECONDS = 900
+
+
+BACKTEST_MAX_CANDLES = {
+    "fib_reversal": 100_000,
+    "halftrend": 100_000,
+    "diamond_algo": 100_000,
+    "elte_smart": 100_000,
+    "candle_patterns": 100_000,
+    "mo7_scalp": 100_000,
+    "ut_bot_hull": 100_000,
+    "wavetrend_cross": 100_000,
+    "pieki_algo": 100_000,
+    "fractals_flip": 100_000,
+    "candle_dna": 100_000,
+    "range_filter": 100_000,
+    "maverick_edge": 100_000,
+    "st_rsi_signal": 100_000,
+    "hvd_signal": 100_000,
+    "ab_breakout": 100_000,
+}
+
+
+def _backtest_cache_get(cache_key):
+    entry = _backtest_candle_cache.get(cache_key)
+    if entry is not None:
+        _backtest_candle_cache.move_to_end(cache_key)  # als zuletzt genutzt markieren
+    return entry
+
+
+def _backtest_cache_set(cache_key, entry):
+    _backtest_candle_cache[cache_key] = entry
+    _backtest_candle_cache.move_to_end(cache_key)
+    while len(_backtest_candle_cache) > BACKTEST_CACHE_MAX_ENTRIES:
+        _backtest_candle_cache.popitem(last=False)
+
+
+def _bt_close_trade(trades, direction, entry, exit_price, size, i, entry_i, reason, ts=None):
+    pnl = (exit_price - entry) * size if direction == "long" else (entry - exit_price) * size
+    trade = {"dir": direction, "entry": entry, "exit": exit_price, "reason": reason,
+             "pnl": pnl, "bars_held": i - entry_i}
+    if ts is not None:
+        trade["entry_ts"] = ts[entry_i]
+        trade["exit_ts"] = ts[i]
+    trades.append(trade)
+
+
+def _trim_candles_to_days(candles, days, max_candles):
+    ts, o, h, l, c = candles
+    if not ts:
+        return candles
+    cutoff = ts[-1] - days * 24 * 60 * 60 * 1000
+    idx = 0
+    for i, t in enumerate(ts):
+        if t >= cutoff:
+            idx = i
+            break
+    ts, o, h, l, c = ts[idx:], o[idx:], h[idx:], l[idx:], c[idx:]
+    if len(c) > max_candles:
+        ts, o, h, l, c = ts[-max_candles:], o[-max_candles:], h[-max_candles:], l[-max_candles:], c[-max_candles:]
+    return ts, o, h, l, c
+
+
+async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type="spot"):
+    """Gemeinsame Kerzen-Cache-Logik (sonst 1:1 dupliziert) - wird gebraucht, weil Chandelier
+    Exit im Backtest ggf. ZWEI verschiedene Aufloesungen gleichzeitig braucht (eigener
+    Zeitrahmen + hoeherer SuperTrend-Filter-Zeitrahmen)."""
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    cache_key = (symbol, resolution, market_type)
+    cached = _backtest_cache_get(cache_key)
+    now = time.time()
+    cache_used = False
+    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
+            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
+            and len(cached["candles"][4]) >= 100):
+        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
+        err = None
+        cache_used = True
+    else:
+        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles, market_type=market_type)
+        if candles:
+            _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
+    return candles, err, cache_used
+
+
+def _align_htf_series(base_ts, htf_ts, htf_vals):
+    """Bildet eine hoehere-Zeiteinheit-Werteserie (htf_ts/htf_vals, z.B. Trend% auf 1h-Kerzen) auf
+    die Zeitstempel einer feineren Serie (base_ts, z.B. 1m-Handels-Kerzen) ab - per Forward-Fill
+    (letzter zum Zeitpunkt base_ts[i] bereits GESCHLOSSENER htf-Wert). Bewusst kein Blick in die
+    Zukunft (kein Wert aus einer noch nicht geschlossenen hoeheren Kerze), sonst waere der Backtest
+    zu optimistisch (Look-Ahead-Bias)."""
+    n = len(base_ts)
+    m = len(htf_ts)
+    out = [0.0] * n
+    j = 0
+    last_val = 0.0
+    for i in range(n):
+        while j < m and htf_ts[j] <= base_ts[i]:
+            last_val = htf_vals[j]
+            j += 1
+        out[i] = last_val
+    return out
+
+
+def _min_ts_step(ts):
+    """Kleinster positiver Abstand zwischen zwei Zeitstempeln = Kerzenlaenge (auch bei Luecken)."""
+    best = None
+    for k in range(1, len(ts)):
+        d = ts[k] - ts[k - 1]
+        if d > 0 and (best is None or d < best):
+            best = d
+    return best
+
+
+def _resolution_ms(resolution):
+    """Kerzenlaenge einer Zeiteinheit in Millisekunden (10s/15s/30s/45s, native Binance-Intervalle
+    und beliebige Minutenwerte wie '8m'/'24m') - None bei unbekanntem Format."""
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        return SUB_MINUTE_RESOLUTIONS[resolution] * 1000
+    if resolution in BINANCE_INTERVAL_MS:
+        return BINANCE_INTERVAL_MS[resolution]
+    m = re.match(r"^(\d+)m$", resolution or "")
+    if m and int(m.group(1)) > 0:
+        return int(m.group(1)) * 60_000
+    return None
+
+
+async def _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, tf_resolution, tf_atr_period):
+    """Backtest-Gegenstueck: holt die Kerzen der Trendfilter-Zeiteinheit passend zum ZEITRAUM der
+    Handels-Kerzen (base_ts) - plus Vorlauf fuer die SuperTrend-Einschwingphase. Liefert
+    (candles, None) oder (None, fertige Fehlermeldung). Vorher: feste 20.000-Kerzen-Grenze, bei
+    feinen Zeiteinheiten (z.B. 1m ueber 30 Tage) fehlte dadurch der Anfang des Zeitraums."""
+    tf_ms = _resolution_ms(tf_resolution)
+    if tf_ms is None:
+        return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): unbekanntes Format."
+
+    synth = resolve_synthetic_resolution(tf_resolution)
+    if synth and synth[0] == "1m":
+        # Aus 1m zusammengesetzte Minuten-Zeiteinheiten (6m-14m, 16m-20m, ...): die 1m-Historie wird
+        # EINMAL geladen (Cache-Schluessel gleich fuer alle diese Zeiteinheiten, weil das Fenster auf den
+        # Vorlauf von mindestens 20 Minuten-Kerzen ausgelegt ist) und hier lokal zusammengesetzt -
+        # statt fuer jede Zeiteinheit dieselben ~45 REST-Seiten (30 Tage) erneut zu holen.
+        wide_ms = max(tf_ms, 20 * 60_000)
+        fetch_ms = (base_ts[-1] - base_ts[0]) + (tf_atr_period * 5 + 20) * wide_ms + wide_ms
+        fetch_ms = -(-fetch_ms // 3_600_000) * 3_600_000  # auf ganze Stunden aufrunden -> gleicher Cache-Schluessel
+        needed_1m = int(fetch_ms // 60_000) + 10
+        base_1m, err, _ = await _fetch_cached_backtest_candles(
+            symbol, "1m", fetch_ms / 86_400_000, min(max(needed_1m, 200), 150_000),
+            market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {err}"
+        candles = resample_candles(base_1m, synth[1]) if base_1m else None
+        if not candles or len(candles[4]) < tf_atr_period + 5:
+            return None, f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."
+        return candles, None
+
+    warm_ms = (tf_atr_period * 5 + 20) * tf_ms
+    span_ms = (base_ts[-1] - base_ts[0]) + warm_ms + tf_ms
+    needed = int(span_ms // tf_ms) + 10
+    if tf_resolution in SUB_MINUTE_RESOLUTIONS and needed > 5000:
+        cover_h = round(5000 * tf_ms / 3_600_000, 1)
+        return None, (f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): Sekunden-Zeiteinheiten sind im Backtest auf "
+                      f"5000 Kerzen (~{cover_h} Std.) begrenzt, der Backtest-Zeitraum ist länger. Kürzeren Zeitraum "
+                      f"oder eine Trendfilter-Zeiteinheit ab 1 Minute wählen.")
+    candles, err, _ = await _fetch_cached_backtest_candles(
+        symbol, tf_resolution, span_ms / 86_400_000, min(max(needed, 200), 100_000),
+        market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return None, f"SuperTrend-Trendfilter-Zeiteinheit ({tf_resolution}): {err}"
+    if not candles or len(candles[4]) < tf_atr_period + 5:
+        return None, f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."
+    return candles, None
+
+
+async def _fetch_trend_filter_candles_live(symbol, st, cfg, tf_resolution, tf_atr_period):
+    """Liefert (highs, lows, closes) der ABGESCHLOSSENEN Kerzen der SuperTrend-Trendfilter-Zeiteinheit
+    (live, fuer ab_breakout und hvd_signal) - oder None, wenn (noch) nicht genug Daten da sind (der
+    Aufrufer laesst den Filter dann wie bisher durch). Unterstuetzt ALLE Zeiteinheiten der Strategien:
+    Sekunden-Zeitrahmen (10s/15s/30s/45s) kommen aus dem 1s-Puffer (wie beim eigenen Handels-Zeitrahmen,
+    kein REST-Traffic), native Minuten/Stunden aus dem Binance-Cache, eigene Minutenwerte (z.B. 8m, 24m)
+    werden aus 1m-Kerzen zusammengesetzt."""
+    tf_needed = min(500, tf_atr_period * 5 + 20)
+    tf_h = tf_l = tf_c = None
+    if tf_resolution in SUB_MINUTE_RESOLUTIONS:
+        local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf_resolution], tf_needed)
+        if local:
+            # get_seconds_candles liefert bereits nur abgeschlossene Buckets (der letzte muss
+            # vollstaendig sein) - deshalb hier KEIN "[:-1]" wie bei den Minuten-Zeitrahmen.
+            _, _, tf_h, tf_l, tf_c = local
+    else:
+        synth = resolve_synthetic_resolution(tf_resolution)
+        factor = synth[1] if synth else 1
+        # Zusammengesetzte Zeitrahmen (z.B. 24m) brauchen factor-mal so viele Basis-Kerzen - die
+        # Basis-Abfrage bleibt bewusst unter ~900 Kerzen (REST-Limit 1000), sonst kaeme gar nichts an.
+        count = tf_needed if factor == 1 else max(1, min(tf_needed, 900 // factor))
+        tf_data = await fetch_candles_binance_multi(symbol, tf_resolution, count_back=count, market_type=cfg.get("binance_market_type", "spot"))
+        if tf_data:
+            _, _, tf_h, tf_l, tf_c = tf_data
+            tf_h, tf_l, tf_c = tf_h[:-1], tf_l[:-1], tf_c[:-1]
+    if not tf_c or len(tf_c) <= tf_atr_period:
+        now = time.time()
+        key = (symbol, tf_resolution)
+        if now - _trend_filter_warn_last.get(key, 0.0) > 300:
+            _trend_filter_warn_last[key] = now
+            debug_log(f"⚠️ [{symbol}] SuperTrend-Trendfilter ({tf_resolution}): noch nicht genug Kerzen "
+                      f"({len(tf_c) if tf_c else 0}/{tf_atr_period + 1} nötig) - Filter lässt Signale vorerst durch.")
+        return None
+    return tf_h, tf_l, tf_c
+
+
+def _trend_filter_ok_series(base_ts, tf_candles, tf_multiplier, tf_atr_period):
+    """(long_ok[], short_ok[]) je Handels-Kerze aus dem SuperTrend der Trendfilter-Zeiteinheit.
+
+    KEIN Look-Ahead: eine Filter-Kerze ist fuer eine Handels-Kerze erst verwendbar, wenn sie zu deren
+    SCHLUSS bereits geschlossen ist (Filter-Kerzenende <= Handels-Kerzenende) - genau wie live, wo nur
+    die letzte abgeschlossene Filter-Kerze zaehlt. Vorher wurde nach dem ERÖFFNUNGSzeitpunkt
+    zugeordnet: eine 15m-Kerze war damit schon ab ihrer ersten Minute mit ihrem spaeteren Schlusskurs
+    (und damit ihrer spaeteren SuperTrend-Richtung) sichtbar - der Backtest 'wusste' die Richtung der
+    laufenden Filter-Kerze im Voraus und war deutlich zu optimistisch (bei Sweeps besonders bei kleinen
+    Multiplikatoren, weil die den Look-Ahead am staerksten ausnutzen).
+    Handels-Kerzen VOR der ersten verwendbaren Filter-Kerze bekommen (False, False) = kein Signal."""
+    tf_ts, _o, tf_h, tf_l, tf_c = tf_candles
+    tf_st_line, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, tf_multiplier, tf_atr_period)
+    tf_bullish = [tf_st_line[i] is not None and tf_c[i] > tf_st_line[i] for i in range(len(tf_c))]
+    base_ms = _min_ts_step(base_ts) or 60_000
+    tf_ms = _min_ts_step(tf_ts) or base_ms
+    # verwendbar ab: tf_ts[j] + tf_ms <= base_ts[i] + base_ms  <=>  (tf_ts[j] + tf_ms - base_ms) <= base_ts[i]
+    available_ts = [t + tf_ms - base_ms for t in tf_ts]
+    aligned = _align_htf_series(base_ts, available_ts, tf_bullish)
+    first_ts = available_ts[0]
+    long_ok = [bool(aligned[i]) and base_ts[i] >= first_ts for i in range(len(base_ts))]
+    short_ok = [(not aligned[i]) and base_ts[i] >= first_ts for i in range(len(base_ts))]
+    return long_ok, short_ok
+
+
+def compute_diamond_supertrend(highs, lows, closes, factor, atr_period):
+    """Portiert aus 'Diamond Algo' (Pine v5) - der SuperTrend-Kernbaustein (Standard-SuperTrend-
+    Algorithmus). factor = Sensitivity * 2 (siehe Original: supertrend(close, nsensitivity*2, 11)).
+    Gibt (supertrend_line, direction) zurueck - direction 1 = bullisch (Linie = unteres Band),
+    -1 = baerisch (Linie = oberes Band), wie im Original-Skript (NICHT dieselbe Konvention wie bei
+    compute_halftrend, dort ist 0=bullisch - hier bewusst beim Original-Vorzeichen geblieben)."""
+    n = len(closes)
+    if n == 0:
+        return [], []
+    atr = compute_atr(highs, lows, closes, atr_period)
+    lower_band_prev = 0.0
+    upper_band_prev = 0.0
+    st_prev = None
+    st_out = [0.0] * n
+    dir_out = [1] * n
+    for i in range(n):
+        basic_upper = closes[i] + factor * atr[i]
+        basic_lower = closes[i] - factor * atr[i]
+        prev_close = closes[i - 1] if i > 0 else closes[i]
+
+        lower_band = basic_lower if (basic_lower > lower_band_prev or prev_close < lower_band_prev) else lower_band_prev
+        upper_band = basic_upper if (basic_upper < upper_band_prev or prev_close > upper_band_prev) else upper_band_prev
+
+        if i == 0:
+            direction = 1
+        elif st_prev == upper_band_prev:
+            direction = -1 if closes[i] > upper_band else 1
+        else:
+            direction = 1 if closes[i] < lower_band else -1
+
+        st = lower_band if direction == -1 else upper_band
+        st_out[i] = st
+        dir_out[i] = direction
+
+        lower_band_prev = lower_band
+        upper_band_prev = upper_band
+        st_prev = st
+    return st_out, dir_out
+
+
+def compute_aso_filter(opens, highs, lows, closes, length=10, mode=0, confirm_bars=1):
+    """Portiert aus dem Nutzer-Pine-Indikator 'Average Sentiment Oscillator' (ASO, KivancOzbilgic) -
+    misst Bullen-/Baerendruck aus Intrabar- UND Gruppen-Kerzen-Bewegung (Intrabar = aktuelle Kerze,
+    Gruppe = die letzten 'length' Kerzen inkl. Range-Hoch/-Tief und dem Open von vor 'length-1'
+    Kerzen, wie im Original 'open[length-1]'). mode: 0 = Mittel aus Intrabar+Gruppe (Original-
+    Standard), 1 = nur Intrabar, 2 = nur Gruppe. Als Filter genutzt (nicht als Chart-Linien wie im
+    Pine-Original): bull_ok[i] = ASOBulls > ASOBears an Kerze i, bear_ok[i] = umgekehrt.
+    confirm_bars > 1 verlangt zusaetzlich, dass die letzten confirm_bars Kerzen ALLE in dieselbe
+    Richtung zeigen (verhindert Filterwechsel bei jedem kleinen Wackler, wie beim separaten
+    ASO-Filter-Pine-Script). Gibt (bull_ok, bear_ok) als Bool-Listen zurueck."""
+    n = len(closes)
+    if n == 0:
+        return [], []
+    lowest, _ = _rolling_min_max(lows, length)
+    _, highest = _rolling_min_max(highs, length)
+    bulls_raw = [0.0] * n
+    bears_raw = [0.0] * n
+    for i in range(n):
+        intrarange = highs[i] - lows[i]
+        k1 = intrarange if intrarange != 0 else 1
+        grouplow = lowest[i]
+        grouphigh = highest[i]
+        group_open_i = i - length + 1
+        groupopen = opens[group_open_i] if group_open_i >= 0 else opens[0]
+        grouprange = grouphigh - grouplow
+        k2 = grouprange if grouprange != 0 else 1
+        intrabar_bulls = (((closes[i] - lows[i]) + (highs[i] - opens[i])) / 2 * 100) / k1
+        group_bulls = (((closes[i] - grouplow) + (grouphigh - groupopen)) / 2 * 100) / k2
+        intrabar_bears = (((highs[i] - closes[i]) + (opens[i] - lows[i])) / 2 * 100) / k1
+        group_bears = (((grouphigh - closes[i]) + (groupopen - grouplow)) / 2 * 100) / k2
+        if mode == 1:
+            bulls_raw[i] = intrabar_bulls
+            bears_raw[i] = intrabar_bears
+        elif mode == 2:
+            bulls_raw[i] = group_bulls
+            bears_raw[i] = group_bears
+        else:
+            bulls_raw[i] = (intrabar_bulls + group_bulls) / 2
+            bears_raw[i] = (intrabar_bears + group_bears) / 2
+    aso_bulls = _sma_series(bulls_raw, length)
+    aso_bears = _sma_series(bears_raw, length)
+    raw_bullish = [aso_bulls[i] > aso_bears[i] for i in range(n)]
+    if confirm_bars <= 1:
+        return raw_bullish, [not b for b in raw_bullish]
+    bull_ok = [False] * n
+    bear_ok = [False] * n
+    for i in range(n):
+        if i < confirm_bars - 1:
+            continue
+        window = raw_bullish[i - confirm_bars + 1:i + 1]
+        bull_ok[i] = all(window)
+        bear_ok[i] = not any(window)
+    return bull_ok, bear_ok
+
+
+def compute_atr(highs, lows, closes, period):
+    """ATR mit Wilder-RMA-Glaettung (wie Pine's ta.atr), fuer marktadaptive SL-Groesse."""
+    n = len(closes)
+    if n < 2:
+        return []
+    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
     for i in range(1, n):
-        buy[i] = c[i - 1] <= st_line[i - 1] and c[i] > st_line[i]
-        sell[i] = c[i - 1] >= st_line[i - 1] and c[i] < st_line[i]
-    risk_atr = compute_atr(h, l, c, risk_atr_period)
-    warmup = max(atr_period, risk_atr_period, vol_ma_len + vol_period) + 5
-    return _simulate_es_trades(candles, cfg, buy, sell, risk_atr, warmup)
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+    atr = [tr[0]] * n
+    for i in range(1, n):
+        if i < period:
+            atr[i] = sum(tr[:i + 1]) / (i + 1)
+        else:
+            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    return atr
 
 
-def backtest_halftrend(candles, cfg):
-    """Backtest laeuft immer 'kerzenbasiert'. Intrabar-Pruefung fuer SL/TP1/TP2/TP3 wie bei den
-    anderen Strategien - hier sind die Abstaende ATR2-basiert (Channel-Deviation bzw. Base-Risk-
-    Multiplikator), nicht fest in $, und werden bei jedem Einstieg neu aus dem dann aktuellen
-    ATR2 berechnet (siehe _simulate_halftrend_trades)."""
-    h, l, c = candles[2], candles[3], candles[4]
-    amplitude = cfg["ht_amplitude"]
-    _, trend, atr2 = compute_halftrend(h, l, c, amplitude, cfg["ht_channel_deviation"])
-    warmup = max(100, amplitude) + 5
-    return _simulate_halftrend_trades(candles, cfg, trend, atr2, warmup)
+def compute_rsi(closes, period):
+    """Standard-RSI mit Wilder-Glaettung (wie Pine's ta.rsi)."""
+    n = len(closes)
+    if n < 2:
+        return [50.0] * n
+    gains = [0.0] * n
+    losses = [0.0] * n
+    for i in range(1, n):
+        diff = closes[i] - closes[i - 1]
+        gains[i] = diff if diff > 0 else 0.0
+        losses[i] = -diff if diff < 0 else 0.0
+
+    def _wilder_rma(values):
+        out = [values[0]] * n
+        for i in range(1, n):
+            if i < period:
+                out[i] = sum(values[:i + 1]) / (i + 1)
+            else:
+                out[i] = (out[i - 1] * (period - 1) + values[i]) / period
+        return out
+
+    avg_gain = _wilder_rma(gains)
+    avg_loss = _wilder_rma(losses)
+    rsi = [50.0] * n
+    for i in range(n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100.0 if avg_gain[i] > 0 else 50.0
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def compute_heikin_ashi(opens, highs, lows, closes):
+    """Rechnet normale OHLC-Kerzen in Heikin-Ashi-Kerzen um (wie bei TradingView, wenn man den
+    Chart-Typ auf 'Heikin Ashi' umstellt). Heikin-Ashi glaettet den Kursverlauf, indem jede Kerze
+    den Durchschnitt der vorherigen mit einrechnet - Trends wirken dadurch 'glatter' (weniger
+    kleine Gegenkerzen), Wendepunkte fallen dafuer etwas verzoegert auf. Gibt (ha_open, ha_high,
+    ha_low, ha_close) zurueck - diese vier werden dann anstelle der normalen OHLC-Werte in die
+    Signal-Berechnung (compute_diamond_signal, compute_atr) gegeben."""
+    n = len(closes)
+    ha_close = [(opens[i] + highs[i] + lows[i] + closes[i]) / 4 for i in range(n)]
+    ha_open = [0.0] * n
+    ha_high = [0.0] * n
+    ha_low = [0.0] * n
+    for i in range(n):
+        ha_open[i] = (opens[i] + closes[i]) / 2 if i == 0 else (ha_open[i - 1] + ha_close[i - 1]) / 2
+        ha_high[i] = max(highs[i], ha_open[i], ha_close[i])
+        ha_low[i] = min(lows[i], ha_open[i], ha_close[i])
+    return ha_open, ha_high, ha_low, ha_close
+
+
+def summarize_backtest_trades(trades, exclude_top_n=1):
+    """WICHTIG: 'trades' kann mehrere Zeilen fuer EINE echte Position enthalten (TP1/TP2/TP3
+    als separate Teilverkaeufe derselben Position - siehe _bt_close_trade). Trefferquote und
+    Ø-Gewinn/-Verlust werden deshalb auf POSITIONS-Ebene berechnet (alle Zeilen mit demselben
+    Einstiegszeitpunkt werden zu einem Netto-Ergebnis zusammengefasst) - sonst wuerde eine
+    Position, die TP1+TP2+TP3 durchlaeuft, dreifach als 'Gewinn' gezaehlt, eine SL-Position aber
+    nur einfach als 'Verlust' - das verzerrt die Trefferquote massiv nach oben (in der Praxis
+    beobachtet: 70% pro Teilverkauf-Zeile vs. 52% pro echter Position auf denselben Daten).
+    Max-Drawdown bleibt bewusst auf Zeilenebene (echter Zeitreihen-Wert, jeder Teilverkauf
+    veraendert das Konto tatsaechlich genau dann, wenn er passiert).
+
+    `exclude_top_n`: Robustheits-Check - wie viele der besten Einzel-Trades (Positionen) sollen
+    aus 'total_pnl_excl_top_n_usd' herausgerechnet werden? Wichtig bei 'immer im Markt'-Systemen
+    (z.B. UT Bot + Hull Flip), wo ein einzelner grosser Pump/Dump-Trade das Gesamtergebnis
+    dominieren und den Backtest/Sweep unrepraesentativ machen kann."""
+    n = len(trades)
+    if n == 0:
+        return {"trades": 0, "fills": 0, "win_rate_pct": 0, "total_pnl_usd": 0, "avg_win_usd": 0, "avg_loss_usd": 0,
+                "max_drawdown_usd": 0, "avg_bars_held": 0, "best_trade_pnl_usd": 0, "worst_trade_pnl_usd": 0,
+                "median_trade_pnl_usd": 0, "total_pnl_excl_best_trade_usd": 0,
+                "top_n_excluded_count": 0, "top_n_excluded_sum_usd": 0, "total_pnl_excl_top_n_usd": 0}
+
+    total_pnl = sum(t["pnl"] for t in trades)
+    equity = peak = max_dd = 0.0
+    for t in trades:
+        equity += t["pnl"]
+        peak = max(peak, equity)
+        max_dd = min(max_dd, equity - peak)
+
+    # Teilverkaeufe zu echten Positionen gruppieren (gleicher Einstiegszeitpunkt = dieselbe
+    # Position). Fallback auf einzeln zaehlen, falls mal kein entry_ts vorhanden sein sollte.
+    positions = {}
+    order = []
+    for t in trades:
+        key = t.get("entry_ts", id(t))
+        if key not in positions:
+            positions[key] = {"pnl": 0.0, "last_exit_i": None, "entry_i": None, "bars_held": 0}
+            order.append(key)
+        positions[key]["pnl"] += t["pnl"]
+        positions[key]["bars_held"] = max(positions[key]["bars_held"], t["bars_held"])
+
+    pos_list = [positions[k] for k in order]
+    wins = [p for p in pos_list if p["pnl"] > 0]
+    losses = [p for p in pos_list if p["pnl"] <= 0]
+    n_pos = len(pos_list)
+
+    sorted_desc = sorted(pos_list, key=lambda p: p["pnl"], reverse=True)
+    best_trade_pnl = sorted_desc[0]["pnl"] if pos_list else 0.0
+    worst_trade_pnl = sorted_desc[-1]["pnl"] if pos_list else 0.0
+    pnls_sorted = sorted(p["pnl"] for p in pos_list)
+    mid = len(pnls_sorted) // 2
+    median_pnl = pnls_sorted[mid] if len(pnls_sorted) % 2 == 1 else (pnls_sorted[mid - 1] + pnls_sorted[mid]) / 2 if pnls_sorted else 0.0
+
+    n_exclude = max(0, min(int(exclude_top_n), len(sorted_desc)))
+    excluded_sum = sum(p["pnl"] for p in sorted_desc[:n_exclude])
+
+    return {
+        "trades": n_pos,
+        "fills": n,
+        "win_rate_pct": round(len(wins) / n_pos * 100, 1),
+        "total_pnl_usd": round(total_pnl, 2),
+        "avg_win_usd": round(sum(p["pnl"] for p in wins) / len(wins), 2) if wins else 0,
+        "avg_loss_usd": round(sum(p["pnl"] for p in losses) / len(losses), 2) if losses else 0,
+        "max_drawdown_usd": round(max_dd, 2),
+        "avg_bars_held": round(sum(p["bars_held"] for p in pos_list) / n_pos, 1),
+        "best_trade_pnl_usd": round(best_trade_pnl, 2),
+        "worst_trade_pnl_usd": round(worst_trade_pnl, 2),
+        "median_trade_pnl_usd": round(median_pnl, 2),
+        "total_pnl_excl_best_trade_usd": round(total_pnl - best_trade_pnl, 2),
+        "top_n_excluded_count": n_exclude,
+        "top_n_excluded_sum_usd": round(excluded_sum, 2),
+        "total_pnl_excl_top_n_usd": round(total_pnl - excluded_sum, 2),
+    }
+
+
+
+
+# ============================================================
+# Wiederhergestellt: Al-Shatri Breakout Kern-Funktionen - waren versehentlich mit
+# entfernten Strategie-Bloecken mitgeloescht worden.
+# ============================================================
+
+AB_PRESETS = {
+    "scalping": {"lookback": 10, "fast_len": 9, "slow_len": 21, "rsi_len": 14, "rsi_gate": 52,
+                 "use_volume": False, "vol_mult": 1.0, "atr_len": 14, "atr_mult": 1.0,
+                 "r1": 0.5, "r2": 1.0, "r3": 1.5},
+    "intraday": {"lookback": 20, "fast_len": 20, "slow_len": 50, "rsi_len": 14, "rsi_gate": 55,
+                 "use_volume": False, "vol_mult": 1.5, "atr_len": 14, "atr_mult": 1.5,
+                 "r1": 1.0, "r2": 2.0, "r3": 3.0},
+    "swing": {"lookback": 50, "fast_len": 50, "slow_len": 200, "rsi_len": 14, "rsi_gate": 58,
+              "use_volume": True, "vol_mult": 1.5, "atr_len": 21, "atr_mult": 2.0,
+              "r1": 1.5, "r2": 3.0, "r3": 5.0},
+}
+
+
+def _ab_effective_params(cfg):
+    """Preset 'Scalping'/'Intraday'/'Swing' uebernimmt die Original-Presets aus dem Pine-Script
+    1:1 (siehe Preset-Logik dort), 'custom' nutzt die frei eingestellten ab_*-Werte."""
+    preset = cfg.get("ab_preset", "intraday")
+    if preset in AB_PRESETS:
+        return AB_PRESETS[preset]
+    return {
+        "lookback": cfg.get("ab_lookback", 20), "fast_len": cfg.get("ab_fast_len", 20),
+        "slow_len": cfg.get("ab_slow_len", 50), "rsi_len": cfg.get("ab_rsi_len", 14),
+        "rsi_gate": cfg.get("ab_rsi_gate", 55), "use_volume": cfg.get("ab_use_volume", False),
+        "vol_mult": cfg.get("ab_vol_mult", 1.5), "atr_len": cfg.get("ab_atr_len", 14),
+        "atr_mult": cfg.get("ab_atr_mult", 1.5), "r1": cfg.get("ab_r1", 1.0),
+        "r2": cfg.get("ab_r2", 2.0), "r3": cfg.get("ab_r3", 3.0),
+    }
+
+
+def _ab_reset_state(st):
+    st["ab_sl_price"] = None
+    st["ab_tp1_price"] = None
+    st["ab_tp2_price"] = None
+    st["ab_tp3_price"] = None
+    st["ab_tp1_done"] = False
+    st["ab_tp2_done"] = False
+    st["ab_be_done"] = False
+
+
+def compute_ab_breakout_signals(highs, lows, closes, volumes, params):
+    """Liefert (long_setup[], short_setup[], atr[]) je Kerze. long_setup/short_setup sind die
+    ROHEN Bedingungen (Pine 'longSetup'/'shortSetup', noch KEINE Flanken-Erkennung) - der
+    tatsaechliche Trigger ist erst 'jetzt erfuellt, letzte Kerze nicht' (siehe ab_poll_loop /
+    _simulate_ab_trades, analog zu Pine's 'longSetup and not longSetup[1]')."""
+    n = len(closes)
+    lookback, fast_len, slow_len = params["lookback"], params["fast_len"], params["slow_len"]
+    rsi_len, rsi_gate = params["rsi_len"], params["rsi_gate"]
+    use_volume, vol_mult = params["use_volume"], params["vol_mult"]
+    atr_len = params["atr_len"]
+
+    ema_fast = _ema_series(closes, fast_len)
+    ema_slow = _ema_series(closes, slow_len)
+    rsi = compute_rsi(closes, rsi_len)
+    atr = compute_atr(highs, lows, closes, atr_len)
+    _, highs_roll_max = _rolling_min_max(highs, lookback)
+    lows_roll_min, _ = _rolling_min_max(lows, lookback)
+    vol_avg = _sma_series(volumes, 20) if volumes else [0.0] * n
+
+    warmup = max(slow_len, lookback, atr_len, rsi_len)
+    long_setup = [False] * n
+    short_setup = [False] * n
+    for i in range(n):
+        if i < warmup or i < 1:
+            continue
+        if atr[i] is None or atr[i] <= 0:
+            continue
+        # [1]-Verschiebung wie im Original: das Range-Hoch/-Tief und der Volumen-Durchschnitt
+        # der VORHERIGEN Kerze werden gegen den AKTUELLEN Schlusskurs geprueft, damit die
+        # gerade schliessende Kerze ihre eigene Range nicht mitzaehlt (sonst waere ein Ausbruch
+        # trivial immer "wahr").
+        upper = highs_roll_max[i - 1]
+        lower = lows_roll_min[i - 1]
+        if upper is None or lower is None:
+            continue
+        if use_volume:
+            v_avg_prev = vol_avg[i - 1] if i - 1 < len(vol_avg) else 0.0
+            vol_ok = v_avg_prev is not None and v_avg_prev > 0 and volumes[i] >= v_avg_prev * vol_mult
+        else:
+            vol_ok = True
+
+        long_setup[i] = (closes[i] > upper and closes[i] > ema_fast[i] and ema_fast[i] > ema_slow[i]
+                          and rsi[i] >= rsi_gate and vol_ok)
+        short_setup[i] = (closes[i] < lower and closes[i] < ema_fast[i] and ema_fast[i] < ema_slow[i]
+                           and rsi[i] <= 100 - rsi_gate and vol_ok)
+    return long_setup, short_setup, atr
+
+
+async def check_ab_sl(symbol, price):
+    """Wechsel-Modus: optionaler fester Dollar-SL (ab_sl_enabled/ab_sl_manual_usd) und optional
+    'SL auf Einstieg' (ab_be_enabled/ab_be_trigger_usd): sobald die Position um den eingestellten
+    Dollar-Betrag im Gewinn ist (Preisabstand = Betrag / Positionsgroesse, wie beim SL), wird der SL auf
+    den Einstiegskurs gesetzt (Break-Even) - auch wenn der feste $-SL abgeschaltet ist, dann entsteht
+    der SL erst mit dem Break-Even. Wird bei jedem Loop-Durchlauf gegen den Live-Preis geprueft
+    (unabhaengig vom Kerzen-Abruf, siehe ab_poll_loop). Schlaegt der Exit fehl (Position bleibt
+    offen), bleibt der SL bestehen und wird beim naechsten Durchlauf erneut versucht - statt ihn
+    faelschlich als erledigt zu vergessen."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    if not cfg.get("ab_sl_enabled", True) and not st.get("ab_be_done"):
+        st["ab_sl_price"] = None  # SL wurde bei offener Position abgeschaltet (ein Break-Even-SL bleibt)
+    if cfg.get("ab_be_enabled", False) and not st.get("ab_be_done"):
+        size = st.get("total_coin_size") or 0
+        entry_ref = st.get("avg_entry_price")
+        if size > 0 and entry_ref:
+            dist_be = cfg.get("ab_be_trigger_usd", 5.0) / size
+            reached = price >= entry_ref + dist_be if pos == "long" else price <= entry_ref - dist_be
+            if reached:
+                st["ab_sl_price"] = entry_ref
+                st["ab_be_done"] = True
+                debug_log(f"📡 [{symbol}] Al-Shatri Breakout: ${cfg.get('ab_be_trigger_usd', 5.0)} Gewinn erreicht - SL auf Einstieg ({round(entry_ref, 4)}) gesetzt")
+    sl_price = st.get("ab_sl_price")
+    if sl_price is None:
+        return
+    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+    if not hit_sl:
+        return
+    reason = "BREAKEVEN" if st.get("ab_be_done") else "SL"
+    debug_log(f"🚪 [{symbol}] Al-Shatri Breakout {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+    await execute_exit(symbol, price, reason)
+    if st["position"] is None:
+        st["ab_sl_cooldown_until"] = time.time() + cfg.get("ab_sl_cooldown_seconds", 30)
+        _ab_reset_state(st)
+
+
+async def _check_ab_flip(symbol, buy_signal, sell_signal, price):
+    """Wechsel-System: immer im Markt. Ein Signal in Richtung der schon offenen Position tut
+    nichts; das Gegen-Signal schliesst die Position (Grund 'AB-FLIP') und oeffnet im selben Schritt
+    die Gegenrichtung - der erste Buy bleibt also offen, bis das erste Sell kommt, usw.
+    Richtung 'nur Long'/'nur Short': das Gegen-Signal schliesst weiterhin, eroeffnet aber keine
+    Position in der gesperrten Richtung (danach flach bis zum naechsten erlaubten Signal).
+    Alle Filter (EMA/RSI/Volumen/SuperTrend/ASO) wirken bereits VOR dieser Funktion auf die
+    Setup-Serien - ein vom Filter blockiertes Gegen-Signal dreht die Position also nicht.
+    Nach dem Einstieg wird (falls aktiv) der feste Dollar-SL gesetzt: SL-Betrag / Positionsgroesse
+    = Preisabstand, d.h. der Verlust der GESAMTEN Position betraegt beim SL genau den Betrag."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    if buy_signal:
+        target = "long"
+    elif sell_signal:
+        target = "short"
+    else:
+        return
+    pos = st["position"]
+    if pos == target:
+        return  # schon in dieser Richtung offen - nur das Gegen-Signal zaehlt
+
+    direction_mode = cfg.get("ab_direction_mode", "both")
+    can_open = (direction_mode == "both"
+                or (direction_mode == "long_only" and target == "long")
+                or (direction_mode == "short_only" and target == "short"))
+
+    if pos is not None:
+        debug_log(f"🔄 [{symbol}] Al-Shatri Breakout Wechsel: {pos.upper()} -> {target.upper() if can_open else 'FLACH'} @ {price}")
+        await execute_exit(symbol, price, "AB-FLIP")
+        if st["position"] is not None:
+            # Exit fehlgeschlagen (Details im execute_exit-Log) - Position bleibt offen, deshalb
+            # KEIN Gegen-Einstieg, sonst waeren beide Richtungen gleichzeitig im Bestand.
+            return
+        _ab_reset_state(st)
+    elif time.time() < st.get("ab_sl_cooldown_until", 0.0):
+        return  # flach nach einem SL - Cooldown laeuft noch
+
+    if not can_open:
+        return
+    debug_log(f"📡 [{symbol}] Al-Shatri Breakout Signal: {target.upper()} @ {price}")
+    await execute_entry(symbol, target, price, is_add_on=False)
+    if st["position"] is None:
+        return  # Einstieg (z.B. dry_run-Fehler) hat nicht geklappt
+    _ab_reset_state(st)
+    size = st.get("total_coin_size") or 0
+    if cfg.get("ab_sl_enabled", True) and size > 0:
+        entry_ref = st.get("avg_entry_price") or price
+        dist_sl = cfg.get("ab_sl_manual_usd", 5.0) / size
+        st["ab_sl_price"] = entry_ref - dist_sl if target == "long" else entry_ref + dist_sl
+
+
+async def _check_ab_plan_entry(symbol, buy_signal, sell_signal, price, atr_now):
+    """Plan-Modus (wie Original-Skript): Einstieg nur wenn flach (kein 'active'-Plan laeuft) - das
+    Original zeichnet waehrend eines laufenden Plans keine neuen Linien. SL/TP1/TP2/TP3 werden
+    einmalig aus dem ATR-Risk-Abstand zum Einstiegszeitpunkt berechnet (kein Nachziehen ausser den
+    beiden abschaltbaren SL-Stufen nach TP1/TP2, siehe check_ab_sl_tp)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or st["position"] is not None or price is None:
+        return
+    if time.time() < st.get("ab_sl_cooldown_until", 0.0):
+        return
+    direction_mode = cfg.get("ab_direction_mode", "both")
+    if direction_mode == "long_only":
+        sell_signal = False
+    elif direction_mode == "short_only":
+        buy_signal = False
+    if not (buy_signal or sell_signal):
+        return
+    if atr_now is None or atr_now <= 0:
+        return
+    direction = "long" if buy_signal else "short"
+    debug_log(f"📡 [{symbol}] Al-Shatri Breakout Signal: {direction.upper()} @ {price}")
+    await execute_entry(symbol, direction, price, is_add_on=False)
+    if st["position"] is None:
+        return  # Einstieg (z.B. dry_run-Fehler) hat nicht geklappt
+    _ab_reset_state(st)
+    params = _ab_effective_params(cfg)
+    risk = atr_now * params["atr_mult"]
+    st["ab_sl_price"] = price - risk if direction == "long" else price + risk
+    r1, r2, r3 = params["r1"], params["r2"], params["r3"]
+    if direction == "long":
+        st["ab_tp1_price"] = price + risk * r1
+        st["ab_tp2_price"] = price + risk * r2
+        st["ab_tp3_price"] = price + risk * r3
+    else:
+        st["ab_tp1_price"] = price - risk * r1
+        st["ab_tp2_price"] = price - risk * r2
+        st["ab_tp3_price"] = price - risk * r3
+
+
+async def check_ab_entry(symbol, buy_signal, sell_signal, price, atr_now):
+    """Waehlt je nach ab_exit_mode: 'plan' (ATR-SL + TP1/TP2/TP3 wie im Original-Skript) oder
+    'flip' (Standard: Wechsel bei Gegen-Signal + optionaler fester Dollar-SL)."""
+    if BOTS[symbol]["config"].get("ab_exit_mode", "flip") == "plan":
+        await _check_ab_plan_entry(symbol, buy_signal, sell_signal, price, atr_now)
+    else:
+        await _check_ab_flip(symbol, buy_signal, sell_signal, price)
+
+
+async def check_ab_sl_tp(symbol, price):
+    """SL zuerst, dann TP1 (Teilverkauf + optional SL->Break-Even), TP2 (weiterer Teilverkauf +
+    optional SL->TP1), TP3 (Rest schliessen) - identisches Muster zu check_ht_sl_tp, nur mit
+    zwei EINZELN abschaltbaren Nachzieh-Stufen statt fest immer Break-Even bei TP1."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+
+    sl_price = st.get("ab_sl_price")
+    if sl_price is not None:
+        hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+        if hit_sl:
+            if st.get("ab_tp2_done"):
+                reason = "SL-AUF-TP1"
+            elif st.get("ab_tp1_done"):
+                reason = "BREAKEVEN"
+            else:
+                reason = "SL"
+            debug_log(f"🚪 [{symbol}] Al-Shatri Breakout {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+            await execute_exit(symbol, price, reason)
+            st["ab_sl_cooldown_until"] = time.time() + cfg.get("ab_sl_cooldown_seconds", 30)
+            _ab_reset_state(st)
+            return
+
+    # TP1/TP2 faellt bewusst OHNE Return direkt zur naechsten Stufe durch, falls der Kurs seit dem
+    # letzten Check (alle ~5s live, oder innerhalb einer Kerze im Backtest) so weit gesprungen ist,
+    # dass mehrere Ziele auf einmal erreicht wurden - vorher wurde pro Aufruf nur EINE Stufe
+    # verarbeitet, wodurch eine uebersprungene Stufe (z.B. TP2) nie nachgeholt wurde, wenn der Kurs
+    # bis zum naechsten Check schon wieder zurueckgelaufen war.
+    if not st.get("ab_tp1_done") and st.get("ab_tp1_price") is not None:
+        tp1_price = st["ab_tp1_price"]
+        if (pos == "long" and price >= tp1_price) or (pos == "short" and price <= tp1_price):
+            fraction = cfg.get("ab_tp1_close_pct", 33) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP1")
+            if ok:
+                st["ab_tp1_done"] = True
+                if cfg.get("ab_sl_to_breakeven_on_tp1", True):
+                    st["ab_sl_price"] = st["avg_entry_price"]
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'],4)}) gesetzt")
+                else:
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP1 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
+            else:
+                return  # Teilverkauf fehlgeschlagen - nicht so tun als waere TP1 schon durch
+        else:
+            return  # TP1 noch nicht erreicht -> TP2/TP3 koennen es dann erst recht nicht sein
+
+    if not st.get("ab_tp2_done") and st.get("ab_tp2_price") is not None:
+        tp2_price = st["ab_tp2_price"]
+        if (pos == "long" and price >= tp2_price) or (pos == "short" and price <= tp2_price):
+            fraction = cfg.get("ab_tp2_close_pct", 50) / 100
+            ok = await execute_partial_exit(symbol, price, fraction, "TP2")
+            if ok:
+                st["ab_tp2_done"] = True
+                if cfg.get("ab_sl_to_tp1_on_tp2", True) and st.get("ab_tp1_price") is not None:
+                    st["ab_sl_price"] = st["ab_tp1_price"]
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL auf TP1 ({round(st['ab_tp1_price'],4)}) gesetzt")
+                else:
+                    debug_log(f"📡 [{symbol}] Al-Shatri Breakout TP2 erreicht - SL-Nachzug deaktiviert, SL bleibt unveraendert")
+            else:
+                return
+        else:
+            return
+
+    tp3_price = st.get("ab_tp3_price")
+    if tp3_price is not None:
+        if (pos == "long" and price >= tp3_price) or (pos == "short" and price <= tp3_price):
+            debug_log(f"🚪 [{symbol}] Al-Shatri Breakout TP3 (Rest): {pos.upper()} @ {price}")
+            await execute_exit(symbol, price, "TP3")
+            _ab_reset_state(st)
 
 
 def _simulate_ab_flip_trades(candles, cfg, long_setup, short_setup, warmup):
@@ -8724,836 +3110,6 @@ def _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup):
     return _simulate_ab_flip_trades(candles, cfg, long_setup, short_setup, warmup)
 
 
-def backtest_ab_breakout(candles, cfg, trend_filter_long_ok=None, trend_filter_short_ok=None):
-    """Backtest fuer Al-Shatri Breakout. Braucht (anders als die meisten anderen Strategien) eine
-    6er-Kerzenquelle MIT Volumen fuer den optionalen Volumen-Filter (Standard aus) - deshalb wie
-    mo7_scalp/maverick_edge in run_backtest() als Sonderfall behandelt statt ueber den generischen
-    5er-Tupel-Dispatch (BACKTEST_FUNCS). trend_filter_long_ok/short_ok (optional): vorab berechnete
-    Listen fuer den SuperTrend-Trendfilter bei ABWEICHENDER Zeiteinheit (von run_backtest async
-    vorbereitet und ausgerichtet, siehe _align_htf_series); bei gleicher Zeiteinheit/deaktiviertem
-    Filter wird hier intern berechnet - wie bei backtest_hvd_signal."""
-    o, h, l, c, v = candles[1], candles[2], candles[3], candles[4], candles[5]
-    params = _ab_effective_params(cfg)
-    if cfg.get("ab_use_heikin_ashi", False):
-        # Signal UND ATR (fuer den Plan-Modus) rechnen auf Heikin-Ashi-Kerzen, SL/TP-Ausloesung im
-        # Backtest bleibt trotzdem an den ECHTEN Kerzen (candles/_simulate_ab_trades), da im
-        # Live-Handel auch der echte Marktpreis ausloest, nicht der geglaettete HA-Wert - wie bei
-        # Diamond Algo (backtest_diamond_algo).
-        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
-    else:
-        sig_h, sig_l, sig_c = h, l, c
-    long_setup, short_setup, atr = compute_ab_breakout_signals(sig_h, sig_l, sig_c, v, params)
-
-    if trend_filter_long_ok is None and cfg.get("ab_trend_filter_enabled", False):
-        tf_resolution = cfg.get("ab_trend_filter_resolution", "15m")
-        if tf_resolution in (None, "", "same") or tf_resolution == cfg.get("ab_resolution", "1m"):
-            tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
-            tf_multiplier = cfg.get("ab_trend_filter_multiplier", 3.0)
-            tf_st_line, _ = compute_diamond_supertrend(h, l, c, tf_multiplier, tf_atr_period)
-            trend_filter_long_ok = [tf_st_line[i] is not None and c[i] > tf_st_line[i] for i in range(len(c))]
-            trend_filter_short_ok = [tf_st_line[i] is not None and c[i] < tf_st_line[i] for i in range(len(c))]
-        # Bei ABWEICHENDER Zeiteinheit wird trend_filter_long_ok/short_ok von run_backtest (async) uebergeben.
-
-    if trend_filter_long_ok is not None:
-        long_setup = [long_setup[i] and trend_filter_long_ok[i] for i in range(len(long_setup))]
-        short_setup = [short_setup[i] and trend_filter_short_ok[i] for i in range(len(short_setup))]
-
-    if cfg.get("ab_aso_filter_enabled", False):
-        o = candles[1]
-        aso_bull_ok, aso_bear_ok = compute_aso_filter(
-            o, h, l, c, cfg.get("ab_aso_filter_length", 10), cfg.get("ab_aso_filter_mode", 0),
-            cfg.get("ab_aso_filter_confirm_bars", 1))
-        long_setup = [long_setup[i] and aso_bull_ok[i] for i in range(len(long_setup))]
-        short_setup = [short_setup[i] and aso_bear_ok[i] for i in range(len(short_setup))]
-
-    warmup = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 5
-    return _simulate_ab_trades(candles, cfg, long_setup, short_setup, atr, warmup)
-
-
-def _simulate_cp_trades(candles, cfg, bull, bear, risk_atr, warmup):
-    """Kern-Simulation fuer Candle-Patterns. Wie _simulate_es_trades, aber nur EIN SL/EIN TP
-    (keine TP1/TP2/TP3-Stufen - passt besser zu einem einzelnen, seltenen Umkehr-Signal statt
-    einem durchlaufenden Trend-System), dafuer mit ATR-Breakeven statt Prozent-Breakeven und
-    optionalem Flip-Exit."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    risk_mult = cfg.get("cp_risk_mult", 1.5)
-    tp_rr = cfg.get("cp_tp_rr", 1.0)
-    sl_enabled = cfg.get("cp_sl_enabled", True)
-    tp_enabled = cfg.get("cp_tp_enabled", True)
-    sl_mode = cfg.get("cp_sl_mode", "atr")
-    sl_manual_usd = cfg.get("cp_sl_manual_usd", 5.0)
-    tp_mode = cfg.get("cp_tp_mode", "atr")
-    tp_manual_usd = cfg.get("cp_tp_manual_usd", 5.0)
-    sl_cooldown_ms = cfg.get("cp_sl_cooldown_seconds", 30) * 1000
-    direction_mode = cfg.get("cp_direction_mode", "both")
-    flip_exit_enabled = cfg.get("cp_flip_exit_enabled", True)
-    breakeven_enabled = cfg.get("cp_breakeven_enabled", True)
-    breakeven_trigger_mult = cfg.get("cp_breakeven_trigger_mult", 0.5)
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-
-        if position is not None:
-            pdir, entry = position["dir"], position["entry"]
-
-            if breakeven_enabled and not position.get("breakeven_done"):
-                atr_now = risk_atr[i] or 0
-                trigger_dist = atr_now * breakeven_trigger_mult
-                best_price = h[i] if pdir == "long" else l[i]
-                moved = (best_price - entry) if pdir == "long" else (entry - best_price)
-                if trigger_dist > 0 and moved >= trigger_dist:
-                    current_sl = position.get("sl_price")
-                    if current_sl is None or (pdir == "long" and entry > current_sl) or (pdir == "short" and entry < current_sl):
-                        position["sl_price"] = entry
-                    position["breakeven_done"] = True
-
-            sl_price = position.get("sl_price")
-            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
-            if hit_sl:
-                reason = "BREAKEVEN" if position.get("breakeven_done") and abs(sl_price - entry) < 1e-9 else "SL"
-                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            else:
-                tp_price = position.get("tp_price")
-                hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
-                if hit_tp:
-                    _bt_close_trade(trades, pdir, entry, tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                    position = None
-
-        buy_signal, sell_signal = bull[i], bear[i]
-        if direction_mode == "long_only":
-            sell_signal = False
-        elif direction_mode == "short_only":
-            buy_signal = False
-
-        just_flipped = False
-        if position is not None and flip_exit_enabled:
-            if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "CP-FLIP-EXIT", ts=ts)
-                position = None
-                just_flipped = True
-
-        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-        if position is None and not in_sl_cooldown and not just_flipped and (buy_signal or sell_signal):
-            direction = "long" if buy_signal else "short"
-            size = (margin * leverage) / price
-            sl_price = tp_price = None
-            if sl_enabled or tp_enabled:
-                atr_band = (risk_atr[i] or 0) * risk_mult
-                dist_for_tp = atr_band
-                if sl_enabled:
-                    if sl_mode == "manual" and size > 0:
-                        dist_sl = sl_manual_usd / size
-                        dist_for_tp = dist_sl
-                    else:
-                        dist_sl = atr_band
-                    sl_price = price - dist_sl if direction == "long" else price + dist_sl
-                if tp_enabled:
-                    if tp_mode == "manual" and size > 0:
-                        dist_tp = tp_manual_usd / size
-                    else:
-                        dist_tp = dist_for_tp * tp_rr
-                    tp_price = price + dist_tp if direction == "long" else price - dist_tp
-            position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
-                        "sl_price": sl_price, "tp_price": tp_price, "breakeven_done": False}
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_candle_patterns(candles, cfg):
-    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
-    bull, bear = compute_cp_signals(o, h, l, c, cfg)
-    risk_atr_period = cfg.get("cp_risk_atr_period", 14)
-    source = cfg.get("cp_signal_source", "three_line_strike")
-    needs_ma = source in ("engulfing", "both") and cfg.get("cp_engulfing_strict", True)
-    needs_rsi = source in ("three_line_strike", "both") and cfg.get("cp_three_line_strict", True)
-    risk_atr = compute_atr(h, l, c, risk_atr_period)
-    warmup = max(risk_atr_period, 14 if needs_rsi else 3, 200 if needs_ma else 3) + 5
-    return _simulate_cp_trades(candles, cfg, bull, bear, risk_atr, warmup)
-
-
-def _simulate_diamond_trades(candles, cfg, buy, sell, smart_buy, smart_sell, atr_risk, warmup):
-    """Kern-Simulation fuer Diamond Algo, getrennt von der Signal-Berechnung (compute_diamond_signal)
-    damit der Parameter-Sweep buy/sell/atr_risk nur EINMAL pro ATR-Periode x Sensitivity-Kombination
-    berechnen muss. SL/TP-Abstand wird bei jedem Einstieg neu aus dem dann aktuellen ATR(risk_atr_period)
-    berechnet (wie im Original: atrBand = ta.atr(atrLen) * atrRisk), TP = SL-Abstand * R:R-Multiplikator."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    signal_mode = cfg.get("da_signal_mode", "all")
-    invert = cfg.get("da_invert_direction", False)
-    sl_enabled = cfg.get("da_sl_enabled", True)
-    tp_enabled = cfg.get("da_tp_enabled", True)
-    risk_mult = cfg.get("da_risk_mult", 1.0)
-    tp_rr = cfg.get("da_tp_rr", 1.0)
-    sl_cooldown_ms = cfg.get("da_sl_cooldown_seconds", 30) * 1000
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-
-        if position is not None:
-            pdir, entry, size = position["dir"], position["entry"], position["size"]
-            sl_price, tp_price = position.get("sl_price"), position.get("tp_price")
-            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
-            if hit_sl:
-                _bt_close_trade(trades, pdir, entry, sl_price, size, i, position["entry_i"], "SL", ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, pdir, entry, tp_price, size, i, position["entry_i"], "TP", ts=ts)
-                position = None
-
-        buy_now = smart_buy[i] if signal_mode == "smart_only" else buy[i]
-        sell_now = smart_sell[i] if signal_mode == "smart_only" else sell[i]
-        if invert:
-            buy_now, sell_now = sell_now, buy_now
-
-        if position is not None:
-            if (position["dir"] == "long" and sell_now) or (position["dir"] == "short" and buy_now):
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "DA-FLIP-EXIT", ts=ts)
-                position = None
-
-        in_sl_cooldown = sl_enabled and sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-        if position is None and not in_sl_cooldown and (buy_now or sell_now):
-            direction = "long" if buy_now else "short"
-            size = (margin * leverage) / price
-            dist_sl = atr_risk[i] * risk_mult if (sl_enabled or tp_enabled) else None
-            sl_price = (price - dist_sl if direction == "long" else price + dist_sl) if (sl_enabled and dist_sl is not None) else None
-            tp_price = None
-            if tp_enabled and dist_sl is not None:
-                dist_tp = dist_sl * tp_rr
-                tp_price = price + dist_tp if direction == "long" else price - dist_tp
-            position = {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price}
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_diamond_algo(candles, cfg):
-    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
-    atr_period = cfg["da_atr_period"]
-    risk_atr_period = cfg.get("da_risk_atr_period", 14)
-    sma_period = cfg["da_sma_period"]
-    ema_trend_period = cfg["da_ema_trend_period"]
-    if cfg.get("da_use_heikin_ashi", False):
-        # Signal UND Risiko-ATR rechnen auf Heikin-Ashi-Kerzen, SL/TP-Ausloesung im Backtest
-        # bleibt trotzdem an den ECHTEN Kerzen (candles) haengen, da im Live-Handel auch der
-        # echte Marktpreis ausgeloest wird, nicht der geglaettete HA-Wert.
-        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
-    else:
-        sig_h, sig_l, sig_c = h, l, c
-    buy, sell, smart_buy, smart_sell = compute_diamond_signal(sig_h, sig_l, sig_c, atr_period, cfg["da_sensitivity"], sma_period, ema_trend_period)
-    atr_risk = compute_atr(sig_h, sig_l, sig_c, risk_atr_period)
-    warmup = max(atr_period, risk_atr_period, sma_period, ema_trend_period) + 5
-    return _simulate_diamond_trades(candles, cfg, buy, sell, smart_buy, smart_sell, atr_risk, warmup)
-
-
-def _bt_close_trade(trades, direction, entry, exit_price, size, i, entry_i, reason, ts=None):
-    pnl = (exit_price - entry) * size if direction == "long" else (entry - exit_price) * size
-    trade = {"dir": direction, "entry": entry, "exit": exit_price, "reason": reason,
-             "pnl": pnl, "bars_held": i - entry_i}
-    if ts is not None:
-        trade["entry_ts"] = ts[entry_i]
-        trade["exit_ts"] = ts[i]
-    trades.append(trade)
-
-
-
-def backtest_fib_reversal(candles, cfg):
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    lookback = cfg["fib_lookback_candles"]
-
-    warmup = lookback + 5
-    position = None  # {"dir","avg_entry","size","entry1_done","entry2_done","tp1_done","sl_active","fib","entry_i"}
-    trades = []
-
-    for i in range(warmup, n):
-        price = c[i]
-
-        if position is None:
-            swing = compute_fib_swing(h[max(0, i - lookback + 1):i + 1], l[max(0, i - lookback + 1):i + 1], lookback)
-            if swing is None:
-                continue
-            fib = build_fib_levels(swing, cfg)
-            direction = fib["direction"]
-            # Intrabar: reicht die Kerze bis zum Entry-Niveau, statt nur der Schlusskurs
-            reached = l[i] <= fib["entry1_price"] if direction == "long" else h[i] >= fib["entry1_price"]
-            if reached:
-                entry_price = fib["entry1_price"]
-                size = (margin * leverage) / entry_price
-                position = {"dir": direction, "avg_entry": entry_price, "size": size, "entry1_done": True,
-                            "entry2_done": False, "tp1_done": False, "sl_active": fib["sl_price"],
-                            "fib": fib, "entry_i": i}
-            continue
-
-        direction, fib = position["dir"], position["fib"]
-
-        if not position["entry2_done"]:
-            reached2 = l[i] <= fib["entry2_price"] if direction == "long" else h[i] >= fib["entry2_price"]
-            if reached2:
-                entry2_price = fib["entry2_price"]
-                add_size = (margin * leverage) / entry2_price
-                total_size = position["size"] + add_size
-                position["avg_entry"] = (position["avg_entry"] * position["size"] + entry2_price * add_size) / total_size
-                position["size"] = total_size
-                position["entry2_done"] = True
-
-        sl_hit = l[i] <= position["sl_active"] if direction == "long" else h[i] >= position["sl_active"]
-        if sl_hit:
-            _bt_close_trade(trades, direction, position["avg_entry"], position["sl_active"], position["size"], i, position["entry_i"], "SL", ts=ts)
-            position = None
-            continue
-
-        if not position["tp1_done"]:
-            tp1_hit = h[i] >= fib["tp1_price"] if direction == "long" else l[i] <= fib["tp1_price"]
-            if tp1_hit:
-                fraction = cfg["fib_tp1_close_pct"] / 100
-                close_size = position["size"] * fraction
-                _bt_close_trade(trades, direction, position["avg_entry"], fib["tp1_price"], close_size, i, position["entry_i"], "TP1", ts=ts)
-                position["size"] -= close_size
-                position["tp1_done"] = True
-                position["sl_active"] = position["avg_entry"]
-            continue
-
-        tp2_hit = h[i] >= fib["tp2_price"] if direction == "long" else l[i] <= fib["tp2_price"]
-        if tp2_hit:
-            _bt_close_trade(trades, direction, position["avg_entry"], fib["tp2_price"], position["size"], i, position["entry_i"], "TP2", ts=ts)
-            position = None
-
-    return trades
-
-
-def summarize_backtest_trades(trades, exclude_top_n=1):
-    """WICHTIG: 'trades' kann mehrere Zeilen fuer EINE echte Position enthalten (TP1/TP2/TP3
-    als separate Teilverkaeufe derselben Position - siehe _bt_close_trade). Trefferquote und
-    Ø-Gewinn/-Verlust werden deshalb auf POSITIONS-Ebene berechnet (alle Zeilen mit demselben
-    Einstiegszeitpunkt werden zu einem Netto-Ergebnis zusammengefasst) - sonst wuerde eine
-    Position, die TP1+TP2+TP3 durchlaeuft, dreifach als 'Gewinn' gezaehlt, eine SL-Position aber
-    nur einfach als 'Verlust' - das verzerrt die Trefferquote massiv nach oben (in der Praxis
-    beobachtet: 70% pro Teilverkauf-Zeile vs. 52% pro echter Position auf denselben Daten).
-    Max-Drawdown bleibt bewusst auf Zeilenebene (echter Zeitreihen-Wert, jeder Teilverkauf
-    veraendert das Konto tatsaechlich genau dann, wenn er passiert).
-
-    `exclude_top_n`: Robustheits-Check - wie viele der besten Einzel-Trades (Positionen) sollen
-    aus 'total_pnl_excl_top_n_usd' herausgerechnet werden? Wichtig bei 'immer im Markt'-Systemen
-    (z.B. UT Bot + Hull Flip), wo ein einzelner grosser Pump/Dump-Trade das Gesamtergebnis
-    dominieren und den Backtest/Sweep unrepraesentativ machen kann."""
-    n = len(trades)
-    if n == 0:
-        return {"trades": 0, "fills": 0, "win_rate_pct": 0, "total_pnl_usd": 0, "avg_win_usd": 0, "avg_loss_usd": 0,
-                "max_drawdown_usd": 0, "avg_bars_held": 0, "best_trade_pnl_usd": 0, "worst_trade_pnl_usd": 0,
-                "median_trade_pnl_usd": 0, "total_pnl_excl_best_trade_usd": 0,
-                "top_n_excluded_count": 0, "top_n_excluded_sum_usd": 0, "total_pnl_excl_top_n_usd": 0}
-
-    total_pnl = sum(t["pnl"] for t in trades)
-    equity = peak = max_dd = 0.0
-    for t in trades:
-        equity += t["pnl"]
-        peak = max(peak, equity)
-        max_dd = min(max_dd, equity - peak)
-
-    # Teilverkaeufe zu echten Positionen gruppieren (gleicher Einstiegszeitpunkt = dieselbe
-    # Position). Fallback auf einzeln zaehlen, falls mal kein entry_ts vorhanden sein sollte.
-    positions = {}
-    order = []
-    for t in trades:
-        key = t.get("entry_ts", id(t))
-        if key not in positions:
-            positions[key] = {"pnl": 0.0, "last_exit_i": None, "entry_i": None, "bars_held": 0}
-            order.append(key)
-        positions[key]["pnl"] += t["pnl"]
-        positions[key]["bars_held"] = max(positions[key]["bars_held"], t["bars_held"])
-
-    pos_list = [positions[k] for k in order]
-    wins = [p for p in pos_list if p["pnl"] > 0]
-    losses = [p for p in pos_list if p["pnl"] <= 0]
-    n_pos = len(pos_list)
-
-    sorted_desc = sorted(pos_list, key=lambda p: p["pnl"], reverse=True)
-    best_trade_pnl = sorted_desc[0]["pnl"] if pos_list else 0.0
-    worst_trade_pnl = sorted_desc[-1]["pnl"] if pos_list else 0.0
-    pnls_sorted = sorted(p["pnl"] for p in pos_list)
-    mid = len(pnls_sorted) // 2
-    median_pnl = pnls_sorted[mid] if len(pnls_sorted) % 2 == 1 else (pnls_sorted[mid - 1] + pnls_sorted[mid]) / 2 if pnls_sorted else 0.0
-
-    n_exclude = max(0, min(int(exclude_top_n), len(sorted_desc)))
-    excluded_sum = sum(p["pnl"] for p in sorted_desc[:n_exclude])
-
-    return {
-        "trades": n_pos,
-        "fills": n,
-        "win_rate_pct": round(len(wins) / n_pos * 100, 1),
-        "total_pnl_usd": round(total_pnl, 2),
-        "avg_win_usd": round(sum(p["pnl"] for p in wins) / len(wins), 2) if wins else 0,
-        "avg_loss_usd": round(sum(p["pnl"] for p in losses) / len(losses), 2) if losses else 0,
-        "max_drawdown_usd": round(max_dd, 2),
-        "avg_bars_held": round(sum(p["bars_held"] for p in pos_list) / n_pos, 1),
-        "best_trade_pnl_usd": round(best_trade_pnl, 2),
-        "worst_trade_pnl_usd": round(worst_trade_pnl, 2),
-        "median_trade_pnl_usd": round(median_pnl, 2),
-        "total_pnl_excl_best_trade_usd": round(total_pnl - best_trade_pnl, 2),
-        "top_n_excluded_count": n_exclude,
-        "top_n_excluded_sum_usd": round(excluded_sum, 2),
-        "total_pnl_excl_top_n_usd": round(total_pnl - excluded_sum, 2),
-    }
-
-
-CE_SWEEP_MAX_COMBOS = 400
-CE_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
-async def run_ht_param_sweep(symbol, cfg, days, amplitude_min, amplitude_max, amplitude_step,
-                              channel_dev_min, channel_dev_max, channel_dev_step,
-                              base_risk_min, base_risk_max, base_risk_step):
-    """'Monte-Carlo'-Parametersweep fuer HalfTrend: testet alle Kombinationen aus Amplitude,
-    Channel-Deviation (SL-Abstand) und Base-Risk-Multiplikator (TP-Abstand) im angegebenen
-    Bereich gegeneinander. Amplitude bestimmt den eigentlichen Trend/Signal-Verlauf (aufwendig
-    zu berechnen), Channel-Deviation/Base-Risk wirken sich NUR auf die SL-/TP-Preise aus (billig
-    zu berechnen) - deshalb wird trend/atr2 nur EINMAL pro Amplitude neu berechnet und fuer alle
-    Channel-Deviation x Base-Risk-Kombinationen wiederverwendet, aehnlich dem Chandelier-Sweep."""
-    max_candles = BACKTEST_MAX_CANDLES["halftrend"]
-    resolution = cfg.get("ht_resolution", "5m")
-    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    if not candles or len(candles[4]) < 150:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-
-    amplitudes = sorted(set(int(round(amplitude_min + i * amplitude_step))
-                             for i in range(int((amplitude_max - amplitude_min) / max(amplitude_step, 1e-9)) + 1)
-                             if amplitude_min + i * amplitude_step <= amplitude_max + 1e-9))
-    channel_devs = sorted(set(round(channel_dev_min + i * channel_dev_step, 4)
-                               for i in range(int((channel_dev_max - channel_dev_min) / max(channel_dev_step, 1e-9)) + 1)
-                               if channel_dev_min + i * channel_dev_step <= channel_dev_max + 1e-9))
-    base_risks = sorted(set(round(base_risk_min + i * base_risk_step, 4)
-                             for i in range(int((base_risk_max - base_risk_min) / max(base_risk_step, 1e-9)) + 1)
-                             if base_risk_min + i * base_risk_step <= base_risk_max + 1e-9))
-    amplitudes = [a for a in amplitudes if a >= 2]
-    channel_devs = [d for d in channel_devs if d > 0]
-    base_risks = [r for r in base_risks if r > 0]
-
-    total_combos = len(amplitudes) * len(channel_devs) * len(base_risks)
-    if total_combos == 0:
-        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
-    if total_combos > HT_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {HT_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
-
-    h, l, c = candles[2], candles[3], candles[4]
-    results = []
-    for amp in amplitudes:
-        _, trend, atr2 = compute_halftrend(h, l, c, amp, 1.0)  # channel_deviation wirkt nicht auf trend/atr2
-        warmup = max(100, amp) + 5
-        for cd in channel_devs:
-            for br in base_risks:
-                cfg_copy = dict(cfg)
-                cfg_copy["ht_amplitude"] = amp
-                cfg_copy["ht_channel_deviation"] = cd
-                cfg_copy["ht_base_risk_mult"] = br
-                trades = _simulate_halftrend_trades(candles, cfg_copy, trend, atr2, warmup)
-                stats = summarize_backtest_trades(trades)
-                results.append({"ht_amplitude": amp, "ht_channel_deviation": cd, "ht_base_risk_mult": br, **stats})
-
-    best_sorted = sorted(results, key=lambda r: (r["trades"] >= HT_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-
-    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
-        "min_reliable_trades": HT_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": total_combos,
-        "results": best_sorted[:30],
-        "worst_results": worst_sorted[:20],
-    }
-
-
-DA_SWEEP_MAX_COMBOS = 400
-DA_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
-async def run_da_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
-                              sensitivity_min, sensitivity_max, sensitivity_step):
-    """'Monte-Carlo'-Parametersweep fuer Diamond Algo: testet einen Bereich von ATR-Periode
-    (SuperTrend-Kernbaustein) und Sensitivity (ATR-Multiplikator = Sensitivity*2) gegeneinander -
-    das sind die beiden Parameter, die im Original wirklich das Signal beeinflussen (SMA-/EMA-
-    Perioden bleiben auf den aktuell gespeicherten Werten, da sie selten geaendert werden)."""
-    max_candles = BACKTEST_MAX_CANDLES["diamond_algo"]
-    resolution = cfg.get("da_resolution", "5m")
-    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    if not candles or len(candles[4]) < 150:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-
-    atr_periods = sorted(set(int(round(atr_period_min + i * atr_period_step))
-                              for i in range(int((atr_period_max - atr_period_min) / max(atr_period_step, 1e-9)) + 1)
-                              if atr_period_min + i * atr_period_step <= atr_period_max + 1e-9))
-    sensitivities = sorted(set(round(sensitivity_min + i * sensitivity_step, 4)
-                                for i in range(int((sensitivity_max - sensitivity_min) / max(sensitivity_step, 1e-9)) + 1)
-                                if sensitivity_min + i * sensitivity_step <= sensitivity_max + 1e-9))
-    atr_periods = [a for a in atr_periods if a >= 1]
-    sensitivities = [s for s in sensitivities if s > 0]
-
-    total_combos = len(atr_periods) * len(sensitivities)
-    if total_combos == 0:
-        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
-    if total_combos > DA_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {DA_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
-
-    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
-    sma_period = cfg["da_sma_period"]
-    ema_trend_period = cfg["da_ema_trend_period"]
-    risk_atr_period = cfg.get("da_risk_atr_period", 14)
-    if cfg.get("da_use_heikin_ashi", False):
-        _, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
-    else:
-        sig_h, sig_l, sig_c = h, l, c
-    atr_risk = compute_atr(sig_h, sig_l, sig_c, risk_atr_period)
-    warmup = max(max(atr_periods), risk_atr_period, sma_period, ema_trend_period) + 5
-
-    results = []
-    for atr_p in atr_periods:
-        for sens in sensitivities:
-            buy, sell, smart_buy, smart_sell = compute_diamond_signal(sig_h, sig_l, sig_c, atr_p, sens, sma_period, ema_trend_period)
-            cfg_copy = dict(cfg)
-            cfg_copy["da_atr_period"] = atr_p
-            cfg_copy["da_sensitivity"] = sens
-            trades = _simulate_diamond_trades(candles, cfg_copy, buy, sell, smart_buy, smart_sell, atr_risk, warmup)
-            stats = summarize_backtest_trades(trades)
-            results.append({"da_atr_period": atr_p, "da_sensitivity": sens, **stats})
-
-    best_sorted = sorted(results, key=lambda r: (r["trades"] >= DA_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-
-    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
-        "min_reliable_trades": DA_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": total_combos,
-        "results": best_sorted[:30],
-        "worst_results": worst_sorted[:20],
-    }
-
-
-ES_SENS_SWEEP_MAX_COMBOS = 2000
-ES_SENS_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
-async def run_es_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step):
-    """'Monte-Carlo'-Parametersweep fuer ELTE Smart, NUR ueber die manuelle Sensitivity - mit
-    zwei Nachkommastellen wie im Original-Skript (sensitivity11 = input.float(..., step=0.01,
-    minval=0.11, maxval=20)). Auto-Sensitivity wird fuer den Sweep zwangsweise deaktiviert -
-    der Sinn des Tests ist ja gerade, verschiedene FESTE Sensitivity-Werte gegeneinander zu
-    vergleichen (bei Auto-Sensitivity waere der Wert ja gar nicht mehr frei waehlbar). Alle
-    anderen ELTE-Smart-Einstellungen (ATR-Periode, SL/TP-Modus, R:R usw.) bleiben auf den
-    aktuell gespeicherten Werten."""
-    max_candles = BACKTEST_MAX_CANDLES["elte_smart"]
-    resolution = cfg.get("es_resolution", "5m")
-    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    if not candles or len(candles[4]) < 150:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-
-    steps = int(round((sens_max - sens_min) / max(sens_step, 1e-9)))
-    sens_values = sorted(set(round(sens_min + i * sens_step, 2) for i in range(steps + 1)
-                              if sens_min + i * sens_step <= sens_max + 1e-9))
-    sens_values = [v for v in sens_values if v > 0]
-
-    if len(sens_values) == 0:
-        return {"error": "Der eingestellte Bereich ergibt keine gültigen Werte."}
-    if len(sens_values) > ES_SENS_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Werte ({len(sens_values)}, Limit {ES_SENS_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
-
-    results = []
-    for sens in sens_values:
-        cfg_copy = dict(cfg)
-        cfg_copy["es_auto_sensitivity"] = False
-        cfg_copy["es_sensitivity"] = sens
-        trades = backtest_elte_smart(candles, cfg_copy)
-        stats = summarize_backtest_trades(trades)
-        results.append({"es_sensitivity": sens, **stats})
-
-    best_sorted = sorted(results, key=lambda r: (r["trades"] >= ES_SENS_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-
-    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
-        "min_reliable_trades": ES_SENS_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": len(sens_values),
-        "results": best_sorted[:30],
-        "worst_results": worst_sorted[:20],
-    }
-
-
-from collections import OrderedDict
-
-_backtest_candle_cache = OrderedDict()  # key: (symbol, resolution) -> {"fetched_at": float, "days": int, "candles": (...)}
-BACKTEST_CACHE_TTL_SECONDS = 900  # 15 Minuten - fuer Backtest-Zwecke muss die Historie nicht
-# sekundenaktuell sein, das erspart bei wiederholten Tests (z.B. nur SL geaendert) unnoetige
-# Neuabrufe derselben Coin+Zeitrahmen-Kombination
-BACKTEST_CACHE_MAX_ENTRIES = 5  # Hartes Limit: nur die 5 zuletzt genutzten Coin+Zeitrahmen-Kombinationen
-# werden im Speicher gehalten (LRU) - sonst wuerde jede je getestete Kombination fuer immer im
-# Arbeitsspeicher bleiben (bis zu ~500.000 Kerzen pro Eintrag = mehrere hundert MB) und den
-# Render-Server irgendwann zum Absturz wegen Speicherueberlauf bringen.
-
-
-def _backtest_cache_get(cache_key):
-    entry = _backtest_candle_cache.get(cache_key)
-    if entry is not None:
-        _backtest_candle_cache.move_to_end(cache_key)  # als zuletzt genutzt markieren
-    return entry
-
-
-def _backtest_cache_set(cache_key, entry):
-    _backtest_candle_cache[cache_key] = entry
-    _backtest_candle_cache.move_to_end(cache_key)
-    while len(_backtest_candle_cache) > BACKTEST_CACHE_MAX_ENTRIES:
-        _backtest_candle_cache.popitem(last=False)  # aeltesten (am laengsten ungenutzten) Eintrag entfernen
-
-
-def _trim_candles_to_days(candles, days, max_candles):
-    ts, o, h, l, c = candles
-    if not ts:
-        return candles
-    cutoff = ts[-1] - days * 24 * 60 * 60 * 1000
-    idx = 0
-    for i, t in enumerate(ts):
-        if t >= cutoff:
-            idx = i
-            break
-    ts, o, h, l, c = ts[idx:], o[idx:], h[idx:], l[idx:], c[idx:]
-    if len(c) > max_candles:
-        ts, o, h, l, c = ts[-max_candles:], o[-max_candles:], h[-max_candles:], l[-max_candles:], c[-max_candles:]
-    return ts, o, h, l, c
-
-
-async def _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type="spot"):
-    """Gemeinsame Kerzen-Cache-Logik (sonst 1:1 dupliziert) - wird gebraucht, weil Chandelier
-    Exit im Backtest ggf. ZWEI verschiedene Aufloesungen gleichzeitig braucht (eigener
-    Zeitrahmen + hoeherer SuperTrend-Filter-Zeitrahmen)."""
-    if resolution in SUB_MINUTE_RESOLUTIONS:
-        max_candles = min(max_candles, 5000)
-    cache_key = (symbol, resolution, market_type)
-    cached = _backtest_cache_get(cache_key)
-    now = time.time()
-    cache_used = False
-    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
-            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
-            and len(cached["candles"][4]) >= 100):
-        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
-        err = None
-        cache_used = True
-    else:
-        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles, market_type=market_type)
-        if candles:
-            _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
-    return candles, err, cache_used
-
-
-def _simulate_mo7_trades(candles_ts, mo7, cfg, bull, bear, warmup):
-    """Kern-Simulation fuer MO7: nur fester SL/TP (kein ATR-Modus), optionaler Flip-Exit,
-    Cooldown nach SL. `candles_ts` ist das 6er-Tupel (ts,o,h,l,c,volumes)."""
-    ts, o, h, l, c, v = candles_ts
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    sl_enabled = cfg.get("mo7_sl_enabled", True)
-    tp_enabled = cfg.get("mo7_tp_enabled", True)
-    sl_manual_usd = cfg.get("mo7_sl_manual_usd", 5.0)
-    tp_manual_usd = cfg.get("mo7_tp_manual_usd", 5.0)
-    sl_cooldown_ms = cfg.get("mo7_sl_cooldown_seconds", 30) * 1000
-    direction_mode = cfg.get("mo7_direction_mode", "both")
-    flip_exit_enabled = cfg.get("mo7_flip_exit_enabled", True)
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-
-        if position is not None:
-            pdir, entry = position["dir"], position["entry"]
-            sl_price = position.get("sl_price")
-            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
-            if hit_sl:
-                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            else:
-                tp_price = position.get("tp_price")
-                hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
-                if hit_tp:
-                    _bt_close_trade(trades, pdir, entry, tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                    position = None
-
-        buy_signal, sell_signal = bull[i], bear[i]
-        if direction_mode == "long_only":
-            sell_signal = False
-        elif direction_mode == "short_only":
-            buy_signal = False
-
-        just_flipped = False
-        if position is not None and flip_exit_enabled:
-            if (position["dir"] == "long" and sell_signal) or (position["dir"] == "short" and buy_signal):
-                _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MO7-FLIP-EXIT", ts=ts)
-                position = None
-                just_flipped = True
-
-        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-        if position is None and not in_sl_cooldown and not just_flipped and (buy_signal or sell_signal):
-            direction = "long" if buy_signal else "short"
-            size = (margin * leverage) / price
-            sl_price = tp_price = None
-            if sl_enabled and size > 0:
-                dist_sl = sl_manual_usd / size
-                sl_price = price - dist_sl if direction == "long" else price + dist_sl
-            if tp_enabled and size > 0:
-                dist_tp = tp_manual_usd / size
-                tp_price = price + dist_tp if direction == "long" else price - dist_tp
-            position = {"dir": direction, "entry": price, "size": size, "entry_i": i,
-                        "sl_price": sl_price, "tp_price": tp_price}
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_mo7(candles_vol, cfg):
-    ts, o, h, l, c, v = candles_vol
-    mo7 = compute_mo7_series(h, l, c, v, cfg)
-    bull, bear = compute_mo7_signals(mo7, cfg)
-    warmup = 505  # 500er-Normierungsfenster + Puffer fuer RSI/Stoch/WPR/MFI-Anlauf
-    return _simulate_mo7_trades(candles_vol, mo7, cfg, bull, bear, warmup)
-
-
-def _mv_bt_set_sl_tp(position, cfg, guide_at_entry):
-    """Backtest-Pendant zu _mv_set_sl_tp - siehe dort fuer die identische Logik."""
-    sl_mode = cfg.get("mv_sl_mode", "fixed")
-    if sl_mode == "guide_trail":
-        position["sl_price"] = guide_at_entry
-    elif cfg.get("mv_sl_enabled", True):
-        size = position["size"]
-        if size <= 0:
-            position["sl_price"] = None
-        else:
-            dist_sl = cfg.get("mv_sl_manual_usd", 5.0) / size
-            entry = position["entry"]
-            position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
-    else:
-        position["sl_price"] = None
-
-    if not cfg.get("mv_tp_enabled", False):
-        position["tp_price"] = None
-        return
-    size = position["size"]
-    if size <= 0:
-        position["tp_price"] = None
-        return
-    dist_tp = cfg.get("mv_tp_manual_usd", 10.0) / size
-    entry = position["entry"]
-    position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
-
-
-def _simulate_mv_trades(candles, cfg, long_entry, short_entry, guide_line, warmup):
-    """Backtest-Pendant zu check_mv_entry/check_mv_sl_tp - reiner Signal-Einstieg (kein Flip),
-    Ausstieg ausschliesslich ueber SL (fest ODER Guide-Linie als Trail-Stop, intrabar per
-    Kerzen-Hoch/Tief geprueft) und TP (fest)."""
-    ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    direction_mode = cfg.get("mv_direction_mode", "both")
-    sl_mode = cfg.get("mv_sl_mode", "fixed")
-    sl_cooldown_ms = cfg.get("mv_sl_cooldown_seconds", 30) * 1000
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-
-        if position is not None:
-            if sl_mode == "guide_trail" and guide_line[i] is not None:
-                position["sl_price"] = guide_line[i]
-            sl_price = position.get("sl_price")
-            tp_price = position.get("tp_price")
-            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
-            if hit_sl:
-                reason = "SL" if sl_mode == "fixed" else "GUIDE-SL"
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
-                position = None
-                if sl_mode == "fixed":
-                    sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-
-        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-
-        if position is None:
-            if in_sl_cooldown:
-                continue
-            if long_entry[i] and direction_mode != "short_only":
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                _mv_bt_set_sl_tp(position, cfg, guide_line[i])
-            elif short_entry[i] and direction_mode != "long_only":
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
-                _mv_bt_set_sl_tp(position, cfg, guide_line[i])
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_maverick_edge(candles_vol, cfg):
-    ts, o, h, l, c, v = candles_vol
-    fast_len = cfg.get("mv_fast_len", 9)
-    slow_len = cfg.get("mv_slow_len", 21)
-    guide_len = cfg.get("mv_guide_len", 34)
-    atr_len = cfg.get("mv_atr_len", 14)
-    strong_mult = cfg.get("mv_strong_mult", 1.5)
-    use_volume = cfg.get("mv_use_volume_enabled", True)
-    vol_len = cfg.get("mv_vol_len", 20)
-    vol_mult = cfg.get("mv_vol_mult", 1.3)
-    long_entry, short_entry, guide_line = compute_maverick_signals(o, h, l, c, v, fast_len, slow_len, guide_len, atr_len, strong_mult, use_volume, vol_len, vol_mult)
-    if cfg.get("mv_invert_direction", False):
-        long_entry, short_entry = short_entry, long_entry
-    warmup = max(slow_len, guide_len, atr_len, vol_len) + 2
-    return _simulate_mv_trades((ts, o, h, l, c), cfg, long_entry, short_entry, guide_line, warmup)
-
-
-MO7_SUM_SWEEP_MAX_COMBOS = 2000
-MO7_SUM_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
 async def _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type="spot"):
     """Eigene, einfachere Cache-Variante fuer MO7 (6er-Tupel MIT Volumen statt 5er) - bewusst
     getrennt von _fetch_cached_backtest_candles, um die dort genutzte 5er-Tupel-Annahme (candles[4]
@@ -9581,1739 +3137,39 @@ async def _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candl
     return candles, err
 
 
-async def run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low_step, sum_high_min, sum_high_max, sum_high_step, exclude_top_n=1):
-    """'Monte-Carlo'-Parametersweep fuer den 'five_candle_sum'-Einstiegsmodus: testet einen
-    Bereich von mo7_sum_low (Long-Schwelle) und mo7_sum_high (Short-Schwelle) gegeneinander.
-    Der MO7-Score selbst wird NUR EINMAL berechnet (unabhaengig von den Schwellen) und fuer alle
-    Kombinationen wiederverwendet - sonst waere der Sweep bei vielen Kombinationen viel zu
-    langsam."""
-    max_candles = BACKTEST_MAX_CANDLES["mo7_scalp"]
-    resolution = cfg.get("mo7_resolution", "5m")
-    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    if not candles or len(candles[4]) < 550:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~550 für das 500er-Normierungsfenster nötig)."}
+def _rolling_min_max(values, window):
+    """Effizientes gleitendes Minimum/Maximum (monotone Deque, O(n) statt O(n*window)) - noetig
+    weil MO7 ein 500-Kerzen-Fenster fuer MACD-/ROC-Normierung braucht und das bei 100.000
+    Backtest-Kerzen sonst zu langsam waere."""
+    n = len(values)
+    mins = [None] * n
+    maxs = [None] * n
+    min_dq = deque()
+    max_dq = deque()
+    for i in range(n):
+        v = values[i]
+        while min_dq and values[min_dq[-1]] >= v:
+            min_dq.pop()
+        min_dq.append(i)
+        while max_dq and values[max_dq[-1]] <= v:
+            max_dq.pop()
+        max_dq.append(i)
+        while min_dq[0] <= i - window:
+            min_dq.popleft()
+        while max_dq[0] <= i - window:
+            max_dq.popleft()
+        mins[i] = values[min_dq[0]]
+        maxs[i] = values[max_dq[0]]
+    return mins, maxs
+
+
+def _sma_series(values, length):
+    n = len(values)
+    out = [0.0] * n
+    for i in range(n):
+        start = max(0, i - length + 1)
+        window = values[start:i + 1]
+        out[i] = sum(window) / len(window)
+    return out
 
-    ts, o, h, l, c, v = candles
-    mo7 = compute_mo7_series(h, l, c, v, cfg)
-    warmup = 505
-
-    sum_lows = sorted(set(round(sum_low_min + i * sum_low_step, 1)
-                           for i in range(int((sum_low_max - sum_low_min) / max(sum_low_step, 1e-9)) + 1)
-                           if sum_low_min + i * sum_low_step <= sum_low_max + 1e-9))
-    sum_highs = sorted(set(round(sum_high_min + i * sum_high_step, 1)
-                            for i in range(int((sum_high_max - sum_high_min) / max(sum_high_step, 1e-9)) + 1)
-                            if sum_high_min + i * sum_high_step <= sum_high_max + 1e-9))
-    sum_lows = [x for x in sum_lows if x > 0]
-    sum_highs = [x for x in sum_highs if x > 0]
-
-    total_combos = len(sum_lows) * len(sum_highs)
-    if total_combos == 0:
-        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
-    if total_combos > MO7_SUM_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {MO7_SUM_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
-
-    results = []
-    for sum_low in sum_lows:
-        for sum_high in sum_highs:
-            cfg_copy = dict(cfg)
-            cfg_copy["mo7_entry_mode"] = "five_candle_sum"
-            cfg_copy["mo7_sum_low"] = sum_low
-            cfg_copy["mo7_sum_high"] = sum_high
-            bull, bear = compute_mo7_signals(mo7, cfg_copy)
-            trades = _simulate_mo7_trades(candles, mo7, cfg_copy, bull, bear, warmup)
-            stats = summarize_backtest_trades(trades, exclude_top_n)
-            results.append({"mo7_sum_low": sum_low, "mo7_sum_high": sum_high, **stats})
-
-    best_sorted = sorted(results, key=lambda r: (r["trades"] >= MO7_SUM_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-
-    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": len(c),
-        "min_reliable_trades": MO7_SUM_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": total_combos,
-        "results": best_sorted[:30],
-        "worst_results": worst_sorted[:20],
-    }
-
-
-def _uh_bt_set_sl(position, cfg, margin, leverage):
-    """Backtest-Pendant zu _uh_set_sl - setzt sl_price auf der Position (fester $-Betrag)."""
-    if not cfg.get("utb_sl_enabled", False):
-        position["sl_price"] = None
-        return
-    size = position["size"]
-    if size <= 0:
-        position["sl_price"] = None
-        return
-    dist_sl = cfg.get("utb_sl_manual_usd", 5.0) / size
-    entry = position["entry"]
-    position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
-
-
-def _uh_bt_set_tp(position, cfg):
-    """Backtest-Pendant zu _uh_set_tp - setzt tp_price auf der Position (fester $-Betrag) und
-    setzt den Trailing-TP-Zustand zurueck."""
-    if not cfg.get("utb_tp_enabled", False):
-        position["tp_price"] = None
-    else:
-        size = position["size"]
-        if size <= 0:
-            position["tp_price"] = None
-        else:
-            dist_tp = cfg.get("utb_tp_manual_usd", 10.0) / size
-            entry = position["entry"]
-            position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
-    position["trail_active"] = False
-    position["trail_best_price"] = position["entry"]
-    position["trail_tp_price"] = None
-
-
-def _uh_bt_apply_trail_tp(position, cfg, bar_high, bar_low):
-    """Backtest-Pendant zu _uh_apply_trail_tp - nutzt das Hoch/Tief der Kerze (wie bei Pieki
-    Algos apply_trailing) als bestmoeglich erreichten Preis innerhalb der Kerze, statt nur
-    des Schlusskurses."""
-    if not cfg.get("utb_trail_tp_enabled", False):
-        return
-    direction = position["dir"]
-    entry_price = position["entry"]
-    extreme = bar_high if direction == "long" else bar_low
-    best = position.get("trail_best_price")
-    best = extreme if best is None else (max(best, extreme) if direction == "long" else min(best, extreme))
-    position["trail_best_price"] = best
-
-    activation_pct = cfg.get("utb_trail_tp_activation_pct", 0.5)
-    step_pct = cfg.get("utb_trail_tp_step_pct", 0.3)
-    profit_pct = ((best - entry_price) / entry_price * 100) if direction == "long" else ((entry_price - best) / entry_price * 100)
-
-    if not position.get("trail_active") and profit_pct >= activation_pct:
-        position["trail_active"] = True
-
-    if position.get("trail_active"):
-        trail_price = best * (1 - step_pct / 100) if direction == "long" else best * (1 + step_pct / 100)
-        current = position.get("trail_tp_price")
-        if direction == "long":
-            position["trail_tp_price"] = trail_price if current is None else max(current, trail_price)
-        else:
-            position["trail_tp_price"] = trail_price if current is None else min(current, trail_price)
-
-
-def _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct=None, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
-    """Immer-im-Markt-Simulation fuer UT Bot + Hull Flip (Flip statt Exit), optional mit festem
-    SL (fester $-Betrag) - bei SL-Treffer geht die Position glatt und wartet (nach Cooldown) auf
-    das naechste gueltige Ersteinstiegs-Signal, statt direkt zu drehen. Siehe check_uh_signal/
-    check_uh_sl fuer die identische Logik im Live-Betrieb. Optionaler MTF-Trend%-Filter,
-    optionaler Z-Score-Filter, optionaler RSI-Regime-Filter und optionaler ADX/DI-Trendfilter
-    gelten fuer JEDEN Einstieg, auch beim Flip - alle unabhaengig voneinander kombinierbar."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    direction_mode = cfg.get("utb_direction_mode", "both")
-    signal_only = cfg.get("utb_flip_trigger", "hull_color") == "signal_only"
-    sl_cooldown_ms = cfg.get("utb_sl_cooldown_seconds", 30) * 1000
-    mtf_enabled = cfg.get("utb_mtf_filter_enabled", False)
-    long_thr = cfg.get("utb_mtf_long_threshold", 0.5)
-    short_thr = cfg.get("utb_mtf_short_threshold", -0.5)
-    zscore_enabled = cfg.get("utb_zscore_filter_enabled", False)
-    rsi_enabled = cfg.get("utb_rsi_filter_enabled", False)
-    rsi_midline = cfg.get("utb_rsi_midline", 50)
-    adx_enabled = cfg.get("utb_adx_filter_enabled", False)
-    adx_threshold = cfg.get("utb_adx_threshold", 20)
-
-    def adx_long_ok(i):
-        return not adx_enabled or adx is None or (adx[i] > adx_threshold and plus_di[i] > minus_di[i])
-
-    def adx_short_ok(i):
-        return not adx_enabled or adx is None or (adx[i] > adx_threshold and minus_di[i] > plus_di[i])
-
-    def long_ok(i):
-        return (direction_mode != "short_only"
-                and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr)
-                and (not zscore_enabled or zscore is None or zscore[i] > 0)
-                and (not rsi_enabled or rsi is None or rsi[i] > rsi_midline)
-                and adx_long_ok(i))
-
-    def short_ok(i):
-        return (direction_mode != "long_only"
-                and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr)
-                and (not zscore_enabled or zscore is None or zscore[i] < 0)
-                and (not rsi_enabled or rsi is None or rsi[i] < rsi_midline)
-                and adx_short_ok(i))
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-
-        if position is not None:
-            _uh_bt_apply_trail_tp(position, cfg, h[i], l[i])
-            sl_price = position.get("sl_price")
-            tp_price = position.get("tp_price")
-            trail_tp_price = position.get("trail_tp_price")
-            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
-            hit_trail_tp = position.get("trail_active") and trail_tp_price is not None and \
-                ((position["dir"] == "long" and l[i] <= trail_tp_price) or (position["dir"] == "short" and h[i] >= trail_tp_price))
-            if hit_sl:
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-            elif hit_trail_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], trail_tp_price, position["size"], i, position["entry_i"], "TRAIL-TP", ts=ts)
-                position = None
-
-        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-
-        if position is None:
-            if in_sl_cooldown:
-                continue
-            if signal_only:
-                if buy[i] and long_ok(i):
-                    size = (margin * leverage) / price
-                    position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                    _uh_bt_set_sl(position, cfg, margin, leverage)
-                    _uh_bt_set_tp(position, cfg)
-                elif sell[i] and short_ok(i):
-                    size = (margin * leverage) / price
-                    position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
-                    _uh_bt_set_sl(position, cfg, margin, leverage)
-                    _uh_bt_set_tp(position, cfg)
-                continue
-            if hull_green[i] is None:
-                continue
-            if buy[i] and hull_green[i] and long_ok(i):
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                _uh_bt_set_sl(position, cfg, margin, leverage)
-                _uh_bt_set_tp(position, cfg)
-            elif sell[i] and not hull_green[i] and short_ok(i):
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
-                _uh_bt_set_sl(position, cfg, margin, leverage)
-                _uh_bt_set_tp(position, cfg)
-            continue
-
-        if position["dir"] == "long" and short_flip[i]:
-            can_flip = direction_mode != "long_only" and short_ok(i)
-            if can_flip:
-                reason = "UTB-HULL-FLIP"
-            elif direction_mode == "long_only":
-                reason = "UTB-HULL-EXIT-DIR"
-            elif mtf_enabled and not (trend_pct is None or trend_pct[i] < short_thr):
-                reason = "UTB-HULL-EXIT-MTF"
-            elif zscore_enabled and not (zscore is None or zscore[i] < 0):
-                reason = "UTB-HULL-EXIT-ZSCORE"
-            elif rsi_enabled and not (rsi is None or rsi[i] < rsi_midline):
-                reason = "UTB-HULL-EXIT-RSI"
-            else:
-                reason = "UTB-HULL-EXIT-ADX"
-            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if not can_flip:
-                position = None
-            else:
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
-                _uh_bt_set_sl(position, cfg, margin, leverage)
-                _uh_bt_set_tp(position, cfg)
-        elif position["dir"] == "short" and long_flip[i]:
-            can_flip = direction_mode != "short_only" and long_ok(i)
-            if can_flip:
-                reason = "UTB-HULL-FLIP"
-            elif direction_mode == "short_only":
-                reason = "UTB-HULL-EXIT-DIR"
-            elif mtf_enabled and not (trend_pct is None or trend_pct[i] > long_thr):
-                reason = "UTB-HULL-EXIT-MTF"
-            elif zscore_enabled and not (zscore is None or zscore[i] > 0):
-                reason = "UTB-HULL-EXIT-ZSCORE"
-            elif rsi_enabled and not (rsi is None or rsi[i] > rsi_midline):
-                reason = "UTB-HULL-EXIT-RSI"
-            else:
-                reason = "UTB-HULL-EXIT-ADX"
-            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if not can_flip:
-                position = None
-            else:
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                _uh_bt_set_sl(position, cfg, margin, leverage)
-                _uh_bt_set_tp(position, cfg)
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_ut_bot_hull(candles, cfg):
-    ts, o, h, l, c = candles
-    atr_period = cfg.get("utb_atr_period", 1)
-    sensitivity = cfg.get("utb_sensitivity", 1.0)
-    use_ha = cfg.get("utb_heikin_ashi", False)
-    hull_period = cfg.get("utb_hull_period", 31)
-    buy, sell, stop_line = compute_ut_bot(o, h, l, c, atr_period, sensitivity, use_ha)
-    hma = compute_hull_ma(c, hull_period)
-    hull_green = [None] * len(c)
-    for i in range(1, len(c)):
-        if hma[i] is not None and hma[i - 1] is not None:
-            hull_green[i] = hma[i] > hma[i - 1]
-    long_flip, short_flip = compute_ut_hull_flip_signals(buy, sell, hull_green, cfg)
-    trend_pct = cfg.get("_utb_trend_pct_precomputed")  # von run_backtest vorab async berechnet
-    # (siehe _pk_build_mtf_trend_pct) - diese Funktion selbst ist NICHT async (einheitliche
-    # BACKTEST_FUNCS-Signatur (candles, cfg))
-    if trend_pct is None and cfg.get("utb_mtf_filter_enabled", False):
-        mtf_fast = cfg.get("utb_mtf_fast_len", 5)
-        mtf_slow = cfg.get("utb_mtf_slow_len", 9)
-        mtf_atr = cfg.get("utb_mtf_atr_len", 14)
-        trend_pct = compute_pk_trend_percent(h, l, c, mtf_fast, mtf_slow, mtf_atr)
-    zscore = cfg.get("_utb_zscore_precomputed")
-    if zscore is None and cfg.get("utb_zscore_filter_enabled", False):
-        zscore = compute_rolling_zscore(c, cfg.get("utb_zscore_lookback", 20), cfg.get("utb_zscore_smooth", 3))
-    rsi = None
-    if cfg.get("utb_rsi_filter_enabled", False):
-        rsi = compute_rsi(c, cfg.get("utb_rsi_length", 14))
-    adx = plus_di = minus_di = None
-    if cfg.get("utb_adx_filter_enabled", False):
-        adx, plus_di, minus_di = compute_adx(h, l, c, cfg.get("utb_adx_length", 14))
-    warmup = max(atr_period, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 2
-    return _simulate_uh_trades(candles, cfg, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct, zscore=zscore, rsi=rsi, adx=adx, plus_di=plus_di, minus_di=minus_di)
-
-
-UTB_SWEEP_MAX_COMBOS = 2000
-UTB_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
-async def run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
-                               sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n=1,
-                               long_threshold_min=None, long_threshold_max=None, long_threshold_step=0.5,
-                               short_threshold_min=None, short_threshold_max=None, short_threshold_step=0.5):
-    """'Monte-Carlo'-Parametersweep fuer UT Bot + Hull Flip: testet einen Bereich von ATR-Periode
-    und Sensitivity (die beiden Parameter, die im Original-Pine-Script beide irrefuehrend
-    'Period' heissen) gegeneinander - optional zusaetzlich noch die MTF-Trend%-Long-/Short-
-    Schwelle (nur wirksam, wenn utb_mtf_filter_enabled an ist; Min==Max bedeutet einfach 1
-    fester Wert, keine zusaetzlichen Kombinationen - das ist auch der Default, wenn die
-    Schwellen-Parameter weggelassen werden). Die Hull-MA UND der optionale MTF-Trend%-Filter
-    werden nur EINMAL berechnet (unabhaengig von allen gesweepten Parametern) und fuer alle
-    Kombinationen wiederverwendet."""
-    max_candles = BACKTEST_MAX_CANDLES["ut_bot_hull"]
-    resolution = cfg.get("utb_resolution", "5m")
-    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    if not candles or len(candles[4]) < 150:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-
-    atr_periods = sorted(set(int(round(atr_period_min + i * atr_period_step))
-                              for i in range(int((atr_period_max - atr_period_min) / max(atr_period_step, 1e-9)) + 1)
-                              if atr_period_min + i * atr_period_step <= atr_period_max + 1e-9))
-    sensitivities = sorted(set(round(sensitivity_min + i * sensitivity_step, 4)
-                                for i in range(int((sensitivity_max - sensitivity_min) / max(sensitivity_step, 1e-9)) + 1)
-                                if sensitivity_min + i * sensitivity_step <= sensitivity_max + 1e-9))
-    atr_periods = [a for a in atr_periods if a >= 1]
-    sensitivities = [s for s in sensitivities if s > 0]
-
-    if long_threshold_min is None:
-        long_threshold_min = cfg.get("utb_mtf_long_threshold", 0.5)
-    if long_threshold_max is None:
-        long_threshold_max = long_threshold_min
-    if short_threshold_min is None:
-        short_threshold_min = cfg.get("utb_mtf_short_threshold", -0.5)
-    if short_threshold_max is None:
-        short_threshold_max = short_threshold_min
-    long_thresholds = sorted(set(round(long_threshold_min + i * long_threshold_step, 4)
-                                  for i in range(int((long_threshold_max - long_threshold_min) / max(long_threshold_step, 1e-9)) + 1)
-                                  if long_threshold_min + i * long_threshold_step <= long_threshold_max + 1e-9))
-    short_thresholds = sorted(set(round(short_threshold_min + i * short_threshold_step, 4)
-                                   for i in range(int((short_threshold_max - short_threshold_min) / max(short_threshold_step, 1e-9)) + 1)
-                                   if short_threshold_min + i * short_threshold_step <= short_threshold_max + 1e-9))
-    if not long_thresholds:
-        long_thresholds = [long_threshold_min]
-    if not short_thresholds:
-        short_thresholds = [short_threshold_min]
-
-    total_combos = len(atr_periods) * len(sensitivities) * len(long_thresholds) * len(short_thresholds)
-    if total_combos == 0:
-        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
-    if total_combos > UTB_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {UTB_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
-
-    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
-    hull_period = cfg.get("utb_hull_period", 31)
-    hma = compute_hull_ma(c, hull_period)
-    hull_green = [None] * len(c)
-    for i in range(1, len(c)):
-        if hma[i] is not None and hma[i - 1] is not None:
-            hull_green[i] = hma[i] > hma[i - 1]
-
-    trend_pct = None
-    if cfg.get("utb_mtf_filter_enabled", False):
-        trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], h, l, c, resolution, prefix="utb")
-        if mtf_err:
-            return {"error": mtf_err}
-
-    results = []
-    for atr_p in atr_periods:
-        for sens in sensitivities:
-            buy, sell, stop_line = compute_ut_bot(o, h, l, c, atr_p, sens, cfg.get("utb_heikin_ashi", False))
-            long_flip, short_flip = compute_ut_hull_flip_signals(buy, sell, hull_green, cfg)
-            warmup = max(atr_p, hull_period + round(math.sqrt(hull_period)) + 2, 5) + 2
-            for long_thr in long_thresholds:
-                for short_thr in short_thresholds:
-                    cfg_combo = dict(cfg)
-                    cfg_combo["utb_mtf_long_threshold"] = long_thr
-                    cfg_combo["utb_mtf_short_threshold"] = short_thr
-                    trades = _simulate_uh_trades(candles, cfg_combo, buy, sell, long_flip, short_flip, hull_green, warmup, trend_pct)
-                    stats = summarize_backtest_trades(trades, exclude_top_n)
-                    results.append({"utb_atr_period": atr_p, "utb_sensitivity": sens,
-                                     "utb_mtf_long_threshold": long_thr, "utb_mtf_short_threshold": short_thr, **stats})
-
-    best_sorted = sorted(results, key=lambda r: (r["trades"] >= UTB_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-
-    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": len(c),
-        "min_reliable_trades": UTB_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": total_combos,
-        "results": best_sorted[:30],
-        "worst_results": worst_sorted[:20],
-    }
-
-
-def _simulate_wtc_trades(candles, cfg, bull, bear, warmup):
-    """Backtest-Pendant zu check_wtc_signal/check_wtc_sl_tp - beide Betriebsarten
-    (wtc_always_in_market An/Aus) identisch nachgebildet."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    direction_mode = cfg.get("wtc_direction_mode", "both")
-    always_in_market = cfg.get("wtc_always_in_market", False)
-    flip_exit_enabled = cfg.get("wtc_flip_exit_enabled", True)
-    sl_enabled = cfg.get("wtc_sl_enabled", True)
-    tp_enabled = cfg.get("wtc_tp_enabled", True)
-    sl_manual_usd = cfg.get("wtc_sl_manual_usd", 5.0)
-    tp_manual_usd = cfg.get("wtc_tp_manual_usd", 5.0)
-    sl_cooldown_ms = cfg.get("wtc_sl_cooldown_seconds", 30) * 1000
-
-    def make_position(direction, price, i):
-        size = (margin * leverage) / price
-        pos = {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
-        if sl_enabled and size > 0:
-            dist_sl = sl_manual_usd / size
-            pos["sl_price"] = price - dist_sl if direction == "long" else price + dist_sl
-        if tp_enabled and size > 0:
-            dist_tp = tp_manual_usd / size
-            pos["tp_price"] = price + dist_tp if direction == "long" else price - dist_tp
-        return pos
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-        buy_i, sell_i = bull[i], bear[i]
-        if direction_mode == "long_only":
-            sell_i = False
-        elif direction_mode == "short_only":
-            buy_i = False
-
-        if position is not None:
-            sl_price = position.get("sl_price")
-            tp_price = position.get("tp_price")
-            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
-            if hit_sl:
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-
-        if position is not None:
-            if always_in_market:
-                if position["dir"] == "long" and sell_i:
-                    _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "WTC-FLIP", ts=ts)
-                    position = make_position("short", price, i)
-                elif position["dir"] == "short" and buy_i:
-                    _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "WTC-FLIP", ts=ts)
-                    position = make_position("long", price, i)
-            elif flip_exit_enabled:
-                if (position["dir"] == "long" and sell_i) or (position["dir"] == "short" and buy_i):
-                    _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "WTC-FLIP-EXIT", ts=ts)
-                    position = None
-
-        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-        if position is None and not in_sl_cooldown and (buy_i or sell_i):
-            direction = "long" if buy_i else "short"
-            position = make_position(direction, price, i)
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_wavetrend_cross(candles, cfg):
-    ts, o, h, l, c = candles
-    bull, bear, wt1, wt2 = compute_wtc_signals(h, l, c, cfg)
-    chlen = cfg.get("wtc_channel_len", 9)
-    avg = cfg.get("wtc_average_len", 12)
-    warmup = max(chlen, avg, 20) + 10
-    return _simulate_wtc_trades(candles, cfg, bull, bear, warmup)
-
-
-def _fr_bt_set_sl(position, cfg, margin, leverage):
-    """Backtest-Pendant zu _fr_set_sl - setzt sl_price auf der Position (fester $-Betrag)."""
-    if not cfg.get("fr_sl_enabled", False):
-        position["sl_price"] = None
-        return
-    size = position["size"]
-    if size <= 0:
-        position["sl_price"] = None
-        return
-    dist_sl = cfg.get("fr_sl_manual_usd", 5.0) / size
-    entry = position["entry"]
-    position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
-
-
-def _fr_bt_set_tp(position, cfg):
-    """Backtest-Pendant zu _fr_set_tp - setzt tp_price auf der Position (fester $-Betrag)."""
-    if not cfg.get("fr_tp_enabled", False):
-        position["tp_price"] = None
-        return
-    size = position["size"]
-    if size <= 0:
-        position["tp_price"] = None
-        return
-    dist_tp = cfg.get("fr_tp_manual_usd", 10.0) / size
-    entry = position["entry"]
-    position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
-
-
-def _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore=None, adx=None, plus_di=None, minus_di=None, trend_pct=None, aso_long_ok=None, aso_short_ok=None):
-    """Backtest-Pendant zu check_fr_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
-    mit Z-Score-Filter, optionalem ADX/DI-Trendfilter, optionalem MTF-Trend%-Filter (alle
-    unabhaengig kombinierbar) und optionalem festem SL/TP (siehe _fr_bt_set_sl/_fr_bt_set_tp -
-    durchbricht 'immer im Markt' NUR in diesen Faellen, Position geht dann glatt; SL zusaetzlich
-    mit Cooldown). Tief-Fraktal = Kauf, Hoch-Fraktal = Verkauf. fr_flatten_on_block_enabled=False
-    (siehe check_fr_signal): ein von Richtung/Filter blockierter Flip wird komplett ignoriert,
-    die Position bleibt einfach offen (nur SL/TP/END-OF-BACKTEST koennen sie noch beenden)."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    direction_mode = cfg.get("fr_direction_mode", "both")
-    flatten_on_block = cfg.get("fr_flatten_on_block_enabled", True)
-    zscore_enabled = cfg.get("fr_zscore_filter_enabled", False)
-    sl_cooldown_ms = cfg.get("fr_sl_cooldown_seconds", 30) * 1000
-    adx_enabled = cfg.get("fr_adx_filter_enabled", False)
-    adx_threshold = cfg.get("fr_adx_threshold", 20)
-    adx_invert = cfg.get("fr_adx_invert_enabled", False)
-    mtf_enabled = cfg.get("fr_mtf_filter_enabled", False)
-    long_thr = cfg.get("fr_mtf_long_threshold", 0.5)
-    short_thr = cfg.get("fr_mtf_short_threshold", -0.5)
-
-    def adx_long_ok(i):
-        if not adx_enabled or adx is None:
-            return True
-        di_ok = (minus_di[i] > plus_di[i]) if adx_invert else (plus_di[i] > minus_di[i])
-        return adx[i] > adx_threshold and di_ok
-
-    def adx_short_ok(i):
-        if not adx_enabled or adx is None:
-            return True
-        di_ok = (plus_di[i] > minus_di[i]) if adx_invert else (minus_di[i] > plus_di[i])
-        return adx[i] > adx_threshold and di_ok
-
-    def long_ok(i):
-        return (direction_mode != "short_only"
-                and (not zscore_enabled or zscore is None or zscore[i] > 0)
-                and adx_long_ok(i)
-                and (not mtf_enabled or trend_pct is None or trend_pct[i] > long_thr)
-                and (aso_long_ok is None or aso_long_ok[i]))
-
-    def short_ok(i):
-        return (direction_mode != "long_only"
-                and (not zscore_enabled or zscore is None or zscore[i] < 0)
-                and adx_short_ok(i)
-                and (not mtf_enabled or trend_pct is None or trend_pct[i] < short_thr)
-                and (aso_short_ok is None or aso_short_ok[i]))
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-    dca_enabled = cfg.get("fr_dca_enabled", False)
-    dca_max_entries = cfg.get("fr_dca_max_entries", 3)
-    dca_step_usd = cfg.get("fr_dca_step_usd", 250.0)
-
-    for i in range(warmup, n):
-        price = c[i]
-        buy_i = down_fractal[i]
-        sell_i = up_fractal[i]
-
-        if position is not None:
-            sl_price = position.get("sl_price")
-            tp_price = position.get("tp_price")
-            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
-            if hit_sl:
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-
-        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-
-        if position is None:
-            if in_sl_cooldown:
-                continue
-            if buy_i and long_ok(i):
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "entries": 1}
-                _fr_bt_set_sl(position, cfg, margin, leverage)
-                _fr_bt_set_tp(position, cfg)
-            elif sell_i and short_ok(i):
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "entries": 1}
-                _fr_bt_set_sl(position, cfg, margin, leverage)
-                _fr_bt_set_tp(position, cfg)
-            continue
-
-        # Nachkauf/DCA: dasselbe Signal wie der Ersteinstieg feuert WAEHREND die Position noch
-        # offen ist erneut in derselben Richtung - siehe check_fr_signal fuer die identische
-        # Logik im Live-Betrieb. Zusaetzlich erst ab einem Mindest-$-Abstand zum aktuellen
-        # Durchschnittspreis (dca_step_usd, wie ein Grid-Abstand) - verhindert mehrere
-        # Nachkauf-Stufen auf fast demselben Kursniveau. Durchschnittspreis wird neu gewichtet,
-        # SL/TP werden danach auf Basis des neuen Durchschnitts neu gesetzt.
-        if position["dir"] == "long" and buy_i and dca_enabled and long_ok(i) and position["entries"] < 1 + dca_max_entries and (dca_step_usd <= 0 or (position["entry"] - price) >= dca_step_usd):
-            add_size = (margin * leverage) / price
-            total_value = position["entry"] * position["size"] + price * add_size
-            position["size"] += add_size
-            position["entry"] = total_value / position["size"]
-            position["entries"] += 1
-            _fr_bt_set_sl(position, cfg, margin, leverage)
-            _fr_bt_set_tp(position, cfg)
-            continue
-        if position["dir"] == "short" and sell_i and dca_enabled and short_ok(i) and position["entries"] < 1 + dca_max_entries and (dca_step_usd <= 0 or (price - position["entry"]) >= dca_step_usd):
-            add_size = (margin * leverage) / price
-            total_value = position["entry"] * position["size"] + price * add_size
-            position["size"] += add_size
-            position["entry"] = total_value / position["size"]
-            position["entries"] += 1
-            _fr_bt_set_sl(position, cfg, margin, leverage)
-            _fr_bt_set_tp(position, cfg)
-            continue
-
-        if position["dir"] == "long" and sell_i:
-            if dca_enabled:
-                continue  # siehe check_fr_signal: solange DCA aktiv ist, kein Flip/Exit ueber Gegen-Signale
-            can_flip = direction_mode != "long_only" and short_ok(i)
-            if can_flip:
-                reason = "FR-FLIP"
-            elif direction_mode == "long_only":
-                reason = "FR-EXIT-DIR"
-            elif zscore_enabled and not (zscore is None or zscore[i] < 0):
-                reason = "FR-EXIT-ZSCORE"
-            elif adx_enabled and not adx_short_ok(i):
-                reason = "FR-EXIT-ADX"
-            elif aso_short_ok is not None and not aso_short_ok[i]:
-                reason = "FR-EXIT-ASO"
-            else:
-                reason = "FR-EXIT-MTF"
-            if not can_flip and not flatten_on_block:
-                continue  # Signal ignorieren, Position bleibt unangetastet offen
-            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if not can_flip:
-                position = None
-            else:
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "entries": 1}
-                _fr_bt_set_sl(position, cfg, margin, leverage)
-                _fr_bt_set_tp(position, cfg)
-        elif position["dir"] == "short" and buy_i:
-            if dca_enabled:
-                continue  # siehe check_fr_signal: solange DCA aktiv ist, kein Flip/Exit ueber Gegen-Signale
-            can_flip = direction_mode != "short_only" and long_ok(i)
-            if can_flip:
-                reason = "FR-FLIP"
-            elif direction_mode == "short_only":
-                reason = "FR-EXIT-DIR"
-            elif zscore_enabled and not (zscore is None or zscore[i] > 0):
-                reason = "FR-EXIT-ZSCORE"
-            elif adx_enabled and not adx_long_ok(i):
-                reason = "FR-EXIT-ADX"
-            elif aso_long_ok is not None and not aso_long_ok[i]:
-                reason = "FR-EXIT-ASO"
-            else:
-                reason = "FR-EXIT-MTF"
-            if not can_flip and not flatten_on_block:
-                continue  # Signal ignorieren, Position bleibt unangetastet offen
-            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if not can_flip:
-                position = None
-            else:
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "entries": 1}
-                _fr_bt_set_sl(position, cfg, margin, leverage)
-                _fr_bt_set_tp(position, cfg)
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_fractals_flip(candles, cfg):
-    ts, o, h, l, c = candles
-    n_periods = cfg.get("fr_periods", 2)
-    up_fractal, down_fractal = compute_fractals(h, l, n_periods)
-    if cfg.get("fr_invert_direction", False):
-        up_fractal, down_fractal = down_fractal, up_fractal
-    zscore = cfg.get("_fr_zscore_precomputed")  # von run_backtest vorab async berechnet, falls
-    # eine abweichende Zeiteinheit gewaehlt ist (siehe _build_zscore_series_for_backtest) - diese
-    # Funktion selbst ist NICHT async (einheitliche BACKTEST_FUNCS-Signatur (candles, cfg))
-    if zscore is None and cfg.get("fr_zscore_filter_enabled", False):
-        zscore = compute_rolling_zscore(c, cfg.get("fr_zscore_lookback", 20), cfg.get("fr_zscore_smooth", 3))
-    adx, plus_di, minus_di = cfg.get("_fr_adx_precomputed", (None, None, None))  # siehe _build_adx_series_for_backtest
-    if adx is None and cfg.get("fr_adx_filter_enabled", False):
-        adx, plus_di, minus_di = compute_adx(h, l, c, cfg.get("fr_adx_length", 14))
-    trend_pct = cfg.get("_fr_trend_pct_precomputed")  # von run_backtest vorab async berechnet, siehe _pk_build_mtf_trend_pct
-    aso_long_ok = aso_short_ok = None
-    if cfg.get("fr_aso_filter_enabled", False):
-        aso_long_ok, aso_short_ok = compute_aso_filter(
-            o, h, l, c, cfg.get("fr_aso_filter_length", 10), cfg.get("fr_aso_filter_mode", 0),
-            cfg.get("fr_aso_filter_confirm_bars", 1))
-    warmup = 2 * n_periods + 5
-    return _simulate_fr_trades(candles, cfg, up_fractal, down_fractal, warmup, zscore, adx=adx, plus_di=plus_di, minus_di=minus_di, trend_pct=trend_pct, aso_long_ok=aso_long_ok, aso_short_ok=aso_short_ok)
-
-
-def _cd_bt_set_sl(position, cfg, margin, leverage):
-    """Backtest-Pendant zu _cd_set_sl - setzt sl_price auf der Position (fester $-Betrag)."""
-    if not cfg.get("cd_sl_enabled", False):
-        position["sl_price"] = None
-        return
-    size = position["size"]
-    if size <= 0:
-        position["sl_price"] = None
-        return
-    dist_sl = cfg.get("cd_sl_manual_usd", 5.0) / size
-    entry = position["entry"]
-    position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
-
-
-def _cd_bt_set_tp(position, cfg, margin, leverage):
-    """Backtest-Pendant zu _cd_set_tp - setzt tp_price auf der Position (fester $-Betrag)."""
-    if not cfg.get("cd_tp_enabled", False):
-        position["tp_price"] = None
-        return
-    size = position["size"]
-    if size <= 0:
-        position["tp_price"] = None
-        return
-    dist_tp = cfg.get("cd_tp_manual_usd", 10.0) / size
-    entry = position["entry"]
-    position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
-
-
-def _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
-    """Backtest-Pendant zu check_cd_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
-    mit Z-Score-Filter (siehe compute_rolling_zscore), optionalem RSI-Regime-Filter (RSI ueber
-    Mittellinie -> nur Long, darunter -> nur Short), optionalem ADX/DI-Trendfilter (ADX ueber
-    Schwelle UND +DI>-DI -> nur Long, ADX ueber Schwelle UND -DI>+DI -> nur Short) und optionalem
-    festem SL (siehe _cd_bt_set_sl). Alle drei Filter sind unabhaengig kombinierbar."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    direction_mode = cfg.get("cd_direction_mode", "both")
-    zscore_enabled = cfg.get("cd_zscore_filter_enabled", False)
-    rsi_enabled = cfg.get("cd_rsi_filter_enabled", False)
-    rsi_midline = cfg.get("cd_rsi_midline", 50)
-    adx_enabled = cfg.get("cd_adx_filter_enabled", False)
-    adx_threshold = cfg.get("cd_adx_threshold", 20)
-    sl_cooldown_ms = cfg.get("cd_sl_cooldown_seconds", 30) * 1000
-
-    def adx_long_ok(i):
-        return not adx_enabled or adx is None or (adx[i] > adx_threshold and plus_di[i] > minus_di[i])
-
-    def adx_short_ok(i):
-        return not adx_enabled or adx is None or (adx[i] > adx_threshold and minus_di[i] > plus_di[i])
-
-    def long_ok(i):
-        return (direction_mode != "short_only"
-                and (not zscore_enabled or zscore is None or zscore[i] > 0)
-                and (not rsi_enabled or rsi is None or rsi[i] > rsi_midline)
-                and adx_long_ok(i))
-
-    def short_ok(i):
-        return (direction_mode != "long_only"
-                and (not zscore_enabled or zscore is None or zscore[i] < 0)
-                and (not rsi_enabled or rsi is None or rsi[i] < rsi_midline)
-                and adx_short_ok(i))
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-        buy_i = buy_signal[i]
-        sell_i = sell_signal[i]
-
-        if position is not None:
-            sl_price = position.get("sl_price")
-            tp_price = position.get("tp_price")
-            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
-            if hit_sl:
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-
-        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-
-        if position is None:
-            if in_sl_cooldown:
-                continue
-            if buy_i and long_ok(i):
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                _cd_bt_set_sl(position, cfg, margin, leverage)
-                _cd_bt_set_tp(position, cfg, margin, leverage)
-            elif sell_i and short_ok(i):
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
-                _cd_bt_set_sl(position, cfg, margin, leverage)
-                _cd_bt_set_tp(position, cfg, margin, leverage)
-            continue
-
-        if position["dir"] == "long" and sell_i:
-            can_flip = direction_mode != "long_only" and short_ok(i)
-            if can_flip:
-                reason = "CD-FLIP"
-            elif direction_mode == "long_only":
-                reason = "CD-EXIT-DIR"
-            elif rsi_enabled and not (rsi is None or rsi[i] < rsi_midline):
-                reason = "CD-EXIT-RSI"
-            elif adx_enabled and not adx_short_ok(i):
-                reason = "CD-EXIT-ADX"
-            else:
-                reason = "CD-EXIT-ZSCORE"
-            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if not can_flip:
-                position = None
-            else:
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
-                _cd_bt_set_sl(position, cfg, margin, leverage)
-                _cd_bt_set_tp(position, cfg, margin, leverage)
-        elif position["dir"] == "short" and buy_i:
-            can_flip = direction_mode != "short_only" and long_ok(i)
-            if can_flip:
-                reason = "CD-FLIP"
-            elif direction_mode == "short_only":
-                reason = "CD-EXIT-DIR"
-            elif rsi_enabled and not (rsi is None or rsi[i] > rsi_midline):
-                reason = "CD-EXIT-RSI"
-            elif adx_enabled and not adx_long_ok(i):
-                reason = "CD-EXIT-ADX"
-            else:
-                reason = "CD-EXIT-ZSCORE"
-            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if not can_flip:
-                position = None
-            else:
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                _cd_bt_set_sl(position, cfg, margin, leverage)
-                _cd_bt_set_tp(position, cfg, margin, leverage)
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_candle_dna(candles, cfg):
-    ts, o, h, l, c = candles
-    threshold = cfg.get("cd_threshold", 50)
-    rejection_mult = cfg.get("cd_rejection_mult", 1.5)
-    if cfg.get("cd_use_heikin_ashi", False):
-        sig_o, sig_h, sig_l, sig_c = compute_heikin_ashi(o, h, l, c)
-    else:
-        sig_o, sig_h, sig_l, sig_c = o, h, l, c
-    buy_signal, sell_signal, score = compute_cd_signals(sig_o, sig_h, sig_l, sig_c, rejection_mult, threshold)
-    if cfg.get("cd_invert_direction", False):
-        buy_signal, sell_signal = sell_signal, buy_signal
-    zscore = cfg.get("_cd_zscore_precomputed")
-    if zscore is None and cfg.get("cd_zscore_filter_enabled", False):
-        zscore = compute_rolling_zscore(c, cfg.get("cd_zscore_lookback", 20), cfg.get("cd_zscore_smooth", 3))
-    rsi = None
-    if cfg.get("cd_rsi_filter_enabled", False):
-        rsi = compute_rsi(c, cfg.get("cd_rsi_length", 14))
-    adx = plus_di = minus_di = None
-    if cfg.get("cd_adx_filter_enabled", False):
-        adx, plus_di, minus_di = compute_adx(sig_h, sig_l, sig_c, cfg.get("cd_adx_length", 14))
-    return _simulate_cd_trades(candles, cfg, buy_signal, sell_signal, warmup=1, zscore=zscore, rsi=rsi, adx=adx, plus_di=plus_di, minus_di=minus_di)
-
-
-def _rf_bt_set_sl(position, cfg, margin, leverage):
-    """Backtest-Pendant zu _rf_set_sl - setzt sl_price auf der Position (fester $-Betrag)."""
-    if not cfg.get("rf_sl_enabled", False):
-        position["sl_price"] = None
-        return
-    size = position["size"]
-    if size <= 0:
-        position["sl_price"] = None
-        return
-    dist_sl = cfg.get("rf_sl_manual_usd", 5.0) / size
-    entry = position["entry"]
-    position["sl_price"] = entry - dist_sl if position["dir"] == "long" else entry + dist_sl
-
-
-def _rf_bt_set_tp(position, cfg, margin, leverage):
-    """Backtest-Pendant zu _rf_set_tp - setzt tp_price auf der Position (fester $-Betrag)."""
-    if not cfg.get("rf_tp_enabled", False):
-        position["tp_price"] = None
-        return
-    size = position["size"]
-    if size <= 0:
-        position["tp_price"] = None
-        return
-    dist_tp = cfg.get("rf_tp_manual_usd", 10.0) / size
-    entry = position["entry"]
-    position["tp_price"] = entry + dist_tp if position["dir"] == "long" else entry - dist_tp
-
-
-def _simulate_rf_trades(candles, cfg, long_flip, short_flip, warmup, zscore=None, rsi=None, adx=None, plus_di=None, minus_di=None):
-    """Backtest-Pendant zu check_rf_signal - immer im Markt, reiner Buy/Sell-Wechsel, optional
-    mit Z-Score-Filter, optionalem RSI-Regime-Filter, optionalem ADX/DI-Trendfilter und
-    optionalem festem SL/TP (siehe _rf_bt_set_sl/_rf_bt_set_tp). Alle drei Filter sind
-    unabhaengig kombinierbar - identisches Muster zu _simulate_cd_trades."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    direction_mode = cfg.get("rf_direction_mode", "both")
-    zscore_enabled = cfg.get("rf_zscore_filter_enabled", False)
-    rsi_enabled = cfg.get("rf_rsi_filter_enabled", False)
-    rsi_midline = cfg.get("rf_rsi_midline", 50)
-    adx_enabled = cfg.get("rf_adx_filter_enabled", False)
-    adx_threshold = cfg.get("rf_adx_threshold", 20)
-    sl_cooldown_ms = cfg.get("rf_sl_cooldown_seconds", 30) * 1000
-
-    def adx_long_ok(i):
-        return not adx_enabled or adx is None or (adx[i] > adx_threshold and plus_di[i] > minus_di[i])
-
-    def adx_short_ok(i):
-        return not adx_enabled or adx is None or (adx[i] > adx_threshold and minus_di[i] > plus_di[i])
-
-    def long_ok(i):
-        return (direction_mode != "short_only"
-                and (not zscore_enabled or zscore is None or zscore[i] > 0)
-                and (not rsi_enabled or rsi is None or rsi[i] > rsi_midline)
-                and adx_long_ok(i))
-
-    def short_ok(i):
-        return (direction_mode != "long_only"
-                and (not zscore_enabled or zscore is None or zscore[i] < 0)
-                and (not rsi_enabled or rsi is None or rsi[i] < rsi_midline)
-                and adx_short_ok(i))
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-        long_i = long_flip[i]
-        short_i = short_flip[i]
-
-        if position is not None:
-            sl_price = position.get("sl_price")
-            tp_price = position.get("tp_price")
-            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
-            if hit_sl:
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-
-        in_sl_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-
-        if position is None:
-            if in_sl_cooldown:
-                continue
-            if long_i and long_ok(i):
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                _rf_bt_set_sl(position, cfg, margin, leverage)
-                _rf_bt_set_tp(position, cfg, margin, leverage)
-            elif short_i and short_ok(i):
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
-                _rf_bt_set_sl(position, cfg, margin, leverage)
-                _rf_bt_set_tp(position, cfg, margin, leverage)
-            continue
-
-        if position["dir"] == "long" and short_i:
-            can_flip = direction_mode != "long_only" and short_ok(i)
-            if can_flip:
-                reason = "RF-FLIP"
-            elif direction_mode == "long_only":
-                reason = "RF-EXIT-DIR"
-            elif rsi_enabled and not (rsi is None or rsi[i] < rsi_midline):
-                reason = "RF-EXIT-RSI"
-            elif adx_enabled and not adx_short_ok(i):
-                reason = "RF-EXIT-ADX"
-            else:
-                reason = "RF-EXIT-ZSCORE"
-            _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if not can_flip:
-                position = None
-            else:
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i}
-                _rf_bt_set_sl(position, cfg, margin, leverage)
-                _rf_bt_set_tp(position, cfg, margin, leverage)
-        elif position["dir"] == "short" and long_i:
-            can_flip = direction_mode != "short_only" and long_ok(i)
-            if can_flip:
-                reason = "RF-FLIP"
-            elif direction_mode == "short_only":
-                reason = "RF-EXIT-DIR"
-            elif rsi_enabled and not (rsi is None or rsi[i] > rsi_midline):
-                reason = "RF-EXIT-RSI"
-            elif adx_enabled and not adx_long_ok(i):
-                reason = "RF-EXIT-ADX"
-            else:
-                reason = "RF-EXIT-ZSCORE"
-            _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], reason, ts=ts)
-            if not can_flip:
-                position = None
-            else:
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i}
-                _rf_bt_set_sl(position, cfg, margin, leverage)
-                _rf_bt_set_tp(position, cfg, margin, leverage)
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-def backtest_range_filter(candles, cfg):
-    ts, o, h, l, c = candles
-    period = cfg.get("rf_period", 20)
-    qty = cfg.get("rf_qty", 3.5)
-    long_flip, short_flip = compute_range_filter(c, period, qty)
-    zscore = cfg.get("_rf_zscore_precomputed")
-    if zscore is None and cfg.get("rf_zscore_filter_enabled", False):
-        zscore = compute_rolling_zscore(c, cfg.get("rf_zscore_lookback", 20), cfg.get("rf_zscore_smooth", 3))
-    rsi = None
-    if cfg.get("rf_rsi_filter_enabled", False):
-        rsi = compute_rsi(c, cfg.get("rf_rsi_length", 14))
-    adx = plus_di = minus_di = None
-    if cfg.get("rf_adx_filter_enabled", False):
-        adx, plus_di, minus_di = compute_adx(h, l, c, cfg.get("rf_adx_length", 14))
-    warmup = max(period * 2, 5) + 2
-    return _simulate_rf_trades(candles, cfg, long_flip, short_flip, warmup, zscore=zscore, rsi=rsi, adx=adx, plus_di=plus_di, minus_di=minus_di)
-
-
-RF_SWEEP_MAX_COMBOS = 400
-RF_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
-async def run_rf_param_sweep(symbol, cfg, days, period_min, period_max, period_step,
-                              qty_min, qty_max, qty_step):
-    """'Monte-Carlo'-Parametersweep fuer Range Filter: testet einen Bereich von Swing-Periode
-    (n) und Swing-Multiplikator (qty) gegeneinander - genau die zwei Parameter, die im Original
-    die Bandbreite und damit das Signal bestimmen (siehe compute_range_filter). Identisches
-    Muster zu run_da_param_sweep."""
-    max_candles = BACKTEST_MAX_CANDLES["range_filter"]
-    resolution = cfg.get("rf_resolution", "5m")
-    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    if not candles or len(candles[4]) < 150:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-
-    periods = sorted(set(int(round(period_min + i * period_step))
-                          for i in range(int((period_max - period_min) / max(period_step, 1e-9)) + 1)
-                          if period_min + i * period_step <= period_max + 1e-9))
-    qtys = sorted(set(round(qty_min + i * qty_step, 4)
-                       for i in range(int((qty_max - qty_min) / max(qty_step, 1e-9)) + 1)
-                       if qty_min + i * qty_step <= qty_max + 1e-9))
-    periods = [p for p in periods if p >= 1]
-    qtys = [q for q in qtys if q > 0]
-
-    total_combos = len(periods) * len(qtys)
-    if total_combos == 0:
-        return {"error": "Der eingestellte Bereich ergibt keine gültigen Kombinationen."}
-    if total_combos > RF_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Kombinationen ({total_combos}, Limit {RF_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
-
-    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
-    zscore = None
-    if cfg.get("rf_zscore_filter_enabled", False):
-        zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], c, resolution, "rf")
-        if zs_err:
-            return {"error": zs_err}
-    rsi = compute_rsi(c, cfg.get("rf_rsi_length", 14)) if cfg.get("rf_rsi_filter_enabled", False) else None
-    adx = plus_di = minus_di = None
-    if cfg.get("rf_adx_filter_enabled", False):
-        adx, plus_di, minus_di = compute_adx(h, l, c, cfg.get("rf_adx_length", 14))
-
-    results = []
-    for period in periods:
-        for qty in qtys:
-            long_flip, short_flip = compute_range_filter(c, period, qty)
-            warmup = max(period * 2, 5) + 2
-            trades = _simulate_rf_trades(candles, cfg, long_flip, short_flip, warmup, zscore=zscore, rsi=rsi, adx=adx, plus_di=plus_di, minus_di=minus_di)
-            stats = summarize_backtest_trades(trades)
-            results.append({"rf_period": period, "rf_qty": qty, **stats})
-
-    best_sorted = sorted(results, key=lambda r: (r["trades"] >= RF_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-
-    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": len(candles[4]),
-        "min_reliable_trades": RF_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": total_combos,
-        "results": best_sorted[:30],
-        "worst_results": worst_sorted[:20],
-    }
-
-
-def _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup):
-    """Backtest-Pendant zu check_pk_signal/check_pk_sl_tp - siehe dort fuer die identische Logik
-    im Live-Betrieb. trend_pct wird UNABHAENGIG von Sensitivity berechnet und beim Sweep nur
-    einmal fuer alle Sensitivity-Werte wiederverwendet (wie hull_green beim UT-Bot-Sweep)."""
-    ts, o, h, l, c = candles
-    n = len(c)
-    margin, leverage = cfg["margin"], cfg["leverage"]
-    direction_mode = cfg.get("pk_direction_mode", "both")
-    exit_mode = cfg.get("pk_exit_mode", "flip")
-    mtf_enabled = cfg.get("pk_mtf_filter_enabled", False)
-    long_thr = cfg.get("pk_mtf_long_threshold", 0.5)
-    short_thr = cfg.get("pk_mtf_short_threshold", -0.5)
-    sl_enabled = cfg.get("pk_sl_enabled", True)
-    tp_enabled = cfg.get("pk_tp_enabled", True)
-    sl_usd = cfg.get("pk_sl_manual_usd", 5.0)
-    tp_usd = cfg.get("pk_tp_manual_usd", 10.0)
-    sl_cooldown_ms = cfg.get("pk_sl_cooldown_seconds", 30) * 1000
-    trailing_enabled = cfg.get("pk_trailing_enabled", False)
-    trailing_activation_pct = cfg.get("pk_trailing_activation_pct", 0.2)
-    trailing_step_pct = cfg.get("pk_trailing_step_pct", 0.2)
-
-    def long_ok(tp):
-        return direction_mode != "short_only" and (not mtf_enabled or tp is None or tp > long_thr)
-
-    def short_ok(tp):
-        return direction_mode != "long_only" and (not mtf_enabled or tp is None or tp < short_thr)
-
-    def apply_trailing(position, bar_high, bar_low):
-        """Backtest-Pendant zu _pk_apply_trailing - nutzt das Hoch/Tief der Kerze (statt nur des
-        Schlusskurses) als bestmoeglich erreichten Preis innerhalb der Kerze, wie bei den
-        SL/TP-Treffer-Checks ueberall sonst im Backtest auch."""
-        if not trailing_enabled:
-            return
-        direction = position["dir"]
-        entry = position["entry"]
-        extreme = bar_high if direction == "long" else bar_low
-        best = position.get("trail_best")
-        best = extreme if best is None else (max(best, extreme) if direction == "long" else min(best, extreme))
-        position["trail_best"] = best
-        profit_pct = ((best - entry) / entry * 100) if direction == "long" else ((entry - best) / entry * 100)
-
-        if not position.get("trail_active") and profit_pct >= trailing_activation_pct:
-            position["trail_active"] = True
-            current_sl = position.get("sl_price")
-            if direction == "long":
-                position["sl_price"] = entry if current_sl is None else max(current_sl, entry)
-            else:
-                position["sl_price"] = entry if current_sl is None else min(current_sl, entry)
-
-        if position.get("trail_active"):
-            trail_sl = best * (1 - trailing_step_pct / 100) if direction == "long" else best * (1 + trailing_step_pct / 100)
-            current_sl = position.get("sl_price")
-            if direction == "long":
-                position["sl_price"] = trail_sl if current_sl is None else max(current_sl, trail_sl)
-            else:
-                position["sl_price"] = trail_sl if current_sl is None else min(current_sl, trail_sl)
-
-    position = None
-    trades = []
-    sl_cooldown_until_ts = None
-
-    for i in range(warmup, n):
-        price = c[i]
-        tpct = trend_pct[i]
-
-        if position is not None:
-            # Trailing greift IMMER (wenn aktiviert), unabhaengig vom Exit-Modus - im Modus
-            # "Wechsel" unterbricht ein Trailing-Treffer das "immer im Markt"-Prinzip NUR in
-            # diesem Fall (genau wie der optionale SL bei UT-Bot + Hull das dort auch tut).
-            # Im Modus "fixed_tp_sl" kommt zusaetzlich noch der normale feste SL/TP dazu.
-            apply_trailing(position, h[i], l[i])
-            sl_price = position.get("sl_price")
-            tp_price = position.get("tp_price")
-            hit_sl = sl_price is not None and ((position["dir"] == "long" and l[i] <= sl_price) or (position["dir"] == "short" and h[i] >= sl_price))
-            hit_tp = tp_price is not None and ((position["dir"] == "long" and h[i] >= tp_price) or (position["dir"] == "short" and l[i] <= tp_price))
-            if hit_sl:
-                reason = "TRAIL-SL" if position.get("trail_active") else "SL"
-                _bt_close_trade(trades, position["dir"], position["entry"], sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
-                position = None
-                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif hit_tp:
-                _bt_close_trade(trades, position["dir"], position["entry"], tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
-                position = None
-
-        in_cooldown = sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts
-
-        if position is None:
-            if in_cooldown:
-                continue
-            if bull[i] and long_ok(tpct):
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "trail_active": False, "trail_best": price}
-                if exit_mode == "fixed_tp_sl":
-                    if sl_enabled:
-                        position["sl_price"] = price - sl_usd / size
-                    if tp_enabled:
-                        position["tp_price"] = price + tp_usd / size
-            elif bear[i] and short_ok(tpct):
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "trail_active": False, "trail_best": price}
-                if exit_mode == "fixed_tp_sl":
-                    if sl_enabled:
-                        position["sl_price"] = price + sl_usd / size
-                    if tp_enabled:
-                        position["tp_price"] = price - tp_usd / size
-            continue
-
-        if exit_mode != "flip":
-            continue  # 'fixed_tp_sl': nur der Block oben (SL/TP) darf schliessen
-
-        if position["dir"] == "long" and bear[i]:
-            if direction_mode == "long_only" or not short_ok(tpct):
-                _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "PK-EXIT", ts=ts)
-                position = None
-            else:
-                _bt_close_trade(trades, "long", position["entry"], price, position["size"], i, position["entry_i"], "PK-FLIP", ts=ts)
-                size = (margin * leverage) / price
-                position = {"dir": "short", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
-        elif position["dir"] == "short" and bull[i]:
-            if direction_mode == "short_only" or not long_ok(tpct):
-                _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "PK-EXIT", ts=ts)
-                position = None
-            else:
-                _bt_close_trade(trades, "short", position["entry"], price, position["size"], i, position["entry_i"], "PK-FLIP", ts=ts)
-                size = (margin * leverage) / price
-                position = {"dir": "long", "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None}
-
-    if position is not None:
-        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
-
-    return trades
-
-
-async def _build_zscore_series_for_backtest(symbol, cfg, days, base_ts, base_c, primary_resolution, prefix):
-    """Baut den Z-Score-Filter-Wert fuer eine ABWEICHENDE Zeiteinheit (<prefix>_zscore_resolution)
-    fuer den Backtest: holt die historischen Kerzen dieser Zeiteinheit, berechnet den Z-Score
-    darauf, bildet ihn per Forward-Fill (siehe _align_htf_series) auf die Zeitstempel der
-    Einstiegs-Kerzen ab - kein Blick in die Zukunft. Bei 'same'/eigenem Handels-Zeitrahmen wird
-    einfach direkt auf den eigenen Kerzen gerechnet. Gibt (zscore, error) zurueck."""
-    resolution = cfg.get(f"{prefix}_zscore_resolution", "same")
-    lookback = cfg.get(f"{prefix}_zscore_lookback", 20)
-    smooth = cfg.get(f"{prefix}_zscore_smooth", 3)
-    if resolution in (None, "", "same") or resolution == primary_resolution:
-        return compute_rolling_zscore(base_c, lookback, smooth), None
-    tf_candles, err, _ = await _fetch_cached_backtest_candles(symbol, resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return None, f"Z-Score-Zeiteinheit ({resolution}): {err}"
-    if not tf_candles or len(tf_candles[4]) < 20:
-        return None, f"Zu wenig historische Kerzen für die Z-Score-Zeiteinheit ({resolution}) erhalten."
-    t_ts, t_o, t_h, t_l, t_c = tf_candles
-    zscore_htf = compute_rolling_zscore(t_c, lookback, smooth)
-    return _align_htf_series(base_ts, t_ts, zscore_htf), None
-
-
-async def _build_ema_series_for_backtest(symbol, cfg, days, base_ts, base_c, primary_resolution, prefix):
-    """Baut den EMA-Filter-Wert fuer eine ABWEICHENDE Zeiteinheit (<prefix>_ema_resolution) fuer
-    den Backtest - identisches Muster zu _build_zscore_series_for_backtest. Bei 'same'/eigenem
-    Handels-Zeitrahmen wird direkt auf den eigenen Kerzen gerechnet. Gibt (ema, error) zurueck."""
-    resolution = cfg.get(f"{prefix}_ema_resolution", "same")
-    length = cfg.get(f"{prefix}_ema_length", 200)
-    if resolution in (None, "", "same") or resolution == primary_resolution:
-        return _ema_series(base_c, length), None
-    tf_candles, err, _ = await _fetch_cached_backtest_candles(symbol, resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return None, f"EMA-Zeiteinheit ({resolution}): {err}"
-    if not tf_candles or len(tf_candles[4]) < length + 5:
-        return None, f"Zu wenig historische Kerzen für die EMA-Zeiteinheit ({resolution}) erhalten."
-    t_ts, t_o, t_h, t_l, t_c = tf_candles
-    ema_htf = _ema_series(t_c, length)
-    return _align_htf_series(base_ts, t_ts, ema_htf), None
-
-
-async def _build_adx_series_for_backtest(symbol, cfg, days, base_ts, base_h, base_l, base_c, primary_resolution, prefix):
-    """Baut ADX/+DI/-DI fuer eine ABWEICHENDE Zeiteinheit (<prefix>_adx_resolution) fuer den
-    Backtest - identisches Muster zu _build_zscore_series_for_backtest, nur fuer drei Serien
-    gleichzeitig. Bei 'same'/eigenem Handels-Zeitrahmen wird direkt auf den eigenen Kerzen
-    gerechnet. Gibt (adx, plus_di, minus_di, error) zurueck."""
-    resolution = cfg.get(f"{prefix}_adx_resolution", "same")
-    length = cfg.get(f"{prefix}_adx_length", 14)
-    if resolution in (None, "", "same") or resolution == primary_resolution:
-        adx, plus_di, minus_di = compute_adx(base_h, base_l, base_c, length)
-        return adx, plus_di, minus_di, None
-    tf_candles, err, _ = await _fetch_cached_backtest_candles(symbol, resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return None, None, None, f"ADX-Zeiteinheit ({resolution}): {err}"
-    if not tf_candles or len(tf_candles[4]) < length + 5:
-        return None, None, None, f"Zu wenig historische Kerzen für die ADX-Zeiteinheit ({resolution}) erhalten."
-    t_ts, t_o, t_h, t_l, t_c = tf_candles
-    adx_htf, plus_di_htf, minus_di_htf = compute_adx(t_h, t_l, t_c, length)
-    return (_align_htf_series(base_ts, t_ts, adx_htf),
-            _align_htf_series(base_ts, t_ts, plus_di_htf),
-            _align_htf_series(base_ts, t_ts, minus_di_htf),
-            None)
-
-
-async def _pk_build_mtf_trend_pct(symbol, cfg, days, base_ts, base_h, base_l, base_c, primary_resolution, prefix="pk"):
-    """Baut den Trend%-Filter-Wert aus bis zu 3 waehlbaren Zeiteinheiten (<prefix>_mtf_tf1/2/3) -
-    wie 'Block 1' im Original-Pine-Indikator (avgB1 = Durchschnitt aus 3 TFs). Generisch ueber
-    'prefix' fuer mehrere Strategien nutzbar (Pieki Algo: prefix='pk', UT-Bot+Hull: prefix='utb').
-    Inaktive TFs ("off") werden ausgelassen, sind ALLE aus wird auf den eigenen Handels-Zeitrahmen
-    zurueckgefallen. Jede aktive TF-Serie wird per Forward-Fill (siehe _align_htf_series) auf die
-    Zeitstempel der Einstiegs-Kerzen (base_ts) abgebildet, dann elementweise gemittelt. Gibt
-    (trend_pct, error) zurueck."""
-    mtf_fast = cfg.get(f"{prefix}_mtf_fast_len", 5)
-    mtf_slow = cfg.get(f"{prefix}_mtf_slow_len", 9)
-    mtf_atr = cfg.get(f"{prefix}_mtf_atr_len", 14)
-    tf_list = [cfg.get(f"{prefix}_mtf_tf{i}", "off") for i in (1, 2, 3)]
-    active_tfs = [tf for tf in tf_list if tf not in (None, "", "off")]
-    if not active_tfs:
-        return compute_pk_trend_percent(base_h, base_l, base_c, mtf_fast, mtf_slow, mtf_atr), None
-
-    aligned_series = []
-    for tf in active_tfs:
-        if tf == primary_resolution:
-            aligned_series.append(compute_pk_trend_percent(base_h, base_l, base_c, mtf_fast, mtf_slow, mtf_atr))
-            continue
-        tf_candles, err, _ = await _fetch_cached_backtest_candles(symbol, tf, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-        if err:
-            return None, f"MTF-Zeiteinheit ({tf}): {err}"
-        if not tf_candles or len(tf_candles[4]) < 20:
-            return None, f"Zu wenig historische Kerzen für die MTF-Zeiteinheit ({tf}) erhalten."
-        t_ts, t_o, t_h, t_l, t_c = tf_candles
-        trend_htf = compute_pk_trend_percent(t_h, t_l, t_c, mtf_fast, mtf_slow, mtf_atr)
-        aligned_series.append(_align_htf_series(base_ts, t_ts, trend_htf))
-
-    n = len(base_ts)
-    trend_pct = [sum(s[i] for s in aligned_series) / len(aligned_series) for i in range(n)]
-    return trend_pct, None
-
-
-def backtest_peki_algo(candles, cfg):
-    ts, o, h, l, c = candles
-    sensitivity = cfg.get("pk_sensitivity", 3.0)
-    atr_period = cfg.get("pk_atr_period", 11)
-    sma_period = cfg.get("pk_sma_period", 13)
-    bull, bear, st_line, sma = compute_pk_signals(h, l, c, sensitivity, atr_period, sma_period)
-    trend_pct = cfg.get("_pk_trend_pct_precomputed")  # von run_backtest vorab async berechnet
-    # (siehe _pk_build_mtf_trend_pct) - diese Funktion selbst ist NICHT async (einheitliche
-    # BACKTEST_FUNCS-Signatur (candles, cfg))
-    if trend_pct is None:
-        mtf_fast = cfg.get("pk_mtf_fast_len", 5)
-        mtf_slow = cfg.get("pk_mtf_slow_len", 9)
-        mtf_atr = cfg.get("pk_mtf_atr_len", 14)
-        trend_pct = compute_pk_trend_percent(h, l, c, mtf_fast, mtf_slow, mtf_atr)
-    warmup = max(atr_period, sma_period, cfg.get("pk_mtf_slow_len", 9), cfg.get("pk_mtf_atr_len", 14), 5) + 2
-    return _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup)
-
-
-PK_SWEEP_MAX_COMBOS = 2000
-PK_SWEEP_MIN_RELIABLE_TRADES = 5
-
-
-async def run_pk_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step):
-    """'Monte-Carlo'-Parametersweep fuer Pieki Algo, NUR ueber die Sensitivity (2 Nachkommastellen,
-    Schritt 0.01 wie im Original-Pine-Script). trend_pct haengt nicht von der Sensitivity ab und
-    wird deshalb nur EINMAL berechnet (ueber bis zu 3 gemittelte Zeiteinheiten, siehe
-    _pk_build_mtf_trend_pct) und fuer alle Sensitivity-Werte wiederverwendet."""
-    max_candles = BACKTEST_MAX_CANDLES["pieki_algo"]
-    resolution = cfg.get("pk_resolution", "5m")
-    candles, err, cache_used = await _fetch_cached_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-    if err:
-        return {"error": err}
-    if not candles or len(candles[4]) < 150:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten."}
-
-    steps = int(round((sens_max - sens_min) / max(sens_step, 1e-9)))
-    sens_values = sorted(set(round(sens_min + i * sens_step, 2) for i in range(steps + 1)
-                              if sens_min + i * sens_step <= sens_max + 1e-9))
-    sens_values = [v for v in sens_values if v > 0]
-
-    if len(sens_values) == 0:
-        return {"error": "Der eingestellte Bereich ergibt keine gültigen Werte."}
-    if len(sens_values) > PK_SWEEP_MAX_COMBOS:
-        return {"error": f"Zu viele Werte ({len(sens_values)}, Limit {PK_SWEEP_MAX_COMBOS}) - Bereich oder Schrittweite vergrößern."}
-
-    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
-    atr_period = cfg.get("pk_atr_period", 11)
-    sma_period = cfg.get("pk_sma_period", 13)
-    mtf_slow = cfg.get("pk_mtf_slow_len", 9)
-    mtf_atr = cfg.get("pk_mtf_atr_len", 14)
-    trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], h, l, c, resolution)
-    if mtf_err:
-        return {"error": mtf_err}
-    warmup = max(atr_period, sma_period, mtf_slow, mtf_atr, 5) + 2
-
-    results = []
-    for sens in sens_values:
-        bull, bear, st_line, sma = compute_pk_signals(h, l, c, sens, atr_period, sma_period)
-        trades = _simulate_pk_trades(candles, cfg, bull, bear, trend_pct, warmup)
-        stats = summarize_backtest_trades(trades)
-        results.append({"pk_sensitivity": sens, **stats})
-
-    best_sorted = sorted(results, key=lambda r: (r["trades"] >= PK_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
-    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
-
-
-    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days,
-        "actual_days_covered": round(actual_days, 1), "candles_processed": len(c),
-        "min_reliable_trades": PK_SWEEP_MIN_RELIABLE_TRADES,
-        "combos_tested": len(sens_values),
-        "results": best_sorted[:30],
-        "worst_results": worst_sorted[:20],
-    }
-
-
-BACKTEST_MAX_CANDLES = {
-    "fib_reversal": 100_000,
-    "halftrend": 100_000,
-    "diamond_algo": 100_000,
-    "elte_smart": 100_000,
-    "candle_patterns": 100_000,
-    "mo7_scalp": 100_000,
-    "ut_bot_hull": 100_000,
-    "wavetrend_cross": 100_000,
-    "pieki_algo": 100_000,
-    "fractals_flip": 100_000,
-    "candle_dna": 100_000,
-    "range_filter": 100_000,
-    "maverick_edge": 100_000,
-    "st_rsi_signal": 100_000,
-    "hvd_signal": 100_000,
-    "ab_breakout": 100_000,
-}
-
-BACKTEST_FUNCS = {
-    "fib_reversal": backtest_fib_reversal,
-    "halftrend": backtest_halftrend,
-    "diamond_algo": backtest_diamond_algo,
-    "elte_smart": backtest_elte_smart,
-    "candle_patterns": backtest_candle_patterns,
-    "ut_bot_hull": backtest_ut_bot_hull,
-    "wavetrend_cross": backtest_wavetrend_cross,
-    "pieki_algo": backtest_peki_algo,
-    "fractals_flip": backtest_fractals_flip,
-    "candle_dna": backtest_candle_dna,
-    "range_filter": backtest_range_filter,
-    "st_rsi_signal": backtest_sr_signal,
-    # "mo7_scalp" bewusst NICHT hier drin - braucht eine 6er-Tupel-Kerzenquelle MIT Volumen
-    # (MFI-Baustein), deshalb in run_backtest() als Sonderfall behandelt statt ueber diesen
-    # generischen 5er-Tupel-Dispatch.
-}
-
-
-async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
-    if entry_mode == "maverick_edge":
-        max_candles = BACKTEST_MAX_CANDLES.get("maverick_edge", 100_000)
-        resolution = cfg.get("mv_resolution", "5m")
-        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-        if err:
-            return {"error": err}
-        min_needed = max(cfg.get("mv_slow_len", 21), cfg.get("mv_guide_len", 34), cfg.get("mv_atr_len", 14), cfg.get("mv_vol_len", 20)) + 10
-        if not candles or len(candles[4]) < min_needed:
-            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
-        n_candles = len(candles[4])
-        trades = backtest_maverick_edge(candles, cfg)
-        stats = summarize_backtest_trades(trades, exclude_top_n)
-        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
-        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
-        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-        return {
-            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
-            "requested_days": days, "actual_days_covered": round(actual_days, 1),
-            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
-            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
-            "trades": trades[-50:],
-        }
-
-    if entry_mode == "ab_breakout":
-        max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
-        resolution = cfg.get("ab_resolution", "15s")
-        if resolution in SUB_MINUTE_RESOLUTIONS:
-            # Sekunden-Aufloesungen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
-            # Obergrenze bewusst strenger, wie bei allen anderen Sub-Minuten-faehigen Strategien.
-            max_candles = min(max_candles, 5000)
-        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-        if err:
-            return {"error": err}
-        params = _ab_effective_params(cfg)
-        min_needed = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 10
-        if not candles or len(candles[4]) < min_needed:
-            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
-        n_candles = len(candles[4])
-
-        trend_filter_long_ok = None
-        trend_filter_short_ok = None
-        if cfg.get("ab_trend_filter_enabled", False):
-            tf_resolution = cfg.get("ab_trend_filter_resolution", "15m")
-            tf_atr_period = cfg.get("ab_trend_filter_atr_period", 10)
-            tf_multiplier = cfg.get("ab_trend_filter_multiplier", 3.0)
-            if not (tf_resolution in (None, "", "same") or tf_resolution == resolution):
-                tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, candles[0], tf_resolution, tf_atr_period)
-                if tf_err:
-                    return {"error": tf_err}
-                trend_filter_long_ok, trend_filter_short_ok = _trend_filter_ok_series(candles[0], tf_candles, tf_multiplier, tf_atr_period)
-            # Bei gleicher Zeiteinheit: bleibt None, backtest_ab_breakout berechnet es selbst intern.
-
-        trades = backtest_ab_breakout(candles, cfg, trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok)
-        stats = summarize_backtest_trades(trades, exclude_top_n)
-        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
-        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
-        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-        return {
-            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
-            "requested_days": days, "actual_days_covered": round(actual_days, 1),
-            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
-            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
-            "trades": trades[-50:],
-        }
-
-    if entry_mode == "mo7_scalp":
-        max_candles = BACKTEST_MAX_CANDLES["mo7_scalp"]
-        resolution = cfg.get("mo7_resolution", "5m")
-        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-        if err:
-            return {"error": err}
-        if not candles or len(candles[4]) < 550:
-            return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~550 für das 500er-Normierungsfenster nötig)."}
-        n_candles = len(candles[4])
-        trades = backtest_mo7(candles, cfg)
-        stats = summarize_backtest_trades(trades, exclude_top_n)
-        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
-        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
-        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-        return {
-            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
-            "requested_days": days, "actual_days_covered": round(actual_days, 1),
-            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
-            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
-            "trades": trades[-50:],
-        }
-
-    if entry_mode == "hvd_signal":
-        max_candles = BACKTEST_MAX_CANDLES.get("hvd_signal", 100_000)
-        resolution = cfg.get("hvd_resolution", "1m")
-        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-        if err:
-            return {"error": err}
-        min_needed = max(cfg.get("hvd_hull_length", 88), cfg.get("hvd_vwap_length", 60), cfg.get("hvd_adx_length", 14), cfg.get("hvd_atr_period", 14)) + 20
-        if not candles or len(candles[4]) < min_needed:
-            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
-        n_candles = len(candles[4])
-
-        adx_filter_ok = None
-        if cfg.get("hvd_adx_filter_enabled", False):
-            filter_resolution = cfg.get("hvd_adx_filter_resolution", "same")
-            filter_length = cfg.get("hvd_adx_filter_length", 14)
-            filter_threshold = cfg.get("hvd_adx_filter_threshold", 20)
-            if not (filter_resolution in (None, "", "same") or filter_resolution == resolution):
-                filter_candles, filter_err, _ = await _fetch_cached_backtest_candles(symbol, filter_resolution, days, 20_000, market_type=cfg.get("binance_market_type", "spot"))
-                if filter_err:
-                    return {"error": f"ADX-Filter-Zeiteinheit ({filter_resolution}): {filter_err}"}
-                if not filter_candles or len(filter_candles[4]) < filter_length + 5:
-                    return {"error": f"Zu wenig historische Kerzen für die ADX-Filter-Zeiteinheit ({filter_resolution}) erhalten."}
-                ft_ts, ft_o, ft_h, ft_l, ft_c = filter_candles
-                filter_adx_htf, _fpd, _fmd = compute_adx(ft_h, ft_l, ft_c, filter_length)
-                filter_adx_aligned = _align_htf_series(candles[0], ft_ts, filter_adx_htf)
-                adx_filter_ok = [val is not None and val > filter_threshold for val in filter_adx_aligned]
-            # Bei gleicher Zeiteinheit: bleibt None, backtest_hvd_signal berechnet es selbst intern.
-
-        trend_filter_long_ok = None
-        trend_filter_short_ok = None
-        if cfg.get("hvd_trend_filter_enabled", False):
-            tf_resolution = cfg.get("hvd_trend_filter_resolution", "15m")
-            tf_atr_period = cfg.get("hvd_trend_filter_atr_period", 10)
-            tf_multiplier = cfg.get("hvd_trend_filter_multiplier", 3.0)
-            if not (tf_resolution in (None, "", "same") or tf_resolution == resolution):
-                tf_candles, tf_err = await _fetch_trend_filter_backtest_candles(symbol, cfg, candles[0], tf_resolution, tf_atr_period)
-                if tf_err:
-                    return {"error": tf_err}
-                trend_filter_long_ok, trend_filter_short_ok = _trend_filter_ok_series(candles[0], tf_candles, tf_multiplier, tf_atr_period)
-            # Bei gleicher Zeiteinheit: bleibt None, backtest_hvd_signal berechnet es selbst intern.
-
-        trades = backtest_hvd_signal(candles, cfg, adx_filter_ok=adx_filter_ok,
-                                      trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok)
-        stats = summarize_backtest_trades(trades, exclude_top_n)
-        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
-        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
-        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-        return {
-            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
-            "requested_days": days, "actual_days_covered": round(actual_days, 1),
-            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
-            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
-            "trades": trades[-50:],
-        }
-
-    if entry_mode not in BACKTEST_FUNCS:
-        return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur fib_reversal, halftrend, diamond_algo, elte_smart, candle_patterns, mo7_scalp, ut_bot_hull, wavetrend_cross, pieki_algo, fractals_flip, candle_dna, range_filter, maverick_edge, st_rsi_signal, hvd_signal, ab_breakout - Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen historische Tick-/Orderbuchdaten, die es nicht gibt)."}
-
-    max_candles = BACKTEST_MAX_CANDLES[entry_mode]
-
-    resolution_key = {"fib_reversal": "fib_resolution", "halftrend": "ht_resolution", "diamond_algo": "da_resolution", "elte_smart": "es_resolution", "candle_patterns": "cp_resolution", "ut_bot_hull": "utb_resolution", "wavetrend_cross": "wtc_resolution", "pieki_algo": "pk_resolution", "fractals_flip": "fr_resolution", "candle_dna": "cd_resolution", "range_filter": "rf_resolution", "st_rsi_signal": "sr_resolution"}[entry_mode]
-    resolution = cfg.get(resolution_key, "1m")
-    if resolution in SUB_MINUTE_RESOLUTIONS:
-        # 10s/15s/30s-Kerzen kommen aus 1s-Basisdaten (10-30x mehr Rohdaten je Zeitraum) -
-        # Obergrenze bewusst strenger, sonst waeren das bei laengeren Zeitraeumen zu viele
-        # Binance-Anfragen.
-        max_candles = min(max_candles, 5000)
-
-    cache_key = (symbol, resolution, cfg.get("binance_market_type", "spot"))
-    cached = _backtest_cache_get(cache_key)
-    now = time.time()
-    cache_used = False
-
-    # WICHTIG: der Cache darf nur genutzt werden, wenn er mit einer mindestens genauso
-    # hohen Kerzen-Obergrenze befuellt wurde wie die aktuelle Anfrage braucht - sonst
-    # bekaeme z.B. MACD-Dual (500.000 Kerzen erlaubt) stillschweigend den kleineren,
-    # von Range-Profile (nur 30.000 erlaubt) gecachten Datensatz serviert.
-    if (cached and (now - cached["fetched_at"] < BACKTEST_CACHE_TTL_SECONDS)
-            and cached["days"] >= days and cached.get("max_candles", 0) >= max_candles
-            and len(cached["candles"][4]) >= 100):
-        candles = _trim_candles_to_days(cached["candles"], days, max_candles)
-        err = None
-        cache_used = True
-    else:
-        candles, err = await fetch_historical_candles_binance(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
-        if candles:
-            _backtest_cache_set(cache_key, {"fetched_at": now, "days": days, "max_candles": max_candles, "candles": candles})
-
-    if err:
-        return {"error": err}
-    if not candles or len(candles[4]) < 100:
-        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
-
-    n_candles = len(candles[4])
-    if entry_mode == "pieki_algo":
-        trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution)
-        if mtf_err:
-            return {"error": mtf_err}
-        cfg = dict(cfg)  # eigene Kopie - der private Cache-Key darf nicht in die Aufrufer-Config
-        cfg["_pk_trend_pct_precomputed"] = trend_pct  # von backtest_peki_algo gelesen (nicht async, siehe dort)
-    elif entry_mode == "ut_bot_hull":
-        cfg = dict(cfg)
-        if cfg.get("utb_mtf_filter_enabled", False):
-            trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, prefix="utb")
-            if mtf_err:
-                return {"error": mtf_err}
-            cfg["_utb_trend_pct_precomputed"] = trend_pct  # von backtest_ut_bot_hull gelesen (nicht async, siehe dort)
-        if cfg.get("utb_zscore_filter_enabled", False):
-            zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "utb")
-            if zs_err:
-                return {"error": zs_err}
-            cfg["_utb_zscore_precomputed"] = zscore  # von backtest_ut_bot_hull gelesen (nicht async, siehe dort)
-    elif entry_mode == "fractals_flip":
-        cfg = dict(cfg)
-        if cfg.get("fr_zscore_filter_enabled", False):
-            zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "fr")
-            if zs_err:
-                return {"error": zs_err}
-            cfg["_fr_zscore_precomputed"] = zscore  # von backtest_fractals_flip gelesen (nicht async, siehe dort)
-        if cfg.get("fr_adx_filter_enabled", False):
-            adx, plus_di, minus_di, adx_err = await _build_adx_series_for_backtest(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, "fr")
-            if adx_err:
-                return {"error": adx_err}
-            cfg["_fr_adx_precomputed"] = (adx, plus_di, minus_di)  # von backtest_fractals_flip gelesen (nicht async, siehe dort)
-        if cfg.get("fr_mtf_filter_enabled", False):
-            trend_pct, mtf_err = await _pk_build_mtf_trend_pct(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, prefix="fr")
-            if mtf_err:
-                return {"error": mtf_err}
-            cfg["_fr_trend_pct_precomputed"] = trend_pct  # von backtest_fractals_flip gelesen (nicht async, siehe dort)
-    elif entry_mode == "candle_dna" and cfg.get("cd_zscore_filter_enabled", False):
-        zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "cd")
-        if zs_err:
-            return {"error": zs_err}
-        cfg = dict(cfg)
-        cfg["_cd_zscore_precomputed"] = zscore  # von backtest_candle_dna gelesen (nicht async, siehe dort)
-    elif entry_mode == "range_filter" and cfg.get("rf_zscore_filter_enabled", False):
-        zscore, zs_err = await _build_zscore_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "rf")
-        if zs_err:
-            return {"error": zs_err}
-        cfg = dict(cfg)
-        cfg["_rf_zscore_precomputed"] = zscore  # von backtest_range_filter gelesen (nicht async, siehe dort)
-    elif entry_mode == "st_rsi_signal":
-        cfg = dict(cfg)
-        if cfg.get("sr_adx_filter_enabled", False):
-            adx, plus_di, minus_di, adx_err = await _build_adx_series_for_backtest(symbol, cfg, days, candles[0], candles[2], candles[3], candles[4], resolution, "sr")
-            if adx_err:
-                return {"error": adx_err}
-            cfg["_sr_adx_precomputed"] = (adx, plus_di, minus_di)  # von backtest_sr_signal gelesen (nicht async, siehe dort)
-        if cfg.get("sr_ema_filter_enabled", False):
-            ema, ema_err = await _build_ema_series_for_backtest(symbol, cfg, days, candles[0], candles[4], resolution, "sr")
-            if ema_err:
-                return {"error": ema_err}
-            cfg["_sr_ema_precomputed"] = ema  # von backtest_sr_signal gelesen (nicht async, siehe dort)
-        need_arm = cfg.get("sr_vwap_dev_filter_enabled", False)
-        need_sl_bands = cfg.get("sr_sl_tp_mode", "fixed") == "vwap_cloud"
-        need_midline = cfg.get("sr_vwap_midline_filter_enabled", False)
-        need_midline_series = cfg.get("sr_vwap_midline_breakeven_enabled", False)
-        if need_arm or need_sl_bands or need_midline or need_midline_series:
-            vwap_arm, sl_lower, sl_upper, midline_ok, midline_series, vwap_err = await _build_vwap_dev_data_for_backtest(symbol, cfg, days, candles[0], resolution, "sr", need_arm, need_sl_bands, need_midline, need_midline_series)
-            if vwap_err:
-                return {"error": vwap_err}
-            cfg["_sr_vwap_arm_precomputed"] = vwap_arm  # von backtest_sr_signal gelesen (nicht async, siehe dort)
-            cfg["_sr_vwap_sl_lower_precomputed"] = sl_lower
-            cfg["_sr_vwap_sl_upper_precomputed"] = sl_upper
-            cfg["_sr_vwap_midline_precomputed"] = midline_ok
-            cfg["_sr_vwap_midline_series_precomputed"] = midline_series
-    backtest_fn = BACKTEST_FUNCS[entry_mode]
-    trades = backtest_fn(candles, cfg)
-    stats = summarize_backtest_trades(trades, exclude_top_n)
-    stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
-    stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
-
-    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
-    return {
-        "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
-        "requested_days": days, "actual_days_covered": round(actual_days, 1),
-        "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": cache_used,
-        "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
-        "trades": trades[-50:],  # letzte 50 fuers Dashboard, nicht alle
-    }
 

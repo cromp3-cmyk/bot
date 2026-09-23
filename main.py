@@ -13,16 +13,11 @@ from bot_core import (
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_ht_sweep, handle_da_sweep, handle_es_sensitivity_sweep,
-    handle_mo7_sum_sweep, handle_ab_sweep, handle_ab_signal_sweep,
-    handle_utb_param_sweep, handle_pk_sensitivity_sweep, handle_rf_sweep, handle_hvd_sweep,
+    handle_manual_trade, handle_backtest, handle_ab_sweep, handle_ab_signal_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
-    trading_loop, fib_reversal_poll_loop, binance_1s_poll_loop,
-    ht_poll_loop,
-    da_poll_loop, es_poll_loop, cp_poll_loop, mo7_poll_loop, utb_poll_loop, wtc_poll_loop, pk_poll_loop, fr_poll_loop, cd_poll_loop, rf_poll_loop, mv_poll_loop,
-    sr_poll_loop, hvd_poll_loop, ab_poll_loop,
+    trading_loop, binance_1s_poll_loop, ab_poll_loop,
 )
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
@@ -46,14 +41,6 @@ async def start_web_server():
     app.router.add_post("/api/close", handle_close_position)
     app.router.add_post("/api/manual_trade", handle_manual_trade)
     app.router.add_post("/api/backtest", handle_backtest)
-    app.router.add_post("/api/ht_sweep", handle_ht_sweep)
-    app.router.add_post("/api/da_sweep", handle_da_sweep)
-    app.router.add_post("/api/es_sensitivity_sweep", handle_es_sensitivity_sweep)
-    app.router.add_post("/api/mo7_sum_sweep", handle_mo7_sum_sweep)
-    app.router.add_post("/api/utb_param_sweep", handle_utb_param_sweep)
-    app.router.add_post("/api/pk_sensitivity_sweep", handle_pk_sensitivity_sweep)
-    app.router.add_post("/api/rf_sweep", handle_rf_sweep)
-    app.router.add_post("/api/hvd_sweep", handle_hvd_sweep)
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
     app.router.add_post("/api/ab_signal_sweep", handle_ab_signal_sweep)
     app.router.add_get("/api/global_settings", handle_global_settings_get)
@@ -101,22 +88,7 @@ async def main():
     await start_web_server()
     await asyncio.gather(
         trading_loop(),
-        *[fib_reversal_poll_loop(s) for s in SYMBOLS],
         *[binance_1s_poll_loop(s) for s in SYMBOLS],
-        *[ht_poll_loop(s) for s in SYMBOLS],
-        *[da_poll_loop(s) for s in SYMBOLS],
-        *[es_poll_loop(s) for s in SYMBOLS],
-        *[cp_poll_loop(s) for s in SYMBOLS],
-        *[mo7_poll_loop(s) for s in SYMBOLS],
-        *[utb_poll_loop(s) for s in SYMBOLS],
-        *[wtc_poll_loop(s) for s in SYMBOLS],
-        *[pk_poll_loop(s) for s in SYMBOLS],
-        *[fr_poll_loop(s) for s in SYMBOLS],
-        *[cd_poll_loop(s) for s in SYMBOLS],
-        *[rf_poll_loop(s) for s in SYMBOLS],
-        *[mv_poll_loop(s) for s in SYMBOLS],
-        *[sr_poll_loop(s) for s in SYMBOLS],
-        *[hvd_poll_loop(s) for s in SYMBOLS],
         *[ab_poll_loop(s) for s in SYMBOLS],
         *[grid_scalp_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
