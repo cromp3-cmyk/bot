@@ -3562,7 +3562,7 @@ async def rsi_poll_loop(symbol):
 
                 data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
                 if data:
-                    timestamps, opens, highs, lows, closes, _volumes = data
+                    timestamps, opens, highs, lows, closes = data
                     closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
                 else:
                     closed_ts = None
