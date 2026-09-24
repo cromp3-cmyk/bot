@@ -12,7 +12,7 @@ import traceback
 import bisect
 import math
 import re
-from collections import deque
+from collections import deque, OrderedDict
 
 from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
@@ -2223,6 +2223,9 @@ BACKTEST_MAX_CANDLES = {
 }
 
 
+_backtest_candle_cache = OrderedDict()  # key: (symbol, resolution) -> {"fetched_at": float, "days": int, "candles": (...)}
+
+
 def _backtest_cache_get(cache_key):
     entry = _backtest_candle_cache.get(cache_key)
     if entry is not None:
@@ -2373,6 +2376,9 @@ async def _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, tf_resoluti
     if not candles or len(candles[4]) < tf_atr_period + 5:
         return None, f"Zu wenig historische Kerzen für die Trendfilter-Zeiteinheit ({tf_resolution}) erhalten."
     return candles, None
+
+
+_trend_filter_warn_last = {}  # (symbol, resolution) -> letzter Warn-Zeitpunkt, damit die "zu wenig Kerzen"-Meldung hoechstens alle 5 Min. pro Kombination im Log steht
 
 
 async def _fetch_trend_filter_candles_live(symbol, st, cfg, tf_resolution, tf_atr_period):
