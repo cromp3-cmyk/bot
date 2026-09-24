@@ -255,6 +255,35 @@ def default_config():
         # normalen Kerzen berechnen - wie bei Diamond Algo/UT Bot/Candle DNA. Ein-/Ausstieg loest
         # weiterhin am ECHTEN Marktpreis aus.
         "ab_use_heikin_ashi": os.getenv("AB_USE_HEIKIN_ASHI", "false").lower() == "true",
+
+        # ================= RSI Signal =================
+        # Reine Handelsidee: RSI < oversold -> long, RSI > overbought -> short. Ausstieg identisch
+        # zu Al-Shatris Wechsel-System (Gegen-Signal dreht die Position, optionaler $-SL,
+        # optionales "SL auf Einstieg"). Trendfilter kommen aus dem generischen Filter-Baukasten -
+        # SuperTrend (eigene, meist hoehere Zeiteinheit), ADX (Trendstaerke/-richtung), MACD
+        # (bullisch/baerisch) - jeder einzeln zu- und abschaltbar.
+        "rsi_resolution": os.getenv("RSI_RESOLUTION", "5m"),
+        "rsi_length": int(os.getenv("RSI_LENGTH", "14")),
+        "rsi_oversold": float(os.getenv("RSI_OVERSOLD", "30")),
+        "rsi_overbought": float(os.getenv("RSI_OVERBOUGHT", "70")),
+        "rsi_direction_mode": os.getenv("RSI_DIRECTION_MODE", "both"),
+        "rsi_sl_enabled": os.getenv("RSI_SL_ENABLED", "true").lower() == "true",
+        "rsi_sl_manual_usd": float(os.getenv("RSI_SL_MANUAL_USD", "5.0")),
+        "rsi_be_enabled": os.getenv("RSI_BE_ENABLED", "false").lower() == "true",
+        "rsi_be_trigger_usd": float(os.getenv("RSI_BE_TRIGGER_USD", "5.0")),
+        "rsi_sl_cooldown_seconds": float(os.getenv("RSI_SL_COOLDOWN_SECONDS", "30")),
+        "rsi_supertrend_filter_enabled": os.getenv("RSI_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",
+        "rsi_supertrend_filter_resolution": os.getenv("RSI_SUPERTREND_FILTER_RESOLUTION", "15m"),
+        "rsi_supertrend_filter_multiplier": float(os.getenv("RSI_SUPERTREND_FILTER_MULTIPLIER", "3.0")),
+        "rsi_supertrend_filter_atr_period": int(os.getenv("RSI_SUPERTREND_FILTER_ATR_PERIOD", "10")),
+        "rsi_adx_filter_enabled": os.getenv("RSI_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "rsi_adx_filter_length": int(os.getenv("RSI_ADX_FILTER_LENGTH", "14")),
+        "rsi_adx_filter_threshold": float(os.getenv("RSI_ADX_FILTER_THRESHOLD", "20")),
+        "rsi_adx_filter_directional": os.getenv("RSI_ADX_FILTER_DIRECTIONAL", "true").lower() == "true",
+        "rsi_macd_filter_enabled": os.getenv("RSI_MACD_FILTER_ENABLED", "false").lower() == "true",
+        "rsi_macd_filter_fast": int(os.getenv("RSI_MACD_FILTER_FAST", "12")),
+        "rsi_macd_filter_slow": int(os.getenv("RSI_MACD_FILTER_SLOW", "26")),
+        "rsi_macd_filter_signal": int(os.getenv("RSI_MACD_FILTER_SIGNAL", "9")),
         # Ausstiegs-Modus: "flip" = Wechsel bei Gegen-Signal (immer im Markt) + optionaler fester
         # Dollar-SL; "plan" = wie das Original-Skript (ATR-SL + TP1/TP2/TP3 mit Teilverkaeufen).
         "ab_exit_mode": os.getenv("AB_EXIT_MODE", "flip"),
@@ -444,6 +473,7 @@ PERSISTED_STATE_KEYS = [
     # mehr, welche offenen Orders im Buch seine eigenen sind, und cancelt sie als fremd.
     "gs_anchor", "gs_cooldown_until", "gs_tag_map", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
+    "rsi_sl_price", "rsi_be_done", "rsi_sl_cooldown_until",
 ]
 
 
@@ -1139,6 +1169,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
+      <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
     </select>
   </div>
 
@@ -1287,6 +1318,89 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     🎭 Eigener Average-Sentiment-Oscillator-Filter (aus deinem Pine-Script): Long-Einstiege nur, wenn ASOBulls&gt;ASOBears auf derselben Zeiteinheit, Short nur umgekehrt. Bestätigungs-Kerzen &gt;1 verlangt, dass mehrere Kerzen hintereinander in dieselbe Richtung zeigen, bevor der Filter kippt.
   </div>
+
+  <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📶 <b>RSI Signal</b>: Long, sobald der RSI unter die Überverkauft-Schwelle fällt, Short sobald er über die Überkauft-Schwelle steigt. Ausstieg wie bei Al-Shatris Wechsel-Modus - der erste Long bleibt offen, bis das Gegen-Signal kommt, das dreht dann direkt. Optional ein fester Dollar-SL und "SL auf Einstieg bei Gewinn". Darunter drei unabhängig zuschaltbare Filter aus dem gemeinsamen Filter-Baukasten (auch für künftige Strategien wiederverwendbar).
+  </div>
+  <div data-mode="rsi_signal"><label>Zeitrahmen</label>
+    <select class="cfg" id="rsi_resolution">
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal"><label>RSI-Periode</label><input type="number" step="1" min="2" id="rsi_length"></div>
+  <div data-mode="rsi_signal"><label>Überverkauft (Long-Schwelle)</label><input type="number" step="1" min="1" max="49" id="rsi_oversold"></div>
+  <div data-mode="rsi_signal"><label>Überkauft (Short-Schwelle)</label><input type="number" step="1" min="51" max="99" id="rsi_overbought"></div>
+  <div data-mode="rsi_signal"><label>Richtung</label>
+    <select class="cfg" id="rsi_direction_mode">
+      <option value="both">Beide</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal"><label>Stop-Loss (fester Dollar-Betrag)</label>
+    <select class="cfg" id="rsi_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus (Ausstieg nur per Gegen-Signal)</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_sl_enabled"><label>SL-Betrag ($ Verlust der Position)</label><input type="number" step="0.1" min="0.1" id="rsi_sl_manual_usd"></div>
+  <div data-mode="rsi_signal"><label>SL auf Einstieg bei Gewinn (Break-Even)</label>
+    <select class="cfg" id="rsi_be_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_be_enabled"><label>Gewinn-Schwelle ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="rsi_be_trigger_usd"></div>
+  <div data-mode="rsi_signal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="rsi_sl_cooldown_seconds"></div>
+
+  <div data-mode="rsi_signal"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
+    <select class="cfg" id="rsi_supertrend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
+    <select class="cfg" id="rsi_supertrend_filter_resolution">
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>SuperTrend-Multiplikator</label><input type="number" step="0.1" min="0.1" id="rsi_supertrend_filter_multiplier"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="rsi_supertrend_filter_atr_period"></div>
+
+  <div data-mode="rsi_signal"><label>ADX-Trendfilter</label>
+    <select class="cfg" id="rsi_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_adx_filter_enabled"><label>ADX-Periode</label><input type="number" step="1" min="1" id="rsi_adx_filter_length"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="1" id="rsi_adx_filter_threshold"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_adx_filter_enabled"><label>Mit Richtung (+DI/-DI)</label>
+    <select class="cfg" id="rsi_adx_filter_directional">
+      <option value="true">An (Long nur bei +DI&gt;-DI, Short umgekehrt)</option>
+      <option value="false">Aus (nur Trendstärke, Richtung egal)</option>
+    </select>
+  </div>
+
+  <div data-mode="rsi_signal"><label>MACD-Trendfilter</label>
+    <select class="cfg" id="rsi_macd_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_macd_filter_enabled"><label>MACD schnell</label><input type="number" step="1" min="1" id="rsi_macd_filter_fast"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_macd_filter_enabled"><label>MACD langsam</label><input type="number" step="1" min="1" id="rsi_macd_filter_slow"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_macd_filter_enabled"><label>MACD-Signal</label><input type="number" step="1" min="1" id="rsi_macd_filter_signal"></div>
+
 
 
 
@@ -2580,6 +2694,29 @@ async function refresh() {
     document.getElementById('ab_sl_manual_usd').value = data.config.ab_sl_manual_usd;
     document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
     document.getElementById('ab_use_heikin_ashi').value = String(data.config.ab_use_heikin_ashi);
+
+    document.getElementById('rsi_resolution').value = data.config.rsi_resolution;
+    document.getElementById('rsi_length').value = data.config.rsi_length;
+    document.getElementById('rsi_oversold').value = data.config.rsi_oversold;
+    document.getElementById('rsi_overbought').value = data.config.rsi_overbought;
+    document.getElementById('rsi_direction_mode').value = data.config.rsi_direction_mode;
+    document.getElementById('rsi_sl_enabled').value = String(data.config.rsi_sl_enabled);
+    document.getElementById('rsi_sl_manual_usd').value = data.config.rsi_sl_manual_usd;
+    document.getElementById('rsi_be_enabled').value = String(data.config.rsi_be_enabled);
+    document.getElementById('rsi_be_trigger_usd').value = data.config.rsi_be_trigger_usd;
+    document.getElementById('rsi_sl_cooldown_seconds').value = data.config.rsi_sl_cooldown_seconds;
+    document.getElementById('rsi_supertrend_filter_enabled').value = String(data.config.rsi_supertrend_filter_enabled);
+    document.getElementById('rsi_supertrend_filter_resolution').value = data.config.rsi_supertrend_filter_resolution;
+    document.getElementById('rsi_supertrend_filter_multiplier').value = data.config.rsi_supertrend_filter_multiplier;
+    document.getElementById('rsi_supertrend_filter_atr_period').value = data.config.rsi_supertrend_filter_atr_period;
+    document.getElementById('rsi_adx_filter_enabled').value = String(data.config.rsi_adx_filter_enabled);
+    document.getElementById('rsi_adx_filter_length').value = data.config.rsi_adx_filter_length;
+    document.getElementById('rsi_adx_filter_threshold').value = data.config.rsi_adx_filter_threshold;
+    document.getElementById('rsi_adx_filter_directional').value = String(data.config.rsi_adx_filter_directional);
+    document.getElementById('rsi_macd_filter_enabled').value = String(data.config.rsi_macd_filter_enabled);
+    document.getElementById('rsi_macd_filter_fast').value = data.config.rsi_macd_filter_fast;
+    document.getElementById('rsi_macd_filter_slow').value = data.config.rsi_macd_filter_slow;
+    document.getElementById('rsi_macd_filter_signal').value = data.config.rsi_macd_filter_signal;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -2775,6 +2912,29 @@ function buildConfigPayload() {
     ab_sl_manual_usd: parseFloat(document.getElementById('ab_sl_manual_usd').value),
     ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
     ab_use_heikin_ashi: document.getElementById('ab_use_heikin_ashi').value === 'true',
+
+    rsi_resolution: document.getElementById('rsi_resolution').value,
+    rsi_length: parseInt(document.getElementById('rsi_length').value),
+    rsi_oversold: parseFloat(document.getElementById('rsi_oversold').value),
+    rsi_overbought: parseFloat(document.getElementById('rsi_overbought').value),
+    rsi_direction_mode: document.getElementById('rsi_direction_mode').value,
+    rsi_sl_enabled: document.getElementById('rsi_sl_enabled').value === 'true',
+    rsi_sl_manual_usd: parseFloat(document.getElementById('rsi_sl_manual_usd').value),
+    rsi_be_enabled: document.getElementById('rsi_be_enabled').value === 'true',
+    rsi_be_trigger_usd: parseFloat(document.getElementById('rsi_be_trigger_usd').value),
+    rsi_sl_cooldown_seconds: parseFloat(document.getElementById('rsi_sl_cooldown_seconds').value),
+    rsi_supertrend_filter_enabled: document.getElementById('rsi_supertrend_filter_enabled').value === 'true',
+    rsi_supertrend_filter_resolution: document.getElementById('rsi_supertrend_filter_resolution').value,
+    rsi_supertrend_filter_multiplier: parseFloat(document.getElementById('rsi_supertrend_filter_multiplier').value),
+    rsi_supertrend_filter_atr_period: parseInt(document.getElementById('rsi_supertrend_filter_atr_period').value),
+    rsi_adx_filter_enabled: document.getElementById('rsi_adx_filter_enabled').value === 'true',
+    rsi_adx_filter_length: parseInt(document.getElementById('rsi_adx_filter_length').value),
+    rsi_adx_filter_threshold: parseFloat(document.getElementById('rsi_adx_filter_threshold').value),
+    rsi_adx_filter_directional: document.getElementById('rsi_adx_filter_directional').value === 'true',
+    rsi_macd_filter_enabled: document.getElementById('rsi_macd_filter_enabled').value === 'true',
+    rsi_macd_filter_fast: parseInt(document.getElementById('rsi_macd_filter_fast').value),
+    rsi_macd_filter_slow: parseInt(document.getElementById('rsi_macd_filter_slow').value),
+    rsi_macd_filter_signal: parseInt(document.getElementById('rsi_macd_filter_signal').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -2944,6 +3104,7 @@ async def handle_status(request):
         "ab_tp1_done": st.get("ab_tp1_done"), "ab_tp2_done": st.get("ab_tp2_done"),
         "ab_be_done": st.get("ab_be_done"),
         "ab_atr_last": st.get("ab_atr_last"),
+        "rsi_sl_price": st.get("rsi_sl_price"), "rsi_be_done": st.get("rsi_be_done"), "rsi_last": st.get("rsi_last"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -2975,7 +3136,18 @@ async def handle_config_update(request):
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",
                 "g2_anchor_follow_enabled", "g2_anchor_follow_pct",
                 "g2_auto_reverse", "g2_revisit_enabled", "g2_revisit_rearm_pct", "g2_double_enabled",
-                "g2_size_multiplier", "g2_deviation_multiplier"]:
+                "g2_size_multiplier", "g2_deviation_multiplier",
+                "ab_resolution", "ab_preset", "ab_lookback", "ab_fast_len", "ab_slow_len", "ab_rsi_len", "ab_rsi_gate",
+                "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
+                "ab_exit_mode", "ab_sl_enabled", "ab_sl_manual_usd", "ab_be_enabled", "ab_be_trigger_usd", "ab_tp1_close_pct", "ab_tp2_close_pct",
+                "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds", "ab_use_heikin_ashi",
+                "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
+                "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
+                "rsi_resolution", "rsi_length", "rsi_oversold", "rsi_overbought", "rsi_direction_mode",
+                "rsi_sl_enabled", "rsi_sl_manual_usd", "rsi_be_enabled", "rsi_be_trigger_usd", "rsi_sl_cooldown_seconds",
+                "rsi_supertrend_filter_enabled", "rsi_supertrend_filter_resolution", "rsi_supertrend_filter_multiplier", "rsi_supertrend_filter_atr_period",
+                "rsi_adx_filter_enabled", "rsi_adx_filter_length", "rsi_adx_filter_threshold", "rsi_adx_filter_directional",
+                "rsi_macd_filter_enabled", "rsi_macd_filter_fast", "rsi_macd_filter_slow", "rsi_macd_filter_signal"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

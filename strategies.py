@@ -1892,7 +1892,55 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "trades": trades[-50:],
         }
 
-    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+    if entry_mode == "rsi_signal":
+        max_candles = BACKTEST_MAX_CANDLES.get("rsi_signal", 100_000)
+        resolution = cfg.get("rsi_resolution", "5m")
+        if resolution in SUB_MINUTE_RESOLUTIONS:
+            max_candles = min(max_candles, 5000)
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        min_needed = cfg.get("rsi_length", 14) + 10
+        if not candles or len(candles[4]) < min_needed:
+            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+        n_candles = len(candles[4])
+
+        trend_filter_long_ok = trend_filter_short_ok = None
+        if cfg.get("rsi_supertrend_filter_enabled", False):
+            tf_resolution = cfg.get("rsi_supertrend_filter_resolution", "15m")
+            tf_atr_period = cfg.get("rsi_supertrend_filter_atr_period", 10)
+            tf_multiplier = cfg.get("rsi_supertrend_filter_multiplier", 3.0)
+            trend_filter_long_ok, trend_filter_short_ok, tf_err = await compute_supertrend_filter_backtest(
+                symbol, cfg, candles[0], tf_resolution, tf_multiplier, tf_atr_period)
+            if tf_err:
+                return {"error": tf_err}
+
+        adx_long_ok = adx_short_ok = None
+        if cfg.get("rsi_adx_filter_enabled", False):
+            adx_long_ok, adx_short_ok = compute_adx_filter_series(
+                candles, cfg.get("rsi_adx_filter_length", 14), cfg.get("rsi_adx_filter_threshold", 20),
+                directional=cfg.get("rsi_adx_filter_directional", True))
+
+        macd_long_ok = macd_short_ok = None
+        if cfg.get("rsi_macd_filter_enabled", False):
+            macd_long_ok, macd_short_ok = compute_macd_filter_series(
+                candles, cfg.get("rsi_macd_filter_fast", 12), cfg.get("rsi_macd_filter_slow", 26), cfg.get("rsi_macd_filter_signal", 9))
+
+        trades = backtest_rsi_signal(candles, cfg, trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok,
+                                      adx_long_ok=adx_long_ok, adx_short_ok=adx_short_ok, macd_long_ok=macd_long_ok, macd_short_ok=macd_short_ok)
+        stats = summarize_backtest_trades(trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
+
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 AB_SWEEP_MAX_COMBOS = 600
 AB_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -3173,3 +3221,451 @@ def _sma_series(values, length):
     return out
 
 
+
+
+# ============================================================
+# Wiederhergestellt: compute_adx/compute_macd_line_and_signal - werden vom neuen
+# generischen Filter-Baukasten (ADX-/MACD-Filter) unten genutzt.
+# ============================================================
+
+def compute_adx(highs, lows, closes, period=14):
+    """Klassischer Wilder-ADX/DMI (wie Pine's ta.dmi), Wilder-RMA-Glaettung wie compute_atr.
+    Gibt (adx, plus_di, minus_di) zurueck - Standardnutzung als Trendfilter: ADX > Schwelle
+    (z.B. 20) heisst 'genug Trendstaerke vorhanden', +DI > -DI heisst 'Richtung ist bullisch',
+    -DI > +DI heisst 'Richtung ist bearisch'. Wird hier als optionaler Long/Short-Filter fuer
+    Kerzen-DNA genutzt (siehe cd_adx_filter_enabled)."""
+    n = len(closes)
+    if n < 2:
+        return [0.0] * n, [0.0] * n, [0.0] * n
+
+    tr = [highs[0] - lows[0]] + [0.0] * (n - 1)
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+    for i in range(1, n):
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
+        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
+
+    def _wilder_smooth(values):
+        out = [values[0]] * n
+        for i in range(1, n):
+            if i < period:
+                out[i] = sum(values[:i + 1]) / (i + 1)
+            else:
+                out[i] = out[i - 1] - (out[i - 1] / period) + values[i]
+        return out
+
+    tr_smooth = _wilder_smooth(tr)
+    plus_dm_smooth = _wilder_smooth(plus_dm)
+    minus_dm_smooth = _wilder_smooth(minus_dm)
+
+    plus_di = [100 * plus_dm_smooth[i] / tr_smooth[i] if tr_smooth[i] > 0 else 0.0 for i in range(n)]
+    minus_di = [100 * minus_dm_smooth[i] / tr_smooth[i] if tr_smooth[i] > 0 else 0.0 for i in range(n)]
+    dx = [100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) > 0 else 0.0 for i in range(n)]
+
+    adx = [dx[0]] * n
+    for i in range(1, n):
+        if i < period:
+            adx[i] = sum(dx[:i + 1]) / (i + 1)
+        else:
+            adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+
+    return adx, plus_di, minus_di
+
+
+def compute_macd_line_and_signal(closes, fast, slow, signal_period):
+    """Rohe MACD-Linie und Signal-Linie (SMA-basiert, wie im BLSH-Original) - fuer den
+    reinen Crossover-Modus (gruener/roter Punkt: MACD kreuzt seine Signal-Linie),
+    unabhaengig von der Composite-Schwelle."""
+    ema_f = _ema_series(closes, fast)
+    ema_s = _ema_series(closes, slow)
+    macd = [ema_f[i] - ema_s[i] for i in range(len(closes))]
+    macd_signal = []
+    for i in range(len(macd)):
+        start = max(0, i - signal_period + 1)
+        window = macd[start:i + 1]
+        macd_signal.append(sum(window) / len(window))
+    return macd, macd_signal
+
+
+
+
+# ============================================================================
+# GENERISCHER FILTER-BAUKASTEN
+# Fuer neue Strategien (z.B. RSI): ein Signalgeber liefert nur long_raw/short_raw
+# (die reine Handelsidee), und haengt hier beliebig viele Filter per UND dran, ohne
+# selbst irgendetwas ueber SuperTrend/ADX/MACD wissen zu muessen. Jeder Filter gibt
+# IMMER dieselbe Form zurueck: (long_ok[], short_ok[]) - True/False je Kerze, ob die
+# jeweilige Richtung laut diesem Filter gerade erlaubt ist. combine_filters() legt
+# beliebig viele davon per UND auf das Rohsignal.
+#
+# WICHTIG: _fetch_trend_filter_backtest_candles()/_fetch_trend_filter_candles_live()
+# (siehe oben, urspruenglich fuer Al-Shatri Breakout gebaut) sind bereits generisch -
+# sie nehmen Zeiteinheit/ATR-Periode als normale Parameter entgegen, nichts davon ist
+# an "ab_" gebunden. Der SuperTrend-Filter unten nutzt sie direkt weiter, ohne sie zu
+# veraendern - Al-Shatri bleibt dadurch komplett unberuehrt.
+# ============================================================================
+
+def combine_filters(long_raw, short_raw, filters):
+    """filters: Liste von (long_ok, short_ok)-Tupeln (gleiche Laenge wie long_raw/short_raw).
+    Kombiniert alles per UND - ein einzelner Filter mit False an einer Kerze blockiert die
+    jeweilige Richtung, unabhaengig davon was die anderen Filter oder das Rohsignal sagen.
+    Leere filters-Liste gibt long_raw/short_raw unveraendert zurueck."""
+    n = len(long_raw)
+    long_final = list(long_raw)
+    short_final = list(short_raw)
+    for long_ok, short_ok in filters:
+        long_final = [long_final[i] and long_ok[i] for i in range(n)]
+        short_final = [short_final[i] and short_ok[i] for i in range(n)]
+    return long_final, short_final
+
+
+def compute_supertrend_filter_series(candles_htf, multiplier, atr_period):
+    """SuperTrend-Trendfilter auf einer (meist hoeheren) Zeiteinheit - reiner Rechenteil, wenn die
+    Filter-Kerzen schon vorliegen (Backtest: ueber _fetch_trend_filter_backtest_candles() holen,
+    dann hier + _trend_filter_ok_series() fuer die Kerzen-Ausrichtung nutzen - siehe
+    compute_supertrend_filter_backtest() unten fuer die fertige Komplett-Variante).
+    candles_htf = (ts, o, h, l, c) der Filter-Zeiteinheit. Gibt (long_ok, short_ok) OHNE
+    Ausrichtung an eine andere Zeitreihe zurueck (Kurs ueber der Linie = long_ok)."""
+    _ts, _o, h, l, c = candles_htf
+    line, _ = compute_diamond_supertrend(h, l, c, multiplier, atr_period)
+    n = len(c)
+    long_ok = [line[i] is not None and c[i] > line[i] for i in range(n)]
+    short_ok = [line[i] is not None and c[i] < line[i] for i in range(n)]
+    return long_ok, short_ok
+
+
+async def compute_supertrend_filter_backtest(symbol, cfg, base_ts, resolution, multiplier, atr_period):
+    """Fertiger SuperTrend-Trendfilter fuers Backtest, ausgerichtet auf base_ts (die Kerzen des
+    Signalgebers). resolution == 'same' oder leer/None: der Filter laeuft auf DENSELBEN Kerzen wie
+    das Signal (Aufrufer muss dann selbst compute_diamond_supertrend auf seinen eigenen h/l/c
+    anwenden - hier nicht sinnvoll ohne die Original-Kerzen). Gibt (long_ok, short_ok, error)
+    zurueck; error ist ein fertiger Fehlertext oder None."""
+    if resolution in (None, "", "same"):
+        return None, None, "SuperTrend-Filter mit 'gleiche Zeiteinheit' braucht die eigenen Kerzen des Signalgebers - resolution explizit angeben."
+    tf_candles, err = await _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, resolution, atr_period)
+    if err:
+        return None, None, err
+    long_ok, short_ok = _trend_filter_ok_series(base_ts, tf_candles, multiplier, atr_period)
+    return long_ok, short_ok, None
+
+
+async def compute_supertrend_filter_live(symbol, st, cfg, resolution, multiplier, atr_period, n_bars):
+    """Live-Gegenstueck: liefert (long_ok, short_ok) als [wert]*n_bars (der aktuelle SuperTrend-Stand
+    gilt fuer alle 'n_bars' zuletzt verarbeiteten Signal-Kerzen, wie bei Al-Shatri) - oder
+    (None, None), wenn (noch) nicht genug Filter-Kerzen da sind; der Aufrufer soll den Filter dann
+    wie ueblich durchlassen (alles True)."""
+    tf_closed = await _fetch_trend_filter_candles_live(symbol, st, cfg, resolution, atr_period)
+    if not tf_closed:
+        return None, None
+    tf_h, tf_l, tf_c = tf_closed
+    line, _ = compute_diamond_supertrend(tf_h, tf_l, tf_c, multiplier, atr_period)
+    bullish_now = line[-1] is not None and tf_c[-1] > line[-1]
+    return [bullish_now] * n_bars, [not bullish_now] * n_bars
+
+
+def compute_adx_filter_series(candles, length, threshold, directional=True):
+    """ADX/DMI-Trendfilter auf den EIGENEN Kerzen des Signalgebers (kein HTF-Fetch noetig - ADX
+    braucht anders als SuperTrend ueblicherweise keine hoehere Zeiteinheit). candles = (ts,o,h,l,c).
+    directional=True (Standard): long_ok nur wenn ADX>Schwelle UND +DI>-DI (Trend UND Richtung
+    stimmen), short_ok umgekehrt. directional=False: long_ok==short_ok==(ADX>Schwelle) - reiner
+    Trendstaerke-Filter ohne Richtungsvorgabe (z.B. um Seitwaerts-Phasen generell zu blocken)."""
+    _ts, _o, h, l, c = candles
+    adx, plus_di, minus_di = compute_adx(h, l, c, length)
+    n = len(c)
+    if directional:
+        long_ok = [adx[i] is not None and adx[i] > threshold and plus_di[i] > minus_di[i] for i in range(n)]
+        short_ok = [adx[i] is not None and adx[i] > threshold and minus_di[i] > plus_di[i] for i in range(n)]
+    else:
+        ok = [adx[i] is not None and adx[i] > threshold for i in range(n)]
+        long_ok, short_ok = ok, list(ok)
+    return long_ok, short_ok
+
+
+def compute_macd_filter_series(candles, fast_len, slow_len, signal_len):
+    """MACD-Trendfilter auf den EIGENEN Kerzen des Signalgebers. long_ok wenn die MACD-Linie ueber
+    ihrer Signal-Linie steht (bullischer Zustand), short_ok umgekehrt - kein reiner Crossover-Moment,
+    sondern der jeweils AKTUELLE Zustand (wie beim SuperTrend), damit der Filter bei jedem
+    Signalgeber-Bar sofort eine Antwort hat statt nur an Kreuzungs-Bars."""
+    _ts, _o, _h, _l, c = candles
+    macd_line, signal_line = compute_macd_line_and_signal(c, fast_len, slow_len, signal_len)
+    n = len(c)
+    long_ok = [macd_line[i] is not None and signal_line[i] is not None and macd_line[i] > signal_line[i] for i in range(n)]
+    short_ok = [macd_line[i] is not None and signal_line[i] is not None and macd_line[i] < signal_line[i] for i in range(n)]
+    return long_ok, short_ok
+
+
+# ============================================================================
+# RSI Signal (kauf bei ueberverkauft, verkauf bei ueberkauft) - erste Strategie nach dem neuen
+# Baukasten-Prinzip: NUR die Signal-Bedingung ist strategie-eigen (unten, compute_rsi_signals).
+# Ein-/Ausstieg ist das exakt gleiche, bereits getestete Wechsel-System wie bei Al-Shatri Breakout
+# (_check_ab_flip/check_ab_sl als Vorlage) - fester Dollar-SL optional, "SL auf Einstieg" optional.
+# Trendfilter (SuperTrend/ADX/MACD) kommen unveraendert aus dem generischen Filter-Baukasten oben -
+# fuer eine kuenftige Strategie reicht es, eine eigene compute_X_signals() zu schreiben und diese
+# Ein-/Ausstiegs- und Filter-Bausteine wiederzuverwenden, statt alles neu zu bauen.
+# ============================================================================
+
+def compute_rsi_signals(closes, length, oversold, overbought):
+    """Reine Signal-Idee, sonst nichts: RSI < oversold -> long erlaubt, RSI > overbought -> short
+    erlaubt. Keine Filter, keine Ausstiegslogik - die kommen separat dazu (Filter-Baukasten bzw.
+    das Wechsel-System unten)."""
+    rsi = compute_rsi(closes, length)
+    n = len(closes)
+    long_raw = [rsi[i] is not None and rsi[i] < oversold for i in range(n)]
+    short_raw = [rsi[i] is not None and rsi[i] > overbought for i in range(n)]
+    return long_raw, short_raw, rsi
+
+
+def _rsi_reset_state(st):
+    st["rsi_sl_price"] = None
+    st["rsi_be_done"] = False
+
+
+async def check_rsi_sl(symbol, price):
+    """Identisch zu check_ab_sl (siehe dort fuer Kommentare) - nur mit rsi_-Config-Feldern."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    if not cfg.get("rsi_sl_enabled", True) and not st.get("rsi_be_done"):
+        st["rsi_sl_price"] = None
+    if cfg.get("rsi_be_enabled", False) and not st.get("rsi_be_done"):
+        size = st.get("total_coin_size") or 0
+        entry_ref = st.get("avg_entry_price")
+        if size > 0 and entry_ref:
+            dist_be = cfg.get("rsi_be_trigger_usd", 5.0) / size
+            reached = price >= entry_ref + dist_be if pos == "long" else price <= entry_ref - dist_be
+            if reached:
+                st["rsi_sl_price"] = entry_ref
+                st["rsi_be_done"] = True
+                debug_log(f"📡 [{symbol}] RSI Signal: ${cfg.get('rsi_be_trigger_usd', 5.0)} Gewinn erreicht - SL auf Einstieg ({round(entry_ref, 4)}) gesetzt")
+    sl_price = st.get("rsi_sl_price")
+    if sl_price is None:
+        return
+    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
+    if not hit_sl:
+        return
+    reason = "BREAKEVEN" if st.get("rsi_be_done") else "SL"
+    debug_log(f"🚪 [{symbol}] RSI Signal {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+    await execute_exit(symbol, price, reason)
+    if st["position"] is None:
+        st["rsi_sl_cooldown_until"] = time.time() + cfg.get("rsi_sl_cooldown_seconds", 30)
+        _rsi_reset_state(st)
+
+
+async def check_rsi_entry(symbol, buy_signal, sell_signal, price):
+    """Identisch zu _check_ab_flip (siehe dort fuer Kommentare) - nur mit rsi_-Config-Feldern."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    if buy_signal:
+        target = "long"
+    elif sell_signal:
+        target = "short"
+    else:
+        return
+    pos = st["position"]
+    if pos == target:
+        return
+
+    direction_mode = cfg.get("rsi_direction_mode", "both")
+    can_open = (direction_mode == "both"
+                or (direction_mode == "long_only" and target == "long")
+                or (direction_mode == "short_only" and target == "short"))
+
+    if pos is not None:
+        debug_log(f"🔄 [{symbol}] RSI Signal Wechsel: {pos.upper()} -> {target.upper() if can_open else 'FLACH'} @ {price}")
+        await execute_exit(symbol, price, "RSI-FLIP")
+        if st["position"] is not None:
+            return
+        _rsi_reset_state(st)
+    elif time.time() < st.get("rsi_sl_cooldown_until", 0.0):
+        return
+
+    if not can_open:
+        return
+    debug_log(f"📡 [{symbol}] RSI Signal: {target.upper()} @ {price}")
+    await execute_entry(symbol, target, price, is_add_on=False)
+    if st["position"] is None:
+        return
+    _rsi_reset_state(st)
+    size = st.get("total_coin_size") or 0
+    if cfg.get("rsi_sl_enabled", True) and size > 0:
+        entry_ref = st.get("avg_entry_price") or price
+        dist_sl = cfg.get("rsi_sl_manual_usd", 5.0) / size
+        st["rsi_sl_price"] = entry_ref - dist_sl if target == "long" else entry_ref + dist_sl
+
+
+async def _rsi_apply_filters(symbol, st, cfg, candles, long_raw, short_raw):
+    """Wendet die im Formular aktivierten Filter (SuperTrend/ADX/MACD) per UND auf long_raw/
+    short_raw an - live. Jeder Filter, der (noch) keine Daten liefern kann, laesst wie ueblich
+    durch (alles True), statt das Signal fälschlich zu blockieren."""
+    n = len(long_raw)
+    active = []
+    if cfg.get("rsi_supertrend_filter_enabled", False):
+        lo, so = await compute_supertrend_filter_live(
+            symbol, st, cfg, cfg.get("rsi_supertrend_filter_resolution", "15m"),
+            cfg.get("rsi_supertrend_filter_multiplier", 3.0), cfg.get("rsi_supertrend_filter_atr_period", 10), n)
+        if lo is not None:
+            active.append((lo, so))
+    if cfg.get("rsi_adx_filter_enabled", False):
+        active.append(compute_adx_filter_series(
+            candles, cfg.get("rsi_adx_filter_length", 14), cfg.get("rsi_adx_filter_threshold", 20),
+            directional=cfg.get("rsi_adx_filter_directional", True)))
+    if cfg.get("rsi_macd_filter_enabled", False):
+        active.append(compute_macd_filter_series(
+            candles, cfg.get("rsi_macd_filter_fast", 12), cfg.get("rsi_macd_filter_slow", 26), cfg.get("rsi_macd_filter_signal", 9)))
+    if not active:
+        return long_raw, short_raw
+    return combine_filters(long_raw, short_raw, active)
+
+
+async def rsi_poll_loop(symbol):
+    """RSI Signal - Kerzenschluss-Signal (wie Al-Shatri), Wechsel-System als Ausstieg, optional
+    SuperTrend-/ADX-/MACD-Filter aus dem generischen Baukasten oben."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "rsi_signal" and cfg["bot_active"]:
+                resolution = cfg.get("rsi_resolution", "5m")
+                length = cfg.get("rsi_length", 14)
+                min_needed = length + 5
+                needed_bars = min(1000, max(min_needed * 2, 200))
+                st = b["state"]
+
+                data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                if data:
+                    timestamps, opens, highs, lows, closes, _volumes = data
+                    closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                else:
+                    closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if st["position"] is not None and st["last_price"] is not None:
+                    await check_rsi_sl(symbol, st["last_price"])
+
+                if closed_ts and len(closed_c) > min_needed:
+                    candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
+                    max_age_seconds = 300
+                    if candle_age_seconds > max_age_seconds:
+                        debug_log(f"⚠️ [{symbol}] RSI Signal: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
+                    else:
+                        last_ts = closed_ts[-1]
+                        if last_ts != last_processed_ts:
+                            last_processed_ts = last_ts
+                            long_raw, short_raw, rsi_series = compute_rsi_signals(closed_c, length, cfg.get("rsi_oversold", 30), cfg.get("rsi_overbought", 70))
+                            candles = (closed_ts, closed_o, closed_h, closed_l, closed_c)
+                            long_final, short_final = await _rsi_apply_filters(symbol, st, cfg, candles, long_raw, short_raw)
+                            buy_signal = long_final[-1]
+                            sell_signal = short_final[-1]
+                            st["rsi_last"] = rsi_series[-1]
+                            await check_rsi_entry(symbol, buy_signal, sell_signal, closed_c[-1])
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            debug_log(f"💓 [{symbol}] RSI Signal aktiv: RSI={round(st.get('rsi_last') or 0, 1)}, "
+                                      f"Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] RSI Signal wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] RSI Signal wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] RSI Signal-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+def _simulate_rsi_trades(candles, cfg, long_setup, short_setup):
+    """Backtest-Simulation - identisch zu _simulate_ab_flip_trades (siehe dort fuer Kommentare),
+    nur mit rsi_-Config-Feldern. Kein Plan-Modus - RSI Signal kennt nur das Wechsel-System."""
+    ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    sl_enabled = cfg.get("rsi_sl_enabled", True)
+    sl_manual_usd = cfg.get("rsi_sl_manual_usd", 5.0)
+    sl_cooldown_ms = cfg.get("rsi_sl_cooldown_seconds", 30) * 1000
+    direction_mode = cfg.get("rsi_direction_mode", "both")
+    be_enabled = cfg.get("rsi_be_enabled", False)
+    be_trigger_usd = cfg.get("rsi_be_trigger_usd", 5.0)
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(1, n):
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position.get("sl_price")
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            if hit_sl:
+                reason = "BREAKEVEN" if position["be_done"] else "SL"
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            elif be_enabled and not position["be_done"] and position["size"] > 0:
+                dist_be = be_trigger_usd / position["size"]
+                if (pdir == "long" and h[i] >= entry + dist_be) or (pdir == "short" and l[i] <= entry - dist_be):
+                    position["sl_price"] = entry
+                    position["be_done"] = True
+
+        if long_setup[i] and not long_setup[i - 1]:
+            target = "long"
+        elif short_setup[i] and not short_setup[i - 1]:
+            target = "short"
+        else:
+            continue
+        if position is not None and position["dir"] == target:
+            continue
+        price = c[i]
+        if position is not None:
+            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "RSI-FLIP", ts=ts)
+            position = None
+        elif sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts:
+            continue
+        can_open = (direction_mode == "both"
+                    or (direction_mode == "long_only" and target == "long")
+                    or (direction_mode == "short_only" and target == "short"))
+        if not can_open:
+            continue
+        size = (margin * leverage) / price
+        sl_price = None
+        if sl_enabled and size > 0:
+            dist_sl = sl_manual_usd / size
+            sl_price = price - dist_sl if target == "long" else price + dist_sl
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "be_done": False}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_rsi_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_short_ok=None,
+                         adx_long_ok=None, adx_short_ok=None, macd_long_ok=None, macd_short_ok=None):
+    """Backtest fuer RSI Signal. Trendfilter-Serien werden von run_backtest() VORAB berechnet und
+    hier nur noch per combine_filters() angewandt (wie bei Al-Shatri: ein Filter wird pro Sweep-
+    Kombination oft wiederverwendet, deshalb hier nicht selbst neu holen)."""
+    o, h, l, c = candles[1], candles[2], candles[3], candles[4]
+    length = cfg.get("rsi_length", 14)
+    long_raw, short_raw, _rsi = compute_rsi_signals(c, length, cfg.get("rsi_oversold", 30), cfg.get("rsi_overbought", 70))
+    filters = []
+    if trend_filter_long_ok is not None:
+        filters.append((trend_filter_long_ok, trend_filter_short_ok))
+    if adx_long_ok is not None:
+        filters.append((adx_long_ok, adx_short_ok))
+    if macd_long_ok is not None:
+        filters.append((macd_long_ok, macd_short_ok))
+    if filters:
+        long_raw, short_raw = combine_filters(long_raw, short_raw, filters)
+    return _simulate_rsi_trades(candles, cfg, long_raw, short_raw)
