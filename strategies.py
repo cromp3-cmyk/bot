@@ -1918,13 +1918,13 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         adx_long_ok = adx_short_ok = None
         if cfg.get("rsi_adx_filter_enabled", False):
             adx_long_ok, adx_short_ok = compute_adx_filter_series(
-                candles, cfg.get("rsi_adx_filter_length", 14), cfg.get("rsi_adx_filter_threshold", 20),
+                (candles[0], candles[1], candles[2], candles[3], candles[4]), cfg.get("rsi_adx_filter_length", 14), cfg.get("rsi_adx_filter_threshold", 20),
                 directional=cfg.get("rsi_adx_filter_directional", True))
 
         macd_long_ok = macd_short_ok = None
         if cfg.get("rsi_macd_filter_enabled", False):
             macd_long_ok, macd_short_ok = compute_macd_filter_series(
-                candles, cfg.get("rsi_macd_filter_fast", 12), cfg.get("rsi_macd_filter_slow", 26), cfg.get("rsi_macd_filter_signal", 9))
+                (candles[0], candles[1], candles[2], candles[3], candles[4]), cfg.get("rsi_macd_filter_fast", 12), cfg.get("rsi_macd_filter_slow", 26), cfg.get("rsi_macd_filter_signal", 9))
 
         trades = backtest_rsi_signal(candles, cfg, trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok,
                                       adx_long_ok=adx_long_ok, adx_short_ok=adx_short_ok, macd_long_ok=macd_long_ok, macd_short_ok=macd_short_ok)
@@ -1940,7 +1940,56 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "trades": trades[-50:],
         }
 
-    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+    if entry_mode == "mvwap_mf_signal":
+        max_candles = BACKTEST_MAX_CANDLES.get("mvwap_mf_signal", 100_000)
+        resolution = cfg.get("mvwap_resolution", "5m")
+        if resolution in SUB_MINUTE_RESOLUTIONS:
+            max_candles = min(max_candles, 5000)
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        params = _mvwap_effective_params(cfg)
+        min_needed = max(params["mf_length"], params["cmf_length"]) + 30
+        if not candles or len(candles[4]) < min_needed:
+            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+        n_candles = len(candles[4])
+
+        trend_filter_long_ok = trend_filter_short_ok = None
+        if cfg.get("mvwap_supertrend_filter_enabled", False):
+            tf_resolution = cfg.get("mvwap_supertrend_filter_resolution", "15m")
+            tf_atr_period = cfg.get("mvwap_supertrend_filter_atr_period", 10)
+            tf_multiplier = cfg.get("mvwap_supertrend_filter_multiplier", 3.0)
+            trend_filter_long_ok, trend_filter_short_ok, tf_err = await compute_supertrend_filter_backtest(
+                symbol, cfg, candles[0], tf_resolution, tf_multiplier, tf_atr_period)
+            if tf_err:
+                return {"error": tf_err}
+
+        adx_long_ok = adx_short_ok = None
+        if cfg.get("mvwap_adx_filter_enabled", False):
+            adx_long_ok, adx_short_ok = compute_adx_filter_series(
+                candles, cfg.get("mvwap_adx_filter_length", 14), cfg.get("mvwap_adx_filter_threshold", 20),
+                directional=cfg.get("mvwap_adx_filter_directional", True))
+
+        macd_long_ok = macd_short_ok = None
+        if cfg.get("mvwap_macd_filter_enabled", False):
+            macd_long_ok, macd_short_ok = compute_macd_filter_series(
+                candles, cfg.get("mvwap_macd_filter_fast", 12), cfg.get("mvwap_macd_filter_slow", 26), cfg.get("mvwap_macd_filter_signal", 9))
+
+        trades = backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok,
+                                        adx_long_ok=adx_long_ok, adx_short_ok=adx_short_ok, macd_long_ok=macd_long_ok, macd_short_ok=macd_short_ok)
+        stats = summarize_backtest_trades(trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades[-50:],
+        }
+
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 AB_SWEEP_MAX_COMBOS = 600
 AB_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -3377,8 +3426,10 @@ def compute_adx_filter_series(candles, length, threshold, directional=True):
     braucht anders als SuperTrend ueblicherweise keine hoehere Zeiteinheit). candles = (ts,o,h,l,c).
     directional=True (Standard): long_ok nur wenn ADX>Schwelle UND +DI>-DI (Trend UND Richtung
     stimmen), short_ok umgekehrt. directional=False: long_ok==short_ok==(ADX>Schwelle) - reiner
-    Trendstaerke-Filter ohne Richtungsvorgabe (z.B. um Seitwaerts-Phasen generell zu blocken)."""
-    _ts, _o, h, l, c = candles
+    Trendstaerke-Filter ohne Richtungsvorgabe (z.B. um Seitwaerts-Phasen generell zu blocken).
+    Nimmt sowohl 5er- (ts,o,h,l,c) als auch 6er-Tupel (ts,o,h,l,c,v) entgegen - ein eventuell
+    mitgegebenes Volumen wird schlicht ignoriert (ADX braucht keins)."""
+    _ts, _o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     adx, plus_di, minus_di = compute_adx(h, l, c, length)
     n = len(c)
     if directional:
@@ -3394,8 +3445,9 @@ def compute_macd_filter_series(candles, fast_len, slow_len, signal_len):
     """MACD-Trendfilter auf den EIGENEN Kerzen des Signalgebers. long_ok wenn die MACD-Linie ueber
     ihrer Signal-Linie steht (bullischer Zustand), short_ok umgekehrt - kein reiner Crossover-Moment,
     sondern der jeweils AKTUELLE Zustand (wie beim SuperTrend), damit der Filter bei jedem
-    Signalgeber-Bar sofort eine Antwort hat statt nur an Kreuzungs-Bars."""
-    _ts, _o, _h, _l, c = candles
+    Signalgeber-Bar sofort eine Antwort hat statt nur an Kreuzungs-Bars. Nimmt sowohl 5er- als
+    auch 6er-Tupel (mit Volumen) entgegen - siehe compute_adx_filter_series."""
+    _ts, _o, _h, _l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     macd_line, signal_line = compute_macd_line_and_signal(c, fast_len, slow_len, signal_len)
     n = len(c)
     long_ok = [macd_line[i] is not None and signal_line[i] is not None and macd_line[i] > signal_line[i] for i in range(n)]
@@ -3702,3 +3754,429 @@ def backtest_rsi_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_sh
     if filters:
         long_raw, short_raw = combine_filters(long_raw, short_raw, filters)
     return _simulate_rsi_trades(candles, cfg, long_raw, short_raw)
+
+
+def compute_mfi(highs, lows, closes, volumes, period):
+    """Money Flow Index: RSI-artiger Oszillator auf Basis von volumengewichtetem
+    typischem Preis (hlc3) statt reinem Schlusskurs - misst Geldfluss statt Preis."""
+    n = len(closes)
+    if n < 2:
+        return [50.0] * n
+    typical = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n)]
+    raw_flow = [typical[i] * volumes[i] for i in range(n)]
+    pos_flow = [0.0] * n
+    neg_flow = [0.0] * n
+    for i in range(1, n):
+        if typical[i] > typical[i - 1]:
+            pos_flow[i] = raw_flow[i]
+        elif typical[i] < typical[i - 1]:
+            neg_flow[i] = raw_flow[i]
+
+    def _rolling_sum(values):
+        out = [0.0] * n
+        for i in range(n):
+            start = max(0, i - period + 1)
+            out[i] = sum(values[start:i + 1])
+        return out
+
+    pos_sum = _rolling_sum(pos_flow)
+    neg_sum = _rolling_sum(neg_flow)
+    mfi = [50.0] * n
+    for i in range(n):
+        if neg_sum[i] == 0:
+            mfi[i] = 100.0 if pos_sum[i] > 0 else 50.0
+        else:
+            money_ratio = pos_sum[i] / neg_sum[i]
+            mfi[i] = 100 - (100 / (1 + money_ratio))
+    return mfi
+
+
+
+# ============================================================================
+# Multi-VWAP Money-Flow Signal (portiert aus dem Pine-Indikator "Multi-VWAP Money Flow
+# Oszillator [Divergenzen]") - Signal-Kern: gewichteter Verbund aus Daily/Weekly/Monthly-VWAP-
+# Abweichung (in %) + MFI oder CMF, EMA-geglaettet. Buy/Sell = der Oszillator dreht die Richtung
+# (steigt nach vorherigem Fallen -> Buy, faellt nach vorherigem Steigen -> Sell), optional nur
+# ausserhalb der Overbought/Oversold-Zone. Aus-/Einstieg identisch zum RSI-Signal-Wechsel-System
+# (Gegen-Signal dreht die Position, optionaler $-SL/-TP, Break-Even, Cooldown) - Filter kommen
+# unveraendert aus dem generischen Filter-Baukasten (SuperTrend/ADX/MACD).
+# ============================================================================
+
+def compute_anchored_vwap_series(ts_ms, highs, lows, closes, volumes, anchor):
+    """Anchored VWAP (wie Pine's ta.vwap(hlc3, newPeriod, 1)) - setzt die kumulierte Summe bei
+    jedem neuen Kalendertag/-woche/-monat (UTC) zurueck. anchor: 'D', 'W' oder 'M'."""
+    import datetime
+    n = len(closes)
+    vwap = [None] * n
+    cum_pv = 0.0
+    cum_vol = 0.0
+    last_key = None
+    for i in range(n):
+        dt = datetime.datetime.utcfromtimestamp(ts_ms[i] / 1000)
+        if anchor == "D":
+            key = dt.date()
+        elif anchor == "W":
+            key = dt.isocalendar()[:2]
+        else:
+            key = (dt.year, dt.month)
+        if key != last_key:
+            cum_pv = 0.0
+            cum_vol = 0.0
+            last_key = key
+        typical = (highs[i] + lows[i] + closes[i]) / 3
+        cum_pv += typical * volumes[i]
+        cum_vol += volumes[i]
+        vwap[i] = cum_pv / cum_vol if cum_vol > 0 else typical
+    return vwap
+
+
+def compute_cmf(highs, lows, closes, volumes, length):
+    """Chaikin Money Flow: rollierende Summe aus (Money-Flow-Multiplikator * Volumen) geteilt
+    durch rollierende Volumensumme - wie Pine's ta.cmf()."""
+    n = len(closes)
+    mfv = [0.0] * n
+    for i in range(n):
+        rng = highs[i] - lows[i]
+        mfm = 0.0 if rng == 0 else ((closes[i] - lows[i]) - (highs[i] - closes[i])) / rng
+        mfv[i] = mfm * volumes[i]
+    cmf = [0.0] * n
+    for i in range(n):
+        start = max(0, i - length + 1)
+        vol_sum = sum(volumes[start:i + 1])
+        cmf[i] = sum(mfv[start:i + 1]) / vol_sum if vol_sum > 0 else 0.0
+    return cmf
+
+
+def compute_mvwap_mf_oscillator(ts_ms, highs, lows, closes, volumes, params):
+    """Composite-Oszillator: (1-mfWeight)*VWAP-Verbund + mfWeight*(MFI oder CMF, normiert auf
+    ca. -2..2). Gibt (osc, mf_raw) zurueck - mf_raw (normiert -1..1) wird auch fuer den separaten
+    Money-Flow-Filter gebraucht."""
+    n = len(closes)
+    dev_d = compute_anchored_vwap_series(ts_ms, highs, lows, closes, volumes, "D") if params["use_daily"] else None
+    dev_w = compute_anchored_vwap_series(ts_ms, highs, lows, closes, volumes, "W") if params["use_weekly"] else None
+    dev_m = compute_anchored_vwap_series(ts_ms, highs, lows, closes, volumes, "M") if params["use_monthly"] else None
+
+    w_daily, w_weekly, w_monthly = params["w_daily"], params["w_weekly"], params["w_monthly"]
+    w_sum = (w_daily if params["use_daily"] else 0) + (w_weekly if params["use_weekly"] else 0) + (w_monthly if params["use_monthly"] else 0)
+    w_sum_safe = w_sum if w_sum != 0 else 1
+
+    vwap_composite = [0.0] * n
+    for i in range(n):
+        dd = ((closes[i] - dev_d[i]) / dev_d[i] * 100) if dev_d is not None else 0.0
+        dw = ((closes[i] - dev_w[i]) / dev_w[i] * 100) if dev_w is not None else 0.0
+        dm = ((closes[i] - dev_m[i]) / dev_m[i] * 100) if dev_m is not None else 0.0
+        vwap_composite[i] = (dd * w_daily + dw * w_weekly + dm * w_monthly) / w_sum_safe
+
+    if params["mf_source"] == "MFI":
+        mfi = compute_mfi(highs, lows, closes, volumes, params["mf_length"])
+        mf_raw = [(v - 50) / 50 for v in mfi]
+    else:
+        mf_raw = compute_cmf(highs, lows, closes, volumes, params["cmf_length"])
+    mf_scaled = [v * 2.0 for v in mf_raw]
+
+    mf_weight = params["mf_weight"]
+    osc_raw = [(1 - mf_weight) * vwap_composite[i] + mf_weight * mf_scaled[i] for i in range(n)]
+    osc = _ema_series(osc_raw, params["smooth_len"])
+    return osc, mf_raw
+
+
+def compute_mvwap_mf_signals(osc, mf_raw, params):
+    """Buy/Sell = Richtungswechsel des Oszillators (wie im Original-Skript: oscUp/oscDown-
+    Flankenwechsel), optional nur ausserhalb der OB/OS-Zone."""
+    n = len(osc)
+    osc_up = [osc[i] > osc[i - 1] if i > 0 else False for i in range(n)]
+    osc_down = [not v for v in osc_up]
+    buy_raw = [osc_up[i] and not (osc_up[i - 1] if i > 0 else False) for i in range(n)]
+    sell_raw = [osc_down[i] and not (osc_down[i - 1] if i > 0 else False) for i in range(n)]
+    if params.get("use_zone_filter", False):
+        ob, os_ = params["ob_level"], params["os_level"]
+        buy_raw = [buy_raw[i] and osc[i] < ob for i in range(n)]
+        sell_raw = [sell_raw[i] and osc[i] > os_ for i in range(n)]
+    return buy_raw, sell_raw
+
+
+def _mvwap_effective_params(cfg):
+    return {
+        "use_daily": cfg.get("mvwap_use_daily", True), "use_weekly": cfg.get("mvwap_use_weekly", True),
+        "use_monthly": cfg.get("mvwap_use_monthly", True),
+        "w_daily": cfg.get("mvwap_w_daily", 0.5), "w_weekly": cfg.get("mvwap_w_weekly", 0.3), "w_monthly": cfg.get("mvwap_w_monthly", 0.2),
+        "mf_source": cfg.get("mvwap_mf_source", "MFI"), "mf_length": cfg.get("mvwap_mf_length", 14),
+        "cmf_length": cfg.get("mvwap_cmf_length", 20), "mf_weight": cfg.get("mvwap_mf_weight", 0.35),
+        "smooth_len": cfg.get("mvwap_smooth_len", 3),
+        "use_zone_filter": cfg.get("mvwap_use_zone_filter", False),
+        "ob_level": cfg.get("mvwap_ob_level", 2.0), "os_level": cfg.get("mvwap_os_level", -2.0),
+    }
+
+
+def _mvwap_reset_state(st):
+    st["mvwap_sl_price"] = None
+    st["mvwap_tp_price"] = None
+    st["mvwap_be_done"] = False
+
+
+async def check_mvwap_sl(symbol, price):
+    """Identisch zu check_rsi_sl (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    if not cfg.get("mvwap_sl_enabled", True) and not st.get("mvwap_be_done"):
+        st["mvwap_sl_price"] = None
+    if cfg.get("mvwap_be_enabled", False) and not st.get("mvwap_be_done"):
+        size = st.get("total_coin_size") or 0
+        entry_ref = st.get("avg_entry_price")
+        if size > 0 and entry_ref:
+            dist_be = cfg.get("mvwap_be_trigger_usd", 5.0) / size
+            reached = price >= entry_ref + dist_be if pos == "long" else price <= entry_ref - dist_be
+            if reached:
+                st["mvwap_sl_price"] = entry_ref
+                st["mvwap_be_done"] = True
+                debug_log(f"📡 [{symbol}] Multi-VWAP Money-Flow: ${cfg.get('mvwap_be_trigger_usd', 5.0)} Gewinn erreicht - SL auf Einstieg ({round(entry_ref, 4)}) gesetzt")
+    sl_price = st.get("mvwap_sl_price")
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    if hit_sl:
+        reason = "BREAKEVEN" if st.get("mvwap_be_done") else "SL"
+        debug_log(f"🚪 [{symbol}] Multi-VWAP Money-Flow {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, reason)
+        if st["position"] is None:
+            st["mvwap_sl_cooldown_until"] = time.time() + cfg.get("mvwap_sl_cooldown_seconds", 30)
+            _mvwap_reset_state(st)
+        return
+    tp_price = st.get("mvwap_tp_price")
+    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
+    if hit_tp:
+        debug_log(f"🎯 [{symbol}] Multi-VWAP Money-Flow TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP")
+        if st["position"] is None:
+            _mvwap_reset_state(st)
+
+
+async def check_mvwap_entry(symbol, buy_signal, sell_signal, price):
+    """Identisch zu check_rsi_entry (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    if buy_signal:
+        target = "long"
+    elif sell_signal:
+        target = "short"
+    else:
+        return
+    pos = st["position"]
+    if pos == target:
+        return
+
+    direction_mode = cfg.get("mvwap_direction_mode", "both")
+    can_open = (direction_mode == "both"
+                or (direction_mode == "long_only" and target == "long")
+                or (direction_mode == "short_only" and target == "short"))
+
+    if pos is not None:
+        debug_log(f"🔄 [{symbol}] Multi-VWAP Money-Flow Wechsel: {pos.upper()} -> {target.upper() if can_open else 'FLACH'} @ {price}")
+        await execute_exit(symbol, price, "MVWAP-FLIP")
+        if st["position"] is not None:
+            return
+        _mvwap_reset_state(st)
+    elif time.time() < st.get("mvwap_sl_cooldown_until", 0.0):
+        return
+
+    if not can_open:
+        return
+    debug_log(f"📡 [{symbol}] Multi-VWAP Money-Flow: {target.upper()} @ {price}")
+    await execute_entry(symbol, target, price, is_add_on=False)
+    if st["position"] is None:
+        return
+    _mvwap_reset_state(st)
+    size = st.get("total_coin_size") or 0
+    if cfg.get("mvwap_sl_enabled", True) and size > 0:
+        entry_ref = st.get("avg_entry_price") or price
+        dist_sl = cfg.get("mvwap_sl_manual_usd", 5.0) / size
+        st["mvwap_sl_price"] = entry_ref - dist_sl if target == "long" else entry_ref + dist_sl
+    if cfg.get("mvwap_tp_enabled", False) and size > 0:
+        entry_ref = st.get("avg_entry_price") or price
+        dist_tp = cfg.get("mvwap_tp_manual_usd", 10.0) / size
+        st["mvwap_tp_price"] = entry_ref + dist_tp if target == "long" else entry_ref - dist_tp
+
+
+async def _mvwap_apply_filters(symbol, st, cfg, candles, long_raw, short_raw):
+    """Identisch zu _rsi_apply_filters (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern."""
+    n = len(long_raw)
+    active = []
+    if cfg.get("mvwap_supertrend_filter_enabled", False):
+        lo, so = await compute_supertrend_filter_live(
+            symbol, st, cfg, cfg.get("mvwap_supertrend_filter_resolution", "15m"),
+            cfg.get("mvwap_supertrend_filter_multiplier", 3.0), cfg.get("mvwap_supertrend_filter_atr_period", 10), n)
+        if lo is not None:
+            active.append((lo, so))
+    if cfg.get("mvwap_adx_filter_enabled", False):
+        active.append(compute_adx_filter_series(
+            candles, cfg.get("mvwap_adx_filter_length", 14), cfg.get("mvwap_adx_filter_threshold", 20),
+            directional=cfg.get("mvwap_adx_filter_directional", True)))
+    if cfg.get("mvwap_macd_filter_enabled", False):
+        active.append(compute_macd_filter_series(
+            candles, cfg.get("mvwap_macd_filter_fast", 12), cfg.get("mvwap_macd_filter_slow", 26), cfg.get("mvwap_macd_filter_signal", 9)))
+    if not active:
+        return long_raw, short_raw
+    return combine_filters(long_raw, short_raw, active)
+
+
+async def mvwap_poll_loop(symbol):
+    """Multi-VWAP Money-Flow Signal - Kerzenschluss-Signal wie RSI, Wechsel-System als Ausstieg,
+    optional SuperTrend-/ADX-/MACD-Filter aus dem generischen Baukasten. Braucht Volumen (fuer
+    VWAP/MFI/CMF) - deshalb fetch_candles_binance_vol statt _multi."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "mvwap_mf_signal" and cfg["bot_active"]:
+                resolution = cfg.get("mvwap_resolution", "5m")
+                params = _mvwap_effective_params(cfg)
+                min_needed = max(params["mf_length"], params["cmf_length"]) + 30
+                needed_bars = min(1000, max(min_needed * 2, 300))
+                st = b["state"]
+
+                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                if data:
+                    timestamps, opens, highs, lows, closes, volumes = data
+                    closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                else:
+                    closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if st["position"] is not None and st["last_price"] is not None:
+                    await check_mvwap_sl(symbol, st["last_price"])
+
+                if closed_ts and len(closed_c) > min_needed:
+                    candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
+                    max_age_seconds = 300
+                    if candle_age_seconds > max_age_seconds:
+                        debug_log(f"⚠️ [{symbol}] Multi-VWAP Money-Flow: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
+                    else:
+                        last_ts = closed_ts[-1]
+                        if last_ts != last_processed_ts:
+                            last_processed_ts = last_ts
+                            osc, mf_raw = compute_mvwap_mf_oscillator(closed_ts, closed_h, closed_l, closed_c, closed_v, params)
+                            long_raw, short_raw = compute_mvwap_mf_signals(osc, mf_raw, params)
+                            candles = (closed_ts, closed_o, closed_h, closed_l, closed_c)
+                            long_final, short_final = await _mvwap_apply_filters(symbol, st, cfg, candles, long_raw, short_raw)
+                            buy_signal = long_final[-1]
+                            sell_signal = short_final[-1]
+                            st["mvwap_osc_last"] = osc[-1]
+                            await check_mvwap_entry(symbol, buy_signal, sell_signal, closed_c[-1])
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            debug_log(f"💓 [{symbol}] Multi-VWAP Money-Flow aktiv: Oszillator={round(st.get('mvwap_osc_last') or 0, 2)}, "
+                                      f"Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Multi-VWAP Money-Flow wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Multi-VWAP Money-Flow wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Multi-VWAP Money-Flow-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+def _simulate_mvwap_trades(candles, cfg, long_setup, short_setup):
+    """Backtest-Simulation - identisch zu _simulate_rsi_trades (siehe dort fuer Kommentare), mit
+    mvwap_-Config-Feldern (inkl. optionalem festen Dollar-TP, SL gewinnt bei Konflikt)."""
+    ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    sl_enabled = cfg.get("mvwap_sl_enabled", True)
+    sl_manual_usd = cfg.get("mvwap_sl_manual_usd", 5.0)
+    sl_cooldown_ms = cfg.get("mvwap_sl_cooldown_seconds", 30) * 1000
+    direction_mode = cfg.get("mvwap_direction_mode", "both")
+    be_enabled = cfg.get("mvwap_be_enabled", False)
+    be_trigger_usd = cfg.get("mvwap_be_trigger_usd", 5.0)
+    tp_enabled = cfg.get("mvwap_tp_enabled", False)
+    tp_manual_usd = cfg.get("mvwap_tp_manual_usd", 10.0)
+
+    position = None
+    trades = []
+    sl_cooldown_until_ts = None
+
+    for i in range(1, n):
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position.get("sl_price")
+            hit_sl = sl_price is not None and ((pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price))
+            if hit_sl:
+                reason = "BREAKEVEN" if position["be_done"] else "SL"
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+                sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
+            else:
+                if be_enabled and not position["be_done"] and position["size"] > 0:
+                    dist_be = be_trigger_usd / position["size"]
+                    if (pdir == "long" and h[i] >= entry + dist_be) or (pdir == "short" and l[i] <= entry - dist_be):
+                        position["sl_price"] = entry
+                        position["be_done"] = True
+                tp_price = position.get("tp_price")
+                hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+                if hit_tp:
+                    _bt_close_trade(trades, pdir, entry, tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                    position = None
+
+        if long_setup[i] and not long_setup[i - 1]:
+            target = "long"
+        elif short_setup[i] and not short_setup[i - 1]:
+            target = "short"
+        else:
+            continue
+        if position is not None and position["dir"] == target:
+            continue
+        price = c[i]
+        if position is not None:
+            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MVWAP-FLIP", ts=ts)
+            position = None
+        elif sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts:
+            continue
+        can_open = (direction_mode == "both"
+                    or (direction_mode == "long_only" and target == "long")
+                    or (direction_mode == "short_only" and target == "short"))
+        if not can_open:
+            continue
+        size = (margin * leverage) / price
+        sl_price = None
+        if sl_enabled and size > 0:
+            dist_sl = sl_manual_usd / size
+            sl_price = price - dist_sl if target == "long" else price + dist_sl
+        tp_price = None
+        if tp_enabled and size > 0:
+            dist_tp = tp_manual_usd / size
+            tp_price = price + dist_tp if target == "long" else price - dist_tp
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "be_done": False}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
+
+
+def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_short_ok=None,
+                           adx_long_ok=None, adx_short_ok=None, macd_long_ok=None, macd_short_ok=None):
+    """Backtest fuer Multi-VWAP Money-Flow Signal. candles muss ein 6er-Tupel MIT Volumen sein."""
+    ts, o, h, l, c, v = candles
+    params = _mvwap_effective_params(cfg)
+    osc, mf_raw = compute_mvwap_mf_oscillator(ts, h, l, c, v, params)
+    long_raw, short_raw = compute_mvwap_mf_signals(osc, mf_raw, params)
+    filters = []
+    if trend_filter_long_ok is not None:
+        filters.append((trend_filter_long_ok, trend_filter_short_ok))
+    if adx_long_ok is not None:
+        filters.append((adx_long_ok, adx_short_ok))
+    if macd_long_ok is not None:
+        filters.append((macd_long_ok, macd_short_ok))
+    if filters:
+        long_raw, short_raw = combine_filters(long_raw, short_raw, filters)
+    return _simulate_mvwap_trades(candles, cfg, long_raw, short_raw)

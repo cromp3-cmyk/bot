@@ -286,6 +286,46 @@ def default_config():
         "rsi_macd_filter_fast": int(os.getenv("RSI_MACD_FILTER_FAST", "12")),
         "rsi_macd_filter_slow": int(os.getenv("RSI_MACD_FILTER_SLOW", "26")),
         "rsi_macd_filter_signal": int(os.getenv("RSI_MACD_FILTER_SIGNAL", "9")),
+
+        # ================= Multi-VWAP Money-Flow Signal =================
+        # Composite-Oszillator aus Daily/Weekly/Monthly-VWAP-Abweichung + MFI/CMF (Original-
+        # Pine-Skript), EMA-geglaettet. Buy/Sell = der Oszillator dreht die Richtung. Ausstieg/
+        # Filter identisch zu RSI Signal (Wechsel-System, $-SL/-TP, Break-Even, SuperTrend/ADX/MACD).
+        "mvwap_resolution": os.getenv("MVWAP_RESOLUTION", "5m"),
+        "mvwap_use_daily": os.getenv("MVWAP_USE_DAILY", "true").lower() == "true",
+        "mvwap_use_weekly": os.getenv("MVWAP_USE_WEEKLY", "true").lower() == "true",
+        "mvwap_use_monthly": os.getenv("MVWAP_USE_MONTHLY", "true").lower() == "true",
+        "mvwap_w_daily": float(os.getenv("MVWAP_W_DAILY", "0.5")),
+        "mvwap_w_weekly": float(os.getenv("MVWAP_W_WEEKLY", "0.3")),
+        "mvwap_w_monthly": float(os.getenv("MVWAP_W_MONTHLY", "0.2")),
+        "mvwap_mf_source": os.getenv("MVWAP_MF_SOURCE", "MFI"),
+        "mvwap_mf_length": int(os.getenv("MVWAP_MF_LENGTH", "14")),
+        "mvwap_cmf_length": int(os.getenv("MVWAP_CMF_LENGTH", "20")),
+        "mvwap_mf_weight": float(os.getenv("MVWAP_MF_WEIGHT", "0.35")),
+        "mvwap_smooth_len": int(os.getenv("MVWAP_SMOOTH_LEN", "3")),
+        "mvwap_use_zone_filter": os.getenv("MVWAP_USE_ZONE_FILTER", "false").lower() == "true",
+        "mvwap_ob_level": float(os.getenv("MVWAP_OB_LEVEL", "2.0")),
+        "mvwap_os_level": float(os.getenv("MVWAP_OS_LEVEL", "-2.0")),
+        "mvwap_direction_mode": os.getenv("MVWAP_DIRECTION_MODE", "both"),
+        "mvwap_sl_enabled": os.getenv("MVWAP_SL_ENABLED", "true").lower() == "true",
+        "mvwap_sl_manual_usd": float(os.getenv("MVWAP_SL_MANUAL_USD", "5.0")),
+        "mvwap_tp_enabled": os.getenv("MVWAP_TP_ENABLED", "false").lower() == "true",
+        "mvwap_tp_manual_usd": float(os.getenv("MVWAP_TP_MANUAL_USD", "10.0")),
+        "mvwap_be_enabled": os.getenv("MVWAP_BE_ENABLED", "false").lower() == "true",
+        "mvwap_be_trigger_usd": float(os.getenv("MVWAP_BE_TRIGGER_USD", "5.0")),
+        "mvwap_sl_cooldown_seconds": float(os.getenv("MVWAP_SL_COOLDOWN_SECONDS", "30")),
+        "mvwap_supertrend_filter_enabled": os.getenv("MVWAP_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_supertrend_filter_resolution": os.getenv("MVWAP_SUPERTREND_FILTER_RESOLUTION", "15m"),
+        "mvwap_supertrend_filter_multiplier": float(os.getenv("MVWAP_SUPERTREND_FILTER_MULTIPLIER", "3.0")),
+        "mvwap_supertrend_filter_atr_period": int(os.getenv("MVWAP_SUPERTREND_FILTER_ATR_PERIOD", "10")),
+        "mvwap_adx_filter_enabled": os.getenv("MVWAP_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_adx_filter_length": int(os.getenv("MVWAP_ADX_FILTER_LENGTH", "14")),
+        "mvwap_adx_filter_threshold": float(os.getenv("MVWAP_ADX_FILTER_THRESHOLD", "20")),
+        "mvwap_adx_filter_directional": os.getenv("MVWAP_ADX_FILTER_DIRECTIONAL", "true").lower() == "true",
+        "mvwap_macd_filter_enabled": os.getenv("MVWAP_MACD_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_macd_filter_fast": int(os.getenv("MVWAP_MACD_FILTER_FAST", "12")),
+        "mvwap_macd_filter_slow": int(os.getenv("MVWAP_MACD_FILTER_SLOW", "26")),
+        "mvwap_macd_filter_signal": int(os.getenv("MVWAP_MACD_FILTER_SIGNAL", "9")),
         # Ausstiegs-Modus: "flip" = Wechsel bei Gegen-Signal (immer im Markt) + optionaler fester
         # Dollar-SL; "plan" = wie das Original-Skript (ATR-SL + TP1/TP2/TP3 mit Teilverkaeufen).
         "ab_exit_mode": os.getenv("AB_EXIT_MODE", "flip"),
@@ -476,6 +516,7 @@ PERSISTED_STATE_KEYS = [
     "gs_anchor", "gs_cooldown_until", "gs_tag_map", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
+    "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
 ]
 
 
@@ -1172,6 +1213,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
       <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
+      <option value="mvwap_mf_signal">Multi-VWAP Money-Flow Signal (VWAP+MFI/CMF-Oszillator dreht Richtung, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
     </select>
   </div>
 
@@ -1326,13 +1368,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="rsi_signal"><label>Zeitrahmen</label>
     <select class="cfg" id="rsi_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="rsi_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="rsi_signal"><label>RSI-Periode</label><input type="number" step="1" min="2" id="rsi_length"></div>
   <div data-mode="rsi_signal"><label>Überverkauft (Long-Schwelle)</label><input type="number" step="1" min="1" max="49" id="rsi_oversold"></div>
@@ -1375,12 +1423,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
     <select class="cfg" id="rsi_supertrend_filter_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
     </select>
+    <input type="number" step="1" min="1" id="rsi_supertrend_filter_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>SuperTrend-Multiplikator</label><input type="number" step="0.1" min="0.1" id="rsi_supertrend_filter_multiplier"></div>
   <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="rsi_supertrend_filter_atr_period"></div>
@@ -1409,6 +1464,132 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="rsi_signal" data-requires="rsi_macd_filter_enabled"><label>MACD schnell</label><input type="number" step="1" min="1" id="rsi_macd_filter_fast"></div>
   <div data-mode="rsi_signal" data-requires="rsi_macd_filter_enabled"><label>MACD langsam</label><input type="number" step="1" min="1" id="rsi_macd_filter_slow"></div>
   <div data-mode="rsi_signal" data-requires="rsi_macd_filter_enabled"><label>MACD-Signal</label><input type="number" step="1" min="1" id="rsi_macd_filter_signal"></div>
+
+  <div data-mode="mvwap_mf_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌊 <b>Multi-VWAP Money-Flow Signal</b>: Long, sobald der Oszillator (gewichteter Daily/Weekly/Monthly-VWAP-Verbund + MFI/CMF) von fallend auf steigend dreht, Short umgekehrt. Ausstieg wie bei RSI - Wechsel-System, optionaler fester $-SL/$-TP, "SL auf Einstieg bei Gewinn". Darunter dieselben drei Filter aus dem Baukasten.
+  </div>
+  <div data-mode="mvwap_mf_signal"><label>Zeitrahmen</label>
+    <select class="cfg" id="mvwap_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="mvwap_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="mvwap_mf_signal"><label>Richtung</label>
+    <select class="cfg" id="mvwap_direction_mode">
+      <option value="both">Beide</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">VWAP-Ebenen (Gewichte sollten zusammen ~1.0 ergeben)</div>
+  <div data-mode="mvwap_mf_signal"><label>Daily VWAP</label>
+    <select class="cfg" id="mvwap_use_daily"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_daily"><label>Gewicht Daily</label><input type="number" step="0.05" min="0" max="1" id="mvwap_w_daily"></div>
+  <div data-mode="mvwap_mf_signal"><label>Weekly VWAP</label>
+    <select class="cfg" id="mvwap_use_weekly"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_weekly"><label>Gewicht Weekly</label><input type="number" step="0.05" min="0" max="1" id="mvwap_w_weekly"></div>
+  <div data-mode="mvwap_mf_signal"><label>Monthly VWAP</label>
+    <select class="cfg" id="mvwap_use_monthly"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_monthly"><label>Gewicht Monthly</label><input type="number" step="0.05" min="0" max="1" id="mvwap_w_monthly"></div>
+  <div data-mode="mvwap_mf_signal"><label>Money-Flow-Typ</label>
+    <select class="cfg" id="mvwap_mf_source"><option value="MFI">MFI</option><option value="CMF">CMF</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal"><label>MFI-Länge</label><input type="number" step="1" min="2" id="mvwap_mf_length"></div>
+  <div data-mode="mvwap_mf_signal"><label>CMF-Länge</label><input type="number" step="1" min="2" id="mvwap_cmf_length"></div>
+  <div data-mode="mvwap_mf_signal"><label>Money-Flow-Gewicht</label><input type="number" step="0.05" min="0" max="1" id="mvwap_mf_weight"></div>
+  <div data-mode="mvwap_mf_signal"><label>EMA-Glättung Oszillator</label><input type="number" step="1" min="1" id="mvwap_smooth_len"></div>
+  <div data-mode="mvwap_mf_signal"><label>Signal nur außerhalb OB/OS-Zone</label>
+    <select class="cfg" id="mvwap_use_zone_filter"><option value="false">Aus</option><option value="true">An</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_zone_filter"><label>Overbought-Level</label><input type="number" step="0.1" min="0" id="mvwap_ob_level"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_zone_filter"><label>Oversold-Level</label><input type="number" step="0.1" max="0" id="mvwap_os_level"></div>
+
+  <div data-mode="mvwap_mf_signal"><label>Stop-Loss (fester Dollar-Betrag)</label>
+    <select class="cfg" id="mvwap_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus (Ausstieg nur per Gegen-Signal)</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_sl_enabled"><label>SL-Betrag ($ Verlust der Position)</label><input type="number" step="0.1" min="0.1" id="mvwap_sl_manual_usd"></div>
+  <div data-mode="mvwap_mf_signal"><label>Take-Profit (fester Dollar-Betrag)</label>
+    <select class="cfg" id="mvwap_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_tp_enabled"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="mvwap_tp_manual_usd"></div>
+  <div data-mode="mvwap_mf_signal"><label>SL auf Einstieg bei Gewinn (Break-Even)</label>
+    <select class="cfg" id="mvwap_be_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_be_enabled"><label>Gewinn-Schwelle ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="mvwap_be_trigger_usd"></div>
+  <div data-mode="mvwap_mf_signal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mvwap_sl_cooldown_seconds"></div>
+
+  <div data-mode="mvwap_mf_signal"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
+    <select class="cfg" id="mvwap_supertrend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
+    <select class="cfg" id="mvwap_supertrend_filter_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="mvwap_supertrend_filter_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_supertrend_filter_enabled"><label>SuperTrend-Multiplikator</label><input type="number" step="0.1" min="0.1" id="mvwap_supertrend_filter_multiplier"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_supertrend_filter_enabled"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="mvwap_supertrend_filter_atr_period"></div>
+
+  <div data-mode="mvwap_mf_signal"><label>ADX-Trendfilter</label>
+    <select class="cfg" id="mvwap_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled"><label>ADX-Periode</label><input type="number" step="1" min="1" id="mvwap_adx_filter_length"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="1" id="mvwap_adx_filter_threshold"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled"><label>Mit Richtung (+DI/-DI)</label>
+    <select class="cfg" id="mvwap_adx_filter_directional">
+      <option value="true">An (Long nur bei +DI&gt;-DI, Short umgekehrt)</option>
+      <option value="false">Aus (nur Trendstärke, Richtung egal)</option>
+    </select>
+  </div>
+
+  <div data-mode="mvwap_mf_signal"><label>MACD-Trendfilter</label>
+    <select class="cfg" id="mvwap_macd_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_macd_filter_enabled"><label>MACD schnell</label><input type="number" step="1" min="1" id="mvwap_macd_filter_fast"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_macd_filter_enabled"><label>MACD langsam</label><input type="number" step="1" min="1" id="mvwap_macd_filter_slow"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_macd_filter_enabled"><label>MACD-Signal</label><input type="number" step="1" min="1" id="mvwap_macd_filter_signal"></div>
+
 
 
 
@@ -2224,7 +2405,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -2704,7 +2885,7 @@ async function refresh() {
     document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
     document.getElementById('ab_use_heikin_ashi').value = String(data.config.ab_use_heikin_ashi);
 
-    document.getElementById('rsi_resolution').value = data.config.rsi_resolution;
+    setResolutionField('rsi_resolution', data.config.rsi_resolution);
     document.getElementById('rsi_length').value = data.config.rsi_length;
     document.getElementById('rsi_oversold').value = data.config.rsi_oversold;
     document.getElementById('rsi_overbought').value = data.config.rsi_overbought;
@@ -2717,7 +2898,7 @@ async function refresh() {
     document.getElementById('rsi_tp_manual_usd').value = data.config.rsi_tp_manual_usd;
     document.getElementById('rsi_sl_cooldown_seconds').value = data.config.rsi_sl_cooldown_seconds;
     document.getElementById('rsi_supertrend_filter_enabled').value = String(data.config.rsi_supertrend_filter_enabled);
-    document.getElementById('rsi_supertrend_filter_resolution').value = data.config.rsi_supertrend_filter_resolution;
+    setResolutionField('rsi_supertrend_filter_resolution', data.config.rsi_supertrend_filter_resolution);
     document.getElementById('rsi_supertrend_filter_multiplier').value = data.config.rsi_supertrend_filter_multiplier;
     document.getElementById('rsi_supertrend_filter_atr_period').value = data.config.rsi_supertrend_filter_atr_period;
     document.getElementById('rsi_adx_filter_enabled').value = String(data.config.rsi_adx_filter_enabled);
@@ -2728,6 +2909,42 @@ async function refresh() {
     document.getElementById('rsi_macd_filter_fast').value = data.config.rsi_macd_filter_fast;
     document.getElementById('rsi_macd_filter_slow').value = data.config.rsi_macd_filter_slow;
     document.getElementById('rsi_macd_filter_signal').value = data.config.rsi_macd_filter_signal;
+
+    setResolutionField('mvwap_resolution', data.config.mvwap_resolution);
+    document.getElementById('mvwap_direction_mode').value = data.config.mvwap_direction_mode;
+    document.getElementById('mvwap_use_daily').value = String(data.config.mvwap_use_daily);
+    document.getElementById('mvwap_w_daily').value = data.config.mvwap_w_daily;
+    document.getElementById('mvwap_use_weekly').value = String(data.config.mvwap_use_weekly);
+    document.getElementById('mvwap_w_weekly').value = data.config.mvwap_w_weekly;
+    document.getElementById('mvwap_use_monthly').value = String(data.config.mvwap_use_monthly);
+    document.getElementById('mvwap_w_monthly').value = data.config.mvwap_w_monthly;
+    document.getElementById('mvwap_mf_source').value = data.config.mvwap_mf_source;
+    document.getElementById('mvwap_mf_length').value = data.config.mvwap_mf_length;
+    document.getElementById('mvwap_cmf_length').value = data.config.mvwap_cmf_length;
+    document.getElementById('mvwap_mf_weight').value = data.config.mvwap_mf_weight;
+    document.getElementById('mvwap_smooth_len').value = data.config.mvwap_smooth_len;
+    document.getElementById('mvwap_use_zone_filter').value = String(data.config.mvwap_use_zone_filter);
+    document.getElementById('mvwap_ob_level').value = data.config.mvwap_ob_level;
+    document.getElementById('mvwap_os_level').value = data.config.mvwap_os_level;
+    document.getElementById('mvwap_sl_enabled').value = String(data.config.mvwap_sl_enabled);
+    document.getElementById('mvwap_sl_manual_usd').value = data.config.mvwap_sl_manual_usd;
+    document.getElementById('mvwap_tp_enabled').value = String(data.config.mvwap_tp_enabled);
+    document.getElementById('mvwap_tp_manual_usd').value = data.config.mvwap_tp_manual_usd;
+    document.getElementById('mvwap_be_enabled').value = String(data.config.mvwap_be_enabled);
+    document.getElementById('mvwap_be_trigger_usd').value = data.config.mvwap_be_trigger_usd;
+    document.getElementById('mvwap_sl_cooldown_seconds').value = data.config.mvwap_sl_cooldown_seconds;
+    document.getElementById('mvwap_supertrend_filter_enabled').value = String(data.config.mvwap_supertrend_filter_enabled);
+    setResolutionField('mvwap_supertrend_filter_resolution', data.config.mvwap_supertrend_filter_resolution);
+    document.getElementById('mvwap_supertrend_filter_multiplier').value = data.config.mvwap_supertrend_filter_multiplier;
+    document.getElementById('mvwap_supertrend_filter_atr_period').value = data.config.mvwap_supertrend_filter_atr_period;
+    document.getElementById('mvwap_adx_filter_enabled').value = String(data.config.mvwap_adx_filter_enabled);
+    document.getElementById('mvwap_adx_filter_length').value = data.config.mvwap_adx_filter_length;
+    document.getElementById('mvwap_adx_filter_threshold').value = data.config.mvwap_adx_filter_threshold;
+    document.getElementById('mvwap_adx_filter_directional').value = String(data.config.mvwap_adx_filter_directional);
+    document.getElementById('mvwap_macd_filter_enabled').value = String(data.config.mvwap_macd_filter_enabled);
+    document.getElementById('mvwap_macd_filter_fast').value = data.config.mvwap_macd_filter_fast;
+    document.getElementById('mvwap_macd_filter_slow').value = data.config.mvwap_macd_filter_slow;
+    document.getElementById('mvwap_macd_filter_signal').value = data.config.mvwap_macd_filter_signal;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -2924,7 +3141,7 @@ function buildConfigPayload() {
     ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
     ab_use_heikin_ashi: document.getElementById('ab_use_heikin_ashi').value === 'true',
 
-    rsi_resolution: document.getElementById('rsi_resolution').value,
+    rsi_resolution: getResolutionField('rsi_resolution'),
     rsi_length: parseInt(document.getElementById('rsi_length').value),
     rsi_oversold: parseFloat(document.getElementById('rsi_oversold').value),
     rsi_overbought: parseFloat(document.getElementById('rsi_overbought').value),
@@ -2937,7 +3154,7 @@ function buildConfigPayload() {
     rsi_tp_manual_usd: parseFloat(document.getElementById('rsi_tp_manual_usd').value),
     rsi_sl_cooldown_seconds: parseFloat(document.getElementById('rsi_sl_cooldown_seconds').value),
     rsi_supertrend_filter_enabled: document.getElementById('rsi_supertrend_filter_enabled').value === 'true',
-    rsi_supertrend_filter_resolution: document.getElementById('rsi_supertrend_filter_resolution').value,
+    rsi_supertrend_filter_resolution: getResolutionField('rsi_supertrend_filter_resolution'),
     rsi_supertrend_filter_multiplier: parseFloat(document.getElementById('rsi_supertrend_filter_multiplier').value),
     rsi_supertrend_filter_atr_period: parseInt(document.getElementById('rsi_supertrend_filter_atr_period').value),
     rsi_adx_filter_enabled: document.getElementById('rsi_adx_filter_enabled').value === 'true',
@@ -2948,6 +3165,42 @@ function buildConfigPayload() {
     rsi_macd_filter_fast: parseInt(document.getElementById('rsi_macd_filter_fast').value),
     rsi_macd_filter_slow: parseInt(document.getElementById('rsi_macd_filter_slow').value),
     rsi_macd_filter_signal: parseInt(document.getElementById('rsi_macd_filter_signal').value),
+
+    mvwap_resolution: getResolutionField('mvwap_resolution'),
+    mvwap_direction_mode: document.getElementById('mvwap_direction_mode').value,
+    mvwap_use_daily: document.getElementById('mvwap_use_daily').value === 'true',
+    mvwap_w_daily: parseFloat(document.getElementById('mvwap_w_daily').value),
+    mvwap_use_weekly: document.getElementById('mvwap_use_weekly').value === 'true',
+    mvwap_w_weekly: parseFloat(document.getElementById('mvwap_w_weekly').value),
+    mvwap_use_monthly: document.getElementById('mvwap_use_monthly').value === 'true',
+    mvwap_w_monthly: parseFloat(document.getElementById('mvwap_w_monthly').value),
+    mvwap_mf_source: document.getElementById('mvwap_mf_source').value,
+    mvwap_mf_length: parseInt(document.getElementById('mvwap_mf_length').value),
+    mvwap_cmf_length: parseInt(document.getElementById('mvwap_cmf_length').value),
+    mvwap_mf_weight: parseFloat(document.getElementById('mvwap_mf_weight').value),
+    mvwap_smooth_len: parseInt(document.getElementById('mvwap_smooth_len').value),
+    mvwap_use_zone_filter: document.getElementById('mvwap_use_zone_filter').value === 'true',
+    mvwap_ob_level: parseFloat(document.getElementById('mvwap_ob_level').value),
+    mvwap_os_level: parseFloat(document.getElementById('mvwap_os_level').value),
+    mvwap_sl_enabled: document.getElementById('mvwap_sl_enabled').value === 'true',
+    mvwap_sl_manual_usd: parseFloat(document.getElementById('mvwap_sl_manual_usd').value),
+    mvwap_tp_enabled: document.getElementById('mvwap_tp_enabled').value === 'true',
+    mvwap_tp_manual_usd: parseFloat(document.getElementById('mvwap_tp_manual_usd').value),
+    mvwap_be_enabled: document.getElementById('mvwap_be_enabled').value === 'true',
+    mvwap_be_trigger_usd: parseFloat(document.getElementById('mvwap_be_trigger_usd').value),
+    mvwap_sl_cooldown_seconds: parseFloat(document.getElementById('mvwap_sl_cooldown_seconds').value),
+    mvwap_supertrend_filter_enabled: document.getElementById('mvwap_supertrend_filter_enabled').value === 'true',
+    mvwap_supertrend_filter_resolution: getResolutionField('mvwap_supertrend_filter_resolution'),
+    mvwap_supertrend_filter_multiplier: parseFloat(document.getElementById('mvwap_supertrend_filter_multiplier').value),
+    mvwap_supertrend_filter_atr_period: parseInt(document.getElementById('mvwap_supertrend_filter_atr_period').value),
+    mvwap_adx_filter_enabled: document.getElementById('mvwap_adx_filter_enabled').value === 'true',
+    mvwap_adx_filter_length: parseInt(document.getElementById('mvwap_adx_filter_length').value),
+    mvwap_adx_filter_threshold: parseFloat(document.getElementById('mvwap_adx_filter_threshold').value),
+    mvwap_adx_filter_directional: document.getElementById('mvwap_adx_filter_directional').value === 'true',
+    mvwap_macd_filter_enabled: document.getElementById('mvwap_macd_filter_enabled').value === 'true',
+    mvwap_macd_filter_fast: parseInt(document.getElementById('mvwap_macd_filter_fast').value),
+    mvwap_macd_filter_slow: parseInt(document.getElementById('mvwap_macd_filter_slow').value),
+    mvwap_macd_filter_signal: parseInt(document.getElementById('mvwap_macd_filter_signal').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -3118,6 +3371,7 @@ async def handle_status(request):
         "ab_be_done": st.get("ab_be_done"),
         "ab_atr_last": st.get("ab_atr_last"),
         "rsi_sl_price": st.get("rsi_sl_price"), "rsi_tp_price": st.get("rsi_tp_price"), "rsi_be_done": st.get("rsi_be_done"), "rsi_last": st.get("rsi_last"),
+        "mvwap_sl_price": st.get("mvwap_sl_price"), "mvwap_tp_price": st.get("mvwap_tp_price"), "mvwap_be_done": st.get("mvwap_be_done"), "mvwap_osc_last": st.get("mvwap_osc_last"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3160,7 +3414,15 @@ async def handle_config_update(request):
                 "rsi_sl_enabled", "rsi_sl_manual_usd", "rsi_be_enabled", "rsi_be_trigger_usd", "rsi_tp_enabled", "rsi_tp_manual_usd", "rsi_sl_cooldown_seconds",
                 "rsi_supertrend_filter_enabled", "rsi_supertrend_filter_resolution", "rsi_supertrend_filter_multiplier", "rsi_supertrend_filter_atr_period",
                 "rsi_adx_filter_enabled", "rsi_adx_filter_length", "rsi_adx_filter_threshold", "rsi_adx_filter_directional",
-                "rsi_macd_filter_enabled", "rsi_macd_filter_fast", "rsi_macd_filter_slow", "rsi_macd_filter_signal"]:
+                "rsi_macd_filter_enabled", "rsi_macd_filter_fast", "rsi_macd_filter_slow", "rsi_macd_filter_signal",
+                "mvwap_resolution", "mvwap_direction_mode", "mvwap_use_daily", "mvwap_w_daily", "mvwap_use_weekly", "mvwap_w_weekly",
+                "mvwap_use_monthly", "mvwap_w_monthly", "mvwap_mf_source", "mvwap_mf_length", "mvwap_cmf_length", "mvwap_mf_weight",
+                "mvwap_smooth_len", "mvwap_use_zone_filter", "mvwap_ob_level", "mvwap_os_level",
+                "mvwap_sl_enabled", "mvwap_sl_manual_usd", "mvwap_tp_enabled", "mvwap_tp_manual_usd",
+                "mvwap_be_enabled", "mvwap_be_trigger_usd", "mvwap_sl_cooldown_seconds",
+                "mvwap_supertrend_filter_enabled", "mvwap_supertrend_filter_resolution", "mvwap_supertrend_filter_multiplier", "mvwap_supertrend_filter_atr_period",
+                "mvwap_adx_filter_enabled", "mvwap_adx_filter_length", "mvwap_adx_filter_threshold", "mvwap_adx_filter_directional",
+                "mvwap_macd_filter_enabled", "mvwap_macd_filter_fast", "mvwap_macd_filter_slow", "mvwap_macd_filter_signal"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
