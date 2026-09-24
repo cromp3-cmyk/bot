@@ -271,6 +271,8 @@ def default_config():
         "rsi_sl_manual_usd": float(os.getenv("RSI_SL_MANUAL_USD", "5.0")),
         "rsi_be_enabled": os.getenv("RSI_BE_ENABLED", "false").lower() == "true",
         "rsi_be_trigger_usd": float(os.getenv("RSI_BE_TRIGGER_USD", "5.0")),
+        "rsi_tp_enabled": os.getenv("RSI_TP_ENABLED", "false").lower() == "true",
+        "rsi_tp_manual_usd": float(os.getenv("RSI_TP_MANUAL_USD", "10.0")),
         "rsi_sl_cooldown_seconds": float(os.getenv("RSI_SL_COOLDOWN_SECONDS", "30")),
         "rsi_supertrend_filter_enabled": os.getenv("RSI_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",
         "rsi_supertrend_filter_resolution": os.getenv("RSI_SUPERTREND_FILTER_RESOLUTION", "15m"),
@@ -473,7 +475,7 @@ PERSISTED_STATE_KEYS = [
     # mehr, welche offenen Orders im Buch seine eigenen sind, und cancelt sie als fremd.
     "gs_anchor", "gs_cooldown_until", "gs_tag_map", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
-    "rsi_sl_price", "rsi_be_done", "rsi_sl_cooldown_until",
+    "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
 ]
 
 
@@ -1356,6 +1358,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="rsi_signal" data-requires="rsi_be_enabled"><label>Gewinn-Schwelle ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="rsi_be_trigger_usd"></div>
+  <div data-mode="rsi_signal"><label>Take-Profit (fester Dollar-Betrag)</label>
+    <select class="cfg" id="rsi_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_tp_enabled"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="rsi_tp_manual_usd"></div>
   <div data-mode="rsi_signal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="rsi_sl_cooldown_seconds"></div>
 
   <div data-mode="rsi_signal"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
@@ -2704,6 +2713,8 @@ async function refresh() {
     document.getElementById('rsi_sl_manual_usd').value = data.config.rsi_sl_manual_usd;
     document.getElementById('rsi_be_enabled').value = String(data.config.rsi_be_enabled);
     document.getElementById('rsi_be_trigger_usd').value = data.config.rsi_be_trigger_usd;
+    document.getElementById('rsi_tp_enabled').value = String(data.config.rsi_tp_enabled);
+    document.getElementById('rsi_tp_manual_usd').value = data.config.rsi_tp_manual_usd;
     document.getElementById('rsi_sl_cooldown_seconds').value = data.config.rsi_sl_cooldown_seconds;
     document.getElementById('rsi_supertrend_filter_enabled').value = String(data.config.rsi_supertrend_filter_enabled);
     document.getElementById('rsi_supertrend_filter_resolution').value = data.config.rsi_supertrend_filter_resolution;
@@ -2922,6 +2933,8 @@ function buildConfigPayload() {
     rsi_sl_manual_usd: parseFloat(document.getElementById('rsi_sl_manual_usd').value),
     rsi_be_enabled: document.getElementById('rsi_be_enabled').value === 'true',
     rsi_be_trigger_usd: parseFloat(document.getElementById('rsi_be_trigger_usd').value),
+    rsi_tp_enabled: document.getElementById('rsi_tp_enabled').value === 'true',
+    rsi_tp_manual_usd: parseFloat(document.getElementById('rsi_tp_manual_usd').value),
     rsi_sl_cooldown_seconds: parseFloat(document.getElementById('rsi_sl_cooldown_seconds').value),
     rsi_supertrend_filter_enabled: document.getElementById('rsi_supertrend_filter_enabled').value === 'true',
     rsi_supertrend_filter_resolution: document.getElementById('rsi_supertrend_filter_resolution').value,
@@ -3104,7 +3117,7 @@ async def handle_status(request):
         "ab_tp1_done": st.get("ab_tp1_done"), "ab_tp2_done": st.get("ab_tp2_done"),
         "ab_be_done": st.get("ab_be_done"),
         "ab_atr_last": st.get("ab_atr_last"),
-        "rsi_sl_price": st.get("rsi_sl_price"), "rsi_be_done": st.get("rsi_be_done"), "rsi_last": st.get("rsi_last"),
+        "rsi_sl_price": st.get("rsi_sl_price"), "rsi_tp_price": st.get("rsi_tp_price"), "rsi_be_done": st.get("rsi_be_done"), "rsi_last": st.get("rsi_last"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3144,7 +3157,7 @@ async def handle_config_update(request):
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
                 "rsi_resolution", "rsi_length", "rsi_oversold", "rsi_overbought", "rsi_direction_mode",
-                "rsi_sl_enabled", "rsi_sl_manual_usd", "rsi_be_enabled", "rsi_be_trigger_usd", "rsi_sl_cooldown_seconds",
+                "rsi_sl_enabled", "rsi_sl_manual_usd", "rsi_be_enabled", "rsi_be_trigger_usd", "rsi_tp_enabled", "rsi_tp_manual_usd", "rsi_sl_cooldown_seconds",
                 "rsi_supertrend_filter_enabled", "rsi_supertrend_filter_resolution", "rsi_supertrend_filter_multiplier", "rsi_supertrend_filter_atr_period",
                 "rsi_adx_filter_enabled", "rsi_adx_filter_length", "rsi_adx_filter_threshold", "rsi_adx_filter_directional",
                 "rsi_macd_filter_enabled", "rsi_macd_filter_fast", "rsi_macd_filter_slow", "rsi_macd_filter_signal"]:

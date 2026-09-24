@@ -3426,11 +3426,15 @@ def compute_rsi_signals(closes, length, oversold, overbought):
 
 def _rsi_reset_state(st):
     st["rsi_sl_price"] = None
+    st["rsi_tp_price"] = None
     st["rsi_be_done"] = False
 
 
 async def check_rsi_sl(symbol, price):
-    """Identisch zu check_ab_sl (siehe dort fuer Kommentare) - nur mit rsi_-Config-Feldern."""
+    """Identisch zu check_ab_sl (siehe dort fuer Kommentare) - nur mit rsi_-Config-Feldern, plus
+    optionalem festen Dollar-TP (rsi_tp_enabled/rsi_tp_manual_usd): schliesst die GANZE Position,
+    kein Teilverkauf. Bei Konflikt (beide in derselben Pruefung erreichbar) gewinnt der SL zuerst -
+    wie ueberall sonst im Bot."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if st["position"] is None or price is None:
@@ -3449,17 +3453,22 @@ async def check_rsi_sl(symbol, price):
                 st["rsi_be_done"] = True
                 debug_log(f"📡 [{symbol}] RSI Signal: ${cfg.get('rsi_be_trigger_usd', 5.0)} Gewinn erreicht - SL auf Einstieg ({round(entry_ref, 4)}) gesetzt")
     sl_price = st.get("rsi_sl_price")
-    if sl_price is None:
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    if hit_sl:
+        reason = "BREAKEVEN" if st.get("rsi_be_done") else "SL"
+        debug_log(f"🚪 [{symbol}] RSI Signal {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, reason)
+        if st["position"] is None:
+            st["rsi_sl_cooldown_until"] = time.time() + cfg.get("rsi_sl_cooldown_seconds", 30)
+            _rsi_reset_state(st)
         return
-    hit_sl = (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)
-    if not hit_sl:
-        return
-    reason = "BREAKEVEN" if st.get("rsi_be_done") else "SL"
-    debug_log(f"🚪 [{symbol}] RSI Signal {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-    await execute_exit(symbol, price, reason)
-    if st["position"] is None:
-        st["rsi_sl_cooldown_until"] = time.time() + cfg.get("rsi_sl_cooldown_seconds", 30)
-        _rsi_reset_state(st)
+    tp_price = st.get("rsi_tp_price")
+    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
+    if hit_tp:
+        debug_log(f"🎯 [{symbol}] RSI Signal TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP")
+        if st["position"] is None:
+            _rsi_reset_state(st)
 
 
 async def check_rsi_entry(symbol, buy_signal, sell_signal, price):
@@ -3504,6 +3513,10 @@ async def check_rsi_entry(symbol, buy_signal, sell_signal, price):
         entry_ref = st.get("avg_entry_price") or price
         dist_sl = cfg.get("rsi_sl_manual_usd", 5.0) / size
         st["rsi_sl_price"] = entry_ref - dist_sl if target == "long" else entry_ref + dist_sl
+    if cfg.get("rsi_tp_enabled", False) and size > 0:
+        entry_ref = st.get("avg_entry_price") or price
+        dist_tp = cfg.get("rsi_tp_manual_usd", 10.0) / size
+        st["rsi_tp_price"] = entry_ref + dist_tp if target == "long" else entry_ref - dist_tp
 
 
 async def _rsi_apply_filters(symbol, st, cfg, candles, long_raw, short_raw):
@@ -3594,7 +3607,9 @@ async def rsi_poll_loop(symbol):
 
 def _simulate_rsi_trades(candles, cfg, long_setup, short_setup):
     """Backtest-Simulation - identisch zu _simulate_ab_flip_trades (siehe dort fuer Kommentare),
-    nur mit rsi_-Config-Feldern. Kein Plan-Modus - RSI Signal kennt nur das Wechsel-System."""
+    nur mit rsi_-Config-Feldern. Kein Plan-Modus - RSI Signal kennt nur das Wechsel-System.
+    Optionaler fester Dollar-TP schliesst die GANZE Position (kein Teilverkauf) - bei Konflikt
+    (SL und TP in derselben Kerze erreichbar) gewinnt der SL zuerst, wie live."""
     ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
@@ -3604,6 +3619,8 @@ def _simulate_rsi_trades(candles, cfg, long_setup, short_setup):
     direction_mode = cfg.get("rsi_direction_mode", "both")
     be_enabled = cfg.get("rsi_be_enabled", False)
     be_trigger_usd = cfg.get("rsi_be_trigger_usd", 5.0)
+    tp_enabled = cfg.get("rsi_tp_enabled", False)
+    tp_manual_usd = cfg.get("rsi_tp_manual_usd", 10.0)
 
     position = None
     trades = []
@@ -3619,11 +3636,17 @@ def _simulate_rsi_trades(candles, cfg, long_setup, short_setup):
                 _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
                 sl_cooldown_until_ts = ts[i] + sl_cooldown_ms
-            elif be_enabled and not position["be_done"] and position["size"] > 0:
-                dist_be = be_trigger_usd / position["size"]
-                if (pdir == "long" and h[i] >= entry + dist_be) or (pdir == "short" and l[i] <= entry - dist_be):
-                    position["sl_price"] = entry
-                    position["be_done"] = True
+            else:
+                if be_enabled and not position["be_done"] and position["size"] > 0:
+                    dist_be = be_trigger_usd / position["size"]
+                    if (pdir == "long" and h[i] >= entry + dist_be) or (pdir == "short" and l[i] <= entry - dist_be):
+                        position["sl_price"] = entry
+                        position["be_done"] = True
+                tp_price = position.get("tp_price")
+                hit_tp = tp_price is not None and ((pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price))
+                if hit_tp:
+                    _bt_close_trade(trades, pdir, entry, tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
+                    position = None
 
         if long_setup[i] and not long_setup[i - 1]:
             target = "long"
@@ -3649,7 +3672,11 @@ def _simulate_rsi_trades(candles, cfg, long_setup, short_setup):
         if sl_enabled and size > 0:
             dist_sl = sl_manual_usd / size
             sl_price = price - dist_sl if target == "long" else price + dist_sl
-        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "be_done": False}
+        tp_price = None
+        if tp_enabled and size > 0:
+            dist_tp = tp_manual_usd / size
+            tp_price = price + dist_tp if target == "long" else price - dist_tp
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "be_done": False}
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
