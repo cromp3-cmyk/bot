@@ -4040,7 +4040,7 @@ async def mvwap_poll_loop(symbol):
                 needed_bars = min(1000, max(min_needed * 2, 300))
                 st = b["state"]
 
-                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
                 if data:
                     timestamps, opens, highs, lows, closes, volumes = data
                     closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
