@@ -1609,8 +1609,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
     Testet die aktuell gespeicherten Strategie-Einstellungen gegen echte historische Binance-Kerzen.
-    Nur für Fibonacci-Reversal und HalfTrend (Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen
-    historische Orderbuch-/Tick-Daten, die es nicht gibt). SL/TP werden pro Kerze am Schlusskurs geprüft,
+    Nur für Al-Shatri Breakout und RSI Signal (Grid braucht historische Orderbuch-/Tick-Daten,
+    die es nicht gibt). SL/TP werden pro Kerze am Schlusskurs geprüft,
     nicht Tick-für-Tick wie live. Lighter ist gebührenfrei, es werden also keine Gebühren simuliert.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
@@ -3191,7 +3191,15 @@ async def handle_backtest(request):
         # nicht auf "Speichern" geklickt wurde.
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
     entry_mode = cfg["entry_mode"]
-    result = await run_backtest(symbol, entry_mode, cfg, days, exclude_top_n)
+    try:
+        result = await run_backtest(symbol, entry_mode, cfg, days, exclude_top_n)
+    except Exception as e:
+        # Ohne dieses try/except wuerde ein unerwarteter Fehler (z.B. bei sehr kurzen Zeitraeumen
+        # mit zu wenig Kerzen fuer die Einschwingphase eines Filters) als rohe aiohttp-Fehlerseite
+        # statt JSON beim Frontend ankommen - der Browser bricht dann mit einem kryptischen
+        # "JSON.parse"-Fehler ab, statt die eigentliche Ursache anzuzeigen.
+        debug_log(f"⚠️ [{symbol}] Backtest ({entry_mode}) fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Backtest fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
 
@@ -3260,7 +3268,11 @@ async def handle_ab_sweep(request):
     if isinstance(overrides, dict):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
-    result = await run_ab_sweep(symbol, cfg, days, [str(t) for t in timeframes], st_mult_min, st_mult_max, st_mult_step, exclude_top_n)
+    try:
+        result = await run_ab_sweep(symbol, cfg, days, [str(t) for t in timeframes], st_mult_min, st_mult_max, st_mult_step, exclude_top_n)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] SuperTrend-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
 
