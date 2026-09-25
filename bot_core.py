@@ -405,6 +405,14 @@ REDIS_URL = os.getenv("REDIS_URL", "").strip().strip('"').strip("'")
 _redis_client = None
 
 
+# Hartes Zeitlimit fuer JEDEN einzelnen Redis-Call (Connect, Ping, Get, Set). Ohne das kann ein
+# haengendes/totes Redis (z.B. kurzer Netzwerk-Hänger bei Render) den einen globalen, von ALLEN
+# Coins geteilten Redis-Client fuer immer blockieren - da save_bot_state() nach JEDEM Trade-Close
+# UND alle 60s im state_persist_loop aufgerufen wird, reisst ein haengender Call so nach und nach
+# ALLE Coins mit in den Stillstand, obwohl das Trading selbst nichts mit Redis zu tun hat.
+REDIS_TIMEOUT_SECONDS = 5
+
+
 async def get_redis():
     global _redis_client
     if not REDIS_URL or redis_lib is None:
@@ -416,8 +424,13 @@ async def get_redis():
                 "beginnt_mit": REDIS_URL[:12] + "...",
                 "startet_korrekt_mit_redis://": REDIS_URL.startswith("redis://"),
             })
-            _redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
-            await _redis_client.ping()
+            _redis_client = redis_lib.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
+                socket_timeout=REDIS_TIMEOUT_SECONDS,
+            )
+            await asyncio.wait_for(_redis_client.ping(), timeout=REDIS_TIMEOUT_SECONDS)
             debug_log("✅ Redis verbunden - Einstellungen werden ab jetzt gespeichert")
         except Exception as e:
             debug_log("⚠️ Redis-Verbindung fehlgeschlagen - läuft ohne Persistenz weiter", {"error": str(e)})
@@ -431,7 +444,7 @@ async def save_bot_configs():
         return
     try:
         data = {s: BOTS[s]["config"] for s in SYMBOLS}
-        await r.set("gridbot:configs", json.dumps(data))
+        await asyncio.wait_for(r.set("gridbot:configs", json.dumps(data)), timeout=REDIS_TIMEOUT_SECONDS)
     except Exception as e:
         debug_log("⚠️ Speichern der Grid-Bot-Configs fehlgeschlagen", {"error": str(e)})
 
@@ -448,7 +461,7 @@ async def save_global_settings():
     if r is None:
         return
     try:
-        await r.set("gridbot:global_settings", json.dumps(GLOBAL_SETTINGS))
+        await asyncio.wait_for(r.set("gridbot:global_settings", json.dumps(GLOBAL_SETTINGS)), timeout=REDIS_TIMEOUT_SECONDS)
     except Exception as e:
         debug_log("⚠️ Speichern der globalen Einstellungen fehlgeschlagen", {"error": str(e)})
 
@@ -458,7 +471,7 @@ async def load_global_settings():
     if r is None:
         return
     try:
-        raw = await r.get("gridbot:global_settings")
+        raw = await asyncio.wait_for(r.get("gridbot:global_settings"), timeout=REDIS_TIMEOUT_SECONDS)
         if raw:
             GLOBAL_SETTINGS.update(json.loads(raw))
             debug_log("✅ Globale Einstellungen aus Redis geladen", GLOBAL_SETTINGS)
@@ -491,7 +504,7 @@ async def load_bot_configs():
     if r is None:
         return
     try:
-        raw_configs = await r.get("gridbot:configs")
+        raw_configs = await asyncio.wait_for(r.get("gridbot:configs"), timeout=REDIS_TIMEOUT_SECONDS)
         if raw_configs:
             saved = json.loads(raw_configs)
             for s in SYMBOLS:
@@ -532,7 +545,7 @@ async def save_bot_state():
             if "trade_log" in entry:
                 entry["trade_log"] = entry["trade_log"][-200:]  # nicht unbegrenzt wachsen lassen
             data[s] = entry
-        await r.set("gridbot:state", json.dumps(data, default=str))
+        await asyncio.wait_for(r.set("gridbot:state", json.dumps(data, default=str)), timeout=REDIS_TIMEOUT_SECONDS)
     except Exception as e:
         debug_log("⚠️ Speichern des Bot-States fehlgeschlagen", {"error": str(e)})
 
@@ -542,7 +555,7 @@ async def load_bot_state():
     if r is None:
         return
     try:
-        raw_state = await r.get("gridbot:state")
+        raw_state = await asyncio.wait_for(r.get("gridbot:state"), timeout=REDIS_TIMEOUT_SECONDS)
         if raw_state:
             saved = json.loads(raw_state)
             for s in SYMBOLS:
@@ -3443,6 +3456,10 @@ async def handle_control(request):
     return web.json_response({"success": True, "bot_active": cfg["bot_active"]})
 
 
+BACKTEST_TIMEOUT_SECONDS = 90  # siehe Kommentar in handle_backtest - verhindert unbegrenzt
+# haengende Backtest-Tasks, die den globalen Binance-Throttle fuer alle Live-Coins blockieren
+
+
 async def handle_backtest(request):
     from strategies import run_backtest
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()
@@ -3466,8 +3483,28 @@ async def handle_backtest(request):
         # nicht auf "Speichern" geklickt wurde.
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
     entry_mode = cfg["entry_mode"]
+    # BACKTEST_TIMEOUT_SECONDS: ohne dieses Limit kann ein Backtest (v.a. bei Sekunden-
+    # Aufloesungen wie 10s/15s/30s/45s ueber mehrere Tage/Wochen) im schlimmsten Fall
+    # unbegrenzt lange im Hintergrund weiterlaufen - selbst wenn der Browser-Tab laengst
+    # geschlossen wurde, der aiohttp-Request also niemand mehr zuhoert. Beobachtet: ein
+    # solcher haengender Task blockierte ueber eine Stunde denselben globalen Binance-
+    # Throttle/Lock, den auch die LIVE-Strategien aller anderen Coins benutzen - die
+    # bekamen in der Zeit "zu wenig Kerzen" bzw. "keine Kerzen erhalten". asyncio.wait_for
+    # bricht die Coroutine nach Ablauf hart ab (CancelledError propagiert nach innen),
+    # damit sowas nie wieder unbegrenzt weiterlaufen und Ressourcen binden kann.
     try:
-        result = await run_backtest(symbol, entry_mode, cfg, days, exclude_top_n)
+        result = await asyncio.wait_for(
+            run_backtest(symbol, entry_mode, cfg, days, exclude_top_n),
+            timeout=BACKTEST_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        debug_log(f"⏱️ [{symbol}] Backtest ({entry_mode}) nach {BACKTEST_TIMEOUT_SECONDS}s abgebrochen (Timeout)",
+                  {"days": days})
+        return web.json_response({
+            "error": f"Backtest nach {BACKTEST_TIMEOUT_SECONDS}s abgebrochen (Timeout) - "
+                     f"wahrscheinlich zu viele Kerzen fuer den gewaehlten Zeitraum/Aufloesung. "
+                     f"Bei Sekunden-Aufloesungen (10s/15s/30s/45s) einen kuerzeren Zeitraum wählen."
+        }, status=504)
     except Exception as e:
         # Ohne dieses try/except wuerde ein unerwarteter Fehler (z.B. bei sehr kurzen Zeitraeumen
         # mit zu wenig Kerzen fuer die Einschwingphase eines Filters) als rohe aiohttp-Fehlerseite
