@@ -3455,6 +3455,71 @@ def compute_macd_filter_series(candles, fast_len, slow_len, signal_len):
     return long_ok, short_ok
 
 
+def compute_rsi_filter_series(candles, length, os_level, ob_level):
+    """RSI-Ueberdehnungsfilter (portiert aus dem Pine-Skript "MVWAP-MF Osc"): long_ok nur wenn der
+    RSI unter os_level liegt (ueberverkauft -> Long-Reversal-Chance erlaubt), short_ok nur wenn er
+    ueber ob_level liegt (ueberkauft -> Short-Reversal-Chance erlaubt). Reiner Zustands-Filter wie
+    ADX/MACD oben - kein Crossover-Moment, gilt auf jeder Kerze einzeln. Nimmt 5er- oder 6er-Tupel
+    entgegen (Volumen wird ignoriert)."""
+    c = candles[4]
+    rsi = compute_rsi(c, length)
+    n = len(c)
+    long_ok = [rsi[i] < os_level for i in range(n)]
+    short_ok = [rsi[i] > ob_level for i in range(n)]
+    return long_ok, short_ok
+
+
+def _rolling_vw_mean_dev(closes, volumes, length):
+    """Gleitender volumengewichteter Mittelwert + mittlere absolute Abweichung ueber ein Fenster
+    der letzten `length` Kerzen (inkl. der aktuellen) - direkter Port von Pine's pine_vwmean()/
+    pine_vwavdev() aus dem "[Hoss] VWAP+RSI+Hull+DI System"-Skript. Faellt bei Volumen-Summe 0
+    (z.B. ganz am Anfang der Historie) auf den reinen Schlusskurs / Abweichung 0 zurueck."""
+    n = len(closes)
+    mean = [0.0] * n
+    dev = [0.0] * n
+    for i in range(n):
+        start = max(0, i - length + 1)
+        window_c = closes[start:i + 1]
+        window_v = volumes[start:i + 1]
+        w_sum = sum(window_v)
+        if w_sum <= 0:
+            mean[i] = closes[i]
+            dev[i] = 0.0
+            continue
+        m = sum(cw * cd for cw, cd in zip(window_v, window_c)) / w_sum
+        mean[i] = m
+        dev[i] = sum(cw * abs(cd - m) for cw, cd in zip(window_v, window_c)) / w_sum
+    return mean, dev
+
+
+def compute_cloud_filter_series(candles, length, dev_mult, touch_arm=False):
+    """"Cloud"-Filter (portiert aus dem "[Hoss] VWAP+RSI+Hull+DI System"-Skript): volumengewichtete
+    Abweichungsbaender um einen gleitenden VWAP. Beruehrt der Kurs das obere Band, ist ab da nur
+    noch Short erlaubt (bis das untere Band beruehrt wird und umgekehrt fuer Long) - der Zustand
+    ("scharf geschaltet") bleibt ueber viele Kerzen bestehen, nicht nur auf der Beruehrungs-Kerze
+    selbst. touch_arm=False (Standard): Kerzenschluss ueber/unter dem Band scharf schaltet;
+    touch_arm=True: schon eine Docht-Beruehrung (High/Low) reicht. Braucht ein 6er-Tupel MIT
+    Volumen (ts,o,h,l,c,v)."""
+    _ts, _o, h, l, c, v = candles
+    mean, dev = _rolling_vw_mean_dev(c, v, length)
+    n = len(c)
+    upper = [mean[i] + dev[i] * dev_mult for i in range(n)]
+    lower = [mean[i] - dev[i] * dev_mult for i in range(n)]
+    band_state = 0
+    long_ok = [False] * n
+    short_ok = [False] * n
+    for i in range(n):
+        touched_upper = (h[i] >= upper[i]) if touch_arm else (c[i] > upper[i])
+        touched_lower = (l[i] <= lower[i]) if touch_arm else (c[i] < lower[i])
+        if touched_upper:
+            band_state = 1
+        if touched_lower:
+            band_state = -1
+        short_ok[i] = band_state == 1
+        long_ok[i] = band_state == -1
+    return long_ok, short_ok
+
+
 # ============================================================================
 # RSI Signal (kauf bei ueberverkauft, verkauf bei ueberkauft) - erste Strategie nach dem neuen
 # Baukasten-Prinzip: NUR die Signal-Bedingung ist strategie-eigen (unten, compute_rsi_signals).
@@ -4005,7 +4070,9 @@ async def check_mvwap_entry(symbol, buy_signal, sell_signal, price):
 
 
 async def _mvwap_apply_filters(symbol, st, cfg, candles, long_raw, short_raw):
-    """Identisch zu _rsi_apply_filters (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern."""
+    """Identisch zu _rsi_apply_filters (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern.
+    candles ist hier ein 6er-Tupel MIT Volumen (ts,o,h,l,c,v) - wird fuer den Cloud-Filter
+    gebraucht, ADX/MACD ignorieren das Volumen einfach (siehe deren Docstrings)."""
     n = len(long_raw)
     active = []
     if cfg.get("mvwap_supertrend_filter_enabled", False):
@@ -4021,6 +4088,14 @@ async def _mvwap_apply_filters(symbol, st, cfg, candles, long_raw, short_raw):
     if cfg.get("mvwap_macd_filter_enabled", False):
         active.append(compute_macd_filter_series(
             candles, cfg.get("mvwap_macd_filter_fast", 12), cfg.get("mvwap_macd_filter_slow", 26), cfg.get("mvwap_macd_filter_signal", 9)))
+    if cfg.get("mvwap_rsi_filter_enabled", False):
+        active.append(compute_rsi_filter_series(
+            candles, cfg.get("mvwap_rsi_filter_length", 14),
+            cfg.get("mvwap_rsi_filter_os_level", 30), cfg.get("mvwap_rsi_filter_ob_level", 70)))
+    if cfg.get("mvwap_cloud_filter_enabled", False):
+        active.append(compute_cloud_filter_series(
+            candles, cfg.get("mvwap_cloud_filter_length", 60), cfg.get("mvwap_cloud_filter_dev_mult", 2.0),
+            touch_arm=cfg.get("mvwap_cloud_filter_touch_arm", False)))
     if not active:
         return long_raw, short_raw
     return combine_filters(long_raw, short_raw, active)
@@ -4068,7 +4143,7 @@ async def mvwap_poll_loop(symbol):
                             last_processed_ts = last_ts
                             osc, mf_raw = compute_mvwap_mf_oscillator(closed_ts, closed_h, closed_l, closed_c, closed_v, params)
                             long_raw, short_raw = compute_mvwap_mf_signals(osc, mf_raw, params)
-                            candles = (closed_ts, closed_o, closed_h, closed_l, closed_c)
+                            candles = (closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v)
                             long_final, short_final = await _mvwap_apply_filters(symbol, st, cfg, candles, long_raw, short_raw)
                             buy_signal = long_final[-1]
                             sell_signal = short_final[-1]
@@ -4181,6 +4256,17 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
         filters.append((adx_long_ok, adx_short_ok))
     if macd_long_ok is not None:
         filters.append((macd_long_ok, macd_short_ok))
+    # RSI- und Cloud-Filter brauchen (anders als SuperTrend/ADX/MACD oben, die teils externe HTF-
+    # Kerzen brauchen) nur die eigenen candles - werden deshalb direkt hier berechnet statt vom
+    # Aufrufer (run_backtest) durchgereicht zu werden.
+    if cfg.get("mvwap_rsi_filter_enabled", False):
+        filters.append(compute_rsi_filter_series(
+            candles, cfg.get("mvwap_rsi_filter_length", 14),
+            cfg.get("mvwap_rsi_filter_os_level", 30), cfg.get("mvwap_rsi_filter_ob_level", 70)))
+    if cfg.get("mvwap_cloud_filter_enabled", False):
+        filters.append(compute_cloud_filter_series(
+            candles, cfg.get("mvwap_cloud_filter_length", 60), cfg.get("mvwap_cloud_filter_dev_mult", 2.0),
+            touch_arm=cfg.get("mvwap_cloud_filter_touch_arm", False)))
     if filters:
         long_raw, short_raw = combine_filters(long_raw, short_raw, filters)
     return _simulate_mvwap_trades(candles, cfg, long_raw, short_raw)

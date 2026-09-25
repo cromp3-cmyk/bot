@@ -326,6 +326,20 @@ def default_config():
         "mvwap_macd_filter_fast": int(os.getenv("MVWAP_MACD_FILTER_FAST", "12")),
         "mvwap_macd_filter_slow": int(os.getenv("MVWAP_MACD_FILTER_SLOW", "26")),
         "mvwap_macd_filter_signal": int(os.getenv("MVWAP_MACD_FILTER_SIGNAL", "9")),
+        # RSI-Ueberdehnungsfilter (aus dem Pine-Skript "MVWAP-MF Osc" portiert): Long erst wenn RSI
+        # unter os_level, Short erst wenn RSI ueber ob_level - zusaetzlich zur bestehenden OB/OS-
+        # Zone auf dem Oszillator selbst (mvwap_use_zone_filter), unabhaengig davon an/abschaltbar.
+        "mvwap_rsi_filter_enabled": os.getenv("MVWAP_RSI_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_rsi_filter_length": int(os.getenv("MVWAP_RSI_FILTER_LENGTH", "14")),
+        "mvwap_rsi_filter_os_level": float(os.getenv("MVWAP_RSI_FILTER_OS_LEVEL", "30")),
+        "mvwap_rsi_filter_ob_level": float(os.getenv("MVWAP_RSI_FILTER_OB_LEVEL", "70")),
+        # Cloud-Filter (VWAP-Deviation-Baender, aus dem "[Hoss] VWAP+RSI+Hull+DI System"-Skript
+        # portiert): Short erst wenn der Kurs zuvor das obere Band beruehrt hat, Long erst nach
+        # Beruehrung des unteren Bandes - bleibt scharf geschaltet bis zur jeweiligen Gegenseite.
+        "mvwap_cloud_filter_enabled": os.getenv("MVWAP_CLOUD_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_cloud_filter_length": int(os.getenv("MVWAP_CLOUD_FILTER_LENGTH", "60")),
+        "mvwap_cloud_filter_dev_mult": float(os.getenv("MVWAP_CLOUD_FILTER_DEV_MULT", "2.0")),
+        "mvwap_cloud_filter_touch_arm": os.getenv("MVWAP_CLOUD_FILTER_TOUCH_ARM", "false").lower() == "true",
         # Ausstiegs-Modus: "flip" = Wechsel bei Gegen-Signal (immer im Markt) + optionaler fester
         # Dollar-SL; "plan" = wie das Original-Skript (ATR-SL + TP1/TP2/TP3 mit Teilverkaeufen).
         "ab_exit_mode": os.getenv("AB_EXIT_MODE", "flip"),
@@ -1603,7 +1617,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="mvwap_mf_signal" data-requires="mvwap_macd_filter_enabled"><label>MACD langsam</label><input type="number" step="1" min="1" id="mvwap_macd_filter_slow"></div>
   <div data-mode="mvwap_mf_signal" data-requires="mvwap_macd_filter_enabled"><label>MACD-Signal</label><input type="number" step="1" min="1" id="mvwap_macd_filter_signal"></div>
 
+  <div data-mode="mvwap_mf_signal"><label>RSI-Überdehnungsfilter</label>
+    <select class="cfg" id="mvwap_rsi_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An (Long erst wenn RSI unter OS, Short erst wenn RSI über OB)</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_rsi_filter_enabled"><label>RSI-Länge</label><input type="number" step="1" min="1" id="mvwap_rsi_filter_length"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_rsi_filter_enabled"><label>RSI Oversold (Long erst darunter)</label><input type="number" step="1" min="1" max="100" id="mvwap_rsi_filter_os_level"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_rsi_filter_enabled"><label>RSI Overbought (Short erst darüber)</label><input type="number" step="1" min="1" max="100" id="mvwap_rsi_filter_ob_level"></div>
 
+  <div data-mode="mvwap_mf_signal"><label>Cloud-Filter (VWAP-Bänder)</label>
+    <select class="cfg" id="mvwap_cloud_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An (Short erst nach Berührung oberes Band, Long erst nach unterem Band)</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_cloud_filter_enabled"><label>Cloud VWAP-Länge</label><input type="number" step="1" min="1" id="mvwap_cloud_filter_length"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_cloud_filter_enabled"><label>Cloud Band-Multiplikator</label><input type="number" step="0.1" min="0.1" id="mvwap_cloud_filter_dev_mult"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_cloud_filter_enabled"><label>Scharfschaltung bei Docht-Berührung</label>
+    <select class="cfg" id="mvwap_cloud_filter_touch_arm">
+      <option value="false">Aus (Kerzenschluss über/unter Band nötig)</option>
+      <option value="true">An (High/Low reicht)</option>
+    </select>
+  </div>
 
 
 
@@ -2958,6 +2995,14 @@ async function refresh() {
     document.getElementById('mvwap_macd_filter_fast').value = data.config.mvwap_macd_filter_fast;
     document.getElementById('mvwap_macd_filter_slow').value = data.config.mvwap_macd_filter_slow;
     document.getElementById('mvwap_macd_filter_signal').value = data.config.mvwap_macd_filter_signal;
+    document.getElementById('mvwap_rsi_filter_enabled').value = String(data.config.mvwap_rsi_filter_enabled);
+    document.getElementById('mvwap_rsi_filter_length').value = data.config.mvwap_rsi_filter_length;
+    document.getElementById('mvwap_rsi_filter_os_level').value = data.config.mvwap_rsi_filter_os_level;
+    document.getElementById('mvwap_rsi_filter_ob_level').value = data.config.mvwap_rsi_filter_ob_level;
+    document.getElementById('mvwap_cloud_filter_enabled').value = String(data.config.mvwap_cloud_filter_enabled);
+    document.getElementById('mvwap_cloud_filter_length').value = data.config.mvwap_cloud_filter_length;
+    document.getElementById('mvwap_cloud_filter_dev_mult').value = data.config.mvwap_cloud_filter_dev_mult;
+    document.getElementById('mvwap_cloud_filter_touch_arm').value = String(data.config.mvwap_cloud_filter_touch_arm);
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -3214,6 +3259,14 @@ function buildConfigPayload() {
     mvwap_macd_filter_fast: parseInt(document.getElementById('mvwap_macd_filter_fast').value),
     mvwap_macd_filter_slow: parseInt(document.getElementById('mvwap_macd_filter_slow').value),
     mvwap_macd_filter_signal: parseInt(document.getElementById('mvwap_macd_filter_signal').value),
+    mvwap_rsi_filter_enabled: document.getElementById('mvwap_rsi_filter_enabled').value === 'true',
+    mvwap_rsi_filter_length: parseInt(document.getElementById('mvwap_rsi_filter_length').value),
+    mvwap_rsi_filter_os_level: parseFloat(document.getElementById('mvwap_rsi_filter_os_level').value),
+    mvwap_rsi_filter_ob_level: parseFloat(document.getElementById('mvwap_rsi_filter_ob_level').value),
+    mvwap_cloud_filter_enabled: document.getElementById('mvwap_cloud_filter_enabled').value === 'true',
+    mvwap_cloud_filter_length: parseInt(document.getElementById('mvwap_cloud_filter_length').value),
+    mvwap_cloud_filter_dev_mult: parseFloat(document.getElementById('mvwap_cloud_filter_dev_mult').value),
+    mvwap_cloud_filter_touch_arm: document.getElementById('mvwap_cloud_filter_touch_arm').value === 'true',
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -3435,7 +3488,9 @@ async def handle_config_update(request):
                 "mvwap_be_enabled", "mvwap_be_trigger_usd", "mvwap_sl_cooldown_seconds",
                 "mvwap_supertrend_filter_enabled", "mvwap_supertrend_filter_resolution", "mvwap_supertrend_filter_multiplier", "mvwap_supertrend_filter_atr_period",
                 "mvwap_adx_filter_enabled", "mvwap_adx_filter_length", "mvwap_adx_filter_threshold", "mvwap_adx_filter_directional",
-                "mvwap_macd_filter_enabled", "mvwap_macd_filter_fast", "mvwap_macd_filter_slow", "mvwap_macd_filter_signal"]:
+                "mvwap_macd_filter_enabled", "mvwap_macd_filter_fast", "mvwap_macd_filter_slow", "mvwap_macd_filter_signal",
+                "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
+                "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
