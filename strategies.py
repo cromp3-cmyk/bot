@@ -3882,7 +3882,11 @@ def compute_mvwap_mf_oscillator(ts_ms, highs, lows, closes, volumes, params):
 
 def compute_mvwap_mf_signals(osc, mf_raw, params):
     """Buy/Sell = Richtungswechsel des Oszillators (wie im Original-Skript: oscUp/oscDown-
-    Flankenwechsel), optional nur ausserhalb der OB/OS-Zone."""
+    Flankenwechsel), optional nur bei Ueberdehnung (INNERHALB der OB/OS-Zone): Buy nur wenn
+    der Oszillator unter os_level liegt (nach unten ueberdehnt -> Reversal-Kaufchance), Sell
+    nur wenn er ueber ob_level liegt (nach oben ueberdehnt -> Reversal-Verkaufschance).
+    FIX: vorher war das vertauscht (osc[i] < ob / osc[i] > os_), wodurch der Filter fast
+    IMMER durchliess statt nur in den Extremzonen."""
     n = len(osc)
     osc_up = [osc[i] > osc[i - 1] if i > 0 else False for i in range(n)]
     osc_down = [not v for v in osc_up]
@@ -3890,8 +3894,8 @@ def compute_mvwap_mf_signals(osc, mf_raw, params):
     sell_raw = [osc_down[i] and not (osc_down[i - 1] if i > 0 else False) for i in range(n)]
     if params.get("use_zone_filter", False):
         ob, os_ = params["ob_level"], params["os_level"]
-        buy_raw = [buy_raw[i] and osc[i] < ob for i in range(n)]
-        sell_raw = [sell_raw[i] and osc[i] > os_ for i in range(n)]
+        buy_raw = [buy_raw[i] and osc[i] < os_ for i in range(n)]
+        sell_raw = [sell_raw[i] and osc[i] > ob for i in range(n)]
     return buy_raw, sell_raw
 
 
