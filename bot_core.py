@@ -2448,9 +2448,13 @@ const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTrade
   const rowStyle = isOpenRow
     ? `border-left: 4px solid ${groupColor}; opacity: 0.75;`
     : `border-left: 4px solid ${groupColor};`;
+  // Bei EINSTIEG/NACHKAUF-Zeilen den TATSAECHLICHEN Kerzenzeitpunkt dieser Stufe zeigen
+  // (row_ts), nicht den urspruenglichen Einstiegszeitpunkt der Position (entry_ts) - sonst
+  // sehen alle Stufen einer Position faelschlich nach demselben Zeitpunkt aus.
+  const startTs = isOpenRow ? r.row_ts : r.entry_ts;
   return `
   <tr style="${rowStyle}">
-    <td>${fmtTs(r.entry_ts)}</td>
+    <td>${fmtTs(startTs)}</td>
     <td>${r.dir === 'long' ? '🟢 Long' : '🔴 Short'}</td>
     <td>${r.entry}</td>
     <td>${isOpenRow ? '–' : fmtTs(r.exit_ts)}</td>

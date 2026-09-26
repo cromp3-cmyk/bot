@@ -2394,14 +2394,21 @@ def _bt_record_addon(trades, direction, price, i, entry_i, stufe, ts=None, is_ad
     """Eigene Zeile je Einstiegs-/Nachkauf-Stufe (nicht nur fuer den finalen Ausstieg) - damit man
     in der Backtest-Tabelle nachvollziehen kann, OB und WIE OFT tatsaechlich nachgekauft wurde,
     genau wie bei der Tabelle "Laufende Nachkäufe" im Live-Betrieb. exit/pnl bleiben None (noch
-    nicht geschlossen) - die Zeile gehoert per gleichem entry_ts (Gruppen-Farbe, siehe
-    renderBtTrades/computeBtColorMap in bot_core.py) zum selben Trade wie die spaetere
-    Ausstiegs-Zeile aus _bt_close_trade."""
+    nicht geschlossen).
+
+    WICHTIG: entry_ts bleibt der urspruengliche Einstiegszeitpunkt der GESAMTEN Position (nur
+    fuer die Gruppen-Farbe, siehe renderBtTrades/computeBtColorMap in bot_core.py) - NICHT der
+    Zeitpunkt dieser einzelnen Stufe, sonst sehen alle Nachkauf-Zeilen einer Position in der
+    "Start"-Spalte faelschlich nach demselben Zeitpunkt aus (genau das hat den Nutzer verwirrt:
+    sah aus wie 13 Signale in derselben Minute). row_ts ist der TATSAECHLICHE Kerzenzeitpunkt
+    dieser Stufe (ts[i], eine Kerze = ein Nachkauf, nie mehrere in derselben Kerze) und wird in
+    der UI fuer die "Start"-Spalte dieser Zeilen verwendet statt entry_ts."""
     trade = {"dir": direction, "entry": price, "exit": None,
              "reason": f"NACHKAUF #{stufe}" if is_add_on else "EINSTIEG",
              "pnl": None, "bars_held": i - entry_i}
     if ts is not None:
         trade["entry_ts"] = ts[entry_i]
+        trade["row_ts"] = ts[i]
         trade["exit_ts"] = None
     trades.append(trade)
 
