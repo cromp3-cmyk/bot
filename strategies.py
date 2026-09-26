@@ -4033,36 +4033,96 @@ async def check_mvwap_sl(symbol, price):
             _mvwap_reset_state(st)
 
 
-async def check_mvwap_entry(symbol, buy_signal, sell_signal, price):
-    """Identisch zu check_rsi_entry (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern."""
+def _mvwap_update_sl_tp(st, cfg):
+    """Setzt/aktualisiert SL- und TP-Preis nach einem Erst- ODER Nachkauf-Einstieg, aus dem
+    AKTUELLEN Ø-Einstiegspreis und der AKTUELLEN Gesamtgroesse - wichtig bei Nachkaeufen
+    (mvwap_max_entries > 1), weil sich beides mit jeder weiteren Stufe aendert (der SL/TP-Abstand
+    in Kursnaehe muss kleiner werden, je groesser die Gesamtposition ist, um denselben
+    Dollar-Betrag zu ergeben)."""
+    pos = st["position"]
+    size = st.get("total_coin_size") or 0
+    entry_ref = st.get("avg_entry_price")
+    if pos is None or size <= 0 or not entry_ref:
+        return
+    if cfg.get("mvwap_sl_enabled", True):
+        dist_sl = cfg.get("mvwap_sl_manual_usd", 5.0) / size
+        st["mvwap_sl_price"] = entry_ref - dist_sl if pos == "long" else entry_ref + dist_sl
+    if cfg.get("mvwap_tp_enabled", False):
+        dist_tp = cfg.get("mvwap_tp_manual_usd", 10.0) / size
+        st["mvwap_tp_price"] = entry_ref + dist_tp if pos == "long" else entry_ref - dist_tp
+
+
+async def check_mvwap_entry(symbol, buy_raw_edge, sell_raw_edge, buy_final_edge, sell_final_edge, price):
+    """Identisch zu check_rsi_entry (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern,
+    UND mit Nachkauf-Unterstuetzung (mvwap_max_entries): jede neue BUY-Flanke waehrend einer
+    offenen Long-Position (bzw. SELL waehrend Short) legt eine weitere Stufe nach, bis zur
+    eingestellten Obergrenze - die ERSTE Gegen-Flanke schliesst die KOMPLETTE Position (alle
+    Stufen), unabhaengig davon wie viele es waren. Alle vier Signal-Parameter sind FLANKEN
+    (True nur genau die eine Kerze, in der das Signal neu auftritt), nicht Zustaende - sonst
+    wuerde ein ueber viele Kerzen anhaltendes Level-Signal bei jedem Kerzenschluss einen
+    weiteren Nachkauf ausloesen.
+
+    WICHTIG (Bugfix): der Ausstieg (sowohl Komplett-Schliessen bei Gegen-Signal) laeuft bewusst
+    auf dem ROHEN, UNGEFILTERTEN Signal (buy_raw_edge/sell_raw_edge) - nicht auf dem gefilterten
+    (buy_final_edge/sell_final_edge, nach SuperTrend/ADX/MACD/RSI/Cloud). Vorher wurde derselbe
+    gefilterte Wert fuer Ausstieg UND Neueinstieg benutzt: ein aktiver Filter (z.B. SuperTrend auf
+    einer hoeheren Zeiteinheit, die sich seltener dreht) verhinderte dann nicht nur einen falschen
+    Neueinstieg, sondern hielt auch eine bestehende Position fest, bis der Filter selbst wieder
+    mitspielte - live beobachtet: eine BTC-Position blieb offen, obwohl das Money-Flow-Signal
+    laengst gedreht hatte ("haette laengst schliessen sollen"), weil der HTF-SuperTrend-Filter das
+    Gegen-Signal noch blockierte. Ein Filter soll nur ungewollte NEUE Einstiege (Erst- und
+    Nachkauf) verhindern, niemals das Schliessen einer bereits offenen Position."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
         return
-    if buy_signal:
+
+    pos = st["position"]
+
+    # Komplett-Ausstieg bei der ERSTEN Gegen-Flanke (ungefiltert) - schliesst ALLE Nachkauf-Stufen
+    # auf einmal, unabhaengig von mvwap_max_entries.
+    if (pos == "long" and sell_raw_edge) or (pos == "short" and buy_raw_edge):
+        debug_log(f"🔄 [{symbol}] Multi-VWAP Money-Flow: erstes Gegensignal - schliesse {pos.upper()}-Position komplett ({st.get('entry_count', 0)} Stufen) @ {price} (Rohsignal - Filter gilt nur fuer Neueinstiege)")
+        await execute_exit(symbol, price, "MVWAP-FLIP")
+        if st["position"] is not None:
+            return
+        _mvwap_reset_state(st)
+        pos = None
+
+    max_entries = max(1, int(cfg.get("mvwap_max_entries", 1) or 1))
+
+    # Nachkauf: Position ist schon in dieselbe Richtung offen UND eine neue (gefilterte) Flanke
+    # derselben Richtung kommt - solange die Stufen-Obergrenze noch nicht erreicht ist.
+    if pos == "long" and buy_final_edge:
+        if st.get("entry_count", 0) >= max_entries:
+            return
+        await execute_entry(symbol, "long", price, is_add_on=True)
+        _mvwap_update_sl_tp(st, cfg)
+        return
+    if pos == "short" and sell_final_edge:
+        if st.get("entry_count", 0) >= max_entries:
+            return
+        await execute_entry(symbol, "short", price, is_add_on=True)
+        _mvwap_update_sl_tp(st, cfg)
+        return
+
+    if pos is not None:
+        return  # Position offen, aber kein (Nachkauf-)Signal in dieselbe Richtung diese Kerze
+
+    if time.time() < st.get("mvwap_sl_cooldown_until", 0.0):
+        return
+
+    if buy_final_edge:
         target = "long"
-    elif sell_signal:
+    elif sell_final_edge:
         target = "short"
     else:
-        return
-    pos = st["position"]
-    if pos == target:
         return
 
     direction_mode = cfg.get("mvwap_direction_mode", "both")
     can_open = (direction_mode == "both"
                 or (direction_mode == "long_only" and target == "long")
                 or (direction_mode == "short_only" and target == "short"))
-
-    if pos is not None:
-        debug_log(f"🔄 [{symbol}] Multi-VWAP Money-Flow Wechsel: {pos.upper()} -> {target.upper() if can_open else 'FLACH'} @ {price}")
-        await execute_exit(symbol, price, "MVWAP-FLIP")
-        if st["position"] is not None:
-            return
-        _mvwap_reset_state(st)
-    elif time.time() < st.get("mvwap_sl_cooldown_until", 0.0):
-        return
-
     if not can_open:
         return
     debug_log(f"📡 [{symbol}] Multi-VWAP Money-Flow: {target.upper()} @ {price}")
@@ -4070,15 +4130,7 @@ async def check_mvwap_entry(symbol, buy_signal, sell_signal, price):
     if st["position"] is None:
         return
     _mvwap_reset_state(st)
-    size = st.get("total_coin_size") or 0
-    if cfg.get("mvwap_sl_enabled", True) and size > 0:
-        entry_ref = st.get("avg_entry_price") or price
-        dist_sl = cfg.get("mvwap_sl_manual_usd", 5.0) / size
-        st["mvwap_sl_price"] = entry_ref - dist_sl if target == "long" else entry_ref + dist_sl
-    if cfg.get("mvwap_tp_enabled", False) and size > 0:
-        entry_ref = st.get("avg_entry_price") or price
-        dist_tp = cfg.get("mvwap_tp_manual_usd", 10.0) / size
-        st["mvwap_tp_price"] = entry_ref + dist_tp if target == "long" else entry_ref - dist_tp
+    _mvwap_update_sl_tp(st, cfg)
 
 
 async def _mvwap_apply_filters(symbol, st, cfg, candles, long_raw, short_raw):
@@ -4160,7 +4212,23 @@ async def mvwap_poll_loop(symbol):
                             buy_signal = long_final[-1]
                             sell_signal = short_final[-1]
                             st["mvwap_osc_last"] = osc[-1]
-                            await check_mvwap_entry(symbol, buy_signal, sell_signal, closed_c[-1])
+                            # Flanken statt Zustand (siehe check_mvwap_entry-Docstring): sonst
+                            # wuerde ein ueber mehrere Kerzen anhaltendes Signal bei JEDEM
+                            # Kerzenschluss einen weiteren Nachkauf ausloesen statt nur einmal pro
+                            # neuem Signalwechsel. Getrennt fuer roh (Ausstieg) und gefiltert
+                            # (Ein-/Nachkauf) verfolgt, da beide unabhaengig voneinander kippen
+                            # koennen (ein Filter kann von True auf False wechseln, ohne dass sich
+                            # das Rohsignal aendert).
+                            buy_raw_now, sell_raw_now = long_raw[-1], short_raw[-1]
+                            buy_raw_edge = buy_raw_now and not st.get("mvwap_prev_buy_raw", False)
+                            sell_raw_edge = sell_raw_now and not st.get("mvwap_prev_sell_raw", False)
+                            buy_final_edge = buy_signal and not st.get("mvwap_prev_buy_final", False)
+                            sell_final_edge = sell_signal and not st.get("mvwap_prev_sell_final", False)
+                            st["mvwap_prev_buy_raw"] = buy_raw_now
+                            st["mvwap_prev_sell_raw"] = sell_raw_now
+                            st["mvwap_prev_buy_final"] = buy_signal
+                            st["mvwap_prev_sell_final"] = sell_signal
+                            await check_mvwap_entry(symbol, buy_raw_edge, sell_raw_edge, buy_final_edge, sell_final_edge, closed_c[-1])
                         if due_heartbeat:
                             last_heartbeat = now
                             debug_log(f"💓 [{symbol}] Multi-VWAP Money-Flow aktiv: Oszillator={round(st.get('mvwap_osc_last') or 0, 2)}, "

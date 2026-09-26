@@ -307,6 +307,7 @@ def default_config():
         "mvwap_ob_level": float(os.getenv("MVWAP_OB_LEVEL", "2.0")),
         "mvwap_os_level": float(os.getenv("MVWAP_OS_LEVEL", "-2.0")),
         "mvwap_direction_mode": os.getenv("MVWAP_DIRECTION_MODE", "both"),
+        "mvwap_max_entries": int(os.getenv("MVWAP_MAX_ENTRIES", "1")),
         "mvwap_sl_enabled": os.getenv("MVWAP_SL_ENABLED", "true").lower() == "true",
         "mvwap_sl_manual_usd": float(os.getenv("MVWAP_SL_MANUAL_USD", "5.0")),
         "mvwap_tp_enabled": os.getenv("MVWAP_TP_ENABLED", "false").lower() == "true",
@@ -1549,6 +1550,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="short_only">Nur Short</option>
     </select>
   </div>
+  <div data-mode="mvwap_mf_signal"><label>Max. Nachkäufe pro Position (1 = kein Nachkauf)</label><input type="number" step="1" min="1" max="50" id="mvwap_max_entries"></div>
   <div data-mode="mvwap_mf_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">VWAP-Ebenen (Gewichte sollten zusammen ~1.0 ergeben)</div>
   <div data-mode="mvwap_mf_signal"><label>Daily VWAP</label>
     <select class="cfg" id="mvwap_use_daily"><option value="true">An</option><option value="false">Aus</option></select>
@@ -2993,6 +2995,7 @@ async function refresh() {
 
     setResolutionField('mvwap_resolution', data.config.mvwap_resolution);
     document.getElementById('mvwap_direction_mode').value = data.config.mvwap_direction_mode;
+    document.getElementById('mvwap_max_entries').value = data.config.mvwap_max_entries;
     document.getElementById('mvwap_use_daily').value = String(data.config.mvwap_use_daily);
     document.getElementById('mvwap_w_daily').value = data.config.mvwap_w_daily;
     document.getElementById('mvwap_use_weekly').value = String(data.config.mvwap_use_weekly);
@@ -3257,6 +3260,7 @@ function buildConfigPayload() {
 
     mvwap_resolution: getResolutionField('mvwap_resolution'),
     mvwap_direction_mode: document.getElementById('mvwap_direction_mode').value,
+    mvwap_max_entries: parseInt(document.getElementById('mvwap_max_entries').value),
     mvwap_use_daily: document.getElementById('mvwap_use_daily').value === 'true',
     mvwap_w_daily: parseFloat(document.getElementById('mvwap_w_daily').value),
     mvwap_use_weekly: document.getElementById('mvwap_use_weekly').value === 'true',
@@ -3512,7 +3516,7 @@ async def handle_config_update(request):
                 "rsi_supertrend_filter_enabled", "rsi_supertrend_filter_resolution", "rsi_supertrend_filter_multiplier", "rsi_supertrend_filter_atr_period",
                 "rsi_adx_filter_enabled", "rsi_adx_filter_length", "rsi_adx_filter_threshold", "rsi_adx_filter_directional",
                 "rsi_macd_filter_enabled", "rsi_macd_filter_fast", "rsi_macd_filter_slow", "rsi_macd_filter_signal",
-                "mvwap_resolution", "mvwap_direction_mode", "mvwap_use_daily", "mvwap_w_daily", "mvwap_use_weekly", "mvwap_w_weekly",
+                "mvwap_resolution", "mvwap_direction_mode", "mvwap_max_entries", "mvwap_use_daily", "mvwap_w_daily", "mvwap_use_weekly", "mvwap_w_weekly",
                 "mvwap_use_monthly", "mvwap_w_monthly", "mvwap_mf_source", "mvwap_mf_length", "mvwap_cmf_length", "mvwap_mf_weight",
                 "mvwap_smooth_len", "mvwap_use_zone_filter", "mvwap_ob_level", "mvwap_os_level",
                 "mvwap_sl_enabled", "mvwap_sl_manual_usd", "mvwap_tp_enabled", "mvwap_tp_manual_usd",
