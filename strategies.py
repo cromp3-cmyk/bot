@@ -4062,20 +4062,26 @@ def compute_mvwap_mf_oscillator(ts_ms, highs, lows, closes, volumes, params):
 
 
 def compute_mvwap_mf_signals(osc, mf_raw, params):
-    """Buy/Sell = Richtung des Oszillators PRO KERZE (Zustand, nicht nur der einzelne
-    Wendepunkt): buy_raw[i] ist True an JEDER Kerze, an der osc steigt (nicht nur an der
-    ersten Kerze eines Anstiegs), sell_raw[i] entsprechend an jeder Kerze mit fallendem osc.
-    Das ist bewusst so (Nutzer-Vorgabe): "signal 1 sell short, signal 2 sell short, signal 3
-    sell short, bei buy komplette position schliessen" - der Bot soll bei JEDEM gueltigen
-    Signal nachkaufen (wie ein DCA-Bot), nicht nur beim allerersten Wendepunkt einer Bewegung.
-    Optional nur bei Ueberdehnung (INNERHALB der OB/OS-Zone): Buy nur wenn der Oszillator
-    unter os_level liegt (nach unten ueberdehnt -> Reversal-Kaufchance), Sell nur wenn er
-    ueber ob_level liegt (nach oben ueberdehnt -> Reversal-Verkaufschance)."""
+    """Buy/Sell = WENDEPUNKT des Oszillators (Flanke, genau die eine Kerze, an der die Richtung
+    neu wechselt) - NICHT der gesamte Zustand "steigt gerade"/"faellt gerade". Nutzer-Korrektur:
+    "der kauft zu oft nach es kommt immer ein signal und minutenlang nix signal nur einmal bei
+    kerzenschluss" - ein durchgaengiger Zustand (jede einzelne Kerze eines Anstiegs/Abstiegs)
+    hat auf einem trendigen Abschnitt viel zu oft ausgeloest (praktisch auf fast jeder Kerze).
+    Nachkauf soll stattdessen nur an echten Wendepunkten passieren, dafuer aber - anders als der
+    fruehere Bug - an JEDEM neuen Wendepunkt in dieselbe Richtung, nicht nur am allerersten:
+    das schafft der Cloud-/RSI-Filter (siehe check_mvwap_entry-Docstring), indem er gegenlaeufige
+    Wendepunkte waehrend einer bestehenden Ausrichtung herausfiltert, waehrend gleichgerichtete
+    Wendepunkte durchkommen - macht mehrere Nachkaeufe in Folge moeglich, aber nur an tatsaechlichen
+    Wendepunkt-Kerzen, nicht auf jeder Kerze dazwischen.
+
+    Optional nur bei Ueberdehnung (INNERHALB der OB/OS-Zone): Buy nur wenn der Oszillator unter
+    os_level liegt (nach unten ueberdehnt -> Reversal-Kaufchance), Sell nur wenn er ueber ob_level
+    liegt (nach oben ueberdehnt -> Reversal-Verkaufschance)."""
     n = len(osc)
     osc_up = [osc[i] > osc[i - 1] if i > 0 else False for i in range(n)]
     osc_down = [not v for v in osc_up]
-    buy_raw = list(osc_up)
-    sell_raw = list(osc_down)
+    buy_raw = [osc_up[i] and not (osc_up[i - 1] if i > 0 else False) for i in range(n)]
+    sell_raw = [osc_down[i] and not (osc_down[i - 1] if i > 0 else False) for i in range(n)]
     if params.get("use_zone_filter", False):
         ob, os_ = params["ob_level"], params["os_level"]
         buy_raw = [buy_raw[i] and osc[i] < os_ for i in range(n)]
