@@ -2052,16 +2052,21 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
 
         trades = backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok,
                                         adx_long_ok=adx_long_ok, adx_short_ok=adx_short_ok, macd_long_ok=macd_long_ok, macd_short_ok=macd_short_ok)
-        stats = summarize_backtest_trades(trades, exclude_top_n)
-        stats_long = summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n)
-        stats_short = summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n)
+        # 'trades' enthaelt jetzt zusaetzlich zur Ausstiegs-Zeile auch eine Zeile je Ersteinstieg/
+        # Nachkauf-Stufe (pnl=None, siehe _bt_record_addon) - nur fuer die Anzeige (damit man
+        # nachvollziehen kann OB/WIE OFT nachgekauft wurde). Fuer Statistik/Kennzahlen zaehlen
+        # weiterhin nur die abgeschlossenen Zeilen (pnl gesetzt).
+        closed_trades = [t for t in trades if t["pnl"] is not None]
+        stats = summarize_backtest_trades(closed_trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in closed_trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in closed_trades if t["dir"] == "short"], exclude_top_n)
         actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
         return {
             "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
             "requested_days": days, "actual_days_covered": round(actual_days, 1),
             "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
             "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
-            "trades": trades[-50:],
+            "trades": trades[-100:],
         }
 
     return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
@@ -2371,6 +2376,22 @@ def _bt_close_trade(trades, direction, entry, exit_price, size, i, entry_i, reas
     if ts is not None:
         trade["entry_ts"] = ts[entry_i]
         trade["exit_ts"] = ts[i]
+    trades.append(trade)
+
+
+def _bt_record_addon(trades, direction, price, i, entry_i, stufe, ts=None, is_add_on=True):
+    """Eigene Zeile je Einstiegs-/Nachkauf-Stufe (nicht nur fuer den finalen Ausstieg) - damit man
+    in der Backtest-Tabelle nachvollziehen kann, OB und WIE OFT tatsaechlich nachgekauft wurde,
+    genau wie bei der Tabelle "Laufende Nachkäufe" im Live-Betrieb. exit/pnl bleiben None (noch
+    nicht geschlossen) - die Zeile gehoert per gleichem entry_ts (Gruppen-Farbe, siehe
+    renderBtTrades/computeBtColorMap in bot_core.py) zum selben Trade wie die spaetere
+    Ausstiegs-Zeile aus _bt_close_trade."""
+    trade = {"dir": direction, "entry": price, "exit": None,
+             "reason": f"NACHKAUF #{stufe}" if is_add_on else "EINSTIEG",
+             "pnl": None, "bars_held": i - entry_i}
+    if ts is not None:
+        trade["entry_ts"] = ts[entry_i]
+        trade["exit_ts"] = None
     trades.append(trade)
 
 
@@ -4382,6 +4403,7 @@ def _simulate_mvwap_trades(candles, cfg, long_signal, short_signal):
                 position["size"] = new_size
                 position["entries"] += 1
                 _recalc_sl_tp(position)
+                _bt_record_addon(trades, position["dir"], price, i, position["entry_i"], position["entries"], ts=ts, is_add_on=True)
             continue  # Position (weiterhin) offen - keine Neueinstiegs-Pruefung diese Kerze
 
         if buy_now:
@@ -4400,6 +4422,7 @@ def _simulate_mvwap_trades(candles, cfg, long_signal, short_signal):
         size = (margin * leverage) / price
         position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "be_done": False, "entries": 1}
         _recalc_sl_tp(position)
+        _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)

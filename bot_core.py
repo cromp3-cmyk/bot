@@ -2441,16 +2441,22 @@ function computeBtColorMap(rows) {
 const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTradesData, (r, i, allRows) => {
   if (i === 0) btColorMap = computeBtColorMap(allRows);
   const groupColor = btColorMap[String(r.entry_ts)];
-  const pnlClass = r.pnl > 0 ? 'green' : r.pnl < 0 ? 'red' : '';
+  // Ersteinstiegs-/Nachkauf-Zeilen (siehe _bt_record_addon) sind noch offen - kein Exit/PnL
+  // bis die Position tatsaechlich schliesst (eigene Zeile aus _bt_close_trade).
+  const isOpenRow = r.pnl === null || r.pnl === undefined;
+  const pnlClass = isOpenRow ? '' : (r.pnl > 0 ? 'green' : r.pnl < 0 ? 'red' : '');
+  const rowStyle = isOpenRow
+    ? `border-left: 4px solid ${groupColor}; opacity: 0.75;`
+    : `border-left: 4px solid ${groupColor};`;
   return `
-  <tr style="border-left: 4px solid ${groupColor};">
+  <tr style="${rowStyle}">
     <td>${fmtTs(r.entry_ts)}</td>
     <td>${r.dir === 'long' ? '🟢 Long' : '🔴 Short'}</td>
     <td>${r.entry}</td>
-    <td>${fmtTs(r.exit_ts)}</td>
-    <td>${r.exit}</td>
+    <td>${isOpenRow ? '–' : fmtTs(r.exit_ts)}</td>
+    <td>${isOpenRow ? '–' : r.exit}</td>
     <td>${r.reason}</td>
-    <td class="${pnlClass}">${r.pnl.toFixed(2)}</td>
+    <td class="${pnlClass}">${isOpenRow ? '–' : r.pnl.toFixed(2)}</td>
   </tr>`;
 });
 
