@@ -354,6 +354,14 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     all_rows = []
     cursor = end_time
     requests_made = 0
+    # Siehe fetch_historical_candles_binance_vol fuer die ausfuehrliche Begruendung: Futures
+    # gewichtet Klines-Anfragen nach Limit-Bracket (500 statt 1000 pro Seite ist deutlich
+    # guenstiger), und bei Sekunden-Aufloesungen entstehen leicht 100+ Seiten in einer Minute -
+    # ohne diese Anpassung reisst das zusammen mit dem parallel laufenden Live-Trading auf
+    # Futures leicht das 2400er-Gewichtslimit (live beobachtet: wiederholte IP-Baenne beim
+    # Backtesten kleiner Aufloesungen).
+    page_limit = 500 if effective_market_type == "futures" else 1000
+    page_pause_s = 0.5 if effective_market_type == "futures" else 0.25
     try:
         async with aiohttp.ClientSession() as session:
             while cursor > start_time and len(all_rows) < hard_candle_cap:
@@ -364,7 +372,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
                     wait_s = max(0, (_binance_ban_until_ms.get(effective_market_type, 0.0) - time.time() * 1000) / 1000)
                     return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
 
-                url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
+                url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit={page_limit}&endTime={cursor}"
                 await _binance_throttle(effective_market_type, f"history:{base_resolution}")
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     _binance_note_response(effective_market_type, resp)
@@ -388,9 +396,9 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
                     break
                 all_rows = batch + all_rows
                 cursor = int(batch[0][0]) - 1
-                if len(batch) < 1000:
+                if len(batch) < page_limit:
                     break
-                await asyncio.sleep(0.25)  # Binance-Ratelimit-freundlich (leicht erhoeht)
+                await asyncio.sleep(page_pause_s)
     except Exception as e:
         return None, f"Abruf fehlgeschlagen nach {requests_made} Anfragen: {e}"
 
@@ -452,13 +460,25 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
     all_rows = []
     cursor = end_time
     requests_made = 0
+    # Seiten-Limit und Pause: Futures gewichtet Klines-Anfragen nach Limit-Bracket (Binance:
+    # 1-100 -> Gewicht 1, 101-500 -> 2, 501-1000 -> 5) - Spot ist dagegen unabhaengig vom Limit
+    # immer guenstig. Bei Sekunden-Aufloesungen (10s/15s/30s/45s) braucht ein Backtest bis zu
+    # ~30x so viele Roh-1s-Seiten wie fertige Kerzen (z.B. 5000 fertige 30s-Kerzen -> 152 Seiten) -
+    # auf Futures mit limit=1000 (Gewicht 5) reisst das zusammen mit dem parallel laufenden
+    # Live-Trading (das denselben Futures-Endpunkt fuer SuperTrend-HTF-Filter nutzt) leicht das
+    # 2400er-Minutenlimit, BEVOR die Gewichts-Bremse in _binance_throttle stark genug gegensteuert
+    # (live beobachtet: wiederholte IP-Baenne beim Backtesten kleiner Aufloesungen). Fix: auf
+    # Futures kleinere Seiten (limit=500, guenstigerer Gewichts-Bracket) und eine groessere feste
+    # Pause zwischen Seiten - kostet insgesamt weniger Gewicht bei nur wenig mehr Anfragen.
+    page_limit = 500 if effective_market_type == "futures" else 1000
+    page_pause_s = 0.5 if effective_market_type == "futures" else 0.25
     try:
         async with aiohttp.ClientSession() as session:
             while cursor > start_time and len(all_rows) < hard_candle_cap:
                 if _binance_is_banned(effective_market_type):
                     wait_s = max(0, (_binance_ban_until_ms.get(effective_market_type, 0.0) - time.time() * 1000) / 1000)
                     return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
-                url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit=1000&endTime={cursor}"
+                url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit={page_limit}&endTime={cursor}"
                 await _binance_throttle(effective_market_type, f"history-vol:{base_resolution}")
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     _binance_note_response(effective_market_type, resp)
@@ -478,9 +498,9 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
                     break
                 all_rows = batch + all_rows
                 cursor = int(batch[0][0]) - 1
-                if len(batch) < 1000:
+                if len(batch) < page_limit:
                     break
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(page_pause_s)
     except Exception as e:
         return None, f"Abruf fehlgeschlagen nach {requests_made} Anfragen: {e}"
 
