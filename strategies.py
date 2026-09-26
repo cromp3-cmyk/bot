@@ -4257,11 +4257,18 @@ async def mvwap_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
-def _simulate_mvwap_trades(candles, cfg, long_setup, short_setup):
+def _simulate_mvwap_trades(candles, cfg, long_raw, short_raw, long_final=None, short_final=None):
     """Backtest-Simulation - identisch zu _simulate_rsi_trades (siehe dort fuer Kommentare), mit
-    mvwap_-Config-Feldern (inkl. optionalem festen Dollar-TP, SL gewinnt bei Konflikt)."""
+    mvwap_-Config-Feldern (inkl. optionalem festen Dollar-TP, SL gewinnt bei Konflikt) UND
+    Nachkauf-Unterstuetzung (mvwap_max_entries), spiegelbildlich zu check_mvwap_entry (live):
+    jede neue gefilterte Signal-Flanke in dieselbe Richtung wie die offene Position legt eine
+    weitere Stufe nach (bis zur Obergrenze), die ERSTE Gegen-Flanke im ROHEN (ungefilterten)
+    Signal schliesst die komplette Position auf einen Schlag. long_final/short_final sind
+    optional (Abwaertskompatibel: ohne Filter sind sie identisch zu long_raw/short_raw)."""
     ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
     n = len(c)
+    if long_final is None:
+        long_final, short_final = long_raw, short_raw
     margin, leverage = cfg["margin"], cfg["leverage"]
     sl_enabled = cfg.get("mvwap_sl_enabled", True)
     sl_manual_usd = cfg.get("mvwap_sl_manual_usd", 5.0)
@@ -4271,10 +4278,20 @@ def _simulate_mvwap_trades(candles, cfg, long_setup, short_setup):
     be_trigger_usd = cfg.get("mvwap_be_trigger_usd", 5.0)
     tp_enabled = cfg.get("mvwap_tp_enabled", False)
     tp_manual_usd = cfg.get("mvwap_tp_manual_usd", 10.0)
+    max_entries = max(1, int(cfg.get("mvwap_max_entries", 1) or 1))
 
     position = None
     trades = []
     sl_cooldown_until_ts = None
+
+    def _recalc_sl_tp(pos):
+        size, entry, pdir = pos["size"], pos["entry"], pos["dir"]
+        if sl_enabled and size > 0:
+            dist_sl = sl_manual_usd / size
+            pos["sl_price"] = entry - dist_sl if pdir == "long" else entry + dist_sl
+        if tp_enabled and size > 0:
+            dist_tp = tp_manual_usd / size
+            pos["tp_price"] = entry + dist_tp if pdir == "long" else entry - dist_tp
 
     for i in range(1, n):
         if position is not None:
@@ -4298,19 +4315,37 @@ def _simulate_mvwap_trades(candles, cfg, long_setup, short_setup):
                     _bt_close_trade(trades, pdir, entry, tp_price, position["size"], i, position["entry_i"], "TP", ts=ts)
                     position = None
 
-        if long_setup[i] and not long_setup[i - 1]:
+        price = c[i]
+        buy_raw_edge = long_raw[i] and not long_raw[i - 1]
+        sell_raw_edge = short_raw[i] and not short_raw[i - 1]
+        buy_final_edge = long_final[i] and not long_final[i - 1]
+        sell_final_edge = short_final[i] and not short_final[i - 1]
+
+        # Komplett-Ausstieg bei der ERSTEN Gegen-Flanke (ungefiltert) - siehe check_mvwap_entry.
+        if position is not None and ((position["dir"] == "long" and sell_raw_edge) or (position["dir"] == "short" and buy_raw_edge)):
+            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MVWAP-FLIP", ts=ts)
+            position = None
+
+        if position is not None:
+            # Nachkauf: weitere gefilterte Flanke in dieselbe Richtung, Stufenlimit noch offen.
+            same_dir_edge = (position["dir"] == "long" and buy_final_edge) or (position["dir"] == "short" and sell_final_edge)
+            if same_dir_edge and position["entries"] < max_entries:
+                add_size = (margin * leverage) / price
+                old_size = position["size"]
+                new_size = old_size + add_size
+                position["entry"] = (position["entry"] * old_size + price * add_size) / new_size
+                position["size"] = new_size
+                position["entries"] += 1
+                _recalc_sl_tp(position)
+            continue  # Position (weiterhin) offen - keine Neueinstiegs-Pruefung diese Kerze
+
+        if buy_final_edge:
             target = "long"
-        elif short_setup[i] and not short_setup[i - 1]:
+        elif sell_final_edge:
             target = "short"
         else:
             continue
-        if position is not None and position["dir"] == target:
-            continue
-        price = c[i]
-        if position is not None:
-            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MVWAP-FLIP", ts=ts)
-            position = None
-        elif sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts:
+        if sl_cooldown_until_ts is not None and ts[i] < sl_cooldown_until_ts:
             continue
         can_open = (direction_mode == "both"
                     or (direction_mode == "long_only" and target == "long")
@@ -4318,15 +4353,8 @@ def _simulate_mvwap_trades(candles, cfg, long_setup, short_setup):
         if not can_open:
             continue
         size = (margin * leverage) / price
-        sl_price = None
-        if sl_enabled and size > 0:
-            dist_sl = sl_manual_usd / size
-            sl_price = price - dist_sl if target == "long" else price + dist_sl
-        tp_price = None
-        if tp_enabled and size > 0:
-            dist_tp = tp_manual_usd / size
-            tp_price = price + dist_tp if target == "long" else price - dist_tp
-        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": sl_price, "tp_price": tp_price, "be_done": False}
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "be_done": False, "entries": 1}
+        _recalc_sl_tp(position)
 
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
@@ -4359,6 +4387,9 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
         filters.append(compute_cloud_filter_series(
             candles, cfg.get("mvwap_cloud_filter_length", 60), cfg.get("mvwap_cloud_filter_dev_mult", 2.0),
             touch_arm=cfg.get("mvwap_cloud_filter_touch_arm", False)))
-    if filters:
-        long_raw, short_raw = combine_filters(long_raw, short_raw, filters)
-    return _simulate_mvwap_trades(candles, cfg, long_raw, short_raw)
+    # long_raw/short_raw bewusst UNVERAENDERT an die Simulation weitergeben (fuer den Ausstieg -
+    # siehe _simulate_mvwap_trades-Docstring) - die gefilterte Fassung geht als eigenes
+    # long_final/short_final mit (fuer Ein-/Nachkauf), damit ein aktiver Filter wie live nur
+    # Neueinstiege/Nachkaeufe verhindert, nie das Schliessen einer offenen Position.
+    long_final, short_final = (combine_filters(long_raw, short_raw, filters) if filters else (long_raw, short_raw))
+    return _simulate_mvwap_trades(candles, cfg, long_raw, short_raw, long_final, short_final)
