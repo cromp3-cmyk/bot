@@ -4021,17 +4021,20 @@ def compute_mvwap_mf_oscillator(ts_ms, highs, lows, closes, volumes, params):
 
 
 def compute_mvwap_mf_signals(osc, mf_raw, params):
-    """Buy/Sell = Richtungswechsel des Oszillators (wie im Original-Skript: oscUp/oscDown-
-    Flankenwechsel), optional nur bei Ueberdehnung (INNERHALB der OB/OS-Zone): Buy nur wenn
-    der Oszillator unter os_level liegt (nach unten ueberdehnt -> Reversal-Kaufchance), Sell
-    nur wenn er ueber ob_level liegt (nach oben ueberdehnt -> Reversal-Verkaufschance).
-    FIX: vorher war das vertauscht (osc[i] < ob / osc[i] > os_), wodurch der Filter fast
-    IMMER durchliess statt nur in den Extremzonen."""
+    """Buy/Sell = Richtung des Oszillators PRO KERZE (Zustand, nicht nur der einzelne
+    Wendepunkt): buy_raw[i] ist True an JEDER Kerze, an der osc steigt (nicht nur an der
+    ersten Kerze eines Anstiegs), sell_raw[i] entsprechend an jeder Kerze mit fallendem osc.
+    Das ist bewusst so (Nutzer-Vorgabe): "signal 1 sell short, signal 2 sell short, signal 3
+    sell short, bei buy komplette position schliessen" - der Bot soll bei JEDEM gueltigen
+    Signal nachkaufen (wie ein DCA-Bot), nicht nur beim allerersten Wendepunkt einer Bewegung.
+    Optional nur bei Ueberdehnung (INNERHALB der OB/OS-Zone): Buy nur wenn der Oszillator
+    unter os_level liegt (nach unten ueberdehnt -> Reversal-Kaufchance), Sell nur wenn er
+    ueber ob_level liegt (nach oben ueberdehnt -> Reversal-Verkaufschance)."""
     n = len(osc)
     osc_up = [osc[i] > osc[i - 1] if i > 0 else False for i in range(n)]
     osc_down = [not v for v in osc_up]
-    buy_raw = [osc_up[i] and not (osc_up[i - 1] if i > 0 else False) for i in range(n)]
-    sell_raw = [osc_down[i] and not (osc_down[i - 1] if i > 0 else False) for i in range(n)]
+    buy_raw = list(osc_up)
+    sell_raw = list(osc_down)
     if params.get("use_zone_filter", False):
         ob, os_ = params["ob_level"], params["os_level"]
         buy_raw = [buy_raw[i] and osc[i] < os_ for i in range(n)]
@@ -4115,30 +4118,21 @@ def _mvwap_update_sl_tp(st, cfg):
         st["mvwap_tp_price"] = entry_ref + dist_tp if pos == "long" else entry_ref - dist_tp
 
 
-async def check_mvwap_entry(symbol, buy_edge, sell_edge, price):
+async def check_mvwap_entry(symbol, buy_signal, sell_signal, price):
     """Identisch zu check_rsi_entry (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern,
-    UND mit Nachkauf-Unterstuetzung (mvwap_max_entries): jede neue BUY-Flanke waehrend einer
-    offenen Long-Position (bzw. SELL waehrend Short) legt eine weitere Stufe nach, bis zur
-    eingestellten Obergrenze - die ERSTE Gegenflanke schliesst die KOMPLETTE Position (alle
-    Stufen), unabhaengig davon wie viele es waren. buy_edge/sell_edge sind FLANKEN (True nur
-    genau die eine Kerze, in der das Signal neu auftritt), nicht Zustaende.
+    UND mit Nachkauf-Unterstuetzung (mvwap_max_entries), als DCA-Bot (Nutzer-Vorgabe: "signal 1
+    sell short, signal 2 sell short, signal 3 sell short, bei buy komplette position schliessen"):
+    buy_signal/sell_signal sind ZUSTAENDE (True an JEDER Kerze, an der das Signal - nach allen
+    aktiven Filtern - zutrifft, nicht nur an der ersten Kerze eines neuen Signalwechsels). Jede
+    Kerze mit BUY waehrend einer offenen Long-Position (bzw. SELL waehrend Short) legt eine
+    weitere Nachkauf-Stufe nach, bis zur eingestellten Obergrenze (mvwap_max_entries) - das ERSTE
+    Gegensignal schliesst die KOMPLETTE Position (alle Stufen) auf einmal, unabhaengig davon wie
+    viele es waren, und eroeffnet im selben Zug direkt die neue Position in die Gegenrichtung
+    (Flip-Modus, identisch zum Original-Skript).
 
-    WICHTIG: es gibt nur noch EIN Signal (buy_edge/sell_edge), nicht mehr getrennt in "roh" (fuer
-    Ausstieg) und "gefiltert" (fuer Einstieg) - das war ein fruehere Fehlannahme meinerseits. Wie
-    das Signal selbst berechnet wird (Momentum-Wendepunkt + optional OB/OS-Zone + RSI-Filter +
+    Wie das Signal selbst berechnet wird (Momentum-Richtung + optional OB/OS-Zone + RSI-Filter +
     Cloud-Filter + SuperTrend-Filter, siehe _mvwap_apply_filters) stellt der Nutzer per Config ein
-    ("die Signale stell ich ein") - diese Funktion reagiert nur noch darauf. Der Cloud-Filter ist
-    dabei der Schluessel zum Nachkauf: cloudArmedLong/cloudArmedShort (siehe compute_cloud_filter_series)
-    bleiben "scharf" fuer eine Richtung, bis der Kurs die JEWEILIGE GEGENSEITE des Bands beruehrt -
-    das ist NICHT symmetrisch zu jedem einzelnen Oszillator-Wendepunkt und durchbricht deshalb die
-    sonst zwingende Abwechslung von buy/sell: solange der Kurs nicht das Gegenband beruehrt, werden
-    alle gegenlaeufigen Momentum-Pulse durch den Cloud-Filter herausgefiltert, waehrend gleichgerichtete
-    Pulse (bei erfuellter Bedingung) mehrfach hintereinander durchkommen koennen - genau das erzeugt
-    "mehrere SELLs in Folge, kein BUY dazwischen" auf dem echten Chart. Filter+Signal sind hier also
-    bewusst EIN Ausdruck (buy_edge/sell_edge, nach ALLEN aktiven Filtern), fuer Einstieg, Nachkauf
-    UND Komplett-Ausstieg gleichermassen - ein Filter, der einen Neueinstieg verhindert, haelt damit
-    auch eine bestehende Position fest, bis er selbst wieder das Gegen-Signal freigibt. Das ist so
-    gewollt (identisch zum Flip-Modus des Original-Skripts), nicht (mehr) als Bug behandelt."""
+    ("die Signale stell ich ein") - diese Funktion reagiert nur noch darauf."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -4148,8 +4142,8 @@ async def check_mvwap_entry(symbol, buy_edge, sell_edge, price):
 
     # Komplett-Ausstieg beim ERSTEN Gegensignal - schliesst ALLE Nachkauf-Stufen auf einmal,
     # unabhaengig von mvwap_max_entries.
-    if (pos == "long" and sell_edge) or (pos == "short" and buy_edge):
-        debug_log(f"🔄 [{symbol}] Multi-VWAP Money-Flow: erstes Gegensignal - schliesse {pos.upper()}-Position komplett ({st.get('entry_count', 0)} Stufen) @ {price}")
+    if (pos == "long" and sell_signal) or (pos == "short" and buy_signal):
+        debug_log(f"🔄 [{symbol}] Multi-VWAP Money-Flow: Gegensignal - schliesse {pos.upper()}-Position komplett ({st.get('entry_count', 0)} Stufen) @ {price}")
         await execute_exit(symbol, price, "MVWAP-FLIP")
         if st["position"] is not None:
             return
@@ -4158,15 +4152,15 @@ async def check_mvwap_entry(symbol, buy_edge, sell_edge, price):
 
     max_entries = max(1, int(cfg.get("mvwap_max_entries", 1) or 1))
 
-    # Nachkauf: Position ist schon in dieselbe Richtung offen UND eine neue Flanke derselben
-    # Richtung kommt - solange die Stufen-Obergrenze noch nicht erreicht ist.
-    if pos == "long" and buy_edge:
+    # Nachkauf: Position ist schon in dieselbe Richtung offen UND das Signal derselben Richtung
+    # gilt weiterhin diese Kerze - solange die Stufen-Obergrenze noch nicht erreicht ist.
+    if pos == "long" and buy_signal:
         if st.get("entry_count", 0) >= max_entries:
             return
         await execute_entry(symbol, "long", price, is_add_on=True)
         _mvwap_update_sl_tp(st, cfg)
         return
-    if pos == "short" and sell_edge:
+    if pos == "short" and sell_signal:
         if st.get("entry_count", 0) >= max_entries:
             return
         await execute_entry(symbol, "short", price, is_add_on=True)
@@ -4179,9 +4173,9 @@ async def check_mvwap_entry(symbol, buy_edge, sell_edge, price):
     if time.time() < st.get("mvwap_sl_cooldown_until", 0.0):
         return
 
-    if buy_edge:
+    if buy_signal:
         target = "long"
-    elif sell_edge:
+    elif sell_signal:
         target = "short"
     else:
         return
@@ -4284,14 +4278,13 @@ async def mvwap_poll_loop(symbol):
                             buy_signal = long_final[-1]
                             sell_signal = short_final[-1]
                             st["mvwap_osc_last"] = osc[-1]
-                            # Flanke statt Zustand (siehe check_mvwap_entry-Docstring): sonst wuerde
-                            # ein ueber mehrere Kerzen anhaltendes Signal bei JEDEM Kerzenschluss
-                            # einen weiteren Nachkauf ausloesen statt nur einmal pro neuem Signalwechsel.
-                            buy_edge = buy_signal and not st.get("mvwap_prev_buy_final", False)
-                            sell_edge = sell_signal and not st.get("mvwap_prev_sell_final", False)
+                            # Kein Flanken-Filter mehr: jede Kerze mit gueltigem Signal zaehlt, auch
+                            # wenn dieselbe Richtung schon an der Vorkerze galt (DCA-Vorgabe des
+                            # Nutzers: "signal 1 sell short, signal 2 sell short, signal 3 sell
+                            # short, bei buy komplette position schliessen").
                             st["mvwap_prev_buy_final"] = buy_signal
                             st["mvwap_prev_sell_final"] = sell_signal
-                            await check_mvwap_entry(symbol, buy_edge, sell_edge, closed_c[-1])
+                            await check_mvwap_entry(symbol, buy_signal, sell_signal, closed_c[-1])
                         if due_heartbeat:
                             last_heartbeat = now
                             debug_log(f"💓 [{symbol}] Multi-VWAP Money-Flow aktiv: Oszillator={round(st.get('mvwap_osc_last') or 0, 2)}, "
@@ -4311,12 +4304,13 @@ async def mvwap_poll_loop(symbol):
 def _simulate_mvwap_trades(candles, cfg, long_signal, short_signal):
     """Backtest-Simulation - identisch zu _simulate_rsi_trades (siehe dort fuer Kommentare), mit
     mvwap_-Config-Feldern (inkl. optionalem festen Dollar-TP, SL gewinnt bei Konflikt) UND
-    Nachkauf-Unterstuetzung (mvwap_max_entries), spiegelbildlich zu check_mvwap_entry (live):
-    jede neue Signal-Flanke in dieselbe Richtung wie die offene Position legt eine weitere Stufe
-    nach (bis zur Obergrenze), die ERSTE Gegenflanke schliesst die komplette Position auf einen
-    Schlag. long_signal/short_signal ist EIN Signal (nach allen aktiven Filtern) fuer Einstieg,
-    Nachkauf UND Komplett-Ausstieg gleichermassen - siehe check_mvwap_entry-Docstring, warum es
-    hier bewusst keine getrennte "roh vs. gefiltert"-Fassung mehr gibt."""
+    Nachkauf-Unterstuetzung (mvwap_max_entries), spiegelbildlich zu check_mvwap_entry (live), als
+    DCA-Bot: long_signal/short_signal sind ZUSTAENDE (True an JEDER Kerze mit gueltigem Signal,
+    nicht nur am ersten Wendepunkt) - jede Kerze mit Signal in dieselbe Richtung wie die offene
+    Position legt eine weitere Stufe nach (bis zur Obergrenze), das ERSTE Gegensignal schliesst
+    die komplette Position auf einen Schlag und eroeffnet direkt die neue Gegenposition (Flip).
+    long_signal/short_signal ist EIN Signal (nach allen aktiven Filtern) fuer Einstieg, Nachkauf
+    UND Komplett-Ausstieg gleichermassen - siehe check_mvwap_entry-Docstring."""
     ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
@@ -4366,17 +4360,20 @@ def _simulate_mvwap_trades(candles, cfg, long_signal, short_signal):
                     position = None
 
         price = c[i]
-        buy_edge = long_signal[i] and not long_signal[i - 1]
-        sell_edge = short_signal[i] and not short_signal[i - 1]
+        # Kein Flanken-Filter mehr: buy_now/sell_now gelten JEDE Kerze, an der das Signal
+        # (nach allen aktiven Filtern) zutrifft - DCA-Vorgabe des Nutzers (siehe
+        # compute_mvwap_mf_signals-Docstring).
+        buy_now = long_signal[i]
+        sell_now = short_signal[i]
 
-        # Komplett-Ausstieg bei der ERSTEN Gegen-Flanke - siehe check_mvwap_entry.
-        if position is not None and ((position["dir"] == "long" and sell_edge) or (position["dir"] == "short" and buy_edge)):
+        # Komplett-Ausstieg beim ERSTEN Gegensignal - siehe check_mvwap_entry.
+        if position is not None and ((position["dir"] == "long" and sell_now) or (position["dir"] == "short" and buy_now)):
             _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MVWAP-FLIP", ts=ts)
             position = None
 
         if position is not None:
-            # Nachkauf: weitere Flanke in dieselbe Richtung, Stufenlimit noch offen.
-            same_dir_edge = (position["dir"] == "long" and buy_edge) or (position["dir"] == "short" and sell_edge)
+            # Nachkauf: gleiches Signal gilt weiterhin diese Kerze, Stufenlimit noch offen.
+            same_dir_edge = (position["dir"] == "long" and buy_now) or (position["dir"] == "short" and sell_now)
             if same_dir_edge and position["entries"] < max_entries:
                 add_size = (margin * leverage) / price
                 old_size = position["size"]
@@ -4387,9 +4384,9 @@ def _simulate_mvwap_trades(candles, cfg, long_signal, short_signal):
                 _recalc_sl_tp(position)
             continue  # Position (weiterhin) offen - keine Neueinstiegs-Pruefung diese Kerze
 
-        if buy_edge:
+        if buy_now:
             target = "long"
-        elif sell_edge:
+        elif sell_now:
             target = "short"
         else:
             continue
