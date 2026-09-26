@@ -4008,24 +4008,36 @@ def compute_mvwap_mf_signals(osc, mf_raw, params):
     return buy_raw, sell_raw
 
 
-def compute_mvwap_reversal_signals(osc):
-    """Grobe ECHTE Trendwende (Nulllinien-Durchbruch) - fuer den KOMPLETT-Ausstieg einer
-    Nachkauf-Position gebraucht, NICHT fuer buy_raw/sell_raw (siehe compute_mvwap_mf_signals):
-    buy_raw/sell_raw feuern bei JEDEM kleinen Richtungswechsel des Oszillators - weil osc_up und
-    osc_down exakte Gegensaetze sind, wechseln sich buy_raw und sell_raw dabei zwingend IMMER ab
-    (zwischen zwei buy_raw-Pulsen MUSS mindestens ein sell_raw-Puls liegen, der Oszillator muss ja
-    erst wieder fallen, bevor er erneut steigen kann). Wird buy_raw/sell_raw fuer den Nachkauf UND
-    fuer den Komplett-Ausstieg beim jeweils GEGENTEILIGEN Puls benutzt, schliesst deshalb JEDER
-    Nachkauf-Versuch zwangslaeufig zuerst die alte Position, statt draufzulegen (live beobachtet:
-    "beendet jeden Sell nacheinander und macht einen neuen auf" - strukturell unmoeglich, echten
-    Nachkauf zu bekommen, weil zwischen zwei gleichgerichteten Pulsen immer ein Gegen-Puls liegt).
-    Der Nulllinien-Durchbruch (Vorzeichenwechsel von osc) ist dagegen ein GROBES, viel selteneres
-    Signal - ein einzelner kleiner Wendepunkt (buy_raw/sell_raw) reisst die Nulllinie normalerweise
-    nicht, mehrere Nachkauf-Stufen bleiben also moeglich, bis der Oszillator wirklich die Seite
-    wechselt."""
+def compute_mvwap_reversal_signals(osc, ob_level=2.0, os_level=-2.0):
+    """Grobe ECHTE Trendwende - fuer den KOMPLETT-Ausstieg einer Nachkauf-Position gebraucht,
+    NICHT fuer buy_raw/sell_raw (siehe compute_mvwap_mf_signals): buy_raw/sell_raw feuern bei
+    JEDEM kleinen Richtungswechsel des Oszillators und wechseln sich deshalb zwingend IMMER ab.
+
+    FIX #2 (Nulllinien-Kreuzung war IMMER NOCH zu empfindlich): mit dem sehr leicht geglaetteten
+    Oszillator (smooth_len oft nur 3) kreuzt osc die Nulllinie in einem seitwaerts laufenden
+    Markt fast genauso oft wie die einzelnen Wendepunkt-Pulse - live beobachtet als "kauft immer
+    noch nicht nach, macht bei jedem Sell einen Flip statt zu stapeln" trotz Fix #1. Deshalb jetzt
+    ein echter Schmitt-Trigger (Hysterese) statt einer einzelnen Schwelle bei 0: bull_cross feuert
+    nur, wenn osc die OBERE Extremzone (ob_level) erreicht/durchbricht UND der Oszillator vorher
+    NICHT schon in dieser Zone war (also wirklich von der Gegenseite kommt), bear_cross analog bei
+    os_level. Zwischen den beiden Schwellen liegt eine "Totzone", in der der Oszillator beliebig
+    hin- und herzappeln kann, ohne dass ein Komplett-Ausstieg ausgeloest wird - genau der Bereich,
+    in dem vorher die Nulllinien-Kreuzung faelschlich ausgeloest hat. Ein Nachkauf-Stapel bleibt
+    also solange bestehen, bis der Oszillator wirklich bis zur GEGENTEILIGEN Extremzone durchzieht."""
     n = len(osc)
-    bull_cross = [osc[i] > 0 and osc[i - 1] <= 0 if i > 0 else False for i in range(n)]
-    bear_cross = [osc[i] < 0 and osc[i - 1] >= 0 if i > 0 else False for i in range(n)]
+    bull_cross = [False] * n
+    bear_cross = [False] * n
+    regime = 0  # 0 = noch unbekannt/neutral, 1 = bullische Extremzone zuletzt, -1 = bearische Extremzone zuletzt
+    for i in range(n):
+        if osc[i] >= ob_level:
+            if regime != 1:
+                bull_cross[i] = True
+            regime = 1
+        elif osc[i] <= os_level:
+            if regime != -1:
+                bear_cross[i] = True
+            regime = -1
+        # sonst: osc liegt in der Totzone zwischen os_level und ob_level - Regime bleibt wie es war, kein Signal
     return bull_cross, bear_cross
 
 
@@ -4270,7 +4282,7 @@ async def mvwap_poll_loop(symbol):
                             last_processed_ts = last_ts
                             osc, mf_raw = compute_mvwap_mf_oscillator(closed_ts, closed_h, closed_l, closed_c, closed_v, params)
                             long_raw, short_raw = compute_mvwap_mf_signals(osc, mf_raw, params)
-                            bull_cross, bear_cross = compute_mvwap_reversal_signals(osc)
+                            bull_cross, bear_cross = compute_mvwap_reversal_signals(osc, params["ob_level"], params["os_level"])
                             candles = (closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v)
                             long_final, short_final = await _mvwap_apply_filters(symbol, st, cfg, candles, long_raw, short_raw)
                             buy_signal = long_final[-1]
@@ -4427,7 +4439,7 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
     params = _mvwap_effective_params(cfg)
     osc, mf_raw = compute_mvwap_mf_oscillator(ts, h, l, c, v, params)
     long_raw, short_raw = compute_mvwap_mf_signals(osc, mf_raw, params)
-    bull_cross, bear_cross = compute_mvwap_reversal_signals(osc)
+    bull_cross, bear_cross = compute_mvwap_reversal_signals(osc, params["ob_level"], params["os_level"])
     filters = []
     if trend_filter_long_ok is not None:
         filters.append((trend_filter_long_ok, trend_filter_short_ok))
