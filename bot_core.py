@@ -3547,6 +3547,14 @@ async def handle_control(request):
     cfg = BOTS[symbol]["config"]
     if "bot_active" in body:
         cfg["bot_active"] = bool(body["bot_active"])
+        # session_started: rein prozessinterner Flag (NICHT gespeichert, faellt bei jedem
+        # Neustart/Deploy automatisch auf False zurueck) - erst ein manueller Klick auf Start HIER
+        # setzt ihn auf True und gibt damit die REST-Kerzen-Abfrage in den Poll-Loops frei (siehe
+        # dortige "session_started"-Checks). So loesen nach einem Deploy nicht mehr ALLE vorher
+        # aktiven Coins gleichzeitig ihre erste Abfrage aus (das war der IP-Bann-Burst) - jeder
+        # Coin bleibt stumm, bis er hier im Panel explizit neu gestartet wird, unabhaengig vom
+        # gespeicherten bot_active-Wert.
+        BOTS[symbol]["state"]["session_started"] = cfg["bot_active"]
         debug_log(f"{'▶️' if cfg['bot_active'] else '⏸️'} [{symbol}] Bot {'gestartet' if cfg['bot_active'] else 'gestoppt'}")
         await save_bot_configs()  # sonst geht bot_active bei Neustart/Redeploy verloren
     return web.json_response({"success": True, "bot_active": cfg["bot_active"]})

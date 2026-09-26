@@ -848,7 +848,14 @@ async def binance_1s_poll_loop(symbol):
         # sobald IRGENDWO in seiner Config (z.B. ein nicht aktiver Filter-Zeitrahmen) ein
         # Sekunden-Wert stand. Bei vielen inaktiven Coins gleichzeitig beim Bot-Start summiert
         # sich das zu genau dem Anfragen-Burst, der die IP-Baenne ausgeloest hat.
-        if not cfg_now["bot_active"] or not _needs_1s_buffer(cfg_now):
+        # ZWEITER FIX (Nutzer-Vorgabe): auch fuer Coins, die schon VOR einem Neustart/Deploy
+        # aktiv waren (bot_active bleibt in der gespeicherten Config auf True), soll die erste
+        # Kerzen-Abfrage NICHT automatisch beim Prozessstart wieder losgehen - das erzeugte
+        # genau den Burst (alle gleichzeitig), der den IP-Bann ausgeloest hat. session_started
+        # ist ein rein prozessinterner Flag (siehe handle_control in bot_core.py), der bei jedem
+        # Neustart auf False zurueckfaellt und erst durch einen MANUELLEN Start/Klick auf
+        # "Start" im Panel wieder True wird - unabhaengig vom persistierten bot_active-Wert.
+        if not cfg_now["bot_active"] or not st.get("session_started") or not _needs_1s_buffer(cfg_now):
             await asyncio.sleep(10)
             continue
         prefill_done = True
@@ -870,7 +877,7 @@ async def binance_1s_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["bot_active"] and _needs_1s_buffer(cfg):
+            if cfg["bot_active"] and st.get("session_started") and _needs_1s_buffer(cfg):
                 # count_back klein halten (nicht mehr 1000!) - wir brauchen bei einem 5-Sekunden-
                 # Poll-Intervall nur eine kleine Ueberlappung zurueck, um bereits gespeicherte,
                 # aber von Binance zwischenzeitlich noch nachtraeglich stabilisierte/korrigierte
@@ -979,7 +986,11 @@ async def ab_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "ab_breakout" and cfg["bot_active"]:
+            # session_started: Nutzer-Vorgabe - nach Neustart/Deploy soll KEIN Coin automatisch
+            # wieder Kerzen abfragen, auch wenn er vorher aktiv war (bot_active=True gespeichert) -
+            # erst ein manueller Start/Klick im Panel (siehe handle_control) setzt das frei. Fix
+            # gegen den IP-Bann-Burst durch alle gleichzeitig neu anlaufenden Coins nach Deploy.
+            if cfg["entry_mode"] == "ab_breakout" and cfg["bot_active"] and b["state"].get("session_started"):
                 resolution = cfg.get("ab_resolution", "5m")
                 params = _ab_effective_params(cfg)
                 min_needed = max(params["slow_len"], params["lookback"], params["atr_len"], params["rsi_len"]) + 5
@@ -3766,7 +3777,9 @@ async def rsi_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "rsi_signal" and cfg["bot_active"]:
+            # session_started: siehe ab_breakout_poll_loop weiter oben - erst manueller Start
+            # im Panel nach diesem Prozessstart loest die erste Kerzen-Abfrage aus.
+            if cfg["entry_mode"] == "rsi_signal" and cfg["bot_active"] and b["state"].get("session_started"):
                 resolution = cfg.get("rsi_resolution", "5m")
                 length = cfg.get("rsi_length", 14)
                 min_needed = length + 5
@@ -4258,7 +4271,9 @@ async def mvwap_poll_loop(symbol):
     while True:
         try:
             cfg = b["config"]
-            if cfg["entry_mode"] == "mvwap_mf_signal" and cfg["bot_active"]:
+            # session_started: siehe ab_breakout_poll_loop weiter oben - erst manueller Start
+            # im Panel nach diesem Prozessstart loest die erste Kerzen-Abfrage aus.
+            if cfg["entry_mode"] == "mvwap_mf_signal" and cfg["bot_active"] and b["state"].get("session_started"):
                 resolution = cfg.get("mvwap_resolution", "5m")
                 params = _mvwap_effective_params(cfg)
                 min_needed = max(params["mf_length"], params["cmf_length"]) + 30
