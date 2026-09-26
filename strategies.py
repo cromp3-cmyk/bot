@@ -224,6 +224,16 @@ async def fetch_candles_binance(symbol, resolution, count_back=150, market_type=
         base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
         url = f"{base_url}?symbol={pair}&interval={resolution}&limit={min(count_back, 1000)}"
         await _binance_throttle(effective_market_type, f"live:{resolution}")
+        # ERNEUT pruefen statt nur vor dem Warten (Race Condition beim Bot-Start): viele Coins
+        # pruefen beim Hochfahren fast gleichzeitig "sind wir gebannt?" (noch "nein", der Bann ist
+        # ja noch nicht bekannt), reihen sich dann alle in _binance_throttle ein - bis sie an der
+        # Reihe sind, kann der ALLERERSTE von ihnen laengst eine echte 418-Antwort bekommen und den
+        # Bann registriert haben. Ohne diesen zweiten Check wuerden die anderen TROTZDEM noch
+        # feuern, obwohl der Bann schon aktiv ist - jede weitere Anfrage waehrend eines aktiven
+        # Banns verlaengert ihn bei Binance in der Praxis nur weiter (live beobachtet: die
+        # gemeldete Bann-Dauer wuchs von Meldung zu Meldung immer weiter an).
+        if _binance_is_banned(effective_market_type):
+            return None
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 _binance_note_response(effective_market_type, resp)
@@ -276,6 +286,11 @@ async def get_smart_direction_g2(symbol):
                 base = "https://fapi.binance.com/fapi/v1/ticker/24hr" if effective_market_type == "futures" \
                     else "https://api.binance.com/api/v3/ticker/24hr"
                 await _binance_throttle(effective_market_type, "ticker")
+                # ERNEUT pruefen (siehe fetch_candles_binance fuer die ausfuehrliche Begruendung):
+                # waehrend wir in _binance_throttle gewartet haben, kann eine ANDERE gleichzeitig
+                # laufende Coin-Abfrage in der Zwischenzeit einen Bann registriert haben.
+                if _binance_is_banned(effective_market_type):
+                    return None
                 url = f"{base}?symbol={pair}"
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -374,6 +389,11 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
 
                 url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit={page_limit}&endTime={cursor}"
                 await _binance_throttle(effective_market_type, f"history:{base_resolution}")
+                if _binance_is_banned(effective_market_type):
+                    # ERNEUT pruefen NACH dem Warten (siehe fetch_candles_binance) - waehrend der
+                    # Drossel-Pause kann eine andere gleichzeitig laufende Abfrage den Bann inzwischen registriert haben.
+                    wait_s = max(0, (_binance_ban_until_ms.get(effective_market_type, 0.0) - time.time() * 1000) / 1000)
+                    return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     _binance_note_response(effective_market_type, resp)
                     if resp.status in (418, 429):
@@ -480,6 +500,11 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
                     return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
                 url = f"{base_url}?symbol={pair}&interval={base_resolution}&limit={page_limit}&endTime={cursor}"
                 await _binance_throttle(effective_market_type, f"history-vol:{base_resolution}")
+                if _binance_is_banned(effective_market_type):
+                    # ERNEUT pruefen NACH dem Warten (siehe fetch_candles_binance) - waehrend der
+                    # Drossel-Pause kann eine andere gleichzeitig laufende Abfrage den Bann inzwischen registriert haben.
+                    wait_s = max(0, (_binance_ban_until_ms.get(effective_market_type, 0.0) - time.time() * 1000) / 1000)
+                    return None, f"Binance-IP-Bann aktiv, noch ca. {round(wait_s)}s - bitte warten und erneut versuchen."
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     _binance_note_response(effective_market_type, resp)
                     if resp.status in (418, 429):
@@ -817,7 +842,13 @@ async def binance_1s_poll_loop(symbol):
 
     prefill_done = bool(st.get("binance_1s_buffer"))
     while not prefill_done:
-        if not _needs_1s_buffer(b["config"]):
+        cfg_now = b["config"]
+        # FIX: bot_active fehlte hier komplett - ein Coin, dessen Bot gar nicht gestartet ist
+        # ("tot"), hat trotzdem ~11 REST-Seiten fuer die 3-Stunden-Vorbefuellung ausgeloest,
+        # sobald IRGENDWO in seiner Config (z.B. ein nicht aktiver Filter-Zeitrahmen) ein
+        # Sekunden-Wert stand. Bei vielen inaktiven Coins gleichzeitig beim Bot-Start summiert
+        # sich das zu genau dem Anfragen-Burst, der die IP-Baenne ausgeloest hat.
+        if not cfg_now["bot_active"] or not _needs_1s_buffer(cfg_now):
             await asyncio.sleep(10)
             continue
         prefill_done = True

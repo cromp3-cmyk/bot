@@ -160,6 +160,13 @@ async def _seed_stream_history(market_type, pair, interval):
     limit = REST_SEED_LIMIT.get(interval, 500)
     try:
         await _binance_throttle(market_type, f"seed:{interval}")
+        # ERNEUT pruefen NACH dem Warten: waehrend der Drossel-Pause kann eine ANDERE gleichzeitig
+        # laufende Coin-Abfrage (viele Streams werden beim Bot-Start fast zeitgleich abonniert) in
+        # der Zwischenzeit einen Bann registriert haben - ohne diesen zweiten Check wuerden wir
+        # trotzdem noch feuern und einen aktiven Bann bei Binance nur weiter verlaengern.
+        if _binance_is_banned(market_type):
+            _pending_subscribe[market_type].add(_key(pair, interval))
+            return
         url = f"{base_url}?symbol={pair}&interval={interval}&limit={limit}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
