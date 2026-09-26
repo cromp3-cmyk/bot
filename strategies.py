@@ -1975,7 +1975,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "requested_days": days, "actual_days_covered": round(actual_days, 1),
             "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
             "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
-            "trades": trades[-50:],
+            "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
         }
 
     if entry_mode == "rsi_signal":
@@ -2023,7 +2023,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "requested_days": days, "actual_days_covered": round(actual_days, 1),
             "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
             "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
-            "trades": trades[-50:],
+            "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
         }
 
     if entry_mode == "mvwap_mf_signal":
@@ -2077,7 +2077,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "requested_days": days, "actual_days_covered": round(actual_days, 1),
             "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
             "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
-            "trades": trades[-100:],
+            "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
         }
 
     return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}

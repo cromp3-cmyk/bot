@@ -1938,7 +1938,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
     </div>
-    <div class="label" style="margin-top:16px; margin-bottom:8px;">Letzte Trades (max. 50, neueste zuerst)</div>
+    <div class="label" style="margin-top:16px; margin-bottom:8px;">Alle Trades (neueste zuerst)</div>
     <table id="bt-trades-table">
       <thead><tr>
         <th class="sortable" data-key="entry_ts">Start ⇅</th>
