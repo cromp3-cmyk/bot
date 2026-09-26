@@ -529,7 +529,19 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
                 return ts, o, h, l, c, v
 
     base_resolution, factor = synth if synth else (resolution, 1)
-    fetch_limit = min(1000, count_back * factor + factor + 5)
+    # WICHTIG: 'fetch_limit' ist die Basis-Kerzen-Anzahl, die noetig waere, um 'count_back'
+    # FERTIGE synthetische Kerzen zu bekommen (z.B. 30s aus 1s: factor=30, also 30x so viele
+    # Basis-Kerzen). Der WS-Cache (get_cached_candles) liest aus einem lokalen Ringpuffer und hat
+    # KEIN 1000er-Limit - das gilt nur fuer eine EINZELNE REST-Anfrage (Binance erlaubt max. 1000
+    # Kerzen pro Aufruf). Frueher wurde derselbe 'min(1000, ...)'-gedeckelte Wert faelschlich auch
+    # fuer den Cache-Read benutzt: bei z.B. 30s (factor=30) kamen so nie mehr als 1000/30 ≈ 33
+    # fertige Kerzen zusammen, EGAL wie lange der Bot lief - ein struktureller Bug, kein
+    # Aufwaerm-Timing (beobachtet als dauerhaft haengenbleibendes "zu wenig Kerzen (33/51 nötig)").
+    # Fix: fuer den Cache-Read den vollen, UNGEDECKELTEN Bedarf anfragen (begrenzt nur noch durch
+    # das, was der Cache tatsaechlich gespeichert hat - siehe MAX_CANDLES_PER_STREAM in
+    # binance_ws.py), und den 1000er-Deckel nur noch fuer die REST-FALLBACK-Anfrage anwenden.
+    cache_fetch_limit = count_back * factor + factor + 5
+    fetch_limit = min(1000, cache_fetch_limit)
 
     if synth:
         # Zusammengesetzte Zeitrahmen (10s/15s/30s/45s aus 1s, 2m/eigene Minuten aus 1m) kamen bisher
@@ -537,7 +549,7 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
         # WebSocket-Cache der Basis-Aufloesung (1s/1m, beide gecacht) zusammengesetzt; REST nur noch,
         # wenn der Cache (noch) nicht warm oder eingefroren ist.
         binance_ws.ensure_subscribed(mt, pair, base_resolution)
-        cached = binance_ws.get_cached_candles(mt, pair, base_resolution, fetch_limit)
+        cached = binance_ws.get_cached_candles(mt, pair, base_resolution, cache_fetch_limit)
         if cached is not None and cached[0]:
             if base_resolution == "1s":
                 out = _resample_seconds_candles_with_volume(cached, factor)

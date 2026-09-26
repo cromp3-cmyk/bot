@@ -38,7 +38,17 @@ WS_HOSTS = {
 # Nur Intervalle, die Binance nativ als Kline-Stream anbietet, werden hier gecacht.
 CACHEABLE_INTERVALS = {"1s", "1m", "3m", "5m", "15m", "30m", "1h", "4h"}
 
-MAX_CANDLES_PER_STREAM = 1500  # deckt alle bisherigen count_back-Werte komfortabel ab
+# War vorher 1500 - fuer synthetische Sekunden-Aufloesungen (10s/15s/30s/45s, siehe strategies.py
+# resolve_synthetic_resolution) reicht das NICHT: die werden aus dem "1s"-Basis-Stream
+# zusammengerechnet, und ein Verbraucher, der z.B. mindestens 51 fertige 30s-Kerzen braucht,
+# braucht dafuer 51*30=1530 rohe 1s-Kerzen - mehr als die alten 1500 ueberhaupt je liefern
+# konnten (der Puffer haette also SELBST BEI VOLLER FUELLUNG nie genug geliefert, ganz unabhaengig
+# vom separat gefixten 1000er-Deckel in strategies.py's fetch_candles_binance_vol). Live beobachtet:
+# "wartet: zu wenig Kerzen (33/51 nötig)" haengt DAUERHAFT fest, nicht nur waehrend des Aufwaermens.
+# 20000 deckt auch 45s-Kerzen mit hohem count_back komfortabel ab; der Speicher-Mehrbedarf ist
+# trivial (kleine Dicts, gilt zudem nur fuer den "1s"-Stream in der Praxis - andere Intervalle
+# fuellen sich so langsam, dass sie diese Grenze nie erreichen).
+MAX_CANDLES_PER_STREAM = 20000
 
 # Wie viele Kerzen beim erstmaligen Abonnieren eines Streams per REST vorgeladen werden
 # (EINMALIG pro Stream, nicht wiederholt - danach nur noch WS-Push).
