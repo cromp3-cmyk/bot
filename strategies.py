@@ -3988,6 +3988,27 @@ def compute_mvwap_mf_signals(osc, mf_raw, params):
     return buy_raw, sell_raw
 
 
+def compute_mvwap_reversal_signals(osc):
+    """Grobe ECHTE Trendwende (Nulllinien-Durchbruch) - fuer den KOMPLETT-Ausstieg einer
+    Nachkauf-Position gebraucht, NICHT fuer buy_raw/sell_raw (siehe compute_mvwap_mf_signals):
+    buy_raw/sell_raw feuern bei JEDEM kleinen Richtungswechsel des Oszillators - weil osc_up und
+    osc_down exakte Gegensaetze sind, wechseln sich buy_raw und sell_raw dabei zwingend IMMER ab
+    (zwischen zwei buy_raw-Pulsen MUSS mindestens ein sell_raw-Puls liegen, der Oszillator muss ja
+    erst wieder fallen, bevor er erneut steigen kann). Wird buy_raw/sell_raw fuer den Nachkauf UND
+    fuer den Komplett-Ausstieg beim jeweils GEGENTEILIGEN Puls benutzt, schliesst deshalb JEDER
+    Nachkauf-Versuch zwangslaeufig zuerst die alte Position, statt draufzulegen (live beobachtet:
+    "beendet jeden Sell nacheinander und macht einen neuen auf" - strukturell unmoeglich, echten
+    Nachkauf zu bekommen, weil zwischen zwei gleichgerichteten Pulsen immer ein Gegen-Puls liegt).
+    Der Nulllinien-Durchbruch (Vorzeichenwechsel von osc) ist dagegen ein GROBES, viel selteneres
+    Signal - ein einzelner kleiner Wendepunkt (buy_raw/sell_raw) reisst die Nulllinie normalerweise
+    nicht, mehrere Nachkauf-Stufen bleiben also moeglich, bis der Oszillator wirklich die Seite
+    wechselt."""
+    n = len(osc)
+    bull_cross = [osc[i] > 0 and osc[i - 1] <= 0 if i > 0 else False for i in range(n)]
+    bear_cross = [osc[i] < 0 and osc[i - 1] >= 0 if i > 0 else False for i in range(n)]
+    return bull_cross, bear_cross
+
+
 def _mvwap_effective_params(cfg):
     return {
         "use_daily": cfg.get("mvwap_use_daily", True), "use_weekly": cfg.get("mvwap_use_weekly", True),
@@ -4064,26 +4085,36 @@ def _mvwap_update_sl_tp(st, cfg):
         st["mvwap_tp_price"] = entry_ref + dist_tp if pos == "long" else entry_ref - dist_tp
 
 
-async def check_mvwap_entry(symbol, buy_raw_edge, sell_raw_edge, buy_final_edge, sell_final_edge, price):
+async def check_mvwap_entry(symbol, buy_reversal_edge, sell_reversal_edge, buy_final_edge, sell_final_edge, price):
     """Identisch zu check_rsi_entry (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern,
     UND mit Nachkauf-Unterstuetzung (mvwap_max_entries): jede neue BUY-Flanke waehrend einer
     offenen Long-Position (bzw. SELL waehrend Short) legt eine weitere Stufe nach, bis zur
-    eingestellten Obergrenze - die ERSTE Gegen-Flanke schliesst die KOMPLETTE Position (alle
-    Stufen), unabhaengig davon wie viele es waren. Alle vier Signal-Parameter sind FLANKEN
-    (True nur genau die eine Kerze, in der das Signal neu auftritt), nicht Zustaende - sonst
-    wuerde ein ueber viele Kerzen anhaltendes Level-Signal bei jedem Kerzenschluss einen
-    weiteren Nachkauf ausloesen.
+    eingestellten Obergrenze - die ERSTE ECHTE Trendwende (Nulllinien-Kreuzung, siehe
+    compute_mvwap_reversal_signals) schliesst die KOMPLETTE Position (alle Stufen), unabhaengig
+    davon wie viele es waren. Alle vier Signal-Parameter sind FLANKEN (True nur genau die eine
+    Kerze, in der das Signal neu auftritt), nicht Zustaende - sonst wuerde ein ueber viele Kerzen
+    anhaltendes Level-Signal bei jedem Kerzenschluss einen weiteren Nachkauf ausloesen.
 
-    WICHTIG (Bugfix): der Ausstieg (sowohl Komplett-Schliessen bei Gegen-Signal) laeuft bewusst
-    auf dem ROHEN, UNGEFILTERTEN Signal (buy_raw_edge/sell_raw_edge) - nicht auf dem gefilterten
-    (buy_final_edge/sell_final_edge, nach SuperTrend/ADX/MACD/RSI/Cloud). Vorher wurde derselbe
-    gefilterte Wert fuer Ausstieg UND Neueinstieg benutzt: ein aktiver Filter (z.B. SuperTrend auf
-    einer hoeheren Zeiteinheit, die sich seltener dreht) verhinderte dann nicht nur einen falschen
-    Neueinstieg, sondern hielt auch eine bestehende Position fest, bis der Filter selbst wieder
-    mitspielte - live beobachtet: eine BTC-Position blieb offen, obwohl das Money-Flow-Signal
-    laengst gedreht hatte ("haette laengst schliessen sollen"), weil der HTF-SuperTrend-Filter das
-    Gegen-Signal noch blockierte. Ein Filter soll nur ungewollte NEUE Einstiege (Erst- und
-    Nachkauf) verhindern, niemals das Schliessen einer bereits offenen Position."""
+    WICHTIG (Bugfix #1): der Komplett-Ausstieg laeuft bewusst auf dem GROBEN Nulllinien-
+    Kreuzungssignal (buy_reversal_edge/sell_reversal_edge), NICHT auf den haeufigen buy/sell-
+    Wendepunkt-Pulsen (die auch fuer buy_final_edge/sell_final_edge zugrunde liegen): die
+    Wendepunkt-Pulse wechseln sich zwingend IMMER ab (osc_up/osc_down sind exakte Gegensaetze,
+    zwischen zwei gleichgerichteten Pulsen MUSS ein Gegen-Puls liegen) - wurden sie fuer den
+    Komplett-Ausstieg benutzt, schloss JEDER Nachkauf-Versuch zwangslaeufig zuerst die alte
+    Position statt draufzulegen (live beobachtet: "beendet jeden Sell nacheinander und macht
+    einen neuen auf"). Das Nulllinien-Kreuzungssignal ist dagegen viel seltener und uebersteht
+    einzelne kleine Wendepunkte, wodurch mehrere Nachkauf-Stufen ueberhaupt erst moeglich werden.
+
+    WICHTIG (Bugfix #2): der Ausstieg laeuft ausserdem bewusst auf dem UNGEFILTERTEN Signal, nicht
+    auf dem gefilterten (buy_final_edge/sell_final_edge, nach SuperTrend/ADX/MACD/RSI/Cloud).
+    Vorher wurde derselbe gefilterte Wert fuer Ausstieg UND Neueinstieg benutzt: ein aktiver
+    Filter (z.B. SuperTrend auf einer hoeheren Zeiteinheit, die sich seltener dreht) verhinderte
+    dann nicht nur einen falschen Neueinstieg, sondern hielt auch eine bestehende Position fest,
+    bis der Filter selbst wieder mitspielte - live beobachtet: eine BTC-Position blieb offen,
+    obwohl das Money-Flow-Signal laengst gedreht hatte ("haette laengst schliessen sollen"), weil
+    der HTF-SuperTrend-Filter das Gegen-Signal noch blockierte. Ein Filter soll nur ungewollte
+    NEUE Einstiege (Erst- und Nachkauf) verhindern, niemals das Schliessen einer bereits offenen
+    Position."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -4091,9 +4122,9 @@ async def check_mvwap_entry(symbol, buy_raw_edge, sell_raw_edge, buy_final_edge,
 
     pos = st["position"]
 
-    # Komplett-Ausstieg bei der ERSTEN Gegen-Flanke (ungefiltert) - schliesst ALLE Nachkauf-Stufen
-    # auf einmal, unabhaengig von mvwap_max_entries.
-    if (pos == "long" and sell_raw_edge) or (pos == "short" and buy_raw_edge):
+    # Komplett-Ausstieg bei der ERSTEN echten Trendwende (Nulllinien-Kreuzung) - schliesst ALLE
+    # Nachkauf-Stufen auf einmal, unabhaengig von mvwap_max_entries.
+    if (pos == "long" and sell_reversal_edge) or (pos == "short" and buy_reversal_edge):
         debug_log(f"🔄 [{symbol}] Multi-VWAP Money-Flow: erstes Gegensignal - schliesse {pos.upper()}-Position komplett ({st.get('entry_count', 0)} Stufen) @ {price} (Rohsignal - Filter gilt nur fuer Neueinstiege)")
         await execute_exit(symbol, price, "MVWAP-FLIP")
         if st["position"] is not None:
@@ -4219,6 +4250,7 @@ async def mvwap_poll_loop(symbol):
                             last_processed_ts = last_ts
                             osc, mf_raw = compute_mvwap_mf_oscillator(closed_ts, closed_h, closed_l, closed_c, closed_v, params)
                             long_raw, short_raw = compute_mvwap_mf_signals(osc, mf_raw, params)
+                            bull_cross, bear_cross = compute_mvwap_reversal_signals(osc)
                             candles = (closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v)
                             long_final, short_final = await _mvwap_apply_filters(symbol, st, cfg, candles, long_raw, short_raw)
                             buy_signal = long_final[-1]
@@ -4227,20 +4259,22 @@ async def mvwap_poll_loop(symbol):
                             # Flanken statt Zustand (siehe check_mvwap_entry-Docstring): sonst
                             # wuerde ein ueber mehrere Kerzen anhaltendes Signal bei JEDEM
                             # Kerzenschluss einen weiteren Nachkauf ausloesen statt nur einmal pro
-                            # neuem Signalwechsel. Getrennt fuer roh (Ausstieg) und gefiltert
-                            # (Ein-/Nachkauf) verfolgt, da beide unabhaengig voneinander kippen
-                            # koennen (ein Filter kann von True auf False wechseln, ohne dass sich
-                            # das Rohsignal aendert).
-                            buy_raw_now, sell_raw_now = long_raw[-1], short_raw[-1]
-                            buy_raw_edge = buy_raw_now and not st.get("mvwap_prev_buy_raw", False)
-                            sell_raw_edge = sell_raw_now and not st.get("mvwap_prev_sell_raw", False)
+                            # neuem Signalwechsel. Fuer den KOMPLETT-Ausstieg wird bewusst NICHT
+                            # long_raw/short_raw benutzt (das sind schon einzelne Wendepunkt-Pulse,
+                            # die sich zwingend mit jedem Nachkauf-Puls abwechseln - siehe
+                            # compute_mvwap_reversal_signals-Docstring, das war der Grund, warum
+                            # "jeder Nachkauf die alte Position zuerst beendet hat"), sondern das
+                            # viel seltenere Nulllinien-Kreuzungssignal (bull_cross/bear_cross).
+                            buy_reversal_now, sell_reversal_now = bull_cross[-1], bear_cross[-1]
+                            buy_reversal_edge = buy_reversal_now and not st.get("mvwap_prev_buy_reversal", False)
+                            sell_reversal_edge = sell_reversal_now and not st.get("mvwap_prev_sell_reversal", False)
                             buy_final_edge = buy_signal and not st.get("mvwap_prev_buy_final", False)
                             sell_final_edge = sell_signal and not st.get("mvwap_prev_sell_final", False)
-                            st["mvwap_prev_buy_raw"] = buy_raw_now
-                            st["mvwap_prev_sell_raw"] = sell_raw_now
+                            st["mvwap_prev_buy_reversal"] = buy_reversal_now
+                            st["mvwap_prev_sell_reversal"] = sell_reversal_now
                             st["mvwap_prev_buy_final"] = buy_signal
                             st["mvwap_prev_sell_final"] = sell_signal
-                            await check_mvwap_entry(symbol, buy_raw_edge, sell_raw_edge, buy_final_edge, sell_final_edge, closed_c[-1])
+                            await check_mvwap_entry(symbol, buy_reversal_edge, sell_reversal_edge, buy_final_edge, sell_final_edge, closed_c[-1])
                         if due_heartbeat:
                             last_heartbeat = now
                             debug_log(f"💓 [{symbol}] Multi-VWAP Money-Flow aktiv: Oszillator={round(st.get('mvwap_osc_last') or 0, 2)}, "
@@ -4262,9 +4296,13 @@ def _simulate_mvwap_trades(candles, cfg, long_raw, short_raw, long_final=None, s
     mvwap_-Config-Feldern (inkl. optionalem festen Dollar-TP, SL gewinnt bei Konflikt) UND
     Nachkauf-Unterstuetzung (mvwap_max_entries), spiegelbildlich zu check_mvwap_entry (live):
     jede neue gefilterte Signal-Flanke in dieselbe Richtung wie die offene Position legt eine
-    weitere Stufe nach (bis zur Obergrenze), die ERSTE Gegen-Flanke im ROHEN (ungefilterten)
-    Signal schliesst die komplette Position auf einen Schlag. long_final/short_final sind
-    optional (Abwaertskompatibel: ohne Filter sind sie identisch zu long_raw/short_raw)."""
+    weitere Stufe nach (bis zur Obergrenze), die ERSTE Flanke im long_raw/short_raw-Parameter
+    schliesst die komplette Position auf einen Schlag. WICHTIG: long_raw/short_raw MUSS hier das
+    GROBE Nulllinien-Kreuzungssignal sein (compute_mvwap_reversal_signals), NICHT die haeufigen
+    buy/sell-Wendepunkt-Pulse aus compute_mvwap_mf_signals - die wechseln sich zwingend mit jedem
+    Nachkauf-Puls ab, wodurch echter Nachkauf sonst strukturell unmoeglich waere (jeder Nachkauf
+    haette zuerst die alte Position geschlossen). long_final/short_final sind optional
+    (abwaertskompatibel: ohne Filter sind sie identisch zum ersten Parameterpaar)."""
     ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
     n = len(c)
     if long_final is None:
@@ -4369,6 +4407,7 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
     params = _mvwap_effective_params(cfg)
     osc, mf_raw = compute_mvwap_mf_oscillator(ts, h, l, c, v, params)
     long_raw, short_raw = compute_mvwap_mf_signals(osc, mf_raw, params)
+    bull_cross, bear_cross = compute_mvwap_reversal_signals(osc)
     filters = []
     if trend_filter_long_ok is not None:
         filters.append((trend_filter_long_ok, trend_filter_short_ok))
@@ -4387,9 +4426,12 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
         filters.append(compute_cloud_filter_series(
             candles, cfg.get("mvwap_cloud_filter_length", 60), cfg.get("mvwap_cloud_filter_dev_mult", 2.0),
             touch_arm=cfg.get("mvwap_cloud_filter_touch_arm", False)))
-    # long_raw/short_raw bewusst UNVERAENDERT an die Simulation weitergeben (fuer den Ausstieg -
-    # siehe _simulate_mvwap_trades-Docstring) - die gefilterte Fassung geht als eigenes
-    # long_final/short_final mit (fuer Ein-/Nachkauf), damit ein aktiver Filter wie live nur
-    # Neueinstiege/Nachkaeufe verhindert, nie das Schliessen einer offenen Position.
+    # bull_cross/bear_cross (Nulllinien-Kreuzung, NICHT long_raw/short_raw) fuer den Komplett-
+    # Ausstieg an die Simulation weitergeben - siehe _simulate_mvwap_trades/check_mvwap_entry-
+    # Docstring: long_raw/short_raw wechseln sich als Wendepunkt-Pulse zwingend IMMER ab, damit
+    # waere echter Nachkauf strukturell unmoeglich (jeder Nachkauf haette zuerst schliessen
+    # muessen). Die gefilterte Fassung (long_final/short_final) geht weiterhin fuer Ein-/Nachkauf
+    # mit, damit ein aktiver Filter wie live nur Neueinstiege/Nachkaeufe verhindert, nie das
+    # Schliessen einer offenen Position.
     long_final, short_final = (combine_filters(long_raw, short_raw, filters) if filters else (long_raw, short_raw))
-    return _simulate_mvwap_trades(candles, cfg, long_raw, short_raw, long_final, short_final)
+    return _simulate_mvwap_trades(candles, cfg, bull_cross, bear_cross, long_final, short_final)
