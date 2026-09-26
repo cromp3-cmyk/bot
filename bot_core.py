@@ -605,17 +605,43 @@ def get_lighter_client():
         return None
 
 
+# Hartes Zeitlimit fuer JEDEN einzelnen Aufruf an den Lighter-Exchange-Client (Order platzieren,
+# Positionsdaten abfragen, Client schliessen). BEGRUENDUNG: trading_loop() (siehe strategies.py)
+# ist der EINE geteilte Task, der Preis-Ticks fuer ALLE Coins sequenziell ueber eine einzige
+# WebSocket-Verbindung verarbeitet ('async for raw in ws: ... await on_price_update(...)'). Haengt
+# die Boerse/Chain auch nur bei EINER einzigen Order fuer EINEN Coin (kein Timeout = kein Fehler,
+# der Await kehrt einfach nie zurueck), blockiert das denselben einen Task fuer IMMER - und damit
+# JEDEN anderen Coin gleich mit, weil dessen naechster Tick nie mehr verarbeitet wird. Exakt dasselbe
+# Fehlerbild wie der bereits gefixte globale Redis-Client, nur zentraler (sitzt direkt im Live-
+# Trading-Pfad). Nach Ablauf des Timeouts wird der jeweilige Aufruf als fehlgeschlagen behandelt
+# (wie ein normaler Boersen-Fehler) statt den Bot fuer immer einzufrieren.
+EXCHANGE_CALL_TIMEOUT_SECONDS = 15
+
+
+async def _safe_close_client(client):
+    """client.close() mit Timeout - schlaegt das Schliessen selbst fehl/haengt, darf das trading_loop
+    trotzdem nicht fuer immer blockieren (siehe EXCHANGE_CALL_TIMEOUT_SECONDS oben)."""
+    try:
+        await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    except Exception as e:
+        debug_log("⚠️ Lighter-Client schliessen fehlgeschlagen/Timeout (ignoriert)", {"error": str(e)})
+
+
 async def place_market_order(client, market_index, symbol, is_ask, base_amount, reference_price, reduce_only=False):
     price_decimals = get_price_decimals(symbol)
     adjusted_price = reference_price * 0.98 if is_ask else reference_price * 1.02
     price_scaled = int(adjusted_price * (10 ** price_decimals))
-    tx, tx_hash, err = await client.create_order(
-        market_index=market_index, client_order_index=int(time.time() * 1000),
-        base_amount=base_amount, price=price_scaled, is_ask=is_ask,
-        order_type=client.ORDER_TYPE_MARKET,
-        time_in_force=client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL, reduce_only=reduce_only,
-        order_expiry=client.DEFAULT_IOC_EXPIRY,
-    )
+    try:
+        tx, tx_hash, err = await asyncio.wait_for(client.create_order(
+            market_index=market_index, client_order_index=int(time.time() * 1000),
+            base_amount=base_amount, price=price_scaled, is_ask=is_ask,
+            order_type=client.ORDER_TYPE_MARKET,
+            time_in_force=client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL, reduce_only=reduce_only,
+            order_expiry=client.DEFAULT_IOC_EXPIRY,
+        ), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        debug_log(f"⚠️ [{symbol}] Order-Aufruf nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s abgebrochen (Timeout) - Boerse/Chain hat nicht rechtzeitig geantwortet")
+        return None, None, f"Timeout nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s"
     return tx, tx_hash, err
 
 
@@ -626,13 +652,18 @@ async def get_account_position_from_exchange(client, market_index, retries=5, de
     on-chain Verbuchung nach einer Order minimal verzoegert sein kann. Gibt None zurueck, wenn die
     Position nicht gefunden wird oder die Abfrage fehlschlaegt - der Aufrufer MUSS in diesem Fall
     auf die bisherige (theoretische) Berechnung zurueckfallen, damit ein API-Hakler niemals einen
-    Trade blockiert oder falsche Daten erzwingt."""
+    Trade blockiert oder falsche Daten erzwingt. Jeder einzelne Abfrage-Versuch hat ein hartes
+    Zeitlimit (EXCHANGE_CALL_TIMEOUT_SECONDS) - ohne das wuerde schon der ERSTE haengende Versuch
+    die komplette Retry-Schleife (und damit das trading_loop) fuer immer blockieren, statt nach
+    einem Fehlversuch weiterzumachen."""
     try:
         import lighter
         account_api = lighter.AccountApi(client.api_client)
         for attempt in range(retries):
             try:
-                resp = await account_api.account(by="index", value=str(client.account_index))
+                resp = await asyncio.wait_for(
+                    account_api.account(by="index", value=str(client.account_index)),
+                    timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
                 if resp and resp.accounts:
                     for pos in (resp.accounts[0].positions or []):
                         if pos.market_id == market_index:
@@ -776,12 +807,12 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
         min_base = get_min_base_amount(symbol)
         if base_amount * (1 / precision) < min_base:
             debug_log(f"⚠️ [{symbol}] Order-Größe unter Mindestgröße")
-            await client.close()
+            await _safe_close_client(client)
             return False
         is_ask = direction == "short"
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=False)
         if err:
-            await client.close()
+            await _safe_close_client(client)
             debug_log(f"⚠️ [{symbol}] Entry-Order fehlgeschlagen", {"error": str(err)})
             return False
         debug_log(f"✅ [{symbol}] ECHTE Order ausgeführt: {direction.upper()} @ ~{price}", {"tx_hash": str(tx_hash)})
@@ -828,7 +859,7 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
             real_pos = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
             real_price = _extract_valid_price(real_pos)
             extra_attempts += 1
-        await client.close()
+        await _safe_close_client(client)
         if real_price is not None:
             if price and abs(real_price - price) / price > 0.0005:
                 debug_log(f"🎯 [{symbol}] Echter Fill-Preis von der Börse: {real_price} (Ziel war {price}, Abweichung {round((real_price-price)/price*100,3)}%)")
@@ -915,7 +946,7 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
         min_base = get_min_base_amount(symbol)
         if base_amount * (1 / precision) < min_base:
             debug_log(f"⚠️ [{symbol}] Teil-Exit-Größe unter Mindestgröße - übersprungen")
-            await client.close()
+            await _safe_close_client(client)
             return False
         is_ask = position_side == "long"
 
@@ -924,7 +955,7 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
 
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
         if err:
-            await client.close()
+            await _safe_close_client(client)
             debug_log(f"⚠️ [{symbol}] Teil-Exit-Order fehlgeschlagen", {"error": str(err)})
             return False
 
@@ -946,7 +977,7 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
                 if real_pnl_usd is None:
                     await asyncio.sleep(0.6)
                 extra_attempts += 1
-        await client.close()
+        await _safe_close_client(client)
         if real_pnl_usd is not None:
             if abs(real_pnl_usd - pnl_usd) > 0.01:
                 debug_log(f"🎯 [{symbol}] Echter realisierter Teil-PnL von der Börse: ${round(real_pnl_usd,3)} (Schätzung war ${round(pnl_usd,3)})")
@@ -1000,7 +1031,7 @@ async def _execute_exit_locked(symbol, price, reason):
 
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
         if err:
-            await client.close()
+            await _safe_close_client(client)
             debug_log(f"⚠️ [{symbol}] Exit-Order fehlgeschlagen - Position bleibt offen!", {"error": str(err)})
             return
 
@@ -1034,7 +1065,7 @@ async def _execute_exit_locked(symbol, price, reason):
                 if real_pnl_usd is None:
                     await asyncio.sleep(0.6)
                 extra_attempts += 1
-        await client.close()
+        await _safe_close_client(client)
         if real_pnl_usd is not None:
             if abs(real_pnl_usd - pnl_usd) > 0.01:
                 debug_log(f"🎯 [{symbol}] Echter realisierter PnL von der Börse: ${round(real_pnl_usd,3)} (Schätzung war ${round(pnl_usd,3)})")

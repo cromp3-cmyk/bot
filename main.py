@@ -86,7 +86,18 @@ async def main():
     await load_global_settings()
     await load_ct_watched()
     await start_web_server()
-    await asyncio.gather(
+    # return_exceptions=True ist HIER ENTSCHEIDEND: ohne das bringt eine einzige unbehandelte
+    # Exception in IRGENDEINER der ~50+ parallelen Tasks (z.B. ein Bug in genau einem Coin/einer
+    # Strategie) asyncio.gather() dazu, ALLE anderen Tasks zu canceln und main() mit dieser einen
+    # Exception abstuerzen zu lassen - das toetet den KOMPLETTEN Bot fuer JEDEN Coin wegen eines
+    # einzelnen, moeglicherweise winzigen Fehlers, und wirkt fuer den Nutzer wie "haengt/startet
+    # nicht" (Render startet den Container neu, trifft ggf. sofort wieder denselben Bug). Mit
+    # return_exceptions=True laeuft jede Task unabhaengig weiter, bis SIE SELBST endet - ein Crash
+    # in einer Task beendet nur diese eine, alle anderen (andere Coins, andere Strategien) laufen
+    # normal weiter. Die meisten Loops fangen Fehler ohnehin schon selbst ab (try/except in ihrer
+    # eigenen while-True-Schleife) - das hier ist nur das letzte Sicherheitsnetz fuer alles, was
+    # AUSSERHALB eines solchen Loops passiert (z.B. beim Task-Start selbst).
+    results = await asyncio.gather(
         trading_loop(),
         *[binance_1s_poll_loop(s) for s in SYMBOLS],
         *[ab_poll_loop(s) for s in SYMBOLS],
@@ -97,7 +108,15 @@ async def main():
         ct_watch_loop(),
         state_persist_loop(),
         binance_ws_cache_loop(),
+        return_exceptions=True,
     )
+    # Alle obigen Loops sind 'while True' - normalerweise kehrt hier nichts jemals zurueck. Landet
+    # trotzdem eine Exception in 'results', ist eine Task fuer immer tot (kein Auto-Neustart) -
+    # das muss lautstark geloggt werden statt leise zu verschwinden.
+    for result in results:
+        if isinstance(result, BaseException):
+            debug_log("🔥 Eine Hintergrund-Task ist dauerhaft abgestürzt (kein automatischer Neustart!)",
+                      {"error": str(result), "type": type(result).__name__})
 
 
 if __name__ == "__main__":

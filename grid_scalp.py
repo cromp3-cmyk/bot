@@ -25,7 +25,7 @@ import traceback
 from bot_core import (
     BOTS, SYMBOLS, MARKET_INDICES, debug_log, save_bot_state,
     get_lighter_client, get_precision, get_price_decimals, get_min_base_amount,
-    get_account_position_from_exchange, now_local,
+    get_account_position_from_exchange, now_local, EXCHANGE_CALL_TIMEOUT_SECONDS,
 )
 
 
@@ -71,22 +71,30 @@ async def place_post_only_order(client, market_index, symbol, is_ask, base_amoun
     das ist KEIN Fehler, sondern der Sinn von Post-Only. Naechster Tick setzt neu."""
     price_decimals = get_price_decimals(symbol)
     price_scaled = int(round(price * (10 ** price_decimals)))
-    tx, tx_hash, err = await client.create_order(
-        market_index=market_index,
-        client_order_index=coi,
-        base_amount=base_amount,
-        price=price_scaled,
-        is_ask=is_ask,
-        order_type=client.ORDER_TYPE_LIMIT,
-        time_in_force=client.ORDER_TIME_IN_FORCE_POST_ONLY,
-        reduce_only=reduce_only,
-        order_expiry=client.DEFAULT_28_DAY_ORDER_EXPIRY,
-    )
+    # Timeout wie bei place_market_order in bot_core.py: grid_scalp_poll_loop(symbol) laeuft zwar
+    # als eigene Task pro Coin (ein Haenger hier reisst andere Coins nicht mit) - ohne Zeitlimit
+    # wuerde ein haengender Aufruf aber trotzdem GENAU DIESEN Coin fuer immer einfrieren, ohne
+    # jemals eine Exception zu werfen, die der try/except im Poll-Loop auffangen koennte.
+    try:
+        tx, tx_hash, err = await asyncio.wait_for(client.create_order(
+            market_index=market_index,
+            client_order_index=coi,
+            base_amount=base_amount,
+            price=price_scaled,
+            is_ask=is_ask,
+            order_type=client.ORDER_TYPE_LIMIT,
+            time_in_force=client.ORDER_TIME_IN_FORCE_POST_ONLY,
+            reduce_only=reduce_only,
+            order_expiry=client.DEFAULT_28_DAY_ORDER_EXPIRY,
+        ), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        debug_log(f"⚠️ [{symbol}] Grid-Scalp Post-Only-Order Timeout nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s")
+        return None, None, f"Timeout nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s"
     return tx, tx_hash, err
 
 
 async def cancel_order(client, market_index, coi):
-    return await client.cancel_order(market_index=market_index, order_index=coi)
+    return await asyncio.wait_for(client.cancel_order(market_index=market_index, order_index=coi), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
 
 
 _auth_cache = {}  # account_index -> (token, expires_ts)
@@ -186,7 +194,7 @@ async def read_open_orders(client, market_index):
 async def read_best_bid_ask(client, market_index):
     import lighter
     order_api = lighter.OrderApi(client.api_client)
-    ob = await order_api.order_book_orders(market_index, 1)
+    ob = await asyncio.wait_for(order_api.order_book_orders(market_index, 1), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
     if not ob.bids or not ob.asks:
         return None, None
     return float(ob.bids[0].price), float(ob.asks[0].price)
@@ -584,7 +592,7 @@ async def grid_scalp_poll_loop(symbol):
         if cfg.get("entry_mode") != "grid_scalp":
             if client is not None:
                 try:
-                    await client.close()
+                    await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
                 except Exception:
                     pass
                 client = None
@@ -611,7 +619,7 @@ async def grid_scalp_poll_loop(symbol):
             debug_log(f"⚠️ [{symbol}] Grid-Scalp Tick-Fehler",
                       {"error": str(e), "traceback": traceback.format_exc()})
             try:
-                await client.close()
+                await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
             except Exception:
                 pass
             client = None
@@ -649,4 +657,4 @@ async def probe_grid_scalp(symbol):
         tp = BOTS[symbol]["config"].get("gs_tp_usd", 1.0)
         print(f"Spread Median: {round(med*100, 4)} % | Round-Trip als Taker: {round(med*200, 4)} %")
         print(f"-> empfohlenes gs_step_notional_usd: {round(tp / (5 * med * 2))} $")
-    await client.close()
+    await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
