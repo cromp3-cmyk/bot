@@ -72,8 +72,20 @@ def _binance_note_response(market_type, resp):
 
 
 def _binance_weight_delay(market_type):
-    """Zusatzpause in Sekunden je nach zuletzt gemeldetem Gewichtsverbrauch (0 unter der Schwelle)."""
+    """Zusatzpause in Sekunden je nach zuletzt gemeldetem Gewichtsverbrauch (0 unter der Schwelle).
+
+    WICHTIG (Bugfix): ts==0.0 heisst "in diesem Prozess noch NIE eine echte Weight-Antwort von
+    Binance bekommen" (direkt nach jedem Deploy/Neustart der Fall, da _binance_used_weight nur ein
+    In-Memory-Dict ist). Binance selbst fuehrt das IP-Gewicht aber UEBER Neustarts hinweg weiter -
+    war es kurz vor dem Neustart schon hoch (z.B. durch viele aktive Filter/Coins), ist die Bremse
+    hier direkt nach dem Start "blind" und liess bisher ungebremst (0s Zusatzpause) einen Schwung
+    Seed-Anfragen fuer alle Coins/Streams raus, BEVOR die erste echte Antwort zurueckkam - live
+    beobachtet: IP-Bann (HTTP 418, futures) Sekunden nach einem Redeploy. Fix: ohne echten Messwert
+    lieber vorsichtig bremsen (wie ein mittlerer Auslastungsgrad) statt "kein Messwert" faelschlich
+    als "safe" zu werten - sobald die erste echte Antwort da ist, greift die praezise Regel unten."""
     weight, ts = _binance_used_weight.get(market_type, (0, 0.0))
+    if ts == 0.0:
+        return 1.0
     if time.time() - ts >= 60:
         return 0.0  # Messwert aelter als das 1-Minuten-Fenster - gilt als zurueckgesetzt
     limit = BINANCE_WEIGHT_LIMIT_1M.get(market_type, 6000)
