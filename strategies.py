@@ -4039,242 +4039,6 @@ def compute_mvwap_mf_signals(osc, mf_raw, params):
     return buy_raw, sell_raw
 
 
-def _pivot_confirmed_series(values, left, right, find_high):
-    """Portiert ta.pivothigh/ta.pivotlow: an Bar i (die Bestaetigungs-Bar, 'right' Baren NACH dem
-    eigentlichen Pivot) liefert ein (pivot_index, price)-Tupel, falls values[i-right] strikt
-    hoeher (find_high) bzw. niedriger als ALLE 'left' Baren davor und ALLE 'right' Baren danach
-    ist - sonst None. O(n*(left+right)), fuer die hier verwendeten kleinen Fenster (<=30) unkritisch."""
-    n = len(values)
-    out = [None] * n
-    for i in range(left + right, n):
-        pivot_idx = i - right
-        window_start = pivot_idx - left
-        if window_start < 0:
-            continue
-        candidate = values[pivot_idx]
-        ok = True
-        for k in range(window_start, pivot_idx):
-            if (candidate > values[k]) if find_high else (candidate < values[k]):
-                continue
-            ok = False
-            break
-        if ok:
-            for k in range(pivot_idx + 1, i + 1):
-                if (candidate > values[k]) if find_high else (candidate < values[k]):
-                    continue
-                ok = False
-                break
-        if ok:
-            out[i] = (pivot_idx, candidate)
-    return out
-
-
-def _period_keys(ts_ms):
-    """Liefert (Tag, ISO-Kalenderwoche, Monat) als vergleichbare Schluessel pro Kerze (UTC-basiert -
-    TradingView nutzt je nach Chart-Zeitzone ggf. einen leicht anderen Tages-/Wochenwechsel, das ist
-    fuer die Liquiditaets-Level-Naeherung aber unkritisch, die Level sind ohnehin nur ein GROBER
-    Anhaltspunkt fuer 'wo lag zuletzt viel Reaktion')."""
-    import datetime
-    out = []
-    for t in ts_ms:
-        d = datetime.datetime.utcfromtimestamp(t / 1000)
-        iso = d.isocalendar()
-        out.append((d.date(), (iso[0], iso[1]), (d.year, d.month)))
-    return out
-
-
-def compute_mvwap_confluence_signals(ts_ms, highs, lows, closes, osc, params):
-    """Portiert die Konfluenz-Engine des Original-Skripts ('Liquidity + MVWAP-MF Confluence
-    [Master]'): buySignal/sellSignal sind dort NICHT einfach jeder Momentum-Wendepunkt des
-    Oszillators (buyMomentum/sellMomentum, wie in compute_mvwap_mf_signals - die wechseln sich
-    zwingend IMMER ab, siehe dort), sondern zusaetzlich nur dann ein "echtes" Signal, wenn der
-    Preis GLEICHZEITIG nah an einem juengeren Liquiditaets-Level liegt (PDH/PDL, PWH/PWL, PMH/PML,
-    Swing-Hoch/Tief, Equal High/Low) UND (per Default) eine Oszillator/Preis-Divergenz vorliegt.
-    Diese Level-Naehe-Bedingung wechselt sich NICHT zwingend mit jedem Momentum-Umschwung ab -
-    sie kann ueber mehrere Momentum-Wendepunkte in dieselbe Richtung hinweg bestehen bleiben,
-    waehrend Wendepunkte in die Gegenrichtung nicht in Level-Naehe passieren. GENAU DAS ist der
-    Mechanismus, der auf dem echten TradingView-Chart mehrere SELL-Label hintereinander OHNE
-    dazwischenliegendes BUY erzeugt (live vom Nutzer per Screenshot bestaetigt) - und der fehlte
-    hier komplett, weshalb vorherige Versuche (Nulllinien-Kreuzung, Schmitt-Trigger) beides falsch
-    gemacht haben: sie haben ENTWEDER weiterhin bei jedem Wendepunkt geschlossen (zu oft) ODER
-    einen erfundenen Schwellenwert benutzt, der mit dem echten Skript nichts zu tun hat und die
-    vorher passenden Ein-/Ausstiege wieder kaputt gemacht hat. Mit dieser Funktion ist buy_final/
-    sell_final das EINZIGE Signal, das gebraucht wird - fuer Neueinstieg, Nachkauf UND den
-    Komplett-Ausstieg beim ersten GEGENTEILIGEN buy_final/sell_final (kein separates Signal mehr
-    noetig, weil es strukturell schon nicht mehr zwingend abwechselt)."""
-    n = len(closes)
-    near_pct = params.get("near_pct", 0.30)
-    use_pdh = params.get("use_level_pdh", True)
-    use_pwh = params.get("use_level_pwh", True)
-    use_pmh = params.get("use_level_pmh", True)
-    use_swing = params.get("use_level_swing", True)
-    use_eq = params.get("use_level_eq", True)
-    use_div_confirm = params.get("use_div_confirm", True)
-    use_obos_filter = params.get("use_zone_filter", False)
-    ob_level, os_level = params["ob_level"], params["os_level"]
-    days_n, weeks_n, months_n = params.get("days_n", 1), params.get("weeks_n", 1), params.get("months_n", 1)
-    sw_left, sw_right, sw_n = params.get("sw_left", 30), params.get("sw_right", 3), params.get("sw_n", 1)
-    eq_left, eq_right, eq_n = params.get("eq_left", 5), params.get("eq_right", 5), params.get("eq_n", 1)
-    eq_touch, eq_tol_atr, eq_span = params.get("eq_touch", 2), params.get("eq_tol_atr", 0.25), params.get("eq_span", 80)
-    piv_len, piv_range = params.get("pivot_len", 5), params.get("pivot_range", 5)
-
-    osc_up = [osc[i] > osc[i - 1] if i > 0 else False for i in range(n)]
-    osc_down = [not v for v in osc_up]
-    buy_momentum = [osc_up[i] and not (osc_up[i - 1] if i > 0 else False) for i in range(n)]
-    sell_momentum = [osc_down[i] and not (osc_down[i - 1] if i > 0 else False) for i in range(n)]
-
-    periods = _period_keys(ts_ms)
-    atr = compute_atr(highs, lows, closes, 14)
-
-    # --- Divergenz: Preis-Pivots vs. Oszillator-Pivots (gleiche Pivot-Bars) ---
-    price_hi_piv = _pivot_confirmed_series(highs, piv_len, piv_range, True)
-    price_lo_piv = _pivot_confirmed_series(lows, piv_len, piv_range, False)
-    osc_hi_piv = _pivot_confirmed_series(osc, piv_len, piv_range, True)
-    osc_lo_piv = _pivot_confirmed_series(osc, piv_len, piv_range, False)
-    bear_div = [False] * n
-    bull_div = [False] * n
-    last_ph_price = last_ph_osc = None
-    last_pl_price = last_pl_osc = None
-    for i in range(n):
-        if price_hi_piv[i] is not None and osc_hi_piv[i] is not None:
-            _, ph_price = price_hi_piv[i]
-            _, ph_osc = osc_hi_piv[i]
-            if last_ph_price is not None and ph_price > last_ph_price and ph_osc < last_ph_osc:
-                bear_div[i] = True
-            last_ph_price, last_ph_osc = ph_price, ph_osc
-        if price_lo_piv[i] is not None and osc_lo_piv[i] is not None:
-            _, pl_price = price_lo_piv[i]
-            _, pl_osc = osc_lo_piv[i]
-            if last_pl_price is not None and pl_price < last_pl_price and pl_osc > last_pl_osc:
-                bull_div[i] = True
-            last_pl_price, last_pl_osc = pl_price, pl_osc
-
-    # --- Swing-/Equal-High/Low-Pivots (eigene, kuerzere/laengere Fenster als die Divergenz-Pivots) ---
-    sw_hi_piv = _pivot_confirmed_series(highs, sw_left, sw_right, True) if use_swing else [None] * n
-    sw_lo_piv = _pivot_confirmed_series(lows, sw_left, sw_right, False) if use_swing else [None] * n
-    eq_hi_piv = _pivot_confirmed_series(highs, eq_left, eq_right, True) if use_eq else [None] * n
-    eq_lo_piv = _pivot_confirmed_series(lows, eq_left, eq_right, False) if use_eq else [None] * n
-
-    # --- Level-Engine: pro Kategorie eine Liste aktiver {"price","broken"}-Level, FIFO auf N*2 begrenzt ---
-    day_lv, week_lv, month_lv, swhi_lv, swlo_lv, eqh_lv, eql_lv = [], [], [], [], [], [], []
-    eq_hi_recent, eq_lo_recent = [], []  # (bar_index, price) der letzten eq_span Bars fuer Cluster-Suche
-
-    d_h = d_l = w_h = w_l = m_h = m_l = None
-    buy_final = [False] * n
-    sell_final = [False] * n
-
-    for i in range(n):
-        day_k, week_k, month_k = periods[i]
-        prev_day_k = periods[i - 1][0] if i > 0 else None
-        prev_week_k = periods[i - 1][1] if i > 0 else None
-        prev_month_k = periods[i - 1][2] if i > 0 else None
-
-        if i > 0 and day_k != prev_day_k and d_h is not None:
-            day_lv.append({"price": d_h, "is_high": True, "broken": False})
-            day_lv.append({"price": d_l, "is_high": False, "broken": False})
-            day_lv[:] = day_lv[-(days_n * 2):]
-            d_h = d_l = None
-        if i > 0 and week_k != prev_week_k and w_h is not None:
-            week_lv.append({"price": w_h, "is_high": True, "broken": False})
-            week_lv.append({"price": w_l, "is_high": False, "broken": False})
-            week_lv[:] = week_lv[-(weeks_n * 2):]
-            w_h = w_l = None
-        if i > 0 and month_k != prev_month_k and m_h is not None:
-            month_lv.append({"price": m_h, "is_high": True, "broken": False})
-            month_lv.append({"price": m_l, "is_high": False, "broken": False})
-            month_lv[:] = month_lv[-(months_n * 2):]
-            m_h = m_l = None
-
-        d_h = highs[i] if d_h is None else max(d_h, highs[i])
-        d_l = lows[i] if d_l is None else min(d_l, lows[i])
-        w_h = highs[i] if w_h is None else max(w_h, highs[i])
-        w_l = lows[i] if w_l is None else min(w_l, lows[i])
-        m_h = highs[i] if m_h is None else max(m_h, highs[i])
-        m_l = lows[i] if m_l is None else min(m_l, lows[i])
-
-        if use_swing and sw_hi_piv[i] is not None:
-            swhi_lv.append({"price": sw_hi_piv[i][1], "is_high": True, "broken": False})
-            swhi_lv[:] = swhi_lv[-sw_n:]
-        if use_swing and sw_lo_piv[i] is not None:
-            swlo_lv.append({"price": sw_lo_piv[i][1], "is_high": False, "broken": False})
-            swlo_lv[:] = swlo_lv[-sw_n:]
-
-        if use_eq:
-            tol_abs = (atr[i] if atr[i] else 0.0) * eq_tol_atr
-            if eq_hi_piv[i] is not None:
-                _, eph = eq_hi_piv[i]
-                touches = 1
-                shelf = eph
-                for (pb, pp) in eq_hi_recent:
-                    if abs(pp - eph) <= tol_abs:
-                        touches += 1
-                        shelf = max(shelf, pp)
-                if touches >= eq_touch:
-                    eqh_lv.append({"price": shelf, "is_high": True, "broken": False})
-                    eqh_lv[:] = eqh_lv[-eq_n:]
-                eq_hi_recent.append((i, eph))
-            if eq_lo_piv[i] is not None:
-                _, epl = eq_lo_piv[i]
-                touches = 1
-                shelf = epl
-                for (pb, pp) in eq_lo_recent:
-                    if abs(pp - epl) <= tol_abs:
-                        touches += 1
-                        shelf = min(shelf, pp)
-                if touches >= eq_touch:
-                    eql_lv.append({"price": shelf, "is_high": False, "broken": False})
-                    eql_lv[:] = eql_lv[-eq_n:]
-                eq_lo_recent.append((i, epl))
-            eq_hi_recent[:] = [(pb, pp) for (pb, pp) in eq_hi_recent if i - pb <= eq_span]
-            eq_lo_recent[:] = [(pb, pp) for (pb, pp) in eq_lo_recent if i - pb <= eq_span]
-
-        active_lists = []
-        if use_pdh:
-            active_lists.append(day_lv)
-        if use_pwh:
-            active_lists.append(week_lv)
-        if use_pmh:
-            active_lists.append(month_lv)
-        if use_swing:
-            active_lists.append(swhi_lv)
-            active_lists.append(swlo_lv)
-        if use_eq:
-            active_lists.append(eqh_lv)
-            active_lists.append(eql_lv)
-
-        near_below = False
-        near_above = False
-        for lv_list in active_lists:
-            for lv in lv_list:
-                if lv["broken"]:
-                    continue
-                if lv["is_high"] and highs[i] > lv["price"]:
-                    lv["broken"] = True
-                    continue
-                if not lv["is_high"] and lows[i] < lv["price"]:
-                    lv["broken"] = True
-                    continue
-                d_pct = (lv["price"] - closes[i]) / closes[i] * 100
-                if 0 < d_pct <= near_pct:
-                    near_above = True
-                elif -near_pct <= d_pct < 0:
-                    near_below = True
-
-        buy_conf = buy_momentum[i] and near_below
-        sell_conf = sell_momentum[i] and near_above
-        buy_conf_strong = buy_conf and bull_div[i]
-        sell_conf_strong = sell_conf and bear_div[i]
-        buy_f = buy_conf_strong if use_div_confirm else buy_conf
-        sell_f = sell_conf_strong if use_div_confirm else sell_conf
-        if use_obos_filter:
-            buy_f = buy_f and osc[i] < os_level
-            sell_f = sell_f and osc[i] > ob_level
-        buy_final[i] = buy_f
-        sell_final[i] = sell_f
-
-    return buy_final, sell_final
-
-
 def _mvwap_effective_params(cfg):
     return {
         "use_daily": cfg.get("mvwap_use_daily", True), "use_weekly": cfg.get("mvwap_use_weekly", True),
@@ -4285,18 +4049,6 @@ def _mvwap_effective_params(cfg):
         "smooth_len": cfg.get("mvwap_smooth_len", 3),
         "use_zone_filter": cfg.get("mvwap_use_zone_filter", False),
         "ob_level": cfg.get("mvwap_ob_level", 2.0), "os_level": cfg.get("mvwap_os_level", -2.0),
-        # Konfluenz-Engine (siehe compute_mvwap_confluence_signals) - Defaults 1:1 aus dem
-        # Original-Skript uebernommen (Gruppe "Konfluenz"/"Liquidity"), noch nicht im UI einstellbar,
-        # koennen aber schon jetzt per ENV/Config ueberschrieben werden.
-        "near_pct": cfg.get("mvwap_near_pct", 0.30),
-        "use_level_pdh": cfg.get("mvwap_use_level_pdh", True), "use_level_pwh": cfg.get("mvwap_use_level_pwh", True),
-        "use_level_pmh": cfg.get("mvwap_use_level_pmh", True), "use_level_swing": cfg.get("mvwap_use_level_swing", True),
-        "use_level_eq": cfg.get("mvwap_use_level_eq", True), "use_div_confirm": cfg.get("mvwap_use_div_confirm", True),
-        "days_n": cfg.get("mvwap_days_n", 1), "weeks_n": cfg.get("mvwap_weeks_n", 1), "months_n": cfg.get("mvwap_months_n", 1),
-        "sw_left": cfg.get("mvwap_sw_left", 30), "sw_right": cfg.get("mvwap_sw_right", 3), "sw_n": cfg.get("mvwap_sw_n", 1),
-        "eq_left": cfg.get("mvwap_eq_left", 5), "eq_right": cfg.get("mvwap_eq_right", 5), "eq_n": cfg.get("mvwap_eq_n", 1),
-        "eq_touch": cfg.get("mvwap_eq_touch", 2), "eq_tol_atr": cfg.get("mvwap_eq_tol_atr", 0.25), "eq_span": cfg.get("mvwap_eq_span", 80),
-        "pivot_len": cfg.get("mvwap_pivot_len", 5), "pivot_range": cfg.get("mvwap_pivot_range", 5),
     }
 
 
@@ -4367,24 +4119,24 @@ async def check_mvwap_entry(symbol, buy_reversal_edge, sell_reversal_edge, buy_f
     """Identisch zu check_rsi_entry (siehe dort fuer Kommentare) - mit mvwap_-Config-Feldern,
     UND mit Nachkauf-Unterstuetzung (mvwap_max_entries): jede neue BUY-Flanke waehrend einer
     offenen Long-Position (bzw. SELL waehrend Short) legt eine weitere Stufe nach, bis zur
-    eingestellten Obergrenze - die ERSTE ECHTE Gegen-Konfluenz (siehe
-    compute_mvwap_confluence_signals) schliesst die KOMPLETTE Position (alle Stufen), unabhaengig
-    davon wie viele es waren. Alle vier Signal-Parameter sind FLANKEN (True nur genau die eine
-    Kerze, in der das Signal neu auftritt), nicht Zustaende - sonst wuerde ein ueber viele Kerzen
-    anhaltendes Level-Signal bei jedem Kerzenschluss einen weiteren Nachkauf ausloesen.
+    eingestellten Obergrenze - die ERSTE Gegenflanke schliesst die KOMPLETTE Position (alle
+    Stufen), unabhaengig davon wie viele es waren. Alle vier Signal-Parameter sind FLANKEN (True
+    nur genau die eine Kerze, in der das Signal neu auftritt), nicht Zustaende - sonst wuerde ein
+    ueber viele Kerzen anhaltendes Signal bei jedem Kerzenschluss einen weiteren Nachkauf ausloesen.
 
-    WICHTIG (Bugfix #1 + #3): der Komplett-Ausstieg laeuft auf buy_reversal_edge/sell_reversal_edge -
-    das ist NICHT (mehr) eine erfundene Nulllinien-Kreuzung/Schmitt-Trigger-Schwelle (die beiden
-    fruehere Versuche waren beide falsch - Nulllinie zu empfindlich, Schmitt-Trigger zu erfunden
-    und hat vorher passende Ein-/Ausstiege wieder kaputt gemacht), sondern die ECHTE Konfluenz aus
-    dem Original-TradingView-Skript: Momentum-Wendepunkt UND Naehe zu einem Liquiditaets-Level
-    (PDH/PDL/PWH/PWL/PMH/PML/Swing/Equal High-Low) UND optional Divergenz. Diese Konfluenz-Signale
-    (buy_final_edge/sell_final_edge sind die GEFILTERTE, buy_reversal_edge/sell_reversal_edge die
-    UNGEFILTERTE Fassung derselben Sache) wechseln sich - anders als reine Momentum-Pulse - NICHT
-    zwingend ab: die Level-Naehe kann ueber mehrere Momentum-Wendepunkte in dieselbe Richtung
-    bestehen bleiben, waehrend Gegenrichtungs-Wendepunkte zufaellig nicht in Level-Naehe passieren.
-    Genau DAS erzeugt auf dem echten Chart mehrere SELL-Signale hintereinander ohne dazwischen-
-    liegendes BUY (vom Nutzer per Screenshot bestaetigt) und macht echten Nachkauf erst moeglich.
+    WICHTIG: das SIGNAL SELBST (wann buy/sell feuert) stellt der Nutzer per Config ein
+    (compute_mvwap_mf_signals: Momentum-Wendepunkt des Oszillators, optional per
+    mvwap_use_zone_filter/ob_level/os_level nur in der OB/OS-Zone) - diese Funktion hier reagiert
+    nur noch darauf (Nachkauf/Komplett-Ausstieg), aendert nicht MEHR selbst, wie das Signal
+    berechnet wird. ACHTUNG (fuer den Nutzer wichtig, nicht nur Code-Kommentar): buy_raw/sell_raw
+    sind bei mvwap_use_zone_filter=False (Standard) exakte Gegensaetze des Oszillator-Richtungs-
+    wechsels und wechseln sich deshalb ZWINGEND IMMER ab - zwischen zwei SELL-Flanken MUSS
+    rechnerisch eine BUY-Flanke liegen. Echter Nachkauf (mehrere SELLs in Folge, ohne dass ein BUY
+    dazwischen alles schliesst) ist mit diesem Signal also nur moeglich, wenn mvwap_use_zone_filter
+    aktiv ist: dann feuert buy_raw nur noch, wenn osc UNTER os_level liegt, sell_raw nur, wenn osc
+    UEBER ob_level liegt - bleibt der Oszillator laenger auf einer Seite (z.B. dauerhaft ueberkauft),
+    fallen alle Momentum-Wendepunkte der jeweils ANDEREN Richtung durchs Zonen-Raster, und mehrere
+    gleichgerichtete Flanken koennen tatsaechlich hintereinander feuern.
 
     WICHTIG (Bugfix #2): der Ausstieg laeuft ausserdem bewusst auf dem UNGEFILTERTEN Signal, nicht
     auf dem gefilterten (buy_final_edge/sell_final_edge, nach SuperTrend/ADX/MACD/RSI/Cloud).
@@ -4530,12 +4282,11 @@ async def mvwap_poll_loop(symbol):
                         if last_ts != last_processed_ts:
                             last_processed_ts = last_ts
                             osc, mf_raw = compute_mvwap_mf_oscillator(closed_ts, closed_h, closed_l, closed_c, closed_v, params)
-                            # Konfluenz-Signal (Momentum + Naehe zu einem Liquiditaets-Level + optional
-                            # Divergenz) statt der reinen Momentum-Pulse - siehe compute_mvwap_confluence_signals-
-                            # Docstring: das ist das EINZIGE Signal, das gebraucht wird, fuer Neueinstieg,
-                            # Nachkauf UND Komplett-Ausstieg, weil es sich (anders als reine Momentum-Pulse)
-                            # NICHT zwingend mit jedem Wendepunkt abwechselt.
-                            buy_conf, sell_conf = compute_mvwap_confluence_signals(closed_ts, closed_h, closed_l, closed_c, osc, params)
+                            # Das Signal selbst (Wendepunkt, optional per mvwap_use_zone_filter/
+                            # ob_level/os_level nur in der OB/OS-Zone) stellt der Nutzer selbst per
+                            # Config ein - hier wird nur noch reagiert: Nachkauf bei jeder weiteren
+                            # gleichgerichteten Flanke, Komplett-Ausstieg bei der ersten Gegenflanke.
+                            buy_conf, sell_conf = compute_mvwap_mf_signals(osc, mf_raw, params)
                             candles = (closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v)
                             long_final, short_final = await _mvwap_apply_filters(symbol, st, cfg, candles, buy_conf, sell_conf)
                             buy_signal = long_final[-1]
@@ -4580,11 +4331,10 @@ def _simulate_mvwap_trades(candles, cfg, long_raw, short_raw, long_final=None, s
     Nachkauf-Unterstuetzung (mvwap_max_entries), spiegelbildlich zu check_mvwap_entry (live):
     jede neue gefilterte Signal-Flanke in dieselbe Richtung wie die offene Position legt eine
     weitere Stufe nach (bis zur Obergrenze), die ERSTE Flanke im long_raw/short_raw-Parameter
-    schliesst die komplette Position auf einen Schlag. WICHTIG: long_raw/short_raw MUSS hier das
-    (ungefilterte) Konfluenz-Signal aus compute_mvwap_confluence_signals sein, NICHT die reinen
-    buy/sell-Wendepunkt-Pulse aus compute_mvwap_mf_signals - die wechseln sich zwingend mit jedem
-    Nachkauf-Puls ab, wodurch echter Nachkauf sonst strukturell unmoeglich waere (jeder Nachkauf
-    haette zuerst die alte Position geschlossen). long_final/short_final sind optional
+    schliesst die komplette Position auf einen Schlag. long_raw/short_raw = das ungefilterte
+    Signal aus compute_mvwap_mf_signals (Signal-Berechnung selbst ist Config-Sache des Nutzers,
+    siehe check_mvwap_entry-Docstring: echter Nachkauf braucht mvwap_use_zone_filter=True, sonst
+    wechseln sich buy_raw/sell_raw zwingend ab). long_final/short_final sind optional
     (abwaertskompatibel: ohne Filter sind sie identisch zum ersten Parameterpaar)."""
     ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
     n = len(c)
@@ -4689,9 +4439,9 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
     ts, o, h, l, c, v = candles
     params = _mvwap_effective_params(cfg)
     osc, mf_raw = compute_mvwap_mf_oscillator(ts, h, l, c, v, params)
-    # Konfluenz-Signal (Momentum + Naehe zu einem Liquiditaets-Level + optional Divergenz) statt
-    # der reinen Momentum-Pulse - siehe compute_mvwap_confluence_signals-Docstring.
-    buy_conf, sell_conf = compute_mvwap_confluence_signals(ts, h, l, c, osc, params)
+    # Das Signal selbst stellt der Nutzer per Config ein (mvwap_use_zone_filter/ob_level/os_level) -
+    # hier wird nur noch reagiert: Nachkauf/Komplett-Ausstieg, siehe _simulate_mvwap_trades.
+    buy_conf, sell_conf = compute_mvwap_mf_signals(osc, mf_raw, params)
     filters = []
     if trend_filter_long_ok is not None:
         filters.append((trend_filter_long_ok, trend_filter_short_ok))
