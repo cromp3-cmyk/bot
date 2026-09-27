@@ -216,9 +216,10 @@ def default_config():
         "scalp_rsi_upper": float(os.getenv("SCALP_RSI_UPPER", "70")),
         "scalp_rsi_lower": float(os.getenv("SCALP_RSI_LOWER", "30")),
         "scalp_docht_threshold": float(os.getenv("SCALP_DOCHT_THRESHOLD", "0.5")),
-        "scalp_sl_pct": float(os.getenv("SCALP_SL_PCT", "0.6")),  # SL in % ab Ø-Einstieg, Standard 0.6%, einstellbar
+        "scalp_sl_usd": float(os.getenv("SCALP_SL_USD", "5.0")),  # SL in $ Verlust ab Ø-Einstieg, Standard 5$, einstellbar
         "scalp_max_nachkauf": int(os.getenv("SCALP_MAX_NACHKAUF", "3")),  # bis zu 3 Nachkaeufe, wie im MVWAP-Skript
         "scalp_nachkauf_min_abstand_usd": float(os.getenv("SCALP_NACHKAUF_MIN_ABSTAND_USD", "0.0")),
+        "scalp_tp1_full_close": os.getenv("SCALP_TP1_FULL_CLOSE", "false").lower() == "true",  # true = TP1 schliesst 100% statt 50% (dann kein TP2 mehr)
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -1747,10 +1748,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI oberer Schwellenwert (Short)</label><input type="number" step="1" min="50" max="100" id="scalp_rsi_upper"></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI unterer Schwellenwert (Long)</label><input type="number" step="1" min="0" max="50" id="scalp_rsi_lower"></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Docht-Schwelle (Anteil des Bandes, 0.5 = 50%)</label><input type="number" step="0.05" min="0" max="1" id="scalp_docht_threshold"></div>
-  <div data-mode="scalp_vwap_obv_rsi"><label>Stop-Loss (% vom Ø-Einstieg)</label><input type="number" step="0.05" min="0.05" id="scalp_sl_pct"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="scalp_sl_usd"></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Max. Nachkäufe (0 = kein Nachkauf)</label><input type="number" step="1" min="0" max="10" id="scalp_max_nachkauf"></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Mindestabstand zum letzten Einstieg/Nachkauf ($, 0 = aus)</label>
     <input type="number" step="0.01" min="0" id="scalp_nachkauf_min_abstand_usd">
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi">
+    <label><input type="checkbox" id="scalp_tp1_full_close" style="width:auto; vertical-align:middle;"> TP1 komplett schließen (100% statt 50%) - danach kein TP2 mehr</label>
   </div>
 
 
@@ -3132,8 +3136,9 @@ async function refresh() {
     document.getElementById('scalp_rsi_upper').value = data.config.scalp_rsi_upper;
     document.getElementById('scalp_rsi_lower').value = data.config.scalp_rsi_lower;
     document.getElementById('scalp_docht_threshold').value = data.config.scalp_docht_threshold;
-    document.getElementById('scalp_sl_pct').value = data.config.scalp_sl_pct;
+    document.getElementById('scalp_sl_usd').value = data.config.scalp_sl_usd;
     document.getElementById('scalp_max_nachkauf').value = data.config.scalp_max_nachkauf;
+    document.getElementById('scalp_tp1_full_close').checked = !!data.config.scalp_tp1_full_close;
     document.getElementById('scalp_nachkauf_min_abstand_usd').value = data.config.scalp_nachkauf_min_abstand_usd;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
