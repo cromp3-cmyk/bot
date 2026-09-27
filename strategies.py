@@ -4522,12 +4522,40 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
     return _simulate_mvwap_trades(candles, cfg, long_final, short_final)
 
 
+
+
 # ============================================================================
-# SCALP VWAP OBV RSI - Mean-Reversion Scalper
+# SCALP VWAP OBV RSI - Mean-Reversion Scalper (entry_mode "scalp_vwap_obv_rsi")
+#
+# Regeln (Nutzer-Vorgabe):
+#   Entry SHORT: Kerze schliesst im roten Band (Zone zwischen Dev2 und Dev3, exakt wie im
+#                Pine-Script farbig eingezeichnet) ODER der Docht durchbricht mindestens 50%
+#                dieses Bandes, UND OBV-RSI > oberer Schwellenwert.
+#   Entry LONG:  Kerze schliesst im gruenen Band ODER Docht durchbricht mindestens 50%,
+#                UND OBV-RSI < unterer Schwellenwert.
+#   Nachkauf:    Solange dasselbe Signal an einer weiteren geschlossenen Kerze weiterhin gilt
+#                UND TP1 noch nicht ausgeloest wurde, legt der Bot bis zu scalp_max_nachkauf
+#                weitere Stufen nach (Standard 3, einstellbar) - identischer Mechanismus zum
+#                Multi-VWAP-Money-Flow-Skript (siehe check_mvwap_entry), inkl. optionalem
+#                Mindestabstand zum letzten Fill (scalp_nachkauf_min_abstand_usd).
+#   TP1:         Rueckkehr zum Mittelband (VWAP-Basis) - schliesst 50% der Position, danach
+#                wird der SL auf den (dann aktuellen) Ø-Einstiegspreis gezogen (Breakeven).
+#   TP2:         Rueckkehr/Durchlauf zum GEGENUEBERLIEGENDEN Dev2-Band - schliesst die
+#                komplette Restposition.
+#   SL:          Prozentualer Abstand vom Ø-Einstiegspreis (scalp_sl_pct, Default 0.6%,
+#                einstellbar), wird nach jedem Erst-/Nachkauf aus dem AKTUELLEN Ø-Einstieg
+#                neu berechnet - bis TP1 den SL auf Breakeven zieht.
+#
+# Nutzt dieselbe generische Order-Infrastruktur (execute_entry/execute_partial_exit/
+# execute_exit) wie Grid/AB-Breakout/RSI/MVWAP - dadurch automatisch: dry_run-Beachtung,
+# echte Fill-Preis-/PnL-Bestaetigung von der Boerse, Persistenz (save_bot_state), Stats/
+# Trade-Log. KEINE eigene Order-Schicht, KEINE Fake-Daten - Kerzen kommen wie bei MVWAP
+# ueber fetch_candles_binance_vol (WS-Cache + REST-Fallback, siehe binance_ws.py).
 # ============================================================================
 
 def calculate_vwap_deviation(closes, highs, lows, volumes, length=60):
-    """Berechnet VWAP Deviation Bands."""
+    """Berechnet volumen-gewichtete Mean/Deviation-Baender (Dev2/Dev3), identisch zur Logik
+    im gemeldeten Pine-Script ('[Hoss] VWAP Deviation', Average Deviation-Modus)."""
     if len(closes) < length:
         return None, None, None, None, None
 
@@ -4545,7 +4573,8 @@ def calculate_vwap_deviation(closes, highs, lows, volumes, length=60):
 
 
 def calculate_obv_rsi(closes, volumes, length=5):
-    """Berechnet OBV RSI."""
+    """RSI auf On-Balance-Volume, identisch zur Logik im gemeldeten Pine-Script
+    ('[Hoss] OBV RSI')."""
     if len(closes) < length + 1:
         return None
 
@@ -4555,14 +4584,14 @@ def calculate_obv_rsi(closes, volumes, length=5):
         if i == 0:
             obv = volumes[i]
         else:
-            if closes[i] > closes[i-1]:
+            if closes[i] > closes[i - 1]:
                 obv += volumes[i]
-            elif closes[i] < closes[i-1]:
+            elif closes[i] < closes[i - 1]:
                 obv -= volumes[i]
         obv_values.append(obv)
 
-    obv_recent = obv_values[-length-1:]
-    deltas = [obv_recent[i] - obv_recent[i-1] for i in range(1, len(obv_recent))]
+    obv_recent = obv_values[-length - 1:]
+    deltas = [obv_recent[i] - obv_recent[i - 1] for i in range(1, len(obv_recent))]
     gains = [d if d > 0 else 0 for d in deltas]
     losses = [-d if d < 0 else 0 for d in deltas]
 
@@ -4576,172 +4605,215 @@ def calculate_obv_rsi(closes, volumes, length=5):
     return 100 - (100 / (1 + rs))
 
 
-def docht_durchbricht_band(candle, band_price, is_upper=True, threshold=0.5):
-    """Prüft ob Docht mindestens 50% in das Band eindringt."""
-    if is_upper:
-        if candle["h"] > band_price:
-            body_high = max(candle["o"], candle["c"])
-            docht_eindringung = candle["h"] - body_high
-            if docht_eindringung >= (band_price - body_high) * threshold:
-                return True
-    else:
-        if candle["l"] < band_price:
-            body_low = min(candle["o"], candle["c"])
-            docht_eindringung = body_low - candle["l"]
-            if docht_eindringung >= (body_low - band_price) * threshold:
-                return True
+def _scalp_compute_signal(cfg, o, h, l, c, v):
+    """Wertet die LETZTE (bereits geschlossene) Kerze aus. 'Band' = die Zone zwischen Dev2 und
+    Dev3 (genau die farbig gefuellte Flaeche im Pine-Script) - 'Kerze schliesst im Band' heisst
+    Schlusskurs jenseits von Dev2, 'Docht durchbricht mindestens 50%' heisst High/Low erreicht
+    mindestens die Haelfte der Dev2-Dev3-Distanz. Gibt zurueck:
+    (long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi)."""
+    vwap_length = int(cfg.get("scalp_vwap_length", 60))
+    mean, lower_dev2, upper_dev2, lower_dev3, upper_dev3 = calculate_vwap_deviation(c, h, l, v, vwap_length)
+    if mean is None:
+        return False, False, None, None, None, None
 
-    return False
+    rsi_length = int(cfg.get("scalp_rsi_length", 5))
+    obv_rsi = calculate_obv_rsi(c, v, rsi_length)
+    if obv_rsi is None:
+        return False, False, mean, lower_dev2, upper_dev2, None
+
+    rsi_upper = float(cfg.get("scalp_rsi_upper", 70))
+    rsi_lower = float(cfg.get("scalp_rsi_lower", 30))
+    docht_threshold = float(cfg.get("scalp_docht_threshold", 0.5))
+
+    last_o, last_h, last_l, last_c = o[-1], h[-1], l[-1], c[-1]
+
+    upper_band_width = max(upper_dev3 - upper_dev2, 1e-12)
+    lower_band_width = max(lower_dev2 - lower_dev3, 1e-12)
+
+    short_close_in_band = last_c >= upper_dev2
+    short_wick_in_band = last_h >= upper_dev2 + docht_threshold * upper_band_width
+    short_signal = (short_close_in_band or short_wick_in_band) and obv_rsi > rsi_upper
+
+    long_close_in_band = last_c <= lower_dev2
+    long_wick_in_band = last_l <= lower_dev2 - docht_threshold * lower_band_width
+    long_signal = (long_close_in_band or long_wick_in_band) and obv_rsi < rsi_lower
+
+    return long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi
+
+
+def _scalp_reset_state(st):
+    st["scalp_sl_price"] = None
+    st["scalp_tp1_done"] = False
+
+
+def _scalp_update_sl(st, cfg):
+    """SL = scalp_sl_pct % vom AKTUELLEN Ø-Einstiegspreis - wird nach jedem Erst-/Nachkauf neu
+    berechnet, weil sich der Ø-Einstieg mit jeder weiteren Stufe aendert. Wird NICHT mehr
+    aufgerufen, sobald TP1 den SL bereits auf Breakeven gezogen hat (siehe check_scalp_entry)."""
+    pos = st["position"]
+    entry_ref = st.get("avg_entry_price")
+    if pos is None or not entry_ref:
+        return
+    sl_pct = float(cfg.get("scalp_sl_pct", 0.6)) / 100.0
+    st["scalp_sl_price"] = entry_ref * (1 - sl_pct) if pos == "long" else entry_ref * (1 + sl_pct)
+
+
+async def check_scalp_sl(symbol, price):
+    """Jeden Tick (aus dem Live-Preis, wie check_mvwap_sl/check_rsi_sl): prueft zuerst SL
+    (bzw. Breakeven nach TP1), dann TP1 (Mittelband, Teil-Exit 50% + SL->Einstieg), dann TP2
+    (Gegenband, Rest komplett)."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+
+    sl_price = st.get("scalp_sl_price")
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    if hit_sl:
+        reason = "BREAKEVEN" if st.get("scalp_tp1_done") else "SL"
+        debug_log(f"🚪 [{symbol}] Scalp VWAP OBV RSI {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, reason)
+        if st["position"] is None:
+            _scalp_reset_state(st)
+        return
+
+    mean = st.get("scalp_mean_price")
+    upper_band = st.get("scalp_upper_band")
+    lower_band = st.get("scalp_lower_band")
+    if mean is None or upper_band is None or lower_band is None:
+        return
+
+    if not st.get("scalp_tp1_done"):
+        tp1_hit = (pos == "long" and price >= mean) or (pos == "short" and price <= mean)
+        if tp1_hit:
+            debug_log(f"🎯 [{symbol}] Scalp VWAP OBV RSI TP1 (Mittelband): {pos.upper()} @ {price} - schließe 50%, SL -> Einstieg")
+            ok = await execute_partial_exit(symbol, price, 0.5, "TP1")
+            if ok and st["position"] is not None:
+                st["scalp_tp1_done"] = True
+                st["scalp_sl_price"] = st["avg_entry_price"]  # Breakeven
+            return
+
+    tp2_hit = (pos == "long" and price >= upper_band) or (pos == "short" and price <= lower_band)
+    if tp2_hit:
+        debug_log(f"🏁 [{symbol}] Scalp VWAP OBV RSI TP2 (Gegenband): {pos.upper()} @ {price} - schließe Rest")
+        await execute_exit(symbol, price, "TP2")
+        if st["position"] is None:
+            _scalp_reset_state(st)
+
+
+async def check_scalp_entry(symbol, long_signal, short_signal, price):
+    """Einstieg + Nachkauf. long_signal/short_signal gelten fuer JEDE geschlossene Kerze, an
+    der die Bedingung zutrifft (nicht nur beim ersten Wendepunkt) - solange TP1 noch nicht
+    ausgeloest wurde, legt eine weitere Kerze mit demselben Signal eine Nachkauf-Stufe nach,
+    bis zur Obergrenze (1 Ersteinstieg + scalp_max_nachkauf), mit optionalem Mindestabstand
+    zum letzten Fill - identischer Mechanismus zu check_mvwap_entry."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+
+    pos = st["position"]
+    max_nachkauf = max(0, int(cfg.get("scalp_max_nachkauf", 3) or 0))
+    max_entries = 1 + max_nachkauf
+    min_abstand = cfg.get("scalp_nachkauf_min_abstand_usd", 0.0) or 0.0
+
+    def _abstand_ok():
+        last_price = st.get("last_entry_price")
+        return min_abstand <= 0 or last_price is None or abs(price - last_price) >= min_abstand
+
+    # Nachkauf: Position bereits in dieselbe Richtung offen, Signal gilt weiterhin diese Kerze,
+    # TP1 noch nicht ausgeloest (danach hat Gewinnsicherung Vorrang, kein weiterer Nachkauf mehr).
+    if pos == "long" and long_signal:
+        if st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok():
+            return
+        await execute_entry(symbol, "long", price, is_add_on=True)
+        _scalp_update_sl(st, cfg)
+        return
+    if pos == "short" and short_signal:
+        if st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok():
+            return
+        await execute_entry(symbol, "short", price, is_add_on=True)
+        _scalp_update_sl(st, cfg)
+        return
+
+    if pos is not None:
+        return  # Position offen, aber kein Nachkauf-Signal in dieselbe Richtung diese Kerze
+
+    # Neueinstieg
+    if long_signal:
+        await execute_entry(symbol, "long", price, is_add_on=False)
+        _scalp_reset_state(st)
+        _scalp_update_sl(st, cfg)
+    elif short_signal:
+        await execute_entry(symbol, "short", price, is_add_on=False)
+        _scalp_reset_state(st)
+        _scalp_update_sl(st, cfg)
 
 
 async def scalp_poll_loop(symbol):
-    """Scalp VWAP OBV RSI Loop - Mean-Reversion Strategie."""
-    from bot_core import get_lighter_client, place_market_order, get_precision, get_price_decimals, get_min_base_amount, get_account_position_from_exchange, save_bot_state, EXCHANGE_CALL_TIMEOUT_SECONDS, _safe_close_client, now_local
-
-    client = None
-    debug_log(f"🚀 [{symbol}] Scalp Loop gestartet")
+    """Scalp VWAP Deviation + OBV RSI Mean-Reversion Scalper - siehe Modul-Docstring oben fuer
+    die vollstaendigen Regeln. Struktur identisch zu mvwap_poll_loop (Kerzen ueber
+    fetch_candles_binance_vol, Signal nur bei NEU geschlossener Kerze, SL/TP1/TP2 jeden Tick
+    aus dem Live-Preis)."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
 
     while True:
-        cfg = BOTS[symbol]["config"]
-
-        if cfg.get("entry_mode") != "scalp_vwap_obv_rsi":
-            if client:
-                await _safe_close_client(client)
-                client = None
-            await asyncio.sleep(5)
-            continue
-
         try:
-            if client is None:
-                client = get_lighter_client()
-                if not client:
-                    await asyncio.sleep(10)
-                    continue
+            cfg = b["config"]
+            # session_started: wie bei ab_breakout/rsi/mvwap - erst manueller Start im Panel
+            # nach diesem Prozessstart loest die erste Kerzen-Abfrage aus (verhindert, dass nach
+            # einem Redeploy ALLE Coins gleichzeitig lossignalisieren, siehe dortige Kommentare).
+            if cfg["entry_mode"] == "scalp_vwap_obv_rsi" and cfg["bot_active"] and b["state"].get("session_started"):
+                resolution = cfg.get("scalp_timeframe", "5m")
+                vwap_length = int(cfg.get("scalp_vwap_length", 60))
+                rsi_length = int(cfg.get("scalp_rsi_length", 5))
+                min_needed = vwap_length + rsi_length + 5
+                needed_bars = min(1000, max(min_needed * 2, 200))
+                st = b["state"]
 
-            st = BOTS[symbol]["state"]
-            market_index = MARKET_INDICES[symbol]
-
-            # Position sync
-            pos = await get_account_position_from_exchange(client, market_index, retries=1, delay=0.2)
-            if pos:
-                try:
-                    current_size = abs(float(pos.position))
-                    current_avg = float(pos.avg_entry_price)
-                except:
-                    current_size, current_avg = 0.0, None
-            else:
-                current_size, current_avg = 0.0, None
-
-            # Kerzen fetch (REST Fallback für jetzt)
-            try:
-                closes = [43250, 43255, 43252, 43260, 43248, 43270, 43245, 43265, 43250]
-                highs = [43260, 43265, 43258, 43270, 43255, 43280, 43250, 43275, 43260]
-                lows = [43245, 43250, 43248, 43255, 43240, 43260, 43240, 43250, 43245]
-                volumes = [100, 110, 95, 120, 105, 130, 90, 125, 115]
-            except:
-                await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
-                continue
-
-            if len(closes) < 65:
-                await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
-                continue
-
-            # Indikatoren
-            vwap_length = int(cfg.get("scalp_vwap_length", 60))
-            mean, lower_dev2, upper_dev2, lower_dev3, upper_dev3 = calculate_vwap_deviation(closes, highs, lows, volumes, vwap_length)
-
-            if mean is None:
-                await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
-                continue
-
-            rsi_length = int(cfg.get("scalp_rsi_length", 5))
-            obv_rsi = calculate_obv_rsi(closes, volumes, rsi_length)
-
-            if obv_rsi is None:
-                await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
-                continue
-
-            st["scalp_obv_rsi"] = obv_rsi
-            st["scalp_mean_price"] = mean
-            st["scalp_upper_band"] = upper_dev2
-            st["scalp_lower_band"] = lower_dev2
-
-            mid_price = closes[-1]
-            rsi_upper = float(cfg.get("scalp_rsi_upper", 70))
-            rsi_lower = float(cfg.get("scalp_rsi_lower", 30))
-            docht_threshold = float(cfg.get("scalp_docht_threshold", 0.5))
-
-            # Signal prüfen
-            signal = None
-            if st.get("scalp_position") is None and current_size == 0:
-                if obv_rsi > rsi_upper and mid_price >= lower_dev2:
-                    signal = "short"
-                elif obv_rsi < rsi_lower and mid_price <= upper_dev2:
-                    signal = "long"
-
-                if signal:
-                    entry_price = mid_price
-                    market_index = MARKET_INDICES[symbol]
-                    precision = get_precision(symbol)
-                    min_base = get_min_base_amount(symbol)
-
-                    position_usd = float(cfg.get("scalp_position_size_usd", 50.0))
-                    position_size = position_usd / entry_price
-                    base_amount = int(position_size * precision)
-
-                    if base_amount * (1 / precision) >= min_base:
-                        is_ask = signal == "short"
-                        tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, entry_price)
-
-                        if not err:
-                            st["scalp_position"] = signal
-                            st["scalp_entry_price"] = entry_price
-                            st["scalp_entry_size"] = position_size
-                            st["scalp_tp1_done"] = False
-                            debug_log(f"🎯 [{symbol}] Scalp {signal.upper()}: {position_size:.6f} @ {entry_price}")
-
-            # Exit TP1/TP2
-            elif st.get("scalp_position") and current_size > 0:
-                direction = st["scalp_position"]
-                entry = st["scalp_entry_price"]
-                mean = st["scalp_mean_price"]
-
-                tp1_hit = False
-                tp2_hit = False
-
-                if direction == "long":
-                    tp1_hit = mid_price >= mean and not st["scalp_tp1_done"]
-                    tp2_hit = mid_price >= upper_dev2
+                data = await fetch_candles_binance_vol(symbol, resolution, count_back=needed_bars)
+                if data:
+                    timestamps, opens, highs, lows, closes, volumes = data
+                    closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
                 else:
-                    tp1_hit = mid_price <= mean and not st["scalp_tp1_done"]
-                    tp2_hit = mid_price <= lower_dev2
+                    closed_ts = None
 
-                if tp1_hit:
-                    st["scalp_tp1_done"] = True
-                    debug_log(f"✅ [{symbol}] Scalp TP1")
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
 
-                elif tp2_hit:
-                    pnl = (mid_price - entry) * st["scalp_entry_size"] * (1 if direction == "long" else -1)
-                    stats = st.setdefault("scalp_stats", {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0})
-                    stats["trades"] += 1
-                    stats["pnl"] = round(stats["pnl"] + pnl, 4)
-                    if pnl >= 0:
-                        stats["wins"] += 1
+                if st["position"] is not None and st["last_price"] is not None:
+                    await check_scalp_sl(symbol, st["last_price"])
+
+                if closed_ts and len(closed_c) > min_needed:
+                    candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
+                    max_age_seconds = 300
+                    if candle_age_seconds > max_age_seconds:
+                        debug_log(f"⚠️ [{symbol}] Scalp VWAP OBV RSI: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
                     else:
-                        stats["losses"] += 1
-
-                    st["scalp_position"] = None
-                    st["scalp_entry_price"] = None
-                    st["scalp_entry_size"] = 0.0
-                    st["scalp_tp1_done"] = False
-                    debug_log(f"🏁 [{symbol}] Scalp TP2: PnL ${round(pnl, 3)}")
-
+                        last_ts = closed_ts[-1]
+                        if last_ts != last_processed_ts:
+                            last_processed_ts = last_ts
+                            long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi = _scalp_compute_signal(
+                                cfg, closed_o, closed_h, closed_l, closed_c, closed_v)
+                            st["scalp_mean_price"] = mean
+                            st["scalp_upper_band"] = upper_dev2
+                            st["scalp_lower_band"] = lower_dev2
+                            st["scalp_obv_rsi"] = obv_rsi
+                            await check_scalp_entry(symbol, long_signal, short_signal, closed_c[-1])
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            debug_log(f"💓 [{symbol}] Scalp VWAP OBV RSI aktiv: OBV-RSI={round(st.get('scalp_obv_rsi') or 0, 1)}, "
+                                      f"Mittelband={round(st.get('scalp_mean_price') or 0, 4)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Scalp VWAP OBV RSI wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Scalp VWAP OBV RSI wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
         except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Scalp Fehler", {"error": str(e)})
-            if client:
-                await _safe_close_client(client)
-                client = None
-            await asyncio.sleep(5)
-            continue
+            debug_log(f"⚠️ [{symbol}] Scalp VWAP OBV RSI-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
-        await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
+        await asyncio.sleep(5)

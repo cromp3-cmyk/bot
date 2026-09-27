@@ -208,16 +208,17 @@ def default_config():
         "gs_max_open_orders": int(os.getenv("GS_MAX_OPEN_ORDERS", "8")),
         "gs_poll_seconds": float(os.getenv("GS_POLL_SECONDS", "2.0")),
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
+        # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
+        # Grid/AB-Breakout/RSI/MVWAP) - kein eigenes scalp_position_size_usd noetig.
         "scalp_timeframe": os.getenv("SCALP_TIMEFRAME", "5m"),
         "scalp_vwap_length": int(os.getenv("SCALP_VWAP_LENGTH", "60")),
         "scalp_rsi_length": int(os.getenv("SCALP_RSI_LENGTH", "5")),
         "scalp_rsi_upper": float(os.getenv("SCALP_RSI_UPPER", "70")),
         "scalp_rsi_lower": float(os.getenv("SCALP_RSI_LOWER", "30")),
         "scalp_docht_threshold": float(os.getenv("SCALP_DOCHT_THRESHOLD", "0.5")),
-        "scalp_position_size_usd": float(os.getenv("SCALP_POSITION_SIZE_USD", "50.0")),
-        "scalp_taker_market": os.getenv("SCALP_TAKER_MARKET", "true").lower() == "true",
-        "scalp_max_open_positions": int(os.getenv("SCALP_MAX_OPEN_POSITIONS", "1")),
-        "scalp_poll_seconds": float(os.getenv("SCALP_POLL_SECONDS", "1.0")),
+        "scalp_sl_pct": float(os.getenv("SCALP_SL_PCT", "0.6")),  # SL in % ab Ø-Einstieg, Standard 0.6%, einstellbar
+        "scalp_max_nachkauf": int(os.getenv("SCALP_MAX_NACHKAUF", "3")),  # bis zu 3 Nachkaeufe, wie im MVWAP-Skript
+        "scalp_nachkauf_min_abstand_usd": float(os.getenv("SCALP_NACHKAUF_MIN_ABSTAND_USD", "0.0")),
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -423,19 +424,16 @@ def default_state():
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
         # ===== Scalp VWAP OBV RSI State =====
-        "scalp_position": None,
-        "scalp_entry_price": None,
-        "scalp_entry_time": None,
-        "scalp_entry_size": 0.0,
+        # Position/Ø-Einstieg/Groesse/Stats/Trade-Log laufen ueber die gemeinsamen Felder oben
+        # (position, avg_entry_price, total_coin_size, entry_count, stats, trade_log) - wie bei
+        # allen anderen Strategien. Hier nur das Strategie-eigene: SL-Preis, TP1-Flag, die
+        # zuletzt berechneten Baender + OBV-RSI (fuers Dashboard).
+        "scalp_sl_price": None,
         "scalp_tp1_done": False,
         "scalp_mean_price": None,
         "scalp_upper_band": None,
         "scalp_lower_band": None,
         "scalp_obv_rsi": None,
-        "scalp_last_error": None,
-        "scalp_trade_log": [],
-        "scalp_stats": {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0},
-        "scalp_candles": {},
     }
 
 
@@ -1297,6 +1295,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
+      <option value="scalp_vwap_obv_rsi">Scalp VWAP OBV RSI (Mean-Reversion, VWAP-Bänder + OBV RSI, TP1/TP2)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
       <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
       <option value="mvwap_mf_signal">Multi-VWAP Money-Flow Signal (VWAP+MFI/CMF-Oszillator dreht Richtung, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
@@ -1724,6 +1723,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
 
+  <div data-mode="scalp_vwap_obv_rsi" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📉 <b>Scalp VWAP OBV RSI</b>: Mean-Reversion. Long, wenn eine Kerze im grünen Band (Dev2-Dev3-Zone) schließt ODER der Docht mind. die Hälfte des Bandes durchbricht UND der OBV-RSI unter dem unteren Schwellenwert liegt (Short spiegelbildlich im roten Band). Solange dasselbe Signal weiter gilt, legt der Bot bis zu "Max. Nachkäufe" weitere Stufen nach. TP1 (50%) am Mittelband zieht den SL auf Einstieg, TP2 (Rest) am Gegenband. SL ist ein fester %-Abstand vom Ø-Einstieg.
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Zeitrahmen</label>
+    <select class="cfg" id="scalp_timeframe">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="scalp_timeframe_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>VWAP-Deviation Länge (Kerzen)</label><input type="number" step="1" min="10" id="scalp_vwap_length"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI Länge</label><input type="number" step="1" min="2" id="scalp_rsi_length"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI oberer Schwellenwert (Short)</label><input type="number" step="1" min="50" max="100" id="scalp_rsi_upper"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI unterer Schwellenwert (Long)</label><input type="number" step="1" min="0" max="50" id="scalp_rsi_lower"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Docht-Schwelle (Anteil des Bandes, 0.5 = 50%)</label><input type="number" step="0.05" min="0" max="1" id="scalp_docht_threshold"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Stop-Loss (% vom Ø-Einstieg)</label><input type="number" step="0.05" min="0.05" id="scalp_sl_pct"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Max. Nachkäufe (0 = kein Nachkauf)</label><input type="number" step="1" min="0" max="10" id="scalp_max_nachkauf"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Mindestabstand zum letzten Einstieg/Nachkauf ($, 0 = aus)</label>
+    <input type="number" step="0.01" min="0" id="scalp_nachkauf_min_abstand_usd">
+  </div>
 
 
 
@@ -2547,7 +2575,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3098,6 +3126,15 @@ async function refresh() {
     document.getElementById('mvwap_cloud_filter_length').value = data.config.mvwap_cloud_filter_length;
     document.getElementById('mvwap_cloud_filter_dev_mult').value = data.config.mvwap_cloud_filter_dev_mult;
     document.getElementById('mvwap_cloud_filter_touch_arm').value = String(data.config.mvwap_cloud_filter_touch_arm);
+    setResolutionField('scalp_timeframe', data.config.scalp_timeframe);
+    document.getElementById('scalp_vwap_length').value = data.config.scalp_vwap_length;
+    document.getElementById('scalp_rsi_length').value = data.config.scalp_rsi_length;
+    document.getElementById('scalp_rsi_upper').value = data.config.scalp_rsi_upper;
+    document.getElementById('scalp_rsi_lower').value = data.config.scalp_rsi_lower;
+    document.getElementById('scalp_docht_threshold').value = data.config.scalp_docht_threshold;
+    document.getElementById('scalp_sl_pct').value = data.config.scalp_sl_pct;
+    document.getElementById('scalp_max_nachkauf').value = data.config.scalp_max_nachkauf;
+    document.getElementById('scalp_nachkauf_min_abstand_usd').value = data.config.scalp_nachkauf_min_abstand_usd;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -3365,6 +3402,15 @@ function buildConfigPayload() {
     mvwap_cloud_filter_length: parseInt(document.getElementById('mvwap_cloud_filter_length').value),
     mvwap_cloud_filter_dev_mult: parseFloat(document.getElementById('mvwap_cloud_filter_dev_mult').value),
     mvwap_cloud_filter_touch_arm: document.getElementById('mvwap_cloud_filter_touch_arm').value === 'true',
+    scalp_timeframe: getResolutionField('scalp_timeframe'),
+    scalp_vwap_length: parseInt(document.getElementById('scalp_vwap_length').value),
+    scalp_rsi_length: parseInt(document.getElementById('scalp_rsi_length').value),
+    scalp_rsi_upper: parseFloat(document.getElementById('scalp_rsi_upper').value),
+    scalp_rsi_lower: parseFloat(document.getElementById('scalp_rsi_lower').value),
+    scalp_docht_threshold: parseFloat(document.getElementById('scalp_docht_threshold').value),
+    scalp_sl_pct: parseFloat(document.getElementById('scalp_sl_pct').value),
+    scalp_max_nachkauf: parseInt(document.getElementById('scalp_max_nachkauf').value),
+    scalp_nachkauf_min_abstand_usd: parseFloat(document.getElementById('scalp_nachkauf_min_abstand_usd').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -3588,7 +3634,9 @@ async def handle_config_update(request):
                 "mvwap_adx_filter_enabled", "mvwap_adx_filter_length", "mvwap_adx_filter_threshold", "mvwap_adx_filter_directional", "mvwap_adx_filter_mode",
                 "mvwap_macd_filter_enabled", "mvwap_macd_filter_fast", "mvwap_macd_filter_slow", "mvwap_macd_filter_signal",
                 "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
-                "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm"]:
+                "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm",
+                "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
+                "scalp_docht_threshold", "scalp_sl_pct", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
