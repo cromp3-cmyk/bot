@@ -2080,7 +2080,39 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
         }
 
-    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+    if entry_mode == "scalp_vwap_obv_rsi":
+        max_candles = BACKTEST_MAX_CANDLES.get("scalp_vwap_obv_rsi", 100_000)
+        resolution = cfg.get("scalp_timeframe", "5m")
+        if resolution in SUB_MINUTE_RESOLUTIONS:
+            max_candles = min(max_candles, 5000)
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        vwap_length = int(cfg.get("scalp_vwap_length", 60))
+        rsi_length = int(cfg.get("scalp_rsi_length", 5))
+        min_needed = vwap_length + rsi_length + 10
+        if not candles or len(candles[4]) < min_needed:
+            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+        n_candles = len(candles[4])
+
+        trades = backtest_scalp_vwap_obv_rsi(candles, cfg)
+        # Wie bei MVWAP: 'trades' enthaelt zusaetzlich zur Ausstiegs-Zeile auch eine Zeile je
+        # Ersteinstieg/Nachkauf-Stufe (pnl=None) - nur fuer die Anzeige. Fuer Statistik/Kennzahlen
+        # zaehlen nur die abgeschlossenen Zeilen (pnl gesetzt).
+        closed_trades = [t for t in trades if t["pnl"] is not None]
+        stats = summarize_backtest_trades(closed_trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in closed_trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in closed_trades if t["dir"] == "short"], exclude_top_n)
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
+        }
+
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 AB_SWEEP_MAX_COMBOS = 600
 AB_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -2360,6 +2392,7 @@ BACKTEST_MAX_CANDLES = {
     "st_rsi_signal": 100_000,
     "hvd_signal": 100_000,
     "ab_breakout": 100_000,
+    "scalp_vwap_obv_rsi": 100_000,
 }
 
 
@@ -4817,3 +4850,110 @@ async def scalp_poll_loop(symbol):
             debug_log(f"⚠️ [{symbol}] Scalp VWAP OBV RSI-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(5)
+
+
+def backtest_scalp_vwap_obv_rsi(candles, cfg):
+    """Backtest fuer Scalp VWAP OBV RSI - simuliert EXAKT dieselben Regeln wie die Live-Engine
+    (check_scalp_entry/check_scalp_sl): Entry bei Band (Dev2-Dev3-Zone) + Docht-Schwelle +
+    OBV-RSI, bis zu scalp_max_nachkauf Nachkaeufe waehrend das Signal anhaelt (mit optionalem
+    Mindestabstand zum letzten Fill, TP1 stoppt weitere Nachkaeufe), TP1 (50% am Mittelband,
+    danach SL auf Einstieg), TP2 (Rest am Gegenband), SL (% vom Ø-Einstieg). 'candles' ist ein
+    6er-Tupel MIT Volumen (ts, o, h, l, c, v)."""
+    ts, o, h, l, c, v = candles
+    n = len(c)
+    vwap_length = int(cfg.get("scalp_vwap_length", 60))
+    rsi_length = int(cfg.get("scalp_rsi_length", 5))
+    rsi_upper = float(cfg.get("scalp_rsi_upper", 70))
+    rsi_lower = float(cfg.get("scalp_rsi_lower", 30))
+    docht_threshold = float(cfg.get("scalp_docht_threshold", 0.5))
+    sl_pct = float(cfg.get("scalp_sl_pct", 0.6)) / 100.0
+    max_nachkauf = max(0, int(cfg.get("scalp_max_nachkauf", 3) or 0))
+    max_entries = 1 + max_nachkauf
+    min_abstand = cfg.get("scalp_nachkauf_min_abstand_usd", 0.0) or 0.0
+    margin, leverage = cfg["margin"], cfg["leverage"]
+
+    min_needed = vwap_length + rsi_length + 2
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp1_done","entries","last_fill_price"}
+    trades = []
+
+    def _recalc_sl(pos):
+        entry, pdir = pos["entry"], pos["dir"]
+        pos["sl_price"] = entry * (1 - sl_pct) if pdir == "long" else entry * (1 + sl_pct)
+
+    for i in range(min_needed, n):
+        # Baender/OBV-RSI IMMER nur aus Kerzen BIS EINSCHLIESSLICH der aktuellen (keine
+        # Zukunftsdaten) - identisch zur Live-Berechnung auf der zuletzt geschlossenen Kerze.
+        mean, lower_dev2, upper_dev2, lower_dev3, upper_dev3 = calculate_vwap_deviation(
+            c[:i + 1], h[:i + 1], l[:i + 1], v[:i + 1], vwap_length)
+        if mean is None:
+            continue
+        obv_rsi = calculate_obv_rsi(c[:i + 1], v[:i + 1], rsi_length)
+        if obv_rsi is None:
+            continue
+
+        price = c[i]
+
+        # --- SL/TP1/TP2 einer offenen Position pruefen (mit High/Low der Kerze) ---
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position["sl_price"]
+            hit_sl = (pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price)
+            if hit_sl:
+                reason = "BREAKEVEN" if position["tp1_done"] else "SL"
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+            else:
+                if not position["tp1_done"]:
+                    tp1_hit = (pdir == "long" and h[i] >= mean) or (pdir == "short" and l[i] <= mean)
+                    if tp1_hit:
+                        close_size = position["size"] * 0.5
+                        _bt_close_trade(trades, pdir, entry, mean, close_size, i, position["entry_i"], "TP1", ts=ts)
+                        position["size"] -= close_size
+                        position["tp1_done"] = True
+                        position["sl_price"] = entry  # Breakeven
+                if position is not None:
+                    tp2_hit = (pdir == "long" and h[i] >= upper_dev2) or (pdir == "short" and l[i] <= lower_dev2)
+                    if tp2_hit:
+                        exit_price = upper_dev2 if pdir == "long" else lower_dev2
+                        _bt_close_trade(trades, pdir, entry, exit_price, position["size"], i, position["entry_i"], "TP2", ts=ts)
+                        position = None
+
+        # --- Signal dieser Kerze (fuer Neueinstieg ODER Nachkauf) ---
+        upper_band_width = max(upper_dev3 - upper_dev2, 1e-12)
+        lower_band_width = max(lower_dev2 - lower_dev3, 1e-12)
+        short_signal = (c[i] >= upper_dev2 or h[i] >= upper_dev2 + docht_threshold * upper_band_width) and obv_rsi > rsi_upper
+        long_signal = (c[i] <= lower_dev2 or l[i] <= lower_dev2 - docht_threshold * lower_band_width) and obv_rsi < rsi_lower
+
+        if position is not None:
+            pdir = position["dir"]
+            same_dir_signal = (pdir == "long" and long_signal) or (pdir == "short" and short_signal)
+            abstand_ok = min_abstand <= 0 or abs(price - position["last_fill_price"]) >= min_abstand
+            if same_dir_signal and not position["tp1_done"] and position["entries"] < max_entries and abstand_ok:
+                add_size = (margin * leverage) / price
+                old_size = position["size"]
+                new_size = old_size + add_size
+                position["entry"] = (position["entry"] * old_size + price * add_size) / new_size
+                position["size"] = new_size
+                position["entries"] += 1
+                position["last_fill_price"] = price
+                _recalc_sl(position)
+                _bt_record_addon(trades, pdir, price, i, position["entry_i"], position["entries"], ts=ts, is_add_on=True)
+            continue
+
+        if long_signal:
+            target = "long"
+        elif short_signal:
+            target = "short"
+        else:
+            continue
+
+        size = (margin * leverage) / price
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "tp1_done": False,
+                    "entries": 1, "last_fill_price": price}
+        _recalc_sl(position)
+        _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
