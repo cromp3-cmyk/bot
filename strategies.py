@@ -2054,7 +2054,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
         if cfg.get("mvwap_adx_filter_enabled", False):
             adx_long_ok, adx_short_ok = compute_adx_filter_series(
                 candles, cfg.get("mvwap_adx_filter_length", 14), cfg.get("mvwap_adx_filter_threshold", 20),
-                directional=cfg.get("mvwap_adx_filter_directional", True))
+                directional=cfg.get("mvwap_adx_filter_directional", True), mode=cfg.get("mvwap_adx_filter_mode", "require_trend"))
 
         macd_long_ok = macd_short_ok = None
         if cfg.get("mvwap_macd_filter_enabled", False):
@@ -3535,17 +3535,31 @@ async def compute_supertrend_filter_live(symbol, st, cfg, resolution, multiplier
     return [bullish_now] * n_bars, [not bullish_now] * n_bars
 
 
-def compute_adx_filter_series(candles, length, threshold, directional=True):
+def compute_adx_filter_series(candles, length, threshold, directional=True, mode="require_trend"):
     """ADX/DMI-Trendfilter auf den EIGENEN Kerzen des Signalgebers (kein HTF-Fetch noetig - ADX
     braucht anders als SuperTrend ueblicherweise keine hoehere Zeiteinheit). candles = (ts,o,h,l,c).
-    directional=True (Standard): long_ok nur wenn ADX>Schwelle UND +DI>-DI (Trend UND Richtung
-    stimmen), short_ok umgekehrt. directional=False: long_ok==short_ok==(ADX>Schwelle) - reiner
-    Trendstaerke-Filter ohne Richtungsvorgabe (z.B. um Seitwaerts-Phasen generell zu blocken).
+
+    mode="require_trend" (Standard, alte Bedeutung): long_ok/short_ok nur wenn ADX>Schwelle (Trend
+    noetig) - directional=True verlangt zusaetzlich die passende +DI/-DI-Ausrichtung, directional=False
+    ist reine Trendstaerke ohne Richtungsvorgabe.
+
+    mode="avoid_trend" (neu, Nutzer-Vorgabe: "in einem starken auf-/abwaertstrend macht er immer
+    minus da er viele kaeufe macht und dann im minus verkauft - mit welchem filter kann man die
+    starken trends rausnehmen"): fuer ein Reversal-/Mean-Reversion-System wie MVWAP-MF ist ein
+    starker, andauernder Trend das Worst-Case-Szenario (Nachkauf gegen die Bewegung, Ausstieg erst
+    beim naechsten Gegensignal, oft tief im Minus) - hier gilt long_ok==short_ok==(ADX<Schwelle),
+    also PAUSE (beide Richtungen gleichermassen blockiert) sobald der Trend zu stark wird,
+    unabhaengig von directional (Richtung ist hier irrelevant - ein starker Trend soll so oder so
+    blockieren).
+
     Nimmt sowohl 5er- (ts,o,h,l,c) als auch 6er-Tupel (ts,o,h,l,c,v) entgegen - ein eventuell
     mitgegebenes Volumen wird schlicht ignoriert (ADX braucht keins)."""
     _ts, _o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     adx, plus_di, minus_di = compute_adx(h, l, c, length)
     n = len(c)
+    if mode == "avoid_trend":
+        ok = [adx[i] is not None and adx[i] < threshold for i in range(n)]
+        return ok, list(ok)
     if directional:
         long_ok = [adx[i] is not None and adx[i] > threshold and plus_di[i] > minus_di[i] for i in range(n)]
         short_ok = [adx[i] is not None and adx[i] > threshold and minus_di[i] > plus_di[i] for i in range(n)]
@@ -4256,7 +4270,7 @@ async def _mvwap_apply_filters(symbol, st, cfg, candles, long_raw, short_raw):
     if cfg.get("mvwap_adx_filter_enabled", False):
         active.append(compute_adx_filter_series(
             candles, cfg.get("mvwap_adx_filter_length", 14), cfg.get("mvwap_adx_filter_threshold", 20),
-            directional=cfg.get("mvwap_adx_filter_directional", True)))
+            directional=cfg.get("mvwap_adx_filter_directional", True), mode=cfg.get("mvwap_adx_filter_mode", "require_trend")))
     if cfg.get("mvwap_macd_filter_enabled", False):
         active.append(compute_macd_filter_series(
             candles, cfg.get("mvwap_macd_filter_fast", 12), cfg.get("mvwap_macd_filter_slow", 26), cfg.get("mvwap_macd_filter_signal", 9)))

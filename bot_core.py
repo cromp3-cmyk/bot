@@ -323,6 +323,7 @@ def default_config():
         "mvwap_adx_filter_length": int(os.getenv("MVWAP_ADX_FILTER_LENGTH", "14")),
         "mvwap_adx_filter_threshold": float(os.getenv("MVWAP_ADX_FILTER_THRESHOLD", "20")),
         "mvwap_adx_filter_directional": os.getenv("MVWAP_ADX_FILTER_DIRECTIONAL", "true").lower() == "true",
+        "mvwap_adx_filter_mode": os.getenv("MVWAP_ADX_FILTER_MODE", "require_trend"),  # "require_trend" (Standard, alt) oder "avoid_trend" (neu - pausiert bei starkem Trend)
         "mvwap_macd_filter_enabled": os.getenv("MVWAP_MACD_FILTER_ENABLED", "false").lower() == "true",
         "mvwap_macd_filter_fast": int(os.getenv("MVWAP_MACD_FILTER_FAST", "12")),
         "mvwap_macd_filter_slow": int(os.getenv("MVWAP_MACD_FILTER_SLOW", "26")),
@@ -1633,7 +1634,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled"><label>ADX-Periode</label><input type="number" step="1" min="1" id="mvwap_adx_filter_length"></div>
   <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="1" id="mvwap_adx_filter_threshold"></div>
-  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled"><label>Mit Richtung (+DI/-DI)</label>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled">
+    <label>Modus</label>
+    <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">
+      "Trend fordern" lässt nur handeln, wenn die Schwelle ÜBERSCHRITTEN wird (starker Trend nötig).
+      "Trend vermeiden" ist für ein Reversal-System wie MVWAP-MF meist die bessere Wahl: er PAUSIERT
+      Einstieg und Nachkauf, solange die Schwelle überschritten ist (starker Auf-/Abwärtstrend),
+      und lässt nur in ruhigeren/Seitwärts-Phasen handeln - verhindert genau das "in einen starken
+      Trend hinein nachkaufen und im Minus verkaufen".
+    </div>
+    <select class="cfg" id="mvwap_adx_filter_mode">
+      <option value="require_trend">Trend fordern (ADX &gt; Schwelle nötig)</option>
+      <option value="avoid_trend">Trend vermeiden (pausiert wenn ADX &gt; Schwelle)</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled" id="mvwap_adx_filter_directional_wrap"><label>Mit Richtung (+DI/-DI)</label>
     <select class="cfg" id="mvwap_adx_filter_directional">
       <option value="true">An (Long nur bei +DI&gt;-DI, Short umgekehrt)</option>
       <option value="false">Aus (nur Trendstärke, Richtung egal)</option>
@@ -3035,6 +3050,7 @@ async function refresh() {
     document.getElementById('mvwap_adx_filter_length').value = data.config.mvwap_adx_filter_length;
     document.getElementById('mvwap_adx_filter_threshold').value = data.config.mvwap_adx_filter_threshold;
     document.getElementById('mvwap_adx_filter_directional').value = String(data.config.mvwap_adx_filter_directional);
+    document.getElementById('mvwap_adx_filter_mode').value = data.config.mvwap_adx_filter_mode || 'require_trend';
     document.getElementById('mvwap_macd_filter_enabled').value = String(data.config.mvwap_macd_filter_enabled);
     document.getElementById('mvwap_macd_filter_fast').value = data.config.mvwap_macd_filter_fast;
     document.getElementById('mvwap_macd_filter_slow').value = data.config.mvwap_macd_filter_slow;
@@ -3300,6 +3316,7 @@ function buildConfigPayload() {
     mvwap_adx_filter_length: parseInt(document.getElementById('mvwap_adx_filter_length').value),
     mvwap_adx_filter_threshold: parseFloat(document.getElementById('mvwap_adx_filter_threshold').value),
     mvwap_adx_filter_directional: document.getElementById('mvwap_adx_filter_directional').value === 'true',
+    mvwap_adx_filter_mode: document.getElementById('mvwap_adx_filter_mode').value,
     mvwap_macd_filter_enabled: document.getElementById('mvwap_macd_filter_enabled').value === 'true',
     mvwap_macd_filter_fast: parseInt(document.getElementById('mvwap_macd_filter_fast').value),
     mvwap_macd_filter_slow: parseInt(document.getElementById('mvwap_macd_filter_slow').value),
@@ -3532,7 +3549,7 @@ async def handle_config_update(request):
                 "mvwap_sl_enabled", "mvwap_sl_manual_usd", "mvwap_tp_enabled", "mvwap_tp_manual_usd",
                 "mvwap_be_enabled", "mvwap_be_trigger_usd", "mvwap_sl_cooldown_seconds",
                 "mvwap_supertrend_filter_enabled", "mvwap_supertrend_filter_resolution", "mvwap_supertrend_filter_multiplier", "mvwap_supertrend_filter_atr_period",
-                "mvwap_adx_filter_enabled", "mvwap_adx_filter_length", "mvwap_adx_filter_threshold", "mvwap_adx_filter_directional",
+                "mvwap_adx_filter_enabled", "mvwap_adx_filter_length", "mvwap_adx_filter_threshold", "mvwap_adx_filter_directional", "mvwap_adx_filter_mode",
                 "mvwap_macd_filter_enabled", "mvwap_macd_filter_fast", "mvwap_macd_filter_slow", "mvwap_macd_filter_signal",
                 "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
                 "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm"]:
