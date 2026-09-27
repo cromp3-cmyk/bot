@@ -28,7 +28,6 @@ from copytrade import (
 )
 from binance_ws import binance_ws_cache_loop
 from grid_scalp import grid_scalp_poll_loop
-from scalp_vwap_obv_rsi import scalp_poll_loop
 
 
 async def start_web_server():
