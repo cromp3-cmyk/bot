@@ -4212,17 +4212,28 @@ async def check_mvwap_entry(symbol, buy_signal, sell_signal, price):
         pos = None
 
     max_entries = max(1, int(cfg.get("mvwap_max_entries", 1) or 1))
+    # Mindestabstand ($) zum letzten Einstieg/Nachkauf, bevor ein weiterer Nachkauf erlaubt ist -
+    # Nutzer-Vorgabe gegen zu dichte Nachkaeufe in schnellen Bewegungen: "nachkauf nur erlauben
+    # z.B. 1 dollar abstand zum letzten wert, veraenderbar". 0 = aus (altes Verhalten, jedes
+    # Signal zaehlt sofort). st["last_entry_price"] wird von execute_entry nach JEDEM Fill (auch
+    # Nachkauf) auf den TATSAECHLICHEN Fuellpreis gesetzt (siehe bot_core.py), nicht den Ø-Einstieg.
+    min_abstand = cfg.get("mvwap_nachkauf_min_abstand_usd", 0.0) or 0.0
+
+    def _abstand_ok():
+        last_price = st.get("last_entry_price")
+        return min_abstand <= 0 or last_price is None or abs(price - last_price) >= min_abstand
 
     # Nachkauf: Position ist schon in dieselbe Richtung offen UND das Signal derselben Richtung
-    # gilt weiterhin diese Kerze - solange die Stufen-Obergrenze noch nicht erreicht ist.
+    # gilt weiterhin diese Kerze - solange die Stufen-Obergrenze noch nicht erreicht ist UND der
+    # Mindestabstand zum letzten Fill erreicht ist.
     if pos == "long" and buy_signal:
-        if st.get("entry_count", 0) >= max_entries:
+        if st.get("entry_count", 0) >= max_entries or not _abstand_ok():
             return
         await execute_entry(symbol, "long", price, is_add_on=True)
         _mvwap_update_sl_tp(st, cfg)
         return
     if pos == "short" and sell_signal:
-        if st.get("entry_count", 0) >= max_entries:
+        if st.get("entry_count", 0) >= max_entries or not _abstand_ok():
             return
         await execute_entry(symbol, "short", price, is_add_on=True)
         _mvwap_update_sl_tp(st, cfg)
@@ -4386,6 +4397,9 @@ def _simulate_mvwap_trades(candles, cfg, long_signal, short_signal):
     tp_enabled = cfg.get("mvwap_tp_enabled", False)
     tp_manual_usd = cfg.get("mvwap_tp_manual_usd", 10.0)
     max_entries = max(1, int(cfg.get("mvwap_max_entries", 1) or 1))
+    # Mindestabstand ($) zum letzten Fill - siehe check_mvwap_entry-Docstring (Nutzer-Vorgabe
+    # gegen zu dichte Nachkaeufe in schnellen Bewegungen). 0 = aus.
+    min_abstand = cfg.get("mvwap_nachkauf_min_abstand_usd", 0.0) or 0.0
 
     position = None
     trades = []
@@ -4435,15 +4449,18 @@ def _simulate_mvwap_trades(candles, cfg, long_signal, short_signal):
             position = None
 
         if position is not None:
-            # Nachkauf: gleiches Signal gilt weiterhin diese Kerze, Stufenlimit noch offen.
+            # Nachkauf: gleiches Signal gilt weiterhin diese Kerze, Stufenlimit noch offen UND
+            # Mindestabstand zum letzten Fill erreicht (last_fill_price, NICHT der Ø-Einstieg).
             same_dir_edge = (position["dir"] == "long" and buy_now) or (position["dir"] == "short" and sell_now)
-            if same_dir_edge and position["entries"] < max_entries:
+            abstand_ok = min_abstand <= 0 or abs(price - position["last_fill_price"]) >= min_abstand
+            if same_dir_edge and position["entries"] < max_entries and abstand_ok:
                 add_size = (margin * leverage) / price
                 old_size = position["size"]
                 new_size = old_size + add_size
                 position["entry"] = (position["entry"] * old_size + price * add_size) / new_size
                 position["size"] = new_size
                 position["entries"] += 1
+                position["last_fill_price"] = price
                 _recalc_sl_tp(position)
                 _bt_record_addon(trades, position["dir"], price, i, position["entry_i"], position["entries"], ts=ts, is_add_on=True)
             continue  # Position (weiterhin) offen - keine Neueinstiegs-Pruefung diese Kerze
@@ -4462,7 +4479,7 @@ def _simulate_mvwap_trades(candles, cfg, long_signal, short_signal):
         if not can_open:
             continue
         size = (margin * leverage) / price
-        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "be_done": False, "entries": 1}
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl_price": None, "tp_price": None, "be_done": False, "entries": 1, "last_fill_price": price}
         _recalc_sl_tp(position)
         _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
 
