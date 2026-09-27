@@ -3413,8 +3413,9 @@ function buildConfigPayload() {
     scalp_rsi_upper: parseFloat(document.getElementById('scalp_rsi_upper').value),
     scalp_rsi_lower: parseFloat(document.getElementById('scalp_rsi_lower').value),
     scalp_docht_threshold: parseFloat(document.getElementById('scalp_docht_threshold').value),
-    scalp_sl_pct: parseFloat(document.getElementById('scalp_sl_pct').value),
+    scalp_sl_usd: parseFloat(document.getElementById('scalp_sl_usd').value),
     scalp_max_nachkauf: parseInt(document.getElementById('scalp_max_nachkauf').value),
+    scalp_tp1_full_close: document.getElementById('scalp_tp1_full_close').checked,
     scalp_nachkauf_min_abstand_usd: parseFloat(document.getElementById('scalp_nachkauf_min_abstand_usd').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
@@ -3641,7 +3642,7 @@ async def handle_config_update(request):
                 "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
                 "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm",
                 "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
-                "scalp_docht_threshold", "scalp_sl_pct", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd"]:
+                "scalp_docht_threshold", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_tp1_full_close"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

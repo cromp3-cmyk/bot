@@ -4571,13 +4571,18 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
 #                weitere Stufen nach (Standard 3, einstellbar) - identischer Mechanismus zum
 #                Multi-VWAP-Money-Flow-Skript (siehe check_mvwap_entry), inkl. optionalem
 #                Mindestabstand zum letzten Fill (scalp_nachkauf_min_abstand_usd).
-#   TP1:         Rueckkehr zum Mittelband (VWAP-Basis) - schliesst 50% der Position, danach
-#                wird der SL auf den (dann aktuellen) Ø-Einstiegspreis gezogen (Breakeven).
-#   TP2:         Rueckkehr/Durchlauf zum GEGENUEBERLIEGENDEN Dev2-Band - schliesst die
-#                komplette Restposition.
-#   SL:          Prozentualer Abstand vom Ø-Einstiegspreis (scalp_sl_pct, Default 0.6%,
-#                einstellbar), wird nach jedem Erst-/Nachkauf aus dem AKTUELLEN Ø-Einstieg
-#                neu berechnet - bis TP1 den SL auf Breakeven zieht.
+#   TP1:         Rueckkehr zum Mittelband (VWAP-Basis) - schliesst standardmaessig 50% der
+#                Position, danach wird der SL auf den (dann aktuellen) Ø-Einstiegspreis gezogen
+#                (Breakeven). Ueber scalp_tp1_full_close (Checkbox, Default aus) kann TP1
+#                stattdessen die KOMPLETTE Position schliessen - dann gibt es kein TP2 mehr.
+#   TP2:         Nur wenn TP1 NICHT komplett schliesst: Rueckkehr/Durchlauf zum GEGENUEBER-
+#                LIEGENDEN Dev2-Band - schliesst die komplette Restposition.
+#   SL:          Fixer Dollar-Abstand vom Ø-Einstiegspreis (scalp_sl_usd, Default 5$,
+#                einstellbar) - wird als Preisabstand = scalp_sl_usd / aktuelle Coin-Groesse
+#                berechnet, damit der SL wirklich einen $-Verlust von scalp_sl_usd begrenzt
+#                (unabhaengig von Hebel/Positionsgroesse). Nach jedem Erst-/Nachkauf aus dem
+#                AKTUELLEN Ø-Einstieg + AKTUELLER Coin-Groesse neu berechnet - bis TP1 den SL
+#                auf Breakeven zieht.
 #
 # Nutzt dieselbe generische Order-Infrastruktur (execute_entry/execute_partial_exit/
 # execute_exit) wie Grid/AB-Breakout/RSI/MVWAP - dadurch automatisch: dry_run-Beachtung,
@@ -4680,15 +4685,19 @@ def _scalp_reset_state(st):
 
 
 def _scalp_update_sl(st, cfg):
-    """SL = scalp_sl_pct % vom AKTUELLEN Ø-Einstiegspreis - wird nach jedem Erst-/Nachkauf neu
-    berechnet, weil sich der Ø-Einstieg mit jeder weiteren Stufe aendert. Wird NICHT mehr
-    aufgerufen, sobald TP1 den SL bereits auf Breakeven gezogen hat (siehe check_scalp_entry)."""
+    """SL = fixer Dollar-Verlust (scalp_sl_usd) ab dem AKTUELLEN Ø-Einstiegspreis, umgerechnet
+    in einen Preisabstand ueber die AKTUELLE Coin-Groesse (distance = scalp_sl_usd /
+    total_coin_size) - wird nach jedem Erst-/Nachkauf neu berechnet, weil sich sowohl Ø-Einstieg
+    als auch Coin-Groesse mit jeder weiteren Stufe aendern. Wird NICHT mehr aufgerufen, sobald
+    TP1 den SL bereits auf Breakeven gezogen hat (siehe check_scalp_entry)."""
     pos = st["position"]
     entry_ref = st.get("avg_entry_price")
-    if pos is None or not entry_ref:
+    coin_size = st.get("total_coin_size")
+    if pos is None or not entry_ref or not coin_size:
         return
-    sl_pct = float(cfg.get("scalp_sl_pct", 0.6)) / 100.0
-    st["scalp_sl_price"] = entry_ref * (1 - sl_pct) if pos == "long" else entry_ref * (1 + sl_pct)
+    sl_usd = float(cfg.get("scalp_sl_usd", 5.0))
+    distance = sl_usd / coin_size
+    st["scalp_sl_price"] = entry_ref - distance if pos == "long" else entry_ref + distance
 
 
 async def check_scalp_sl(symbol, price):
@@ -4720,6 +4729,12 @@ async def check_scalp_sl(symbol, price):
     if not st.get("scalp_tp1_done"):
         tp1_hit = (pos == "long" and price >= mean) or (pos == "short" and price <= mean)
         if tp1_hit:
+            if cfg.get("scalp_tp1_full_close", False):
+                debug_log(f"🎯 [{symbol}] Scalp VWAP OBV RSI TP1 (Mittelband, volle Größe): {pos.upper()} @ {price} - schließe 100%")
+                await execute_exit(symbol, price, "TP1")
+                if st["position"] is None:
+                    _scalp_reset_state(st)
+                return
             debug_log(f"🎯 [{symbol}] Scalp VWAP OBV RSI TP1 (Mittelband): {pos.upper()} @ {price} - schließe 50%, SL -> Einstieg")
             ok = await execute_partial_exit(symbol, price, 0.5, "TP1")
             if ok and st["position"] is not None:
@@ -4857,8 +4872,10 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
     (check_scalp_entry/check_scalp_sl): Entry bei Band (Dev2-Dev3-Zone) + Docht-Schwelle +
     OBV-RSI, bis zu scalp_max_nachkauf Nachkaeufe waehrend das Signal anhaelt (mit optionalem
     Mindestabstand zum letzten Fill, TP1 stoppt weitere Nachkaeufe), TP1 (50% am Mittelband,
-    danach SL auf Einstieg), TP2 (Rest am Gegenband), SL (% vom Ø-Einstieg). 'candles' ist ein
-    6er-Tupel MIT Volumen (ts, o, h, l, c, v)."""
+    danach SL auf Einstieg, ausser scalp_tp1_full_close=True: dann schliesst TP1 die komplette
+    Position und es gibt kein TP2 mehr), TP2 (Rest am Gegenband), SL (fixer $-Verlust ab
+    Ø-Einstieg, umgerechnet ueber die aktuelle Coin-Groesse). 'candles' ist ein 6er-Tupel MIT
+    Volumen (ts, o, h, l, c, v)."""
     ts, o, h, l, c, v = candles
     n = len(c)
     vwap_length = int(cfg.get("scalp_vwap_length", 60))
@@ -4866,7 +4883,8 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
     rsi_upper = float(cfg.get("scalp_rsi_upper", 70))
     rsi_lower = float(cfg.get("scalp_rsi_lower", 30))
     docht_threshold = float(cfg.get("scalp_docht_threshold", 0.5))
-    sl_pct = float(cfg.get("scalp_sl_pct", 0.6)) / 100.0
+    sl_usd = float(cfg.get("scalp_sl_usd", 5.0))
+    tp1_full_close = bool(cfg.get("scalp_tp1_full_close", False))
     max_nachkauf = max(0, int(cfg.get("scalp_max_nachkauf", 3) or 0))
     max_entries = 1 + max_nachkauf
     min_abstand = cfg.get("scalp_nachkauf_min_abstand_usd", 0.0) or 0.0
@@ -4877,8 +4895,9 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
     trades = []
 
     def _recalc_sl(pos):
-        entry, pdir = pos["entry"], pos["dir"]
-        pos["sl_price"] = entry * (1 - sl_pct) if pdir == "long" else entry * (1 + sl_pct)
+        entry, pdir, size = pos["entry"], pos["dir"], pos["size"]
+        distance = sl_usd / size if size else 0
+        pos["sl_price"] = entry - distance if pdir == "long" else entry + distance
 
     for i in range(min_needed, n):
         # Baender/OBV-RSI IMMER nur aus Kerzen BIS EINSCHLIESSLICH der aktuellen (keine
@@ -4906,11 +4925,15 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
                 if not position["tp1_done"]:
                     tp1_hit = (pdir == "long" and h[i] >= mean) or (pdir == "short" and l[i] <= mean)
                     if tp1_hit:
-                        close_size = position["size"] * 0.5
-                        _bt_close_trade(trades, pdir, entry, mean, close_size, i, position["entry_i"], "TP1", ts=ts)
-                        position["size"] -= close_size
-                        position["tp1_done"] = True
-                        position["sl_price"] = entry  # Breakeven
+                        if tp1_full_close:
+                            _bt_close_trade(trades, pdir, entry, mean, position["size"], i, position["entry_i"], "TP1", ts=ts)
+                            position = None
+                        else:
+                            close_size = position["size"] * 0.5
+                            _bt_close_trade(trades, pdir, entry, mean, close_size, i, position["entry_i"], "TP1", ts=ts)
+                            position["size"] -= close_size
+                            position["tp1_done"] = True
+                            position["sl_price"] = entry  # Breakeven
                 if position is not None:
                     tp2_hit = (pdir == "long" and h[i] >= upper_dev2) or (pdir == "short" and l[i] <= lower_dev2)
                     if tp2_hit:
