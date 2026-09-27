@@ -207,6 +207,17 @@ def default_config():
         "gs_requote_ticks": int(os.getenv("GS_REQUOTE_TICKS", "2")),
         "gs_max_open_orders": int(os.getenv("GS_MAX_OPEN_ORDERS", "8")),
         "gs_poll_seconds": float(os.getenv("GS_POLL_SECONDS", "2.0")),
+        # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
+        "scalp_timeframe": os.getenv("SCALP_TIMEFRAME", "5m"),
+        "scalp_vwap_length": int(os.getenv("SCALP_VWAP_LENGTH", "60")),
+        "scalp_rsi_length": int(os.getenv("SCALP_RSI_LENGTH", "5")),
+        "scalp_rsi_upper": float(os.getenv("SCALP_RSI_UPPER", "70")),
+        "scalp_rsi_lower": float(os.getenv("SCALP_RSI_LOWER", "30")),
+        "scalp_docht_threshold": float(os.getenv("SCALP_DOCHT_THRESHOLD", "0.5")),
+        "scalp_position_size_usd": float(os.getenv("SCALP_POSITION_SIZE_USD", "50.0")),
+        "scalp_taker_market": os.getenv("SCALP_TAKER_MARKET", "true").lower() == "true",
+        "scalp_max_open_positions": int(os.getenv("SCALP_MAX_OPEN_POSITIONS", "1")),
+        "scalp_poll_seconds": float(os.getenv("SCALP_POLL_SECONDS", "1.0")),
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -411,6 +422,20 @@ def default_state():
         "local_1s_buffer": [],
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
+        # ===== Scalp VWAP OBV RSI State =====
+        "scalp_position": None,
+        "scalp_entry_price": None,
+        "scalp_entry_time": None,
+        "scalp_entry_size": 0.0,
+        "scalp_tp1_done": False,
+        "scalp_mean_price": None,
+        "scalp_upper_band": None,
+        "scalp_lower_band": None,
+        "scalp_obv_rsi": None,
+        "scalp_last_error": None,
+        "scalp_trade_log": [],
+        "scalp_stats": {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+        "scalp_candles": {},
     }
 
 

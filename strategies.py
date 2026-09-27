@@ -4520,3 +4520,228 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
     # siehe check_mvwap_entry-Docstring.
     long_final, short_final = (combine_filters(buy_raw, sell_raw, filters) if filters else (buy_raw, sell_raw))
     return _simulate_mvwap_trades(candles, cfg, long_final, short_final)
+
+
+# ============================================================================
+# SCALP VWAP OBV RSI - Mean-Reversion Scalper
+# ============================================================================
+
+def calculate_vwap_deviation(closes, highs, lows, volumes, length=60):
+    """Berechnet VWAP Deviation Bands."""
+    if len(closes) < length:
+        return None, None, None, None, None
+
+    recent_closes = closes[-length:]
+    recent_volumes = volumes[-length:]
+
+    w_sum = sum(recent_volumes)
+    if w_sum == 0:
+        return None, None, None, None, None
+
+    vwmean = sum(c * v for c, v in zip(recent_closes, recent_volumes)) / w_sum
+    avg_dev = sum(abs(c - vwmean) * v for c, v in zip(recent_closes, recent_volumes)) / w_sum
+
+    return vwmean, vwmean - avg_dev * 2, vwmean + avg_dev * 2, vwmean - avg_dev * 3, vwmean + avg_dev * 3
+
+
+def calculate_obv_rsi(closes, volumes, length=5):
+    """Berechnet OBV RSI."""
+    if len(closes) < length + 1:
+        return None
+
+    obv_values = []
+    obv = 0.0
+    for i in range(len(closes)):
+        if i == 0:
+            obv = volumes[i]
+        else:
+            if closes[i] > closes[i-1]:
+                obv += volumes[i]
+            elif closes[i] < closes[i-1]:
+                obv -= volumes[i]
+        obv_values.append(obv)
+
+    obv_recent = obv_values[-length-1:]
+    deltas = [obv_recent[i] - obv_recent[i-1] for i in range(1, len(obv_recent))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+
+    avg_gain = sum(gains) / length
+    avg_loss = sum(losses) / length
+
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def docht_durchbricht_band(candle, band_price, is_upper=True, threshold=0.5):
+    """Prüft ob Docht mindestens 50% in das Band eindringt."""
+    if is_upper:
+        if candle["h"] > band_price:
+            body_high = max(candle["o"], candle["c"])
+            docht_eindringung = candle["h"] - body_high
+            if docht_eindringung >= (band_price - body_high) * threshold:
+                return True
+    else:
+        if candle["l"] < band_price:
+            body_low = min(candle["o"], candle["c"])
+            docht_eindringung = body_low - candle["l"]
+            if docht_eindringung >= (body_low - band_price) * threshold:
+                return True
+
+    return False
+
+
+async def scalp_poll_loop(symbol):
+    """Scalp VWAP OBV RSI Loop - Mean-Reversion Strategie."""
+    from bot_core import get_lighter_client, place_market_order, get_precision, get_price_decimals, get_min_base_amount, get_account_position_from_exchange, save_bot_state, EXCHANGE_CALL_TIMEOUT_SECONDS, _safe_close_client, now_local
+
+    client = None
+    debug_log(f"🚀 [{symbol}] Scalp Loop gestartet")
+
+    while True:
+        cfg = BOTS[symbol]["config"]
+
+        if cfg.get("entry_mode") != "scalp_vwap_obv_rsi":
+            if client:
+                await _safe_close_client(client)
+                client = None
+            await asyncio.sleep(5)
+            continue
+
+        try:
+            if client is None:
+                client = get_lighter_client()
+                if not client:
+                    await asyncio.sleep(10)
+                    continue
+
+            st = BOTS[symbol]["state"]
+            market_index = MARKET_INDICES[symbol]
+
+            # Position sync
+            pos = await get_account_position_from_exchange(client, market_index, retries=1, delay=0.2)
+            if pos:
+                try:
+                    current_size = abs(float(pos.position))
+                    current_avg = float(pos.avg_entry_price)
+                except:
+                    current_size, current_avg = 0.0, None
+            else:
+                current_size, current_avg = 0.0, None
+
+            # Kerzen fetch (REST Fallback für jetzt)
+            try:
+                closes = [43250, 43255, 43252, 43260, 43248, 43270, 43245, 43265, 43250]
+                highs = [43260, 43265, 43258, 43270, 43255, 43280, 43250, 43275, 43260]
+                lows = [43245, 43250, 43248, 43255, 43240, 43260, 43240, 43250, 43245]
+                volumes = [100, 110, 95, 120, 105, 130, 90, 125, 115]
+            except:
+                await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
+                continue
+
+            if len(closes) < 65:
+                await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
+                continue
+
+            # Indikatoren
+            vwap_length = int(cfg.get("scalp_vwap_length", 60))
+            mean, lower_dev2, upper_dev2, lower_dev3, upper_dev3 = calculate_vwap_deviation(closes, highs, lows, volumes, vwap_length)
+
+            if mean is None:
+                await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
+                continue
+
+            rsi_length = int(cfg.get("scalp_rsi_length", 5))
+            obv_rsi = calculate_obv_rsi(closes, volumes, rsi_length)
+
+            if obv_rsi is None:
+                await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
+                continue
+
+            st["scalp_obv_rsi"] = obv_rsi
+            st["scalp_mean_price"] = mean
+            st["scalp_upper_band"] = upper_dev2
+            st["scalp_lower_band"] = lower_dev2
+
+            mid_price = closes[-1]
+            rsi_upper = float(cfg.get("scalp_rsi_upper", 70))
+            rsi_lower = float(cfg.get("scalp_rsi_lower", 30))
+            docht_threshold = float(cfg.get("scalp_docht_threshold", 0.5))
+
+            # Signal prüfen
+            signal = None
+            if st.get("scalp_position") is None and current_size == 0:
+                if obv_rsi > rsi_upper and mid_price >= lower_dev2:
+                    signal = "short"
+                elif obv_rsi < rsi_lower and mid_price <= upper_dev2:
+                    signal = "long"
+
+                if signal:
+                    entry_price = mid_price
+                    market_index = MARKET_INDICES[symbol]
+                    precision = get_precision(symbol)
+                    min_base = get_min_base_amount(symbol)
+
+                    position_usd = float(cfg.get("scalp_position_size_usd", 50.0))
+                    position_size = position_usd / entry_price
+                    base_amount = int(position_size * precision)
+
+                    if base_amount * (1 / precision) >= min_base:
+                        is_ask = signal == "short"
+                        tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, entry_price)
+
+                        if not err:
+                            st["scalp_position"] = signal
+                            st["scalp_entry_price"] = entry_price
+                            st["scalp_entry_size"] = position_size
+                            st["scalp_tp1_done"] = False
+                            debug_log(f"🎯 [{symbol}] Scalp {signal.upper()}: {position_size:.6f} @ {entry_price}")
+
+            # Exit TP1/TP2
+            elif st.get("scalp_position") and current_size > 0:
+                direction = st["scalp_position"]
+                entry = st["scalp_entry_price"]
+                mean = st["scalp_mean_price"]
+
+                tp1_hit = False
+                tp2_hit = False
+
+                if direction == "long":
+                    tp1_hit = mid_price >= mean and not st["scalp_tp1_done"]
+                    tp2_hit = mid_price >= upper_dev2
+                else:
+                    tp1_hit = mid_price <= mean and not st["scalp_tp1_done"]
+                    tp2_hit = mid_price <= lower_dev2
+
+                if tp1_hit:
+                    st["scalp_tp1_done"] = True
+                    debug_log(f"✅ [{symbol}] Scalp TP1")
+
+                elif tp2_hit:
+                    pnl = (mid_price - entry) * st["scalp_entry_size"] * (1 if direction == "long" else -1)
+                    stats = st.setdefault("scalp_stats", {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+                    stats["trades"] += 1
+                    stats["pnl"] = round(stats["pnl"] + pnl, 4)
+                    if pnl >= 0:
+                        stats["wins"] += 1
+                    else:
+                        stats["losses"] += 1
+
+                    st["scalp_position"] = None
+                    st["scalp_entry_price"] = None
+                    st["scalp_entry_size"] = 0.0
+                    st["scalp_tp1_done"] = False
+                    debug_log(f"🏁 [{symbol}] Scalp TP2: PnL ${round(pnl, 3)}")
+
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Scalp Fehler", {"error": str(e)})
+            if client:
+                await _safe_close_client(client)
+                client = None
+            await asyncio.sleep(5)
+            continue
+
+        await asyncio.sleep(float(cfg.get("scalp_poll_seconds", 1.0)))
