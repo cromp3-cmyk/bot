@@ -2095,7 +2095,17 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
         n_candles = len(candles[4])
 
-        trades = backtest_scalp_vwap_obv_rsi(candles, cfg)
+        trend_filter_long_ok = trend_filter_short_ok = None
+        if cfg.get("scalp_supertrend_filter_enabled", False):
+            tf_resolution = cfg.get("scalp_supertrend_filter_resolution", "15m")
+            tf_atr_period = cfg.get("scalp_supertrend_filter_atr_period", 10)
+            tf_multiplier = cfg.get("scalp_supertrend_filter_multiplier", 3.0)
+            trend_filter_long_ok, trend_filter_short_ok, tf_err = await compute_supertrend_filter_backtest(
+                symbol, cfg, candles[0], tf_resolution, tf_multiplier, tf_atr_period)
+            if tf_err:
+                return {"error": tf_err}
+
+        trades = backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok)
         # Wie bei MVWAP: 'trades' enthaelt zusaetzlich zur Ausstiegs-Zeile auch eine Zeile je
         # Ersteinstieg/Nachkauf-Stufe (pnl=None) - nur fuer die Anzeige. Fuer Statistik/Kennzahlen
         # zaehlen nur die abgeschlossenen Zeilen (pnl gesetzt).
@@ -4761,7 +4771,10 @@ async def check_scalp_entry(symbol, long_signal, short_signal, price):
     der die Bedingung zutrifft (nicht nur beim ersten Wendepunkt) - solange TP1 noch nicht
     ausgeloest wurde, legt eine weitere Kerze mit demselben Signal eine Nachkauf-Stufe nach,
     bis zur Obergrenze (1 Ersteinstieg + scalp_max_nachkauf), mit optionalem Mindestabstand
-    zum letzten Fill - identischer Mechanismus zu check_mvwap_entry."""
+    zum letzten Fill in $ (scalp_nachkauf_min_abstand_usd) UND in Kerzen
+    (scalp_nachkauf_min_candles, Standard 10 - zaehlt anhand von scalp_candle_seq, das
+    scalp_poll_loop bei JEDER neu geschlossenen Kerze hochzaehlt) - identischer Mechanismus zu
+    check_mvwap_entry, nur um die Kerzen-Sperre erweitert."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -4771,23 +4784,32 @@ async def check_scalp_entry(symbol, long_signal, short_signal, price):
     max_nachkauf = max(0, int(cfg.get("scalp_max_nachkauf", 3) or 0))
     max_entries = 1 + max_nachkauf
     min_abstand = cfg.get("scalp_nachkauf_min_abstand_usd", 0.0) or 0.0
+    min_candles = max(0, int(cfg.get("scalp_nachkauf_min_candles", 10) or 0))
 
     def _abstand_ok():
         last_price = st.get("last_entry_price")
         return min_abstand <= 0 or last_price is None or abs(price - last_price) >= min_abstand
 
+    def _candle_abstand_ok():
+        last_seq = st.get("scalp_last_entry_seq")
+        if min_candles <= 0 or last_seq is None:
+            return True
+        return st.get("scalp_candle_seq", 0) - last_seq >= min_candles
+
     # Nachkauf: Position bereits in dieselbe Richtung offen, Signal gilt weiterhin diese Kerze,
     # TP1 noch nicht ausgeloest (danach hat Gewinnsicherung Vorrang, kein weiterer Nachkauf mehr).
     if pos == "long" and long_signal:
-        if st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok():
+        if st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok() or not _candle_abstand_ok():
             return
         await execute_entry(symbol, "long", price, is_add_on=True)
+        st["scalp_last_entry_seq"] = st.get("scalp_candle_seq", 0)
         _scalp_update_sl(st, cfg)
         return
     if pos == "short" and short_signal:
-        if st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok():
+        if st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok() or not _candle_abstand_ok():
             return
         await execute_entry(symbol, "short", price, is_add_on=True)
+        st["scalp_last_entry_seq"] = st.get("scalp_candle_seq", 0)
         _scalp_update_sl(st, cfg)
         return
 
@@ -4798,10 +4820,12 @@ async def check_scalp_entry(symbol, long_signal, short_signal, price):
     if long_signal:
         await execute_entry(symbol, "long", price, is_add_on=False)
         _scalp_reset_state(st)
+        st["scalp_last_entry_seq"] = st.get("scalp_candle_seq", 0)
         _scalp_update_sl(st, cfg)
     elif short_signal:
         await execute_entry(symbol, "short", price, is_add_on=False)
         _scalp_reset_state(st)
+        st["scalp_last_entry_seq"] = st.get("scalp_candle_seq", 0)
         _scalp_update_sl(st, cfg)
 
 
@@ -4850,8 +4874,17 @@ async def scalp_poll_loop(symbol):
                         last_ts = closed_ts[-1]
                         if last_ts != last_processed_ts:
                             last_processed_ts = last_ts
+                            st["scalp_candle_seq"] = st.get("scalp_candle_seq", 0) + 1
                             long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi = _scalp_compute_signal(
                                 cfg, closed_o, closed_h, closed_l, closed_c, closed_v)
+                            if cfg.get("scalp_supertrend_filter_enabled", False):
+                                lo, so = await compute_supertrend_filter_live(
+                                    symbol, st, cfg, cfg.get("scalp_supertrend_filter_resolution", "15m"),
+                                    cfg.get("scalp_supertrend_filter_multiplier", 3.0),
+                                    cfg.get("scalp_supertrend_filter_atr_period", 10), 1)
+                                if lo is not None:
+                                    long_signal = long_signal and lo[0]
+                                    short_signal = short_signal and so[0]
                             st["scalp_mean_price"] = mean
                             st["scalp_upper_band"] = upper_dev2
                             st["scalp_lower_band"] = lower_dev2
@@ -4873,15 +4906,18 @@ async def scalp_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
-def backtest_scalp_vwap_obv_rsi(candles, cfg):
+def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_filter_short_ok=None):
     """Backtest fuer Scalp VWAP OBV RSI - simuliert EXAKT dieselben Regeln wie die Live-Engine
     (check_scalp_entry/check_scalp_sl): Entry bei Band (Dev2-Dev3-Zone) + Docht-Schwelle +
-    OBV-RSI, bis zu scalp_max_nachkauf Nachkaeufe waehrend das Signal anhaelt (mit optionalem
-    Mindestabstand zum letzten Fill, TP1 stoppt weitere Nachkaeufe), TP1 (50% am Mittelband,
-    danach SL auf Einstieg, ausser scalp_tp1_full_close=True: dann schliesst TP1 die komplette
-    Position und es gibt kein TP2 mehr), TP2 (Rest am Gegenband), SL (ueber scalp_sl_mode
-    waehlbar: "pct" = % vom Ø-Einstieg, "usd" = fixer $-Verlust, umgerechnet ueber die aktuelle
-    Coin-Groesse). 'candles' ist ein 6er-Tupel MIT Volumen (ts, o, h, l, c, v)."""
+    OBV-RSI, optional zusaetzlich gegated durch einen uebergeordneten SuperTrend-Trendfilter
+    (trend_filter_long_ok/short_ok, siehe scalp_supertrend_filter_enabled in run_backtest), bis
+    zu scalp_max_nachkauf Nachkaeufe waehrend das Signal anhaelt (mit optionalem Mindestabstand
+    zum letzten Fill in $ UND in Kerzen ueber scalp_nachkauf_min_candles, TP1 stoppt weitere
+    Nachkaeufe), TP1 (50% am Mittelband, danach SL auf Einstieg, ausser
+    scalp_tp1_full_close=True: dann schliesst TP1 die komplette Position und es gibt kein TP2
+    mehr), TP2 (Rest am Gegenband), SL (ueber scalp_sl_mode waehlbar: "pct" = % vom Ø-Einstieg,
+    "usd" = fixer $-Verlust, umgerechnet ueber die aktuelle Coin-Groesse). 'candles' ist ein
+    6er-Tupel MIT Volumen (ts, o, h, l, c, v)."""
     ts, o, h, l, c, v = candles
     n = len(c)
     vwap_length = int(cfg.get("scalp_vwap_length", 60))
@@ -4896,6 +4932,7 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
     max_nachkauf = max(0, int(cfg.get("scalp_max_nachkauf", 3) or 0))
     max_entries = 1 + max_nachkauf
     min_abstand = cfg.get("scalp_nachkauf_min_abstand_usd", 0.0) or 0.0
+    min_candles = max(0, int(cfg.get("scalp_nachkauf_min_candles", 10) or 0))
     margin, leverage = cfg["margin"], cfg["leverage"]
 
     min_needed = vwap_length + rsi_length + 2
@@ -4957,12 +4994,16 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
         lower_band_width = max(lower_dev2 - lower_dev3, 1e-12)
         short_signal = (c[i] >= upper_dev2 or h[i] >= upper_dev2 + docht_threshold * upper_band_width) and obv_rsi > rsi_upper
         long_signal = (c[i] <= lower_dev2 or l[i] <= lower_dev2 - docht_threshold * lower_band_width) and obv_rsi < rsi_lower
+        if trend_filter_long_ok is not None:
+            long_signal = long_signal and trend_filter_long_ok[i]
+            short_signal = short_signal and trend_filter_short_ok[i]
 
         if position is not None:
             pdir = position["dir"]
             same_dir_signal = (pdir == "long" and long_signal) or (pdir == "short" and short_signal)
             abstand_ok = min_abstand <= 0 or abs(price - position["last_fill_price"]) >= min_abstand
-            if same_dir_signal and not position["tp1_done"] and position["entries"] < max_entries and abstand_ok:
+            candle_abstand_ok = min_candles <= 0 or (i - position["last_fill_i"]) >= min_candles
+            if same_dir_signal and not position["tp1_done"] and position["entries"] < max_entries and abstand_ok and candle_abstand_ok:
                 add_size = (margin * leverage) / price
                 old_size = position["size"]
                 new_size = old_size + add_size
@@ -4970,6 +5011,7 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
                 position["size"] = new_size
                 position["entries"] += 1
                 position["last_fill_price"] = price
+                position["last_fill_i"] = i
                 _recalc_sl(position)
                 _bt_record_addon(trades, pdir, price, i, position["entry_i"], position["entries"], ts=ts, is_add_on=True)
             continue
@@ -4983,7 +5025,7 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
 
         size = (margin * leverage) / price
         position = {"dir": target, "entry": price, "size": size, "entry_i": i, "tp1_done": False,
-                    "entries": 1, "last_fill_price": price}
+                    "entries": 1, "last_fill_price": price, "last_fill_i": i}
         _recalc_sl(position)
         _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
 

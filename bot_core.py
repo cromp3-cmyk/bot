@@ -221,7 +221,12 @@ def default_config():
         "scalp_sl_usd": float(os.getenv("SCALP_SL_USD", "5.0")),  # SL in $ Verlust ab Ø-Einstieg, falls scalp_sl_mode="usd"
         "scalp_max_nachkauf": int(os.getenv("SCALP_MAX_NACHKAUF", "3")),  # bis zu 3 Nachkaeufe, wie im MVWAP-Skript
         "scalp_nachkauf_min_abstand_usd": float(os.getenv("SCALP_NACHKAUF_MIN_ABSTAND_USD", "0.0")),
+        "scalp_nachkauf_min_candles": int(os.getenv("SCALP_NACHKAUF_MIN_CANDLES", "10")),  # Mindestabstand zum letzten Fill in Kerzen, Standard 10
         "scalp_tp1_full_close": os.getenv("SCALP_TP1_FULL_CLOSE", "false").lower() == "true",  # true = TP1 schliesst 100% statt 50% (dann kein TP2 mehr)
+        "scalp_supertrend_filter_enabled": os.getenv("SCALP_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",  # uebergeordneter SuperTrend-Trendfilter (hoehere Zeiteinheit)
+        "scalp_supertrend_filter_resolution": os.getenv("SCALP_SUPERTREND_FILTER_RESOLUTION", "15m"),
+        "scalp_supertrend_filter_multiplier": float(os.getenv("SCALP_SUPERTREND_FILTER_MULTIPLIER", "3.0")),
+        "scalp_supertrend_filter_atr_period": int(os.getenv("SCALP_SUPERTREND_FILTER_ATR_PERIOD", "10")),
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -437,6 +442,8 @@ def default_state():
         "scalp_upper_band": None,
         "scalp_lower_band": None,
         "scalp_obv_rsi": None,
+        "scalp_candle_seq": 0,  # zaehlt bei JEDER neu geschlossenen Kerze hoch (fuer den Kerzen-Mindestabstand beim Nachkauf)
+        "scalp_last_entry_seq": None,  # scalp_candle_seq-Stand beim letzten Erst-/Nachkauf
     }
 
 
@@ -1762,10 +1769,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="scalp_vwap_obv_rsi"><label>Mindestabstand zum letzten Einstieg/Nachkauf ($, 0 = aus)</label>
     <input type="number" step="0.01" min="0" id="scalp_nachkauf_min_abstand_usd">
   </div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Mindestabstand zum letzten Einstieg/Nachkauf (Kerzen, 0 = aus)</label>
+    <input type="number" step="1" min="0" id="scalp_nachkauf_min_candles">
+  </div>
   <div data-mode="scalp_vwap_obv_rsi">
     <label><input type="checkbox" id="scalp_tp1_full_close" style="width:auto; vertical-align:middle;"> TP1 komplett schließen (100% statt 50%) - danach kein TP2 mehr</label>
   </div>
 
+  <div data-mode="scalp_vwap_obv_rsi"><label>SuperTrend-Trendfilter (übergeordnete, höhere Zeiteinheit)</label>
+    <select class="cfg" id="scalp_supertrend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
+    <select class="cfg" id="scalp_supertrend_filter_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="scalp_supertrend_filter_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>SuperTrend-Multiplikator</label><input type="number" step="0.1" min="0.1" id="scalp_supertrend_filter_multiplier"></div>
+  <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="scalp_supertrend_filter_atr_period"></div>
 
 
 
@@ -2588,7 +2622,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3151,6 +3185,11 @@ async function refresh() {
     document.getElementById('scalp_max_nachkauf').value = data.config.scalp_max_nachkauf;
     document.getElementById('scalp_tp1_full_close').checked = !!data.config.scalp_tp1_full_close;
     document.getElementById('scalp_nachkauf_min_abstand_usd').value = data.config.scalp_nachkauf_min_abstand_usd;
+    document.getElementById('scalp_nachkauf_min_candles').value = data.config.scalp_nachkauf_min_candles;
+    document.getElementById('scalp_supertrend_filter_enabled').value = String(data.config.scalp_supertrend_filter_enabled);
+    setResolutionField('scalp_supertrend_filter_resolution', data.config.scalp_supertrend_filter_resolution);
+    document.getElementById('scalp_supertrend_filter_multiplier').value = data.config.scalp_supertrend_filter_multiplier;
+    document.getElementById('scalp_supertrend_filter_atr_period').value = data.config.scalp_supertrend_filter_atr_period;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -3430,6 +3469,11 @@ function buildConfigPayload() {
     scalp_max_nachkauf: parseInt(document.getElementById('scalp_max_nachkauf').value),
     scalp_tp1_full_close: document.getElementById('scalp_tp1_full_close').checked,
     scalp_nachkauf_min_abstand_usd: parseFloat(document.getElementById('scalp_nachkauf_min_abstand_usd').value),
+    scalp_nachkauf_min_candles: parseInt(document.getElementById('scalp_nachkauf_min_candles').value),
+    scalp_supertrend_filter_enabled: document.getElementById('scalp_supertrend_filter_enabled').value === 'true',
+    scalp_supertrend_filter_resolution: getResolutionField('scalp_supertrend_filter_resolution'),
+    scalp_supertrend_filter_multiplier: parseFloat(document.getElementById('scalp_supertrend_filter_multiplier').value),
+    scalp_supertrend_filter_atr_period: parseInt(document.getElementById('scalp_supertrend_filter_atr_period').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -3655,7 +3699,8 @@ async def handle_config_update(request):
                 "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
                 "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm",
                 "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
-                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_tp1_full_close"]:
+                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_tp1_full_close",
+                "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
