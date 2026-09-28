@@ -576,12 +576,23 @@ async def load_bot_configs():
 PERSISTED_STATE_KEYS = [
     "position", "avg_entry_price", "total_coin_size", "entry_count", "anchor_price",
     "position_opened_at", "last_entry_price", "stats", "trade_log",
+    # current_position_entries MUSS persistiert werden: sonst zeigt die Tabelle "Laufende
+    # Nachkäufe" nach einem Neustart/Redeploy faelschlich "keine offene Position", OBWOHL
+    # Position/Ø-Einstieg/Groesse (siehe oben) ganz normal wiederhergestellt wurden - genau
+    # dieser Widerspruch (oben "short" + Verlust, unten leere Tabelle) wurde live beobachtet.
+    "current_position_entries",
     # gs_tag_map MUSS persistiert werden: sonst weiss der Bot nach einem Redeploy nicht
     # mehr, welche offenen Orders im Buch seine eigenen sind, und cancelt sie als fremd.
     "gs_anchor", "gs_cooldown_until", "gs_tag_map", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
+    # Scalp VWAP OBV RSI: fehlte hier komplett (anders als bei allen anderen Strategien oben) -
+    # nach jedem Neustart waren SL-Preis, TP1-Done und der Halfway-Lock-Status einer offenen
+    # Scalp-Position weg, d.h. der Stop-Loss war bis zur naechsten geschlossenen Kerze faktisch
+    # nicht mehr aktiv (check_scalp_sl braucht "scalp_sl_price" != None).
+    "scalp_sl_price", "scalp_tp1_done", "scalp_mean_price", "scalp_upper_band", "scalp_lower_band",
+    "scalp_obv_rsi", "scalp_candle_seq", "scalp_last_entry_seq", "scalp_halfway_lock_done",
 ]
 
 
