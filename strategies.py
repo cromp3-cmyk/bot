@@ -4869,14 +4869,30 @@ async def scalp_poll_loop(symbol):
                 if data:
                     timestamps, opens, highs, lows, closes, volumes = data
                     closed_ts, closed_o, closed_h, closed_l, closed_c, closed_v = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
+                    # 'closes[-1]' (VOR dem [:-1]-Abschneiden) ist der Schlusskurs der aktuell noch
+                    # LAUFENDEN Binance-Kerze - der WS-Cache aktualisiert diese kontinuierlich bei
+                    # jedem Trade (siehe binance_ws._apply_kline_event), das ist also ein echter
+                    # Live-Preis, kein alter Kerzenschluss. WICHTIG: Mittellinie/Baender/SL-Referenz
+                    # werden komplett aus Binance-Kerzen berechnet - fuer SL/TP1/TP2-Ausloesung wird
+                    # deshalb bewusst DIESER Binance-Live-Preis verwendet statt des Lighter-Preises
+                    # (st["last_price"], aus dem Lighter-Trade-Feed): weichen Binance und Lighter fuer
+                    # den Coin leicht voneinander ab (Spread/Basis), fuehrte der Lighter-Preis dazu,
+                    # dass eine auf dem Chart sichtbare Bandberuehrung (Binance-Basis) den Bot nicht
+                    # ausloeste, weil der Lighter-Preis das Ziel (noch) nicht erreicht hatte. Die
+                    # tatsaechliche Order wird natuerlich trotzdem ganz normal auf Lighter ausgefuehrt -
+                    # execute_exit/execute_partial_exit bestaetigen den echten Fuellpreis von der
+                    # Boerse (siehe dortige real_pnl-Logik), dieser Preis hier ist nur der Ausloeser.
+                    scalp_live_price = closes[-1]
                 else:
                     closed_ts = None
+                    scalp_live_price = None
 
                 now = time.time()
                 due_heartbeat = now - last_heartbeat > 300
 
-                if st["position"] is not None and st["last_price"] is not None:
-                    await check_scalp_sl(symbol, st["last_price"])
+                sl_check_price = scalp_live_price if scalp_live_price is not None else st["last_price"]
+                if st["position"] is not None and sl_check_price is not None:
+                    await check_scalp_sl(symbol, sl_check_price)
 
                 if closed_ts and len(closed_c) > min_needed:
                     candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
