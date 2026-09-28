@@ -216,7 +216,9 @@ def default_config():
         "scalp_rsi_upper": float(os.getenv("SCALP_RSI_UPPER", "70")),
         "scalp_rsi_lower": float(os.getenv("SCALP_RSI_LOWER", "30")),
         "scalp_docht_threshold": float(os.getenv("SCALP_DOCHT_THRESHOLD", "0.5")),
-        "scalp_sl_usd": float(os.getenv("SCALP_SL_USD", "5.0")),  # SL in $ Verlust ab Ø-Einstieg, Standard 5$, einstellbar
+        "scalp_sl_mode": os.getenv("SCALP_SL_MODE", "pct"),  # "pct" (Standard) oder "usd"
+        "scalp_sl_pct": float(os.getenv("SCALP_SL_PCT", "0.6")),  # SL in % ab Ø-Einstieg, Standard 0.6%, einstellbar
+        "scalp_sl_usd": float(os.getenv("SCALP_SL_USD", "5.0")),  # SL in $ Verlust ab Ø-Einstieg, falls scalp_sl_mode="usd"
         "scalp_max_nachkauf": int(os.getenv("SCALP_MAX_NACHKAUF", "3")),  # bis zu 3 Nachkaeufe, wie im MVWAP-Skript
         "scalp_nachkauf_min_abstand_usd": float(os.getenv("SCALP_NACHKAUF_MIN_ABSTAND_USD", "0.0")),
         "scalp_tp1_full_close": os.getenv("SCALP_TP1_FULL_CLOSE", "false").lower() == "true",  # true = TP1 schliesst 100% statt 50% (dann kein TP2 mehr)
@@ -1748,6 +1750,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI oberer Schwellenwert (Short)</label><input type="number" step="1" min="50" max="100" id="scalp_rsi_upper"></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI unterer Schwellenwert (Long)</label><input type="number" step="1" min="0" max="50" id="scalp_rsi_lower"></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Docht-Schwelle (Anteil des Bandes, 0.5 = 50%)</label><input type="number" step="0.05" min="0" max="1" id="scalp_docht_threshold"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>SL-Modus</label>
+    <select class="cfg" id="scalp_sl_mode">
+      <option value="pct">Prozent vom Ø-Einstieg</option>
+      <option value="usd">Fester $-Verlust</option>
+    </select>
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Stop-Loss (% vom Ø-Einstieg)</label><input type="number" step="0.05" min="0.05" id="scalp_sl_pct"></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="scalp_sl_usd"></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Max. Nachkäufe (0 = kein Nachkauf)</label><input type="number" step="1" min="0" max="10" id="scalp_max_nachkauf"></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Mindestabstand zum letzten Einstieg/Nachkauf ($, 0 = aus)</label>
@@ -3136,6 +3145,8 @@ async function refresh() {
     document.getElementById('scalp_rsi_upper').value = data.config.scalp_rsi_upper;
     document.getElementById('scalp_rsi_lower').value = data.config.scalp_rsi_lower;
     document.getElementById('scalp_docht_threshold').value = data.config.scalp_docht_threshold;
+    document.getElementById('scalp_sl_mode').value = data.config.scalp_sl_mode;
+    document.getElementById('scalp_sl_pct').value = data.config.scalp_sl_pct;
     document.getElementById('scalp_sl_usd').value = data.config.scalp_sl_usd;
     document.getElementById('scalp_max_nachkauf').value = data.config.scalp_max_nachkauf;
     document.getElementById('scalp_tp1_full_close').checked = !!data.config.scalp_tp1_full_close;
@@ -3413,6 +3424,8 @@ function buildConfigPayload() {
     scalp_rsi_upper: parseFloat(document.getElementById('scalp_rsi_upper').value),
     scalp_rsi_lower: parseFloat(document.getElementById('scalp_rsi_lower').value),
     scalp_docht_threshold: parseFloat(document.getElementById('scalp_docht_threshold').value),
+    scalp_sl_mode: document.getElementById('scalp_sl_mode').value,
+    scalp_sl_pct: parseFloat(document.getElementById('scalp_sl_pct').value),
     scalp_sl_usd: parseFloat(document.getElementById('scalp_sl_usd').value),
     scalp_max_nachkauf: parseInt(document.getElementById('scalp_max_nachkauf').value),
     scalp_tp1_full_close: document.getElementById('scalp_tp1_full_close').checked,
@@ -3642,7 +3655,7 @@ async def handle_config_update(request):
                 "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
                 "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm",
                 "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
-                "scalp_docht_threshold", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_tp1_full_close"]:
+                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_tp1_full_close"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

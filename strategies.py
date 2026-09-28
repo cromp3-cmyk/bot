@@ -4577,12 +4577,12 @@ def backtest_mvwap_signal(candles, cfg, trend_filter_long_ok=None, trend_filter_
 #                stattdessen die KOMPLETTE Position schliessen - dann gibt es kein TP2 mehr.
 #   TP2:         Nur wenn TP1 NICHT komplett schliesst: Rueckkehr/Durchlauf zum GEGENUEBER-
 #                LIEGENDEN Dev2-Band - schliesst die komplette Restposition.
-#   SL:          Fixer Dollar-Abstand vom Ø-Einstiegspreis (scalp_sl_usd, Default 5$,
-#                einstellbar) - wird als Preisabstand = scalp_sl_usd / aktuelle Coin-Groesse
-#                berechnet, damit der SL wirklich einen $-Verlust von scalp_sl_usd begrenzt
-#                (unabhaengig von Hebel/Positionsgroesse). Nach jedem Erst-/Nachkauf aus dem
-#                AKTUELLEN Ø-Einstieg + AKTUELLER Coin-Groesse neu berechnet - bis TP1 den SL
-#                auf Breakeven zieht.
+#   SL:          Ueber scalp_sl_mode waehlbar: "pct" (Standard) = Prozentualer Abstand vom
+#                Ø-Einstiegspreis (scalp_sl_pct, Default 0.6%) - ODER "usd" = fixer Dollar-
+#                Verlust (scalp_sl_usd, Default 5$), umgerechnet in einen Preisabstand ueber
+#                die aktuelle Coin-Groesse. In beiden Modi wird der SL nach jedem Erst-/
+#                Nachkauf aus dem AKTUELLEN Ø-Einstieg (bzw. + Coin-Groesse bei "usd") neu
+#                berechnet - bis TP1 den SL auf Breakeven zieht.
 #
 # Nutzt dieselbe generische Order-Infrastruktur (execute_entry/execute_partial_exit/
 # execute_exit) wie Grid/AB-Breakout/RSI/MVWAP - dadurch automatisch: dry_run-Beachtung,
@@ -4685,18 +4685,24 @@ def _scalp_reset_state(st):
 
 
 def _scalp_update_sl(st, cfg):
-    """SL = fixer Dollar-Verlust (scalp_sl_usd) ab dem AKTUELLEN Ø-Einstiegspreis, umgerechnet
+    """SL je nach scalp_sl_mode: "pct" (Standard) = scalp_sl_pct % vom AKTUELLEN Ø-Einstieg,
+    "usd" = fixer Dollar-Verlust (scalp_sl_usd) ab dem AKTUELLEN Ø-Einstiegspreis, umgerechnet
     in einen Preisabstand ueber die AKTUELLE Coin-Groesse (distance = scalp_sl_usd /
-    total_coin_size) - wird nach jedem Erst-/Nachkauf neu berechnet, weil sich sowohl Ø-Einstieg
-    als auch Coin-Groesse mit jeder weiteren Stufe aendern. Wird NICHT mehr aufgerufen, sobald
-    TP1 den SL bereits auf Breakeven gezogen hat (siehe check_scalp_entry)."""
+    total_coin_size). Wird nach jedem Erst-/Nachkauf neu berechnet, weil sich Ø-Einstieg (und
+    bei "usd" auch die Coin-Groesse) mit jeder weiteren Stufe aendern. Wird NICHT mehr
+    aufgerufen, sobald TP1 den SL bereits auf Breakeven gezogen hat (siehe check_scalp_entry)."""
     pos = st["position"]
     entry_ref = st.get("avg_entry_price")
-    coin_size = st.get("total_coin_size")
-    if pos is None or not entry_ref or not coin_size:
+    if pos is None or not entry_ref:
         return
-    sl_usd = float(cfg.get("scalp_sl_usd", 5.0))
-    distance = sl_usd / coin_size
+    sl_mode = cfg.get("scalp_sl_mode", "pct")
+    if sl_mode == "usd":
+        coin_size = st.get("total_coin_size")
+        if not coin_size:
+            return
+        distance = float(cfg.get("scalp_sl_usd", 5.0)) / coin_size
+    else:
+        distance = entry_ref * (float(cfg.get("scalp_sl_pct", 0.6)) / 100.0)
     st["scalp_sl_price"] = entry_ref - distance if pos == "long" else entry_ref + distance
 
 
@@ -4873,9 +4879,9 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
     OBV-RSI, bis zu scalp_max_nachkauf Nachkaeufe waehrend das Signal anhaelt (mit optionalem
     Mindestabstand zum letzten Fill, TP1 stoppt weitere Nachkaeufe), TP1 (50% am Mittelband,
     danach SL auf Einstieg, ausser scalp_tp1_full_close=True: dann schliesst TP1 die komplette
-    Position und es gibt kein TP2 mehr), TP2 (Rest am Gegenband), SL (fixer $-Verlust ab
-    Ø-Einstieg, umgerechnet ueber die aktuelle Coin-Groesse). 'candles' ist ein 6er-Tupel MIT
-    Volumen (ts, o, h, l, c, v)."""
+    Position und es gibt kein TP2 mehr), TP2 (Rest am Gegenband), SL (ueber scalp_sl_mode
+    waehlbar: "pct" = % vom Ø-Einstieg, "usd" = fixer $-Verlust, umgerechnet ueber die aktuelle
+    Coin-Groesse). 'candles' ist ein 6er-Tupel MIT Volumen (ts, o, h, l, c, v)."""
     ts, o, h, l, c, v = candles
     n = len(c)
     vwap_length = int(cfg.get("scalp_vwap_length", 60))
@@ -4883,6 +4889,8 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
     rsi_upper = float(cfg.get("scalp_rsi_upper", 70))
     rsi_lower = float(cfg.get("scalp_rsi_lower", 30))
     docht_threshold = float(cfg.get("scalp_docht_threshold", 0.5))
+    sl_mode = cfg.get("scalp_sl_mode", "pct")
+    sl_pct = float(cfg.get("scalp_sl_pct", 0.6)) / 100.0
     sl_usd = float(cfg.get("scalp_sl_usd", 5.0))
     tp1_full_close = bool(cfg.get("scalp_tp1_full_close", False))
     max_nachkauf = max(0, int(cfg.get("scalp_max_nachkauf", 3) or 0))
@@ -4896,7 +4904,10 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg):
 
     def _recalc_sl(pos):
         entry, pdir, size = pos["entry"], pos["dir"], pos["size"]
-        distance = sl_usd / size if size else 0
+        if sl_mode == "usd":
+            distance = sl_usd / size if size else 0
+        else:
+            distance = entry * sl_pct
         pos["sl_price"] = entry - distance if pdir == "long" else entry + distance
 
     for i in range(min_needed, n):
