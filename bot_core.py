@@ -446,6 +446,9 @@ def default_state():
         "scalp_candle_seq": 0,  # zaehlt bei JEDER neu geschlossenen Kerze hoch (fuer den Kerzen-Mindestabstand beim Nachkauf)
         "scalp_last_entry_seq": None,  # scalp_candle_seq-Stand beim letzten Erst-/Nachkauf
         "scalp_halfway_lock_done": False,  # true sobald der SL nach TP1 auf halbem Weg zu TP2 auf die Mittellinie nachgezogen wurde
+        "scalp_band_history": [],  # Verlauf von Mittellinie/Baendern ueber Zeit, NUR fuers Dashboard-Chart
+        # (Zeitpunkt + mean/upper/lower je neu geschlossener Kerze) - unabhaengig von den "scalp_*"-
+        # Einzelwerten oben, die immer nur den JEWEILS AKTUELLEN Stand halten.
     }
 
 
@@ -3277,6 +3280,35 @@ async function refresh() {
   if (gl.next_entry_long) datasets.push({ label:'Entry Long ab', data: Array(n).fill(gl.next_entry_long), borderColor:'#4ade80', borderDash:[2,2], pointRadius:0, borderWidth:1 });
   if (gl.next_entry_short) datasets.push({ label:'Entry Short ab', data: Array(n).fill(gl.next_entry_short), borderColor:'#f87171', borderDash:[2,2], pointRadius:0, borderWidth:1 });
 
+  // Scalp VWAP OBV RSI: Mittellinie (=TP1) + obere/untere TP2-Baender als Verlauf ueber die Zeit
+  // einblenden (nicht als starre Linie wie bei Grid oben, weil sich die Baender mit jeder neu
+  // geschlossenen Kerze verschieben), plus die tatsaechlichen Einstiege als Marker im Kursverlauf.
+  if (data.config.entry_mode === 'scalp_vwap_obv_rsi') {
+    const bandHist = (data.scalp_band_history || []).slice().sort((a, b) => a.ts - b.ts);
+    const lookupBand = (ts, key) => {
+      let val = null;
+      for (const b of bandHist) {
+        if (b.ts <= ts) val = b[key]; else break;
+      }
+      return val;
+    };
+    datasets.push({ label:'Mittellinie (TP1)', data: hist.map(p => lookupBand(p.ts, 'mean')), borderColor:'#facc15', borderDash:[5,3], pointRadius:0, borderWidth:1.5, spanGaps:true });
+    datasets.push({ label:'TP2 oben', data: hist.map(p => lookupBand(p.ts, 'upper')), borderColor:'#4ade80', borderDash:[3,3], pointRadius:0, borderWidth:1, spanGaps:true });
+    datasets.push({ label:'TP2 unten', data: hist.map(p => lookupBand(p.ts, 'lower')), borderColor:'#f87171', borderDash:[3,3], pointRadius:0, borderWidth:1, spanGaps:true });
+
+    const scalpEntries = data.current_position_entries || [];
+    const entryArr = Array(n).fill(null);
+    scalpEntries.forEach(e => {
+      const eTs = new Date(e.time).getTime();
+      let bestIdx = -1, bestDiff = Infinity;
+      hist.forEach((p, i) => {
+        const d = Math.abs(p.ts - eTs);
+        if (d < bestDiff) { bestDiff = d; bestIdx = i; }
+      });
+      if (bestIdx >= 0) entryArr[bestIdx] = e.price;
+    });
+    datasets.push({ label:'Einstiege', data: entryArr, borderColor:'#60a5fa', backgroundColor:'#facc15', pointRadius:6, pointStyle:'triangle', showLine:false });
+  }
 
   if (!priceChart) {
     priceChart = new Chart(document.getElementById('priceChart'), {
@@ -3663,6 +3695,10 @@ async def handle_status(request):
         "ab_atr_last": st.get("ab_atr_last"),
         "rsi_sl_price": st.get("rsi_sl_price"), "rsi_tp_price": st.get("rsi_tp_price"), "rsi_be_done": st.get("rsi_be_done"), "rsi_last": st.get("rsi_last"),
         "mvwap_sl_price": st.get("mvwap_sl_price"), "mvwap_tp_price": st.get("mvwap_tp_price"), "mvwap_be_done": st.get("mvwap_be_done"), "mvwap_osc_last": st.get("mvwap_osc_last"),
+        "scalp_sl_price": st.get("scalp_sl_price"), "scalp_tp1_done": st.get("scalp_tp1_done"),
+        "scalp_mean_price": st.get("scalp_mean_price"), "scalp_upper_band": st.get("scalp_upper_band"),
+        "scalp_lower_band": st.get("scalp_lower_band"), "scalp_obv_rsi": st.get("scalp_obv_rsi"),
+        "scalp_band_history": st.get("scalp_band_history", [])[-500:],
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000

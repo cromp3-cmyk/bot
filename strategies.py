@@ -4918,6 +4918,16 @@ async def scalp_poll_loop(symbol):
                             st["scalp_upper_band"] = upper_dev2
                             st["scalp_lower_band"] = lower_dev2
                             st["scalp_obv_rsi"] = obv_rsi
+                            # Nur fuers Dashboard-Chart: Verlauf der Baender ueber Zeit, damit sich
+                            # Mittellinie/TP2-Baender zusammen mit dem Kursverlauf und den Einstiegen
+                            # als Linien im Chart einblenden lassen (siehe DASHBOARD_HTML/priceChart).
+                            band_hist = st.get("scalp_band_history")
+                            if band_hist is None:
+                                band_hist = []
+                            band_hist.append({"ts": int(last_ts), "mean": mean, "upper": upper_dev2, "lower": lower_dev2})
+                            if len(band_hist) > 500:
+                                band_hist = band_hist[-500:]
+                            st["scalp_band_history"] = band_hist
                             await check_scalp_entry(symbol, long_signal, short_signal, closed_c[-1])
                         if due_heartbeat:
                             last_heartbeat = now
