@@ -4692,6 +4692,7 @@ def _scalp_compute_signal(cfg, o, h, l, c, v):
 def _scalp_reset_state(st):
     st["scalp_sl_price"] = None
     st["scalp_tp1_done"] = False
+    st["scalp_halfway_lock_done"] = False
 
 
 def _scalp_update_sl(st, cfg):
@@ -4718,7 +4719,11 @@ def _scalp_update_sl(st, cfg):
 
 async def check_scalp_sl(symbol, price):
     """Jeden Tick (aus dem Live-Preis, wie check_mvwap_sl/check_rsi_sl): prueft zuerst SL
-    (bzw. Breakeven nach TP1), dann TP1 (Mittelband, Teil-Exit 50% + SL->Einstieg), dann TP2
+    (bzw. Breakeven nach TP1), dann TP1 (Mittelband, Teil-Exit 50% + SL->Einstieg), dann den
+    Halbweg-Lock (Nutzer-Vorgabe: sobald der Kurs NACH TP1 die Haelfte des Wegs von der
+    Mittellinie zum GEGENUEBERLIEGENDEN Dev2-Band/TP2 geschafft hat, wird der SL zusaetzlich von
+    Breakeven auf die Mittellinie nachgezogen - schuetzt einen Teil des TP1-Gewinnbereichs,
+    OHNE die Position zu schliessen, ueber scalp_halfway_sl_enabled an/abschaltbar), dann TP2
     (Gegenband, Rest komplett)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -4757,6 +4762,14 @@ async def check_scalp_sl(symbol, price):
                 st["scalp_tp1_done"] = True
                 st["scalp_sl_price"] = st["avg_entry_price"]  # Breakeven
             return
+
+    if st.get("scalp_tp1_done") and not st.get("scalp_halfway_lock_done") and cfg.get("scalp_halfway_sl_enabled", True):
+        halfway_price = mean + (upper_band - mean) * 0.5 if pos == "long" else mean - (mean - lower_band) * 0.5
+        halfway_hit = (pos == "long" and price >= halfway_price) or (pos == "short" and price <= halfway_price)
+        if halfway_hit:
+            st["scalp_sl_price"] = mean
+            st["scalp_halfway_lock_done"] = True
+            debug_log(f"🔒 [{symbol}] Scalp VWAP OBV RSI: Kurs auf halbem Weg zu TP2 - SL von Einstieg auf Mittellinie ({round(mean, 4)}) nachgezogen")
 
     tp2_hit = (pos == "long" and price >= upper_band) or (pos == "short" and price <= lower_band)
     if tp2_hit:
@@ -4929,6 +4942,7 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
     sl_pct = float(cfg.get("scalp_sl_pct", 0.6)) / 100.0
     sl_usd = float(cfg.get("scalp_sl_usd", 5.0))
     tp1_full_close = bool(cfg.get("scalp_tp1_full_close", False))
+    halfway_sl_enabled = cfg.get("scalp_halfway_sl_enabled", True)
     max_nachkauf = max(0, int(cfg.get("scalp_max_nachkauf", 3) or 0))
     max_entries = 1 + max_nachkauf
     min_abstand = cfg.get("scalp_nachkauf_min_abstand_usd", 0.0) or 0.0
@@ -4982,6 +4996,12 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
                             position["size"] -= close_size
                             position["tp1_done"] = True
                             position["sl_price"] = entry  # Breakeven
+                if position is not None and position["tp1_done"] and not position.get("halfway_lock_done", False) and halfway_sl_enabled:
+                    halfway_price = mean + (upper_dev2 - mean) * 0.5 if pdir == "long" else mean - (mean - lower_dev2) * 0.5
+                    halfway_hit = (pdir == "long" and h[i] >= halfway_price) or (pdir == "short" and l[i] <= halfway_price)
+                    if halfway_hit:
+                        position["sl_price"] = mean
+                        position["halfway_lock_done"] = True
                 if position is not None:
                     tp2_hit = (pdir == "long" and h[i] >= upper_dev2) or (pdir == "short" and l[i] <= lower_dev2)
                     if tp2_hit:
@@ -5025,7 +5045,7 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
 
         size = (margin * leverage) / price
         position = {"dir": target, "entry": price, "size": size, "entry_i": i, "tp1_done": False,
-                    "entries": 1, "last_fill_price": price, "last_fill_i": i}
+                    "halfway_lock_done": False, "entries": 1, "last_fill_price": price, "last_fill_i": i}
         _recalc_sl(position)
         _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
 

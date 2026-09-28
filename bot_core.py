@@ -223,6 +223,7 @@ def default_config():
         "scalp_nachkauf_min_abstand_usd": float(os.getenv("SCALP_NACHKAUF_MIN_ABSTAND_USD", "0.0")),
         "scalp_nachkauf_min_candles": int(os.getenv("SCALP_NACHKAUF_MIN_CANDLES", "10")),  # Mindestabstand zum letzten Fill in Kerzen, Standard 10
         "scalp_tp1_full_close": os.getenv("SCALP_TP1_FULL_CLOSE", "false").lower() == "true",  # true = TP1 schliesst 100% statt 50% (dann kein TP2 mehr)
+        "scalp_halfway_sl_enabled": os.getenv("SCALP_HALFWAY_SL_ENABLED", "true").lower() == "true",  # nach TP1: auf halbem Weg zu TP2 den SL zusaetzlich auf die Mittellinie nachziehen
         "scalp_supertrend_filter_enabled": os.getenv("SCALP_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",  # uebergeordneter SuperTrend-Trendfilter (hoehere Zeiteinheit)
         "scalp_supertrend_filter_resolution": os.getenv("SCALP_SUPERTREND_FILTER_RESOLUTION", "15m"),
         "scalp_supertrend_filter_multiplier": float(os.getenv("SCALP_SUPERTREND_FILTER_MULTIPLIER", "3.0")),
@@ -444,6 +445,7 @@ def default_state():
         "scalp_obv_rsi": None,
         "scalp_candle_seq": 0,  # zaehlt bei JEDER neu geschlossenen Kerze hoch (fuer den Kerzen-Mindestabstand beim Nachkauf)
         "scalp_last_entry_seq": None,  # scalp_candle_seq-Stand beim letzten Erst-/Nachkauf
+        "scalp_halfway_lock_done": False,  # true sobald der SL nach TP1 auf halbem Weg zu TP2 auf die Mittellinie nachgezogen wurde
     }
 
 
@@ -1774,6 +1776,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="scalp_vwap_obv_rsi">
     <label><input type="checkbox" id="scalp_tp1_full_close" style="width:auto; vertical-align:middle;"> TP1 komplett schließen (100% statt 50%) - danach kein TP2 mehr</label>
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi">
+    <label><input type="checkbox" id="scalp_halfway_sl_enabled" style="width:auto; vertical-align:middle;"> Nach TP1: SL auf halbem Weg zur TP2-Linie auf die Mittellinie nachziehen</label>
   </div>
 
   <div data-mode="scalp_vwap_obv_rsi"><label>SuperTrend-Trendfilter (übergeordnete, höhere Zeiteinheit)</label>
@@ -3184,6 +3189,7 @@ async function refresh() {
     document.getElementById('scalp_sl_usd').value = data.config.scalp_sl_usd;
     document.getElementById('scalp_max_nachkauf').value = data.config.scalp_max_nachkauf;
     document.getElementById('scalp_tp1_full_close').checked = !!data.config.scalp_tp1_full_close;
+    document.getElementById('scalp_halfway_sl_enabled').checked = !!data.config.scalp_halfway_sl_enabled;
     document.getElementById('scalp_nachkauf_min_abstand_usd').value = data.config.scalp_nachkauf_min_abstand_usd;
     document.getElementById('scalp_nachkauf_min_candles').value = data.config.scalp_nachkauf_min_candles;
     document.getElementById('scalp_supertrend_filter_enabled').value = String(data.config.scalp_supertrend_filter_enabled);
@@ -3468,6 +3474,7 @@ function buildConfigPayload() {
     scalp_sl_usd: parseFloat(document.getElementById('scalp_sl_usd').value),
     scalp_max_nachkauf: parseInt(document.getElementById('scalp_max_nachkauf').value),
     scalp_tp1_full_close: document.getElementById('scalp_tp1_full_close').checked,
+    scalp_halfway_sl_enabled: document.getElementById('scalp_halfway_sl_enabled').checked,
     scalp_nachkauf_min_abstand_usd: parseFloat(document.getElementById('scalp_nachkauf_min_abstand_usd').value),
     scalp_nachkauf_min_candles: parseInt(document.getElementById('scalp_nachkauf_min_candles').value),
     scalp_supertrend_filter_enabled: document.getElementById('scalp_supertrend_filter_enabled').value === 'true',
@@ -3699,7 +3706,7 @@ async def handle_config_update(request):
                 "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
                 "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm",
                 "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
-                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_tp1_full_close",
+                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
                 "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period"]:
         if key in body:
             cfg[key] = body[key]
