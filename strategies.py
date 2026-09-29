@@ -4658,16 +4658,22 @@ def _scalp_compute_signal(cfg, o, h, l, c, v):
     Dev3 (genau die farbig gefuellte Flaeche im Pine-Script) - 'Kerze schliesst im Band' heisst
     Schlusskurs jenseits von Dev2, 'Docht durchbricht mindestens 50%' heisst High/Low erreicht
     mindestens die Haelfte der Dev2-Dev3-Distanz. Gibt zurueck:
-    (long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi)."""
+    (long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi, long_close_in_band, short_close_in_band).
+    Die beiden "*_close_in_band"-Werte sind NUR der reine Schlusskurs-Test (ohne RSI, ohne Docht) -
+    werden fuer die Nachkauf-Reversal-Logik gebraucht (siehe scalp_nachkauf_require_reversal):
+    original will ein Nachkauf erst, wenn zwischen zwei Nachkaeufen mindestens eine Kerze NICHT im
+    Band geschlossen hat (Kurs hat sich kurz vom Band geloest), bevor die naechste Kerze wieder im
+    Band schliesst und der RSI passt - nicht, dass JEDE Kerze eines durchlaufenden Trends erneut
+    nachkauft."""
     vwap_length = int(cfg.get("scalp_vwap_length", 60))
     mean, lower_dev2, upper_dev2, lower_dev3, upper_dev3 = calculate_vwap_deviation(c, h, l, v, vwap_length)
     if mean is None:
-        return False, False, None, None, None, None
+        return False, False, None, None, None, None, False, False
 
     rsi_length = int(cfg.get("scalp_rsi_length", 5))
     obv_rsi = calculate_obv_rsi(c, v, rsi_length)
     if obv_rsi is None:
-        return False, False, mean, lower_dev2, upper_dev2, None
+        return False, False, mean, lower_dev2, upper_dev2, None, False, False
 
     rsi_upper = float(cfg.get("scalp_rsi_upper", 70))
     rsi_lower = float(cfg.get("scalp_rsi_lower", 30))
@@ -4686,13 +4692,14 @@ def _scalp_compute_signal(cfg, o, h, l, c, v):
     long_wick_in_band = last_l <= lower_dev2 - docht_threshold * lower_band_width
     long_signal = (long_close_in_band or long_wick_in_band) and obv_rsi < rsi_lower
 
-    return long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi
+    return long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi, long_close_in_band, short_close_in_band
 
 
 def _scalp_reset_state(st):
     st["scalp_sl_price"] = None
     st["scalp_tp1_done"] = False
     st["scalp_halfway_lock_done"] = False
+    st["scalp_left_band_since_fill"] = False
 
 
 def _scalp_update_sl(st, cfg):
@@ -4779,7 +4786,7 @@ async def check_scalp_sl(symbol, price):
             _scalp_reset_state(st)
 
 
-async def check_scalp_entry(symbol, long_signal, short_signal, price):
+async def check_scalp_entry(symbol, long_signal, short_signal, price, long_close_in_band=False, short_close_in_band=False):
     """Einstieg + Nachkauf. long_signal/short_signal gelten fuer JEDE geschlossene Kerze, an
     der die Bedingung zutrifft (nicht nur beim ersten Wendepunkt) - solange TP1 noch nicht
     ausgeloest wurde, legt eine weitere Kerze mit demselben Signal eine Nachkauf-Stufe nach,
@@ -4787,7 +4794,15 @@ async def check_scalp_entry(symbol, long_signal, short_signal, price):
     zum letzten Fill in $ (scalp_nachkauf_min_abstand_usd) UND in Kerzen
     (scalp_nachkauf_min_candles, Standard 10 - zaehlt anhand von scalp_candle_seq, das
     scalp_poll_loop bei JEDER neu geschlossenen Kerze hochzaehlt) - identischer Mechanismus zu
-    check_mvwap_entry, nur um die Kerzen-Sperre erweitert."""
+    check_mvwap_entry, nur um die Kerzen-Sperre erweitert.
+
+    scalp_nachkauf_require_reversal (Original-Logik, siehe Nutzer-Vorgabe): zusaetzlich zu den
+    obigen Sperren darf ein NACHKAUF (nicht der Ersteinstieg) erst ausgeloest werden, wenn seit
+    dem letzten Fill (Einstieg ODER Nachkauf) mindestens EINE Kerze NICHT im Band geschlossen hat
+    (long_close_in_band/short_close_in_band = False) - erst danach zaehlt eine Kerze, die wieder
+    im Band schliesst UND den RSI erfuellt, als gueltiges Nachkauf-Signal. Ohne das wuerde ein
+    durchlaufender Trend, bei dem JEDE Kerze weiter im Band schliesst, bei jeder einzelnen Kerze
+    erneut nachkaufen (siehe scalp_left_band_since_fill in default_state)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -4798,6 +4813,7 @@ async def check_scalp_entry(symbol, long_signal, short_signal, price):
     max_entries = 1 + max_nachkauf
     min_abstand = cfg.get("scalp_nachkauf_min_abstand_usd", 0.0) or 0.0
     min_candles = max(0, int(cfg.get("scalp_nachkauf_min_candles", 10) or 0))
+    require_reversal = cfg.get("scalp_nachkauf_require_reversal", True)
 
     def _abstand_ok():
         last_price = st.get("last_entry_price")
@@ -4809,27 +4825,41 @@ async def check_scalp_entry(symbol, long_signal, short_signal, price):
             return True
         return st.get("scalp_candle_seq", 0) - last_seq >= min_candles
 
-    # Nachkauf: Position bereits in dieselbe Richtung offen, Signal gilt weiterhin diese Kerze,
-    # TP1 noch nicht ausgeloest (danach hat Gewinnsicherung Vorrang, kein weiterer Nachkauf mehr).
-    if pos == "long" and long_signal:
-        if st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok() or not _candle_abstand_ok():
+    # Nachkauf: Position bereits in dieselbe Richtung offen. Die "seit dem letzten Fill nicht im
+    # Band geschlossen"-Spur wird HIER, unabhaengig vom Signal dieser Kerze, aktuell gehalten -
+    # sonst wuerde eine Kerze, die zwar aus dem Band laeuft aber (noch) kein neues Signal ausloest,
+    # verloren gehen.
+    if pos == "long":
+        if not long_close_in_band:
+            st["scalp_left_band_since_fill"] = True
+        if not long_signal:
+            return
+        reversal_ok = (not require_reversal) or st.get("scalp_left_band_since_fill", False)
+        if not reversal_ok or st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok() or not _candle_abstand_ok():
             return
         await execute_entry(symbol, "long", price, is_add_on=True)
         st["scalp_last_entry_seq"] = st.get("scalp_candle_seq", 0)
+        st["scalp_left_band_since_fill"] = False  # fuer den naechsten Nachkauf muss der Kurs das Band erneut verlassen
         _scalp_update_sl(st, cfg)
         return
-    if pos == "short" and short_signal:
-        if st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok() or not _candle_abstand_ok():
+    if pos == "short":
+        if not short_close_in_band:
+            st["scalp_left_band_since_fill"] = True
+        if not short_signal:
+            return
+        reversal_ok = (not require_reversal) or st.get("scalp_left_band_since_fill", False)
+        if not reversal_ok or st.get("scalp_tp1_done") or st.get("entry_count", 0) >= max_entries or not _abstand_ok() or not _candle_abstand_ok():
             return
         await execute_entry(symbol, "short", price, is_add_on=True)
         st["scalp_last_entry_seq"] = st.get("scalp_candle_seq", 0)
+        st["scalp_left_band_since_fill"] = False
         _scalp_update_sl(st, cfg)
         return
 
     if pos is not None:
         return  # Position offen, aber kein Nachkauf-Signal in dieselbe Richtung diese Kerze
 
-    # Neueinstieg
+    # Neueinstieg - die Reversal-Sperre gilt NICHT fuer den Ersteinstieg, nur fuer Nachkaeufe.
     if long_signal:
         await execute_entry(symbol, "long", price, is_add_on=False)
         _scalp_reset_state(st)
@@ -4891,6 +4921,18 @@ async def scalp_poll_loop(symbol):
                 due_heartbeat = now - last_heartbeat > 300
 
                 sl_check_price = scalp_live_price if scalp_live_price is not None else st["last_price"]
+                if sl_check_price is not None:
+                    # Nur fuers Dashboard-Chart: den TATSAECHLICHEN Trigger-Preis (Binance-Live, mit
+                    # Lighter-Fallback) protokollieren - unabhaengig davon, ob gerade eine Position
+                    # offen ist, damit man im Chart auch VOR einem Einstieg sieht, wo der Trigger-Preis
+                    # im Verhaeltnis zu den Baendern stand (siehe scalp_price_history in default_state).
+                    p_hist = st.get("scalp_price_history")
+                    if p_hist is None:
+                        p_hist = []
+                    p_hist.append({"ts": int(time.time() * 1000), "price": sl_check_price})
+                    if len(p_hist) > 1000:
+                        p_hist = p_hist[-1000:]
+                    st["scalp_price_history"] = p_hist
                 if st["position"] is not None and sl_check_price is not None:
                     await check_scalp_sl(symbol, sl_check_price)
 
@@ -4904,7 +4946,7 @@ async def scalp_poll_loop(symbol):
                         if last_ts != last_processed_ts:
                             last_processed_ts = last_ts
                             st["scalp_candle_seq"] = st.get("scalp_candle_seq", 0) + 1
-                            long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi = _scalp_compute_signal(
+                            long_signal, short_signal, mean, lower_dev2, upper_dev2, obv_rsi, long_close_in_band, short_close_in_band = _scalp_compute_signal(
                                 cfg, closed_o, closed_h, closed_l, closed_c, closed_v)
                             if cfg.get("scalp_supertrend_filter_enabled", False):
                                 lo, so = await compute_supertrend_filter_live(
@@ -4928,7 +4970,7 @@ async def scalp_poll_loop(symbol):
                             if len(band_hist) > 500:
                                 band_hist = band_hist[-500:]
                             st["scalp_band_history"] = band_hist
-                            await check_scalp_entry(symbol, long_signal, short_signal, closed_c[-1])
+                            await check_scalp_entry(symbol, long_signal, short_signal, closed_c[-1], long_close_in_band, short_close_in_band)
                         if due_heartbeat:
                             last_heartbeat = now
                             debug_log(f"💓 [{symbol}] Scalp VWAP OBV RSI aktiv: OBV-RSI={round(st.get('scalp_obv_rsi') or 0, 1)}, "
@@ -4973,6 +5015,7 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
     max_entries = 1 + max_nachkauf
     min_abstand = cfg.get("scalp_nachkauf_min_abstand_usd", 0.0) or 0.0
     min_candles = max(0, int(cfg.get("scalp_nachkauf_min_candles", 10) or 0))
+    require_reversal = cfg.get("scalp_nachkauf_require_reversal", True)
     margin, leverage = cfg["margin"], cfg["leverage"]
 
     min_needed = vwap_length + rsi_length + 2
@@ -5038,18 +5081,29 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
         # --- Signal dieser Kerze (fuer Neueinstieg ODER Nachkauf) ---
         upper_band_width = max(upper_dev3 - upper_dev2, 1e-12)
         lower_band_width = max(lower_dev2 - lower_dev3, 1e-12)
-        short_signal = (c[i] >= upper_dev2 or h[i] >= upper_dev2 + docht_threshold * upper_band_width) and obv_rsi > rsi_upper
-        long_signal = (c[i] <= lower_dev2 or l[i] <= lower_dev2 - docht_threshold * lower_band_width) and obv_rsi < rsi_lower
+        short_close_in_band = c[i] >= upper_dev2
+        long_close_in_band = c[i] <= lower_dev2
+        short_signal = (short_close_in_band or h[i] >= upper_dev2 + docht_threshold * upper_band_width) and obv_rsi > rsi_upper
+        long_signal = (long_close_in_band or l[i] <= lower_dev2 - docht_threshold * lower_band_width) and obv_rsi < rsi_lower
         if trend_filter_long_ok is not None:
             long_signal = long_signal and trend_filter_long_ok[i]
             short_signal = short_signal and trend_filter_short_ok[i]
 
         if position is not None:
             pdir = position["dir"]
+            # scalp_nachkauf_require_reversal (Original-Vorgabe): ein Nachkauf zaehlt nur, wenn seit
+            # dem letzten Fill mindestens eine Kerze NICHT im Band geschlossen hat - sonst wuerde ein
+            # durchlaufender Trend, bei dem jede Kerze weiter im Band schliesst, bei JEDER Kerze
+            # erneut nachkaufen. Die Spur wird unabhaengig vom Signal dieser Kerze aktuell gehalten.
+            if pdir == "long" and not long_close_in_band:
+                position["left_band_since_fill"] = True
+            elif pdir == "short" and not short_close_in_band:
+                position["left_band_since_fill"] = True
+            reversal_ok = (not require_reversal) or position.get("left_band_since_fill", False)
             same_dir_signal = (pdir == "long" and long_signal) or (pdir == "short" and short_signal)
             abstand_ok = min_abstand <= 0 or abs(price - position["last_fill_price"]) >= min_abstand
             candle_abstand_ok = min_candles <= 0 or (i - position["last_fill_i"]) >= min_candles
-            if same_dir_signal and not position["tp1_done"] and position["entries"] < max_entries and abstand_ok and candle_abstand_ok:
+            if same_dir_signal and reversal_ok and not position["tp1_done"] and position["entries"] < max_entries and abstand_ok and candle_abstand_ok:
                 add_size = (margin * leverage) / price
                 old_size = position["size"]
                 new_size = old_size + add_size
@@ -5058,6 +5112,7 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
                 position["entries"] += 1
                 position["last_fill_price"] = price
                 position["last_fill_i"] = i
+                position["left_band_since_fill"] = False  # fuer den naechsten Nachkauf muss der Kurs das Band erneut verlassen
                 _recalc_sl(position)
                 _bt_record_addon(trades, pdir, price, i, position["entry_i"], position["entries"], ts=ts, is_add_on=True)
             continue
@@ -5071,7 +5126,8 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
 
         size = (margin * leverage) / price
         position = {"dir": target, "entry": price, "size": size, "entry_i": i, "tp1_done": False,
-                    "halfway_lock_done": False, "entries": 1, "last_fill_price": price, "last_fill_i": i}
+                    "halfway_lock_done": False, "entries": 1, "last_fill_price": price, "last_fill_i": i,
+                    "left_band_since_fill": False}
         _recalc_sl(position)
         _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
 

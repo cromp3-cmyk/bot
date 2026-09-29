@@ -222,6 +222,11 @@ def default_config():
         "scalp_max_nachkauf": int(os.getenv("SCALP_MAX_NACHKAUF", "3")),  # bis zu 3 Nachkaeufe, wie im MVWAP-Skript
         "scalp_nachkauf_min_abstand_usd": float(os.getenv("SCALP_NACHKAUF_MIN_ABSTAND_USD", "0.0")),
         "scalp_nachkauf_min_candles": int(os.getenv("SCALP_NACHKAUF_MIN_CANDLES", "10")),  # Mindestabstand zum letzten Fill in Kerzen, Standard 10
+        "scalp_nachkauf_require_reversal": os.getenv("SCALP_NACHKAUF_REQUIRE_REVERSAL", "true").lower() == "true",  # Nachkauf nur, wenn die
+        # neu geschlossene Kerze selbst wie eine Trendwende aussieht (Kerzenfarbe in Richtung Mittellinie UND
+        # Schlusskurs jenseits des letzten Schlusskurses in dieselbe Richtung) - verhindert, dass bei einem
+        # laengeren durchlaufenden Trend JEDE weitere Kerze im Band automatisch nachkauft, obwohl der Kurs
+        # einfach nur weiter in dieselbe Richtung durchlaeuft statt sich der Mittellinie wieder anzunaehern.
         "scalp_tp1_full_close": os.getenv("SCALP_TP1_FULL_CLOSE", "false").lower() == "true",  # true = TP1 schliesst 100% statt 50% (dann kein TP2 mehr)
         "scalp_halfway_sl_enabled": os.getenv("SCALP_HALFWAY_SL_ENABLED", "true").lower() == "true",  # nach TP1: auf halbem Weg zu TP2 den SL zusaetzlich auf die Mittellinie nachziehen
         "scalp_supertrend_filter_enabled": os.getenv("SCALP_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",  # uebergeordneter SuperTrend-Trendfilter (hoehere Zeiteinheit)
@@ -446,9 +451,17 @@ def default_state():
         "scalp_candle_seq": 0,  # zaehlt bei JEDER neu geschlossenen Kerze hoch (fuer den Kerzen-Mindestabstand beim Nachkauf)
         "scalp_last_entry_seq": None,  # scalp_candle_seq-Stand beim letzten Erst-/Nachkauf
         "scalp_halfway_lock_done": False,  # true sobald der SL nach TP1 auf halbem Weg zu TP2 auf die Mittellinie nachgezogen wurde
+        "scalp_left_band_since_fill": False,  # siehe scalp_nachkauf_require_reversal: wird True, sobald seit dem
+        # letzten Einstieg/Nachkauf eine Kerze NICHT im Band geschlossen hat - erst dann darf die naechste
+        # Kerze, die wieder im Band schliesst UND den RSI erfuellt, einen weiteren Nachkauf ausloesen.
         "scalp_band_history": [],  # Verlauf von Mittellinie/Baendern ueber Zeit, NUR fuers Dashboard-Chart
         # (Zeitpunkt + mean/upper/lower je neu geschlossener Kerze) - unabhaengig von den "scalp_*"-
         # Einzelwerten oben, die immer nur den JEWEILS AKTUELLEN Stand halten.
+        "scalp_price_history": [],  # Verlauf des tatsaechlichen TRIGGER-Preises (Binance-Live, siehe
+        # scalp_poll_loop) ueber Zeit - NUR fuers Dashboard-Chart. Wichtig, weil der normale
+        # "Preis"-Chart den Lighter-Tick-Preis zeigt, SL/TP aber am Binance-Preis ausgeloest werden -
+        # ohne diese zweite Linie sieht ein TP/SL-Trigger im Chart aus wie "hat die Linie gar nicht
+        # beruehrt", obwohl Binance sie zum Ausloese-Zeitpunkt sehr wohl beruehrt/durchbrochen hat.
     }
 
 
@@ -596,6 +609,7 @@ PERSISTED_STATE_KEYS = [
     # nicht mehr aktiv (check_scalp_sl braucht "scalp_sl_price" != None).
     "scalp_sl_price", "scalp_tp1_done", "scalp_mean_price", "scalp_upper_band", "scalp_lower_band",
     "scalp_obv_rsi", "scalp_candle_seq", "scalp_last_entry_seq", "scalp_halfway_lock_done",
+    "scalp_left_band_since_fill",
 ]
 
 
@@ -1787,6 +1801,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Mindestabstand zum letzten Einstieg/Nachkauf (Kerzen, 0 = aus)</label>
     <input type="number" step="1" min="0" id="scalp_nachkauf_min_candles">
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi">
+    <label><input type="checkbox" id="scalp_nachkauf_require_reversal" style="width:auto; vertical-align:middle;"> Nachkauf erst, wenn seit dem letzten Fill eine Kerze NICHT im Band geschlossen hat (statt bei jeder Kerze im Band nachzukaufen, obwohl der Kurs einfach weiter durchläuft)</label>
   </div>
   <div data-mode="scalp_vwap_obv_rsi">
     <label><input type="checkbox" id="scalp_tp1_full_close" style="width:auto; vertical-align:middle;"> TP1 komplett schließen (100% statt 50%) - danach kein TP2 mehr</label>
@@ -3202,6 +3219,7 @@ async function refresh() {
     document.getElementById('scalp_sl_pct').value = data.config.scalp_sl_pct;
     document.getElementById('scalp_sl_usd').value = data.config.scalp_sl_usd;
     document.getElementById('scalp_max_nachkauf').value = data.config.scalp_max_nachkauf;
+    document.getElementById('scalp_nachkauf_require_reversal').checked = !!data.config.scalp_nachkauf_require_reversal;
     document.getElementById('scalp_tp1_full_close').checked = !!data.config.scalp_tp1_full_close;
     document.getElementById('scalp_halfway_sl_enabled').checked = !!data.config.scalp_halfway_sl_enabled;
     document.getElementById('scalp_nachkauf_min_abstand_usd').value = data.config.scalp_nachkauf_min_abstand_usd;
@@ -3295,6 +3313,19 @@ async function refresh() {
     datasets.push({ label:'Mittellinie (TP1)', data: hist.map(p => lookupBand(p.ts, 'mean')), borderColor:'#facc15', borderDash:[5,3], pointRadius:0, borderWidth:1.5, spanGaps:true });
     datasets.push({ label:'TP2 oben', data: hist.map(p => lookupBand(p.ts, 'upper')), borderColor:'#4ade80', borderDash:[3,3], pointRadius:0, borderWidth:1, spanGaps:true });
     datasets.push({ label:'TP2 unten', data: hist.map(p => lookupBand(p.ts, 'lower')), borderColor:'#f87171', borderDash:[3,3], pointRadius:0, borderWidth:1, spanGaps:true });
+
+    // Trigger-Preis (Binance-Live, siehe scalp_poll_loop) als eigene Linie - WEICHT vom Lighter-
+    // Preis oben ab und ist der Preis, an dem SL/TP tatsaechlich ausgeloest werden. Ohne diese
+    // Linie sieht ein Trigger im Chart faelschlich aus wie "Preis hat die Linie nicht beruehrt".
+    const scalpPriceHist = (data.scalp_price_history || []).slice().sort((a, b) => a.ts - b.ts);
+    const lookupPrice = (ts) => {
+      let val = null;
+      for (const p of scalpPriceHist) {
+        if (p.ts <= ts) val = p.price; else break;
+      }
+      return val;
+    };
+    datasets.push({ label:'Preis (Binance-Live, Trigger)', data: hist.map(p => lookupPrice(p.ts)), borderColor:'#c084fc', pointRadius:0, borderWidth:1.5, spanGaps:true });
 
     const scalpEntries = data.current_position_entries || [];
     const entryArr = Array(n).fill(null);
@@ -3516,6 +3547,7 @@ function buildConfigPayload() {
     scalp_sl_pct: parseFloat(document.getElementById('scalp_sl_pct').value),
     scalp_sl_usd: parseFloat(document.getElementById('scalp_sl_usd').value),
     scalp_max_nachkauf: parseInt(document.getElementById('scalp_max_nachkauf').value),
+    scalp_nachkauf_require_reversal: document.getElementById('scalp_nachkauf_require_reversal').checked,
     scalp_tp1_full_close: document.getElementById('scalp_tp1_full_close').checked,
     scalp_halfway_sl_enabled: document.getElementById('scalp_halfway_sl_enabled').checked,
     scalp_nachkauf_min_abstand_usd: parseFloat(document.getElementById('scalp_nachkauf_min_abstand_usd').value),
@@ -3699,6 +3731,7 @@ async def handle_status(request):
         "scalp_mean_price": st.get("scalp_mean_price"), "scalp_upper_band": st.get("scalp_upper_band"),
         "scalp_lower_band": st.get("scalp_lower_band"), "scalp_obv_rsi": st.get("scalp_obv_rsi"),
         "scalp_band_history": st.get("scalp_band_history", [])[-500:],
+        "scalp_price_history": st.get("scalp_price_history", [])[-500:],
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3753,7 +3786,7 @@ async def handle_config_update(request):
                 "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
                 "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm",
                 "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
-                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
+                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_nachkauf_require_reversal", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
                 "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period"]:
         if key in body:
             cfg[key] = body[key]
