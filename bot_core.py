@@ -228,6 +228,9 @@ def default_config():
         # laengeren durchlaufenden Trend JEDE weitere Kerze im Band automatisch nachkauft, obwohl der Kurs
         # einfach nur weiter in dieselbe Richtung durchlaeuft statt sich der Mittellinie wieder anzunaehern.
         "scalp_tp1_full_close": os.getenv("SCALP_TP1_FULL_CLOSE", "false").lower() == "true",  # true = TP1 schliesst 100% statt 50% (dann kein TP2 mehr)
+        "scalp_tp1_require_profit": os.getenv("SCALP_TP1_REQUIRE_PROFIT", "true").lower() == "true",  # TP1 nur ausloesen,
+        # wenn die (bei jeder Kerze neu berechnete) Mittellinie noch auf der profitablen Seite des
+        # Ø-Einstiegs liegt - sonst warten (SL bleibt aktiv) statt mit kleinem Verlust bei "TP1" rauszugehen
         "scalp_halfway_sl_enabled": os.getenv("SCALP_HALFWAY_SL_ENABLED", "true").lower() == "true",  # nach TP1: auf halbem Weg zu TP2 den SL zusaetzlich auf die Mittellinie nachziehen
         "scalp_supertrend_filter_enabled": os.getenv("SCALP_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",  # uebergeordneter SuperTrend-Trendfilter (hoehere Zeiteinheit)
         "scalp_supertrend_filter_resolution": os.getenv("SCALP_SUPERTREND_FILTER_RESOLUTION", "15m"),
@@ -1806,6 +1809,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <label><input type="checkbox" id="scalp_nachkauf_require_reversal" style="width:auto; vertical-align:middle;"> Nachkauf erst, wenn seit dem letzten Fill eine Kerze NICHT im Band geschlossen hat (statt bei jeder Kerze im Band nachzukaufen, obwohl der Kurs einfach weiter durchläuft)</label>
   </div>
   <div data-mode="scalp_vwap_obv_rsi">
+    <label><input type="checkbox" id="scalp_tp1_require_profit" style="width:auto; vertical-align:middle;"> TP1 nur wenn mindestens Breakeven (sonst warten, statt mit kleinem Verlust zu schließen)</label>
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi">
     <label><input type="checkbox" id="scalp_tp1_full_close" style="width:auto; vertical-align:middle;"> TP1 komplett schließen (100% statt 50%) - danach kein TP2 mehr</label>
   </div>
   <div data-mode="scalp_vwap_obv_rsi">
@@ -3220,6 +3226,7 @@ async function refresh() {
     document.getElementById('scalp_sl_usd').value = data.config.scalp_sl_usd;
     document.getElementById('scalp_max_nachkauf').value = data.config.scalp_max_nachkauf;
     document.getElementById('scalp_nachkauf_require_reversal').checked = !!data.config.scalp_nachkauf_require_reversal;
+    document.getElementById('scalp_tp1_require_profit').checked = !!data.config.scalp_tp1_require_profit;
     document.getElementById('scalp_tp1_full_close').checked = !!data.config.scalp_tp1_full_close;
     document.getElementById('scalp_halfway_sl_enabled').checked = !!data.config.scalp_halfway_sl_enabled;
     document.getElementById('scalp_nachkauf_min_abstand_usd').value = data.config.scalp_nachkauf_min_abstand_usd;
@@ -3548,6 +3555,7 @@ function buildConfigPayload() {
     scalp_sl_usd: parseFloat(document.getElementById('scalp_sl_usd').value),
     scalp_max_nachkauf: parseInt(document.getElementById('scalp_max_nachkauf').value),
     scalp_nachkauf_require_reversal: document.getElementById('scalp_nachkauf_require_reversal').checked,
+    scalp_tp1_require_profit: document.getElementById('scalp_tp1_require_profit').checked,
     scalp_tp1_full_close: document.getElementById('scalp_tp1_full_close').checked,
     scalp_halfway_sl_enabled: document.getElementById('scalp_halfway_sl_enabled').checked,
     scalp_nachkauf_min_abstand_usd: parseFloat(document.getElementById('scalp_nachkauf_min_abstand_usd').value),
@@ -3786,7 +3794,7 @@ async def handle_config_update(request):
                 "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
                 "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm",
                 "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
-                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_nachkauf_require_reversal", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
+                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_nachkauf_require_reversal", "scalp_tp1_require_profit", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
                 "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period"]:
         if key in body:
             cfg[key] = body[key]

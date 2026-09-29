@@ -4797,6 +4797,20 @@ async def check_scalp_sl(symbol, price):
 
     if not st.get("scalp_tp1_done"):
         tp1_hit = (pos == "long" and price >= mean) or (pos == "short" and price <= mean)
+        # scalp_tp1_require_profit (Nutzer-Vorgabe): die Mittellinie ist KEIN fester Zielpreis,
+        # sondern wird bei jeder neuen Kerze neu berechnet - laeuft der Kurs waehrend der
+        # Positionshaltung nur leicht gegen einen, kann die Mittellinie inzwischen UNTER (Long)
+        # bzw. UEBER (Short) den Ø-Einstieg gerutscht sein. "Kurs erreicht Mittellinie" bedeutet
+        # dann nicht mehr "im Plus", sondern TP1 wuerde trotz des Namens mit einem kleinen Verlust
+        # schliessen (live+Backtest beobachtet). Mit dieser Sperre wird in diesem Fall NICHT bei
+        # TP1 geschlossen, sondern weiter gewartet (SL bleibt normal aktiv) - Ausstieg dann erst
+        # bei echtem TP2 (Gegenband) oder wenn die Mittellinie sich wieder auf profitable Seite
+        # des Einstiegs bewegt hat.
+        if tp1_hit and cfg.get("scalp_tp1_require_profit", True):
+            entry_ref = st.get("avg_entry_price")
+            profitable = entry_ref is None or (mean >= entry_ref if pos == "long" else mean <= entry_ref)
+            if not profitable:
+                tp1_hit = False
         if tp1_hit:
             if cfg.get("scalp_tp1_full_close", False):
                 debug_log(f"🎯 [{symbol}] Scalp VWAP OBV RSI TP1 (Mittelband, volle Größe): {pos.upper()} @ {price} - schließe 100%")
@@ -5051,6 +5065,7 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
     sl_pct = float(cfg.get("scalp_sl_pct", 0.6)) / 100.0
     sl_usd = float(cfg.get("scalp_sl_usd", 5.0))
     tp1_full_close = bool(cfg.get("scalp_tp1_full_close", False))
+    tp1_require_profit = cfg.get("scalp_tp1_require_profit", True)
     halfway_sl_enabled = cfg.get("scalp_halfway_sl_enabled", True)
     max_nachkauf = max(0, int(cfg.get("scalp_max_nachkauf", 3) or 0))
     max_entries = 1 + max_nachkauf
@@ -5096,6 +5111,12 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
             else:
                 if not position["tp1_done"]:
                     tp1_hit = (pdir == "long" and h[i] >= mean) or (pdir == "short" and l[i] <= mean)
+                    # scalp_tp1_require_profit: siehe ausfuehrlicher Kommentar in check_scalp_sl (live) -
+                    # Mittellinie kann inzwischen auf die unprofitable Seite des Einstiegs gerutscht sein.
+                    if tp1_hit and tp1_require_profit:
+                        profitable = (mean >= entry) if pdir == "long" else (mean <= entry)
+                        if not profitable:
+                            tp1_hit = False
                     if tp1_hit:
                         if tp1_full_close:
                             _bt_close_trade(trades, pdir, entry, mean, position["size"], i, position["entry_i"], "TP1", ts=ts)
