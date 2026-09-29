@@ -17,6 +17,7 @@ from collections import deque, OrderedDict
 from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
     BOTS, execute_entry, execute_exit, execute_partial_exit, compute_step_abs, compute_step_abs_g2, GLOBAL_SETTINGS,
+    get_redis, REDIS_TIMEOUT_SECONDS,
 )
 import binance_ws  # WebSocket-Kerzen-Cache - reduziert REST-Traffic gegen Binance drastisch,
 # siehe fetch_candles_binance()/fetch_candles_binance_vol() weiter unten
@@ -157,6 +158,45 @@ _binance_ban_until_ms = {"spot": 0.0, "futures": 0.0}
 _binance_ban_logged_until = {"spot": 0.0, "futures": 0.0}  # verhindert Log-Spam waehrend des Banns
 
 
+async def save_binance_ban_state():
+    """Persistiert _binance_ban_until_ms in Redis - OHNE das vergisst der Bot bei JEDEM
+    Neustart (Redeploy, Absturz, manueller Restart) komplett, dass er gerade gebannt ist
+    (die Variable ist nur ein normaler Python-Wert im Speicher). Direkt nach einem Neustart
+    fangen dann wieder ALLE Poll-Loops fuer ALLE Coins an, Binance anzufragen, WAEHREND der
+    echte Bann bei Binance noch laeuft - jede dieser Anfragen bekommt sofort wieder eine 418
+    UND Binance verlaengert den eigenen Bann bei jeder weiteren Anfrage waehrend eines aktiven
+    Banns nur immer weiter (live beobachtet: "mehr Bann-Sekunden nach jedem Neustart"). Mit
+    dieser Persistierung "erinnert" sich der Bot auch nach einem Neustart an einen noch
+    laufenden Bann und stellt bis dahin gar keine neuen Anfragen."""
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        await asyncio.wait_for(r.set("gridbot:binance_ban", json.dumps(_binance_ban_until_ms)), timeout=REDIS_TIMEOUT_SECONDS)
+    except Exception as e:
+        debug_log("⚠️ Speichern des Binance-Bann-Status fehlgeschlagen", {"error": str(e)})
+
+
+async def load_binance_ban_state():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        raw = await asyncio.wait_for(r.get("gridbot:binance_ban"), timeout=REDIS_TIMEOUT_SECONDS)
+        if raw:
+            saved = json.loads(raw)
+            for mt in ("spot", "futures"):
+                if mt in saved:
+                    _binance_ban_until_ms[mt] = saved[mt]
+            still_banned = {mt: v for mt, v in _binance_ban_until_ms.items() if v > time.time() * 1000}
+            if still_banned:
+                debug_log("🚫 Binance-Bann-Status aus Redis geladen (noch aktiv)", {
+                    mt: round((until_ms - time.time() * 1000) / 1000) for mt, until_ms in still_banned.items()
+                })
+    except Exception as e:
+        debug_log("⚠️ Laden des Binance-Bann-Status fehlgeschlagen", {"error": str(e)})
+
+
 def _binance_is_banned(market_type):
     return time.time() * 1000 < _binance_ban_until_ms.get(market_type, 0.0)
 
@@ -172,6 +212,7 @@ def _binance_register_ban(market_type, symbol, status, body_text):
         until_ms = time.time() * 1000 + 60_000
     if until_ms > _binance_ban_until_ms.get(market_type, 0.0):
         _binance_ban_until_ms[market_type] = until_ms
+        asyncio.ensure_future(save_binance_ban_state())  # ueberlebt jetzt auch einen Neustart, siehe dort
     if _binance_ban_logged_until.get(market_type, 0.0) < until_ms:
         _binance_ban_logged_until[market_type] = until_ms
         wait_s = max(0, (until_ms - time.time() * 1000) / 1000)

@@ -18,6 +18,7 @@ from bot_core import (
 )
 from strategies import (
     trading_loop, binance_1s_poll_loop, ab_poll_loop, rsi_poll_loop, mvwap_poll_loop, scalp_poll_loop,
+    load_binance_ban_state,
 )
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
@@ -85,6 +86,10 @@ async def main():
     await load_bot_state()
     await load_global_settings()
     await load_ct_watched()
+    # MUSS vor allen Poll-Loops geladen werden: sonst "vergisst" der Bot bei jedem Neustart einen
+    # noch laufenden Binance-Bann und alle Coins feuern sofort wieder frische Anfragen gegen einen
+    # Server, der sie noch immer ablehnt - siehe Kommentar bei save_binance_ban_state() in strategies.py.
+    await load_binance_ban_state()
     await start_web_server()
     # return_exceptions=True ist HIER ENTSCHEIDEND: ohne das bringt eine einzige unbehandelte
     # Exception in IRGENDEINER der ~50+ parallelen Tasks (z.B. ein Bug in genau einem Coin/einer
