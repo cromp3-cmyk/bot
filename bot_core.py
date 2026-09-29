@@ -236,6 +236,26 @@ def default_config():
         "scalp_supertrend_filter_resolution": os.getenv("SCALP_SUPERTREND_FILTER_RESOLUTION", "15m"),
         "scalp_supertrend_filter_multiplier": float(os.getenv("SCALP_SUPERTREND_FILTER_MULTIPLIER", "3.0")),
         "scalp_supertrend_filter_atr_period": int(os.getenv("SCALP_SUPERTREND_FILTER_ATR_PERIOD", "10")),
+        # ===== Liquidity Waves (Nachbau des gleichnamigen Pine-Script-Indikators) =====
+        # Markiert Kerzen mit kleinem Koerper (relativ zur Kerzenspanne) als "Sweep"-Kerzen: eine
+        # bearische Sweep-Kerze setzt ein Level am HOCH (Short/Sell-Level), eine bullische am TIEF
+        # (Long/Buy-Level). Von den neuesten "liq_max_levels" Levels zaehlen nur die "gueltigen"
+        # (Short-Level noch UEBER dem Kurs, Long-Level noch UNTER dem Kurs, falls liq_side_filter an) -
+        # daraus ergibt sich Buyers% (Anteil gueltiger Long-Level) und Sellers% (Anteil gueltiger
+        # Short-Level). Long-Einstieg wenn Buyers% unter liq_entry_threshold_pct faellt (Kontra-
+        # Signal: kaum noch Kauf-Liquiditaet uebrig), Short spiegelbildlich mit Sellers%. TP1 (50%
+        # der Position) sobald der jeweilige Prozentwert wieder auf liq_tp1_pct steht, TP2 (Rest)
+        # bei liq_tp2_pct. SL ist ein fester $-Verlust ab Ø-Einstieg (kein Nachkauf/DCA).
+        "liq_timeframe": os.getenv("LIQ_TIMEFRAME", "5m"),
+        "liq_body_max_pct": float(os.getenv("LIQ_BODY_MAX_PCT", "50.0")),  # max. Koerper in % der Kerzenspanne, um als Sweep-Kerze zu zaehlen
+        "liq_max_levels": int(os.getenv("LIQ_MAX_LEVELS", "50")),  # wie viele der neuesten Level insgesamt betrachtet werden
+        "liq_side_filter": os.getenv("LIQ_SIDE_FILTER", "true").lower() == "true",  # nur Short-Level ueber / Long-Level unter dem Kurs zaehlen
+        "liq_dup_remove": os.getenv("LIQ_DUP_REMOVE", "true").lower() == "true",  # aelteres Level derselben Art ungueltig, wenn ein spaeteres auf (fast) gleicher Hoehe liegt
+        "liq_dup_tolerance_usd": float(os.getenv("LIQ_DUP_TOLERANCE_USD", "0.0")),  # Toleranz fuer "gleiche Hoehe" in $ (Ersatz fuer "Ticks" aus dem Original, da wir keine Tick-Groesse pro Symbol fuehren)
+        "liq_entry_threshold_pct": float(os.getenv("LIQ_ENTRY_THRESHOLD_PCT", "5.0")),  # Long wenn Buyers% < das, Short wenn Sellers% < das
+        "liq_tp1_pct": float(os.getenv("LIQ_TP1_PCT", "50.0")),  # TP1 (50% Teil-Exit, SL -> Einstieg) sobald Buyers%/Sellers% wieder hier steht
+        "liq_tp2_pct": float(os.getenv("LIQ_TP2_PCT", "85.0")),  # TP2 (Rest-Exit) sobald Buyers%/Sellers% hier steht
+        "liq_sl_usd": float(os.getenv("LIQ_SL_USD", "5.0")),  # fester $-Verlust ab Ø-Einstieg
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -465,6 +485,11 @@ def default_state():
         # "Preis"-Chart den Lighter-Tick-Preis zeigt, SL/TP aber am Binance-Preis ausgeloest werden -
         # ohne diese zweite Linie sieht ein TP/SL-Trigger im Chart aus wie "hat die Linie gar nicht
         # beruehrt", obwohl Binance sie zum Ausloese-Zeitpunkt sehr wohl beruehrt/durchbrochen hat.
+        # ===== Liquidity Waves State =====
+        "liq_sl_price": None,
+        "liq_tp1_done": False,
+        "liq_buyers_pct": None,  # zuletzt berechneter Wert, nur fuers Dashboard
+        "liq_sellers_pct": None,
     }
 
 
@@ -613,6 +638,7 @@ PERSISTED_STATE_KEYS = [
     "scalp_sl_price", "scalp_tp1_done", "scalp_mean_price", "scalp_upper_band", "scalp_lower_band",
     "scalp_obv_rsi", "scalp_candle_seq", "scalp_last_entry_seq", "scalp_halfway_lock_done",
     "scalp_left_band_since_fill",
+    "liq_sl_price", "liq_tp1_done",
 ]
 
 
@@ -1339,6 +1365,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
       <option value="scalp_vwap_obv_rsi">Scalp VWAP OBV RSI (Mean-Reversion, VWAP-Bänder + OBV RSI, TP1/TP2)</option>
+      <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
       <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
       <option value="mvwap_mf_signal">Multi-VWAP Money-Flow Signal (VWAP+MFI/CMF-Oszillator dreht Richtung, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
@@ -1843,6 +1870,44 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>SuperTrend-Multiplikator</label><input type="number" step="0.1" min="0.1" id="scalp_supertrend_filter_multiplier"></div>
   <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="scalp_supertrend_filter_atr_period"></div>
 
+  <div data-mode="liquidity_waves" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌊 <b>Liquidity Waves</b>: Kerzen mit kleinem Körper (relativ zur Spanne) markieren "Sweep"-Level - Hoch bei bärischer, Tief bei bullischer Sweep-Kerze. Von den neuesten "Levels betrachten" zählen nur die noch gültigen (Short-Level über, Long-Level unter dem Kurs) als Buyers%/Sellers%. Long wenn Buyers% unter der Einstiegs-Schwelle fällt (Short spiegelbildlich mit Sellers%). TP1 (50%, SL → Einstieg) sobald der Wert wieder beim TP1-Schwellenwert steht, TP2 (Rest) beim TP2-Schwellenwert. SL ist ein fester $-Verlust ab Ø-Einstieg, kein Nachkauf.
+  </div>
+  <div data-mode="liquidity_waves"><label>Zeitrahmen</label>
+    <select class="cfg" id="liq_timeframe">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="liq_timeframe_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="liquidity_waves"><label>Max. Körper (% der Kerzenspanne) für Sweep-Kerze</label><input type="number" step="1" min="1" max="100" id="liq_body_max_pct"></div>
+  <div data-mode="liquidity_waves"><label>Levels betrachten (neueste N)</label><input type="number" step="1" min="1" max="100" id="liq_max_levels"></div>
+  <div data-mode="liquidity_waves"><label>Long-Sweep nur unter, Short-Sweep nur über dem Kurs zählen</label>
+    <select class="cfg" id="liq_side_filter">
+      <option value="true">An</option>
+      <option value="false">Aus (alle Levels zählen, unabhängig von der Kursrichtung)</option>
+    </select>
+  </div>
+  <div data-mode="liquidity_waves"><label>Älteres Level ungültig bei späterem Sweep auf gleicher Höhe</label>
+    <select class="cfg" id="liq_dup_remove">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="liquidity_waves" data-requires="liq_dup_remove"><label>Toleranz für "gleiche Höhe" ($)</label><input type="number" step="0.01" min="0" id="liq_dup_tolerance_usd"></div>
+  <div data-mode="liquidity_waves"><label>Einstiegs-Schwelle (Buyers%/Sellers% unter diesem Wert)</label><input type="number" step="0.5" min="0" max="49" id="liq_entry_threshold_pct"></div>
+  <div data-mode="liquidity_waves"><label>TP1-Schwelle (%, 50% Teil-Exit, SL → Einstieg)</label><input type="number" step="1" min="1" max="99" id="liq_tp1_pct"></div>
+  <div data-mode="liquidity_waves"><label>TP2-Schwelle (%, Rest-Exit)</label><input type="number" step="1" min="1" max="100" id="liq_tp2_pct"></div>
+  <div data-mode="liquidity_waves"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="liq_sl_usd"></div>
 
 
 
@@ -2664,7 +2729,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3235,6 +3300,16 @@ async function refresh() {
     setResolutionField('scalp_supertrend_filter_resolution', data.config.scalp_supertrend_filter_resolution);
     document.getElementById('scalp_supertrend_filter_multiplier').value = data.config.scalp_supertrend_filter_multiplier;
     document.getElementById('scalp_supertrend_filter_atr_period').value = data.config.scalp_supertrend_filter_atr_period;
+    setResolutionField('liq_timeframe', data.config.liq_timeframe);
+    document.getElementById('liq_body_max_pct').value = data.config.liq_body_max_pct;
+    document.getElementById('liq_max_levels').value = data.config.liq_max_levels;
+    document.getElementById('liq_side_filter').value = String(data.config.liq_side_filter);
+    document.getElementById('liq_dup_remove').value = String(data.config.liq_dup_remove);
+    document.getElementById('liq_dup_tolerance_usd').value = data.config.liq_dup_tolerance_usd;
+    document.getElementById('liq_entry_threshold_pct').value = data.config.liq_entry_threshold_pct;
+    document.getElementById('liq_tp1_pct').value = data.config.liq_tp1_pct;
+    document.getElementById('liq_tp2_pct').value = data.config.liq_tp2_pct;
+    document.getElementById('liq_sl_usd').value = data.config.liq_sl_usd;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -3564,6 +3639,16 @@ function buildConfigPayload() {
     scalp_supertrend_filter_resolution: getResolutionField('scalp_supertrend_filter_resolution'),
     scalp_supertrend_filter_multiplier: parseFloat(document.getElementById('scalp_supertrend_filter_multiplier').value),
     scalp_supertrend_filter_atr_period: parseInt(document.getElementById('scalp_supertrend_filter_atr_period').value),
+    liq_timeframe: getResolutionField('liq_timeframe'),
+    liq_body_max_pct: parseFloat(document.getElementById('liq_body_max_pct').value),
+    liq_max_levels: parseInt(document.getElementById('liq_max_levels').value),
+    liq_side_filter: document.getElementById('liq_side_filter').value === 'true',
+    liq_dup_remove: document.getElementById('liq_dup_remove').value === 'true',
+    liq_dup_tolerance_usd: parseFloat(document.getElementById('liq_dup_tolerance_usd').value),
+    liq_entry_threshold_pct: parseFloat(document.getElementById('liq_entry_threshold_pct').value),
+    liq_tp1_pct: parseFloat(document.getElementById('liq_tp1_pct').value),
+    liq_tp2_pct: parseFloat(document.getElementById('liq_tp2_pct').value),
+    liq_sl_usd: parseFloat(document.getElementById('liq_sl_usd').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -3740,6 +3825,8 @@ async def handle_status(request):
         "scalp_lower_band": st.get("scalp_lower_band"), "scalp_obv_rsi": st.get("scalp_obv_rsi"),
         "scalp_band_history": st.get("scalp_band_history", [])[-500:],
         "scalp_price_history": st.get("scalp_price_history", [])[-500:],
+        "liq_sl_price": st.get("liq_sl_price"), "liq_tp1_done": st.get("liq_tp1_done"),
+        "liq_buyers_pct": st.get("liq_buyers_pct"), "liq_sellers_pct": st.get("liq_sellers_pct"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3795,7 +3882,9 @@ async def handle_config_update(request):
                 "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm",
                 "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
                 "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_nachkauf_require_reversal", "scalp_tp1_require_profit", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
-                "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period"]:
+                "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period",
+                "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
+                "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

@@ -5197,3 +5197,309 @@ def backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=None, trend_f
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
 
     return trades
+
+
+# ============================================================================
+# LIQUIDITY WAVES - Nachbau des gleichnamigen Pine-Script-Indikators (entry_mode "liquidity_waves")
+# ============================================================================
+# Kerzen mit kleinem Koerper (relativ zur Kerzenspanne, siehe liq_body_max_pct) gelten als
+# "Sweep"-Kerzen: eine bearische (close < open) setzt ein Level am HOCH der Kerze (Short/Sell-
+# Level, "Widerstand"), eine bullische (close > open) eines am TIEF (Long/Buy-Level,
+# "Unterstuetzung"). Ein neu hinzugefuegtes Level macht (falls liq_dup_remove an) alle AELTEREN
+# Level DERSELBEN Art auf (fast) gleicher Hoehe ungueltig (liq_dup_tolerance_usd Toleranz - Ersatz
+# fuer "Ticks" aus dem Original, da wir keine Tick-Groesse pro Symbol fuehren). Von den neuesten
+# "liq_max_levels" Leveln insgesamt (windowFirst-Verhalten wie im Original: zuerst die N neuesten
+# ueberhaupt auswaehlen, DANACH erst nach gueltig/ungueltig sortieren) zaehlen nur die noch
+# "gueltigen" (falls liq_side_filter an: Short-Level noch UEBER dem aktuellen Kurs, Long-Level
+# noch UNTER dem Kurs) fuer Buyers%/Sellers% (Anteil gueltiger Long- bzw. Short-Level an allen
+# gueltigen Leveln).
+#
+# Handelslogik (Nutzer-Vorgabe): Long-Einstieg wenn Buyers% unter liq_entry_threshold_pct faellt
+# (Kontra-Signal: kaum noch Kauf-Liquiditaet/Unterstuetzung uebrig), Short spiegelbildlich mit
+# Sellers%. TP1 (50% Teil-Exit, SL -> Einstieg) sobald der jeweilige Prozentwert wieder auf
+# liq_tp1_pct steht, TP2 (Rest-Exit) bei liq_tp2_pct. SL ist ein fester $-Verlust ab Ø-Einstieg.
+# Kein Nachkauf/DCA (vom Nutzer nicht verlangt, haelt die erste Version einfach).
+
+def compute_liqwave_series(o, h, l, c, body_max_pct, max_levels, side_filter, dup_remove, dup_tolerance_usd):
+    """Ein einziger Durchlauf ueber die komplette Kerzenreihe, liefert fuer JEDEN Index i die
+    Buyers%/Sellers% 'als ob dies die letzte Kerze waere' (wie Pine's barstate.islast, hier aber
+    fuer JEDEN Index einzeln ausgewertet - noetig, um live UND im Backtest denselben Wert pro
+    Kerze zu bekommen). None, solange nach Anwendung von liq_side_filter noch keine gueltigen
+    Level existieren. Kein Volumen noetig - das faerbt im Original nur die $-Labels, nicht die
+    Signale."""
+    n = len(c)
+    buyers_pct = [None] * n
+    sellers_pct = [None] * n
+    lvls = []  # je Eintrag: [price, is_high, bar_index] - is_high=True: Short/Sell-Level (am Hoch)
+    for i in range(n):
+        rng = h[i] - l[i]
+        body_pct = (abs(c[i] - o[i]) / rng * 100) if rng > 0 else 100.0
+        is_sweep = body_pct <= body_max_pct
+        if is_sweep and c[i] < o[i]:
+            price, is_high = h[i], True
+        elif is_sweep and c[i] > o[i]:
+            price, is_high = l[i], False
+        else:
+            price = None
+        if price is not None:
+            if dup_remove:
+                lvls = [lv for lv in lvls if not (lv[1] == is_high and abs(lv[0] - price) <= dup_tolerance_usd)]
+            lvls.append([price, is_high, i])
+            if len(lvls) > 150:  # gleicher Deckel wie im Original (Pine: lvls.size() > 150 -> shift)
+                lvls.pop(0)
+
+        close_now = c[i]
+        n_hi = 0
+        n_lo = 0
+        seen = 0
+        for lv_price, lv_is_high, _lv_bar in reversed(lvls):
+            if seen >= max_levels:
+                break
+            seen += 1
+            valid = (not side_filter) or (lv_price > close_now if lv_is_high else lv_price < close_now)
+            if valid:
+                if lv_is_high:
+                    n_hi += 1
+                else:
+                    n_lo += 1
+        cnt_tot = n_hi + n_lo
+        if cnt_tot > 0:
+            sellers_pct[i] = n_hi / cnt_tot * 100
+            buyers_pct[i] = n_lo / cnt_tot * 100
+
+    return buyers_pct, sellers_pct
+
+
+def _liq_reset_state(st):
+    st["liq_sl_price"] = None
+    st["liq_tp1_done"] = False
+
+
+def _liq_set_sl(st, cfg, entry_ref, target):
+    coin_size = st.get("total_coin_size") or 0
+    if coin_size <= 0:
+        return
+    distance = cfg.get("liq_sl_usd", 5.0) / coin_size
+    st["liq_sl_price"] = entry_ref - distance if target == "long" else entry_ref + distance
+
+
+async def check_liq_sl(symbol, price):
+    """Jeden Tick (Live-Preis): nur der feste $-SL - TP1/TP2 haengen an Buyers%/Sellers% und
+    werden deshalb NUR bei neu geschlossenen Kerzen in check_liq_candle geprueft, nicht hier."""
+    b = BOTS[symbol]
+    st = b["state"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    sl_price = st.get("liq_sl_price")
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    if hit_sl:
+        reason = "BREAKEVEN" if st.get("liq_tp1_done") else "SL"
+        debug_log(f"🚪 [{symbol}] Liquidity Waves {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, reason)
+        if st["position"] is None:
+            _liq_reset_state(st)
+
+
+async def check_liq_candle(symbol, buyers_pct, sellers_pct, price):
+    """Bei JEDER neu geschlossenen Kerze: TP1/TP2 einer offenen Position pruefen (haengt an
+    Buyers%/Sellers%, siehe Modul-Docstring), sonst einen Neueinstieg. Kein Nachkauf."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    pos = st["position"]
+    tp1_pct = cfg.get("liq_tp1_pct", 50.0)
+    tp2_pct = cfg.get("liq_tp2_pct", 85.0)
+
+    if pos == "long":
+        pct = buyers_pct
+        if pct is None:
+            return
+        if not st.get("liq_tp1_done"):
+            if pct >= tp1_pct:
+                debug_log(f"🎯 [{symbol}] Liquidity Waves TP1 (Buyers%={round(pct,1)}): LONG @ {price} - schließe 50%, SL -> Einstieg")
+                ok = await execute_partial_exit(symbol, price, 0.5, "TP1")
+                if ok and st["position"] is not None:
+                    st["liq_tp1_done"] = True
+                    st["liq_sl_price"] = st["avg_entry_price"]  # Breakeven
+            return
+        if pct >= tp2_pct:
+            debug_log(f"🎯 [{symbol}] Liquidity Waves TP2 (Buyers%={round(pct,1)}): LONG @ {price} - schließe Rest")
+            await execute_exit(symbol, price, "TP2")
+            if st["position"] is None:
+                _liq_reset_state(st)
+        return
+
+    if pos == "short":
+        pct = sellers_pct
+        if pct is None:
+            return
+        if not st.get("liq_tp1_done"):
+            if pct >= tp1_pct:
+                debug_log(f"🎯 [{symbol}] Liquidity Waves TP1 (Sellers%={round(pct,1)}): SHORT @ {price} - schließe 50%, SL -> Einstieg")
+                ok = await execute_partial_exit(symbol, price, 0.5, "TP1")
+                if ok and st["position"] is not None:
+                    st["liq_tp1_done"] = True
+                    st["liq_sl_price"] = st["avg_entry_price"]  # Breakeven
+            return
+        if pct >= tp2_pct:
+            debug_log(f"🎯 [{symbol}] Liquidity Waves TP2 (Sellers%={round(pct,1)}): SHORT @ {price} - schließe Rest")
+            await execute_exit(symbol, price, "TP2")
+            if st["position"] is None:
+                _liq_reset_state(st)
+        return
+
+    # Keine Position offen: Neueinstieg pruefen. Beide Prozentwerte < Schwelle gleichzeitig ist
+    # unmoeglich (sie summieren sich auf 100%, die Schwelle liegt < 50%), daher kein Konflikt.
+    threshold = cfg.get("liq_entry_threshold_pct", 5.0)
+    if buyers_pct is not None and buyers_pct < threshold:
+        await execute_entry(symbol, "long", price, is_add_on=False)
+        if st["position"] is not None:
+            _liq_reset_state(st)
+            _liq_set_sl(st, cfg, st["avg_entry_price"], "long")
+            debug_log(f"🌊 [{symbol}] Liquidity Waves: LONG @ {price} (Buyers%={round(buyers_pct,1)} < {threshold})")
+    elif sellers_pct is not None and sellers_pct < threshold:
+        await execute_entry(symbol, "short", price, is_add_on=False)
+        if st["position"] is not None:
+            _liq_reset_state(st)
+            _liq_set_sl(st, cfg, st["avg_entry_price"], "short")
+            debug_log(f"🌊 [{symbol}] Liquidity Waves: SHORT @ {price} (Sellers%={round(sellers_pct,1)} < {threshold})")
+
+
+async def liq_poll_loop(symbol):
+    """Liquidity Waves - Struktur identisch zu rsi_poll_loop/mvwap_poll_loop (Kerzen ueber
+    fetch_candles_binance_multi, Signal nur bei NEU geschlossener Kerze), SL jeden Tick aus dem
+    Live-Preis (check_liq_sl), TP1/TP2 nur bei neu geschlossener Kerze (check_liq_candle), weil sie
+    an Buyers%/Sellers% haengen, die sich nur pro Kerze aendern."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "liquidity_waves" and cfg["bot_active"] and b["state"].get("session_started"):
+                resolution = cfg.get("liq_timeframe", "5m")
+                max_levels = int(cfg.get("liq_max_levels", 50))
+                min_needed = max(max_levels * 3, 60)  # genug Kerzen, damit realistisch >= max_levels Sweep-Level entstehen koennen
+                needed_bars = min(1000, max(min_needed * 2, 200))
+                st = b["state"]
+
+                data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                if data:
+                    timestamps, opens, highs, lows, closes = data
+                    closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                else:
+                    closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if st["position"] is not None and st["last_price"] is not None:
+                    await check_liq_sl(symbol, st["last_price"])
+
+                if closed_ts and len(closed_c) > min_needed:
+                    candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
+                    max_age_seconds = 300
+                    if candle_age_seconds > max_age_seconds:
+                        debug_log(f"⚠️ [{symbol}] Liquidity Waves: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
+                    else:
+                        last_ts = closed_ts[-1]
+                        if last_ts != last_processed_ts:
+                            last_processed_ts = last_ts
+                            buyers_pct_arr, sellers_pct_arr = compute_liqwave_series(
+                                closed_o, closed_h, closed_l, closed_c,
+                                cfg.get("liq_body_max_pct", 50.0), max_levels,
+                                cfg.get("liq_side_filter", True), cfg.get("liq_dup_remove", True),
+                                cfg.get("liq_dup_tolerance_usd", 0.0))
+                            st["liq_buyers_pct"] = buyers_pct_arr[-1]
+                            st["liq_sellers_pct"] = sellers_pct_arr[-1]
+                            await check_liq_candle(symbol, buyers_pct_arr[-1], sellers_pct_arr[-1], closed_c[-1])
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            debug_log(f"💓 [{symbol}] Liquidity Waves aktiv: Buyers%={round(st.get('liq_buyers_pct') or 0, 1)}, "
+                                      f"Sellers%={round(st.get('liq_sellers_pct') or 0, 1)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Liquidity Waves wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Liquidity Waves wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Liquidity Waves-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+def backtest_liquidity_waves(candles, cfg):
+    """Backtest fuer Liquidity Waves - simuliert dieselben Regeln wie check_liq_candle/
+    check_liq_sl: SL wird pro Kerze gegen High/Low geprueft (wie ueberall sonst im Backtest),
+    TP1/TP2 gegen den PRO KERZE berechneten Buyers%/Sellers%-Wert (Kerzenschluss-basiert, wie
+    live). 'candles' ist ein 5er-Tupel OHNE Volumen (ts, o, h, l, c) - wird hier nicht gebraucht."""
+    ts, o, h, l, c = candles
+    n = len(c)
+    body_max_pct = float(cfg.get("liq_body_max_pct", 50.0))
+    max_levels = int(cfg.get("liq_max_levels", 50))
+    side_filter = cfg.get("liq_side_filter", True)
+    dup_remove = cfg.get("liq_dup_remove", True)
+    dup_tolerance_usd = float(cfg.get("liq_dup_tolerance_usd", 0.0))
+    entry_threshold = float(cfg.get("liq_entry_threshold_pct", 5.0))
+    tp1_pct = float(cfg.get("liq_tp1_pct", 50.0))
+    tp2_pct = float(cfg.get("liq_tp2_pct", 85.0))
+    sl_usd = float(cfg.get("liq_sl_usd", 5.0))
+    margin, leverage = cfg["margin"], cfg["leverage"]
+
+    buyers_pct_arr, sellers_pct_arr = compute_liqwave_series(o, h, l, c, body_max_pct, max_levels, side_filter, dup_remove, dup_tolerance_usd)
+
+    min_needed = max(max_levels * 3, 60)
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp1_done"}
+    trades = []
+
+    def _recalc_sl(pos):
+        distance = sl_usd / pos["size"] if pos["size"] else 0
+        pos["sl_price"] = pos["entry"] - distance if pos["dir"] == "long" else pos["entry"] + distance
+
+    for i in range(min_needed, n):
+        price = c[i]
+        buyers_pct, sellers_pct = buyers_pct_arr[i], sellers_pct_arr[i]
+
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position["sl_price"]
+            hit_sl = (pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price)
+            if hit_sl:
+                reason = "BREAKEVEN" if position["tp1_done"] else "SL"
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+            else:
+                pct = buyers_pct if pdir == "long" else sellers_pct
+                if pct is not None:
+                    if not position["tp1_done"]:
+                        if pct >= tp1_pct:
+                            close_size = position["size"] * 0.5
+                            _bt_close_trade(trades, pdir, entry, price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                            position["size"] -= close_size
+                            position["tp1_done"] = True
+                            position["sl_price"] = entry  # Breakeven
+                    elif pct >= tp2_pct:
+                        _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP2", ts=ts)
+                        position = None
+            continue
+
+        if buyers_pct is not None and buyers_pct < entry_threshold:
+            target = "long"
+        elif sellers_pct is not None and sellers_pct < entry_threshold:
+            target = "short"
+        else:
+            continue
+
+        size = (margin * leverage) / price
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "tp1_done": False}
+        _recalc_sl(position)
+        _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades
