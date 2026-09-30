@@ -717,6 +717,15 @@ async def grid_scalp_tick(client, symbol):
         if time.time() < float(st.get("ms_pause_until") or 0):
             entries_ok = False
         st["ms_trend"] = trend
+        if ctx is None:
+            st["ms_ctx"] = "KEINE Binance-1m-Kerzen -> keine Entries"
+            if time.time() - float(st.get("ms_ctx_warn") or 0) >= 60:
+                st["ms_ctx_warn"] = time.time()
+                debug_log(f"⚠️ [{symbol}] Maker-Scalp: keine Binance-1m-Futures-Kerzen (Bann/Stream nicht warm?) - keine neuen Entries")
+        elif time.time() < float(st.get("ms_pause_until") or 0):
+            st["ms_ctx"] = f"Vol-Pause noch {round(float(st['ms_pause_until']) - time.time())}s"
+        else:
+            st["ms_ctx"] = f"ok (EMA-Abstand {ctx.get('ema_bps')} bps)"
         desired = _desired_maker(symbol, cfg, pos_size, avg_entry, best_bid, best_ask, trend, entries_ok)
     else:
         desired = _desired_orders(symbol, cfg, st, pos_size, avg_entry, best_bid, best_ask)
@@ -730,7 +739,7 @@ async def grid_scalp_tick(client, symbol):
             wr = round(stt["gewinne"] / stt["trades"] * 100, 1) if stt["trades"] else 0
             debug_log(f"\U0001f493 [{symbol}] {mode} SIM Heartbeat", {
                 "mid": round(mid, 6), "bid/ask": f"{best_bid}/{best_ask}",
-                "trend": st.get("ms_trend"), "position": f"{round(pos_size,6)} @ {avg_entry}" if pos_size else "flat",
+                "trend": st.get("ms_trend"), "kontext": st.get("ms_ctx"), "position": f"{round(pos_size,6)} @ {avg_entry}" if pos_size else "flat",
                 "sim_orders": len(st["gs_sim_orders"]), "sim_trades": stt["trades"], "sim_winrate": f"{wr}%",
                 "sim_pnl_usd": stt["pnl"], "markout": _markout_summary(st)})
         return
