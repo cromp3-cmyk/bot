@@ -2163,7 +2163,37 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
         }
 
-    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+    if entry_mode == "liquidity_waves":
+        max_candles = BACKTEST_MAX_CANDLES.get("liquidity_waves", 100_000)
+        resolution = cfg.get("liq_timeframe", "5m")
+        if resolution in SUB_MINUTE_RESOLUTIONS:
+            max_candles = min(max_candles, 5000)
+        candles_vol, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        max_levels = int(cfg.get("liq_max_levels", 50))
+        min_needed = max(max_levels * 3, 60) + 10
+        if not candles_vol or len(candles_vol[4]) < min_needed:
+            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+        n_candles = len(candles_vol[4])
+        # Liquidity Waves braucht kein Volumen (siehe compute_liqwave_series-Docstring) - 5er-Tupel
+        candles = candles_vol[:5]
+
+        trades = backtest_liquidity_waves(candles, cfg)
+        closed_trades = [t for t in trades if t["pnl"] is not None]
+        stats = summarize_backtest_trades(closed_trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in closed_trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in closed_trades if t["dir"] == "short"], exclude_top_n)
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
+        }
+
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 AB_SWEEP_MAX_COMBOS = 600
 AB_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -2444,6 +2474,7 @@ BACKTEST_MAX_CANDLES = {
     "hvd_signal": 100_000,
     "ab_breakout": 100_000,
     "scalp_vwap_obv_rsi": 100_000,
+    "liquidity_waves": 100_000,
 }
 
 
