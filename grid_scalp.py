@@ -319,6 +319,69 @@ def _feed_internal(symbol, mid):
         cur[1] = max(cur[1], mid); cur[2] = min(cur[2], mid); cur[3] = mid
 
 
+_seed_state = {}   # symbol -> {"done": bool, "last_try": ts}
+
+
+async def _seed_lighter(symbol):
+    import lighter
+    from bot_core import BASE_URL
+    configuration = lighter.Configuration(host=BASE_URL)
+    async with lighter.ApiClient(configuration) as api_client:
+        candle_api = lighter.CandlestickApi(api_client)
+        now_ms = int(time.time() * 1000)
+        resp = await candle_api.candles(
+            market_id=MARKET_INDICES[symbol], resolution="1m",
+            start_timestamp=now_ms - 6 * 3600 * 1000, end_timestamp=now_ms,
+            count_back=150, set_timestamp_to_end=True)
+    out = []
+    for c in (getattr(resp, "c", None) or []):
+        try:
+            t = int(c.t); t = t // 1000 if t > 1e12 else t
+            out.append((t, float(c.h), float(c.l), float(c.c)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
+async def _seed_hyperliquid(symbol):
+    import aiohttp
+    now_ms = int(time.time() * 1000)
+    body = {"type": "candleSnapshot", "req": {"coin": symbol, "interval": "1m",
+                                               "startTime": now_ms - 3 * 3600 * 1000, "endTime": now_ms}}
+    async with aiohttp.ClientSession() as sess:
+        async with sess.post("https://api.hyperliquid.xyz/info", json=body,
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                return []
+            data = await r.json()
+    return [(int(k["t"]) // 1000, float(k["h"]), float(k["l"]), float(k["c"])) for k in data]
+
+
+async def _seed_internal(symbol, cfg):
+    """Fuellt die eigenen 1m-Kerzen EINMALIG mit Historie (Lighter, sonst Hyperliquid) -
+    dadurch entfaellt die Aufwaermzeit nach einem Deploy."""
+    stt = _seed_state.setdefault(symbol, {"done": False, "last_try": 0.0})
+    if stt["done"] or time.time() - stt["last_try"] < 60:
+        return
+    stt["last_try"] = time.time()
+    candles = []
+    for name, fn in (("Lighter", _seed_lighter), ("Hyperliquid", _seed_hyperliquid)):
+        try:
+            candles = await asyncio.wait_for(fn(symbol), timeout=15)
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Maker-Scalp Seed {name} fehlgeschlagen", {"error": str(e)})
+            candles = []
+        if len(candles) >= 20:
+            cur_min = int(time.time() // 60)
+            candles = sorted(candles)
+            closed = [(h, l, c) for t, h, l, c in candles if t // 60 < cur_min]
+            d = _int_candles.setdefault(symbol, {"closed": [], "cur": None})
+            d["closed"] = closed[-300:] + d["closed"]
+            stt["done"] = True
+            debug_log(f"🌱 [{symbol}] Maker-Scalp: {len(closed)} Historien-Kerzen geladen ({name}) - keine Aufwaermzeit")
+            return
+
+
 async def _maker_context(symbol, cfg):
     """Gibt {"trend": up/down/flat, "vol_spike": bool, "quelle": ...} zurueck oder None.
     Quelle 1: Binance-1m-Futures (WS-Cache). Quelle 2 (Fallback): eigene 1m-Kerzen aus dem
@@ -436,6 +499,60 @@ def _sim_stats(st):
     return stats
 
 
+def _dash_entry(st, price, size, is_add_on):
+    """Dashboard: Tabelle 'Laufende Nachkaeufe' fuettern (Dry-Run)."""
+    st.setdefault("current_position_entries", []).append({
+        "time": now_local().isoformat(), "price": round(price, 6), "size": round(size, 8),
+        "stufe": int(st.get("entry_count") or 0) + 1, "is_add_on": is_add_on})
+    st["entry_count"] = int(st.get("entry_count") or 0) + 1
+    st["last_entry_price"] = price
+    if not is_add_on:
+        st["position_opened_at"] = now_local().isoformat()
+
+
+def _dash_trade(st, side, avg, exit_px, pnl, reason):
+    """Dashboard: Trade-Log + Statistik (Dry-Run)."""
+    stats = st.setdefault("stats", {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0})
+    stats["trades"] += 1
+    stats["total_pnl_usd"] += pnl
+    stats["wins" if pnl > 0 else "losses"] += 1
+    log = st.setdefault("trade_log", [])
+    log.append({"side": side, "avg_entry": round(avg, 4), "exit": round(exit_px, 4),
+                "entries": int(st.get("entry_count") or 0), "pnl_usd": round(pnl, 3),
+                "opened_at": st.get("position_opened_at"), "closed_at": now_local().isoformat(),
+                "reason": reason})
+    if len(log) > 200:
+        del log[:len(log) - 200]
+
+
+def _dash_reset_cycle(st):
+    st["entry_count"] = 0
+    st["current_position_entries"] = []
+    st["position_opened_at"] = None
+    st["last_entry_price"] = None
+
+
+def _publish_levels(st, cfg, mode, desired, pos_size, avg_entry):
+    """Linien fuer Chart/Anzeige: TP, SL, naechster Nachkauf bzw. Einstiegs-Level."""
+    lv = {"tp_price": None, "sl_price": None, "next_nachkauf_price": None,
+          "next_entry_long": None, "next_entry_short": None}
+    for d in desired:
+        t = d["tag"]
+        if t == "tp":
+            lv["tp_price"] = d["price"]
+        elif t in ("buy_0", "sell_0") and pos_size == 0:
+            lv["next_entry_long" if t == "buy_0" else "next_entry_short"] = d["price"]
+        elif not d["reduce_only"] and lv["next_nachkauf_price"] is None:
+            lv["next_nachkauf_price"] = d["price"]
+    if pos_size != 0 and avg_entry:
+        if mode == "maker_scalp":
+            dist = avg_entry * float(_ms(cfg, "ms_sl_bps")) / 1e4
+        else:
+            dist = abs(float(cfg.get("gs_flatten_usd", 25.0))) / max(abs(pos_size), 1e-12)
+        lv["sl_price"] = round(avg_entry - dist if pos_size > 0 else avg_entry + dist, 6)
+    st["gs_levels"] = lv
+
+
 def _sim_process_fills(symbol, st, cfg, best_bid, best_ask):
     """Prueft alle simulierten Orders auf Fill und verbucht sie.
     Gibt (pos_size, avg_entry) nach den Fills zurueck."""
@@ -471,6 +588,8 @@ def _sim_process_fills(symbol, st, cfg, best_bid, best_ask):
                     stats["gewinne"] += 1
                 else:
                     stats["verluste"] += 1
+                _dash_trade(st, "long" if pos > 0 else "short", avg, o["price"], pnl,
+                            "TP" if o.get("reduce_only") else "Gegen-Order")
                 quote = round(stats["gewinne"] / stats["trades"] * 100, 1)
                 debug_log(
                     f"\U0001f4b0 [{symbol}] SIM-TRADE #{stats['trades']}: "
@@ -481,8 +600,10 @@ def _sim_process_fills(symbol, st, cfg, best_bid, best_ask):
             pos += menge
             if abs(pos) < 1e-12:
                 pos, avg = 0.0, None
+                _dash_reset_cycle(st)
         else:
             # Oeffnender/aufstockender Fill
+            _dash_entry(st, o["price"], o["size"], is_add_on=not (pos == 0 or avg is None))
             if pos == 0 or avg is None:
                 pos, avg = menge, o["price"]
             else:
@@ -566,6 +687,8 @@ def _sim_close_market(st, bid, ask, reason):
     stats["gewinne" if pnl >= 0 else "verluste"] += 1
     debug_log(f"\U0001f9ea SIM-FLATTEN ({reason}): zu {px} | PnL {round(pnl, 4)}$",
               {"gesamt_pnl": stats["pnl"], "gewinne": stats["gewinne"], "verluste": stats["verluste"]})
+    _dash_trade(st, "long" if pos > 0 else "short", avg, px, pnl, reason)
+    _dash_reset_cycle(st)
     _sim_reset(st)
     st["position"] = None
     st["avg_entry_price"] = None
@@ -650,6 +773,7 @@ async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldo
         debug_log(f"🚪 [{symbol}] Grid-Scalp FLATTEN ausgefuehrt ({reason})", {"tx_hash": str(tx_hash)})
 
     st["gs_tag_map"] = {}
+    st["gs_levels"] = None
     st["gs_cooldown_until"] = time.time() + (float(cooldown_s) if cooldown_s is not None
                                              else float(cfg.get("gs_cooldown_min", 30.0)) * 60)
     st["gs_anchor"] = None
@@ -743,6 +867,7 @@ async def grid_scalp_tick(client, symbol):
     # 4) SOLL gegen IST abgleichen
     if mode == "maker_scalp":
         _feed_internal(symbol, mid)
+        await _seed_internal(symbol, cfg)
         ctx = await _maker_context(symbol, cfg)
         entries_ok = ctx is not None
         trend = ctx["trend"] if ctx else "flat"
@@ -768,6 +893,8 @@ async def grid_scalp_tick(client, symbol):
     else:
         desired = _desired_orders(symbol, cfg, st, pos_size, avg_entry, best_bid, best_ask)
 
+    _publish_levels(st, cfg, mode, desired, pos_size, avg_entry)
+
     if cfg["dry_run"]:
         _sim_reconcile(symbol, st, cfg, desired)
         now = time.time()
@@ -779,7 +906,9 @@ async def grid_scalp_tick(client, symbol):
                 "mid": round(mid, 6), "bid/ask": f"{best_bid}/{best_ask}",
                 "trend": st.get("ms_trend"), "kontext": st.get("ms_ctx"), "position": f"{round(pos_size,6)} @ {avg_entry}" if pos_size else "flat",
                 "sim_orders": len(st["gs_sim_orders"]), "sim_trades": stt["trades"], "sim_winrate": f"{wr}%",
-                "sim_pnl_usd": stt["pnl"], "markout": _markout_summary(st)})
+                "sim_pnl_usd": stt["pnl"],
+                "sim_upnl_usd": round((mid - avg_entry) * pos_size, 3) if (pos_size and avg_entry) else 0.0,
+                "markout": _markout_summary(st)})
         return
 
     live = await read_open_orders(client, market_index)

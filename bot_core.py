@@ -842,6 +842,10 @@ def calc_grid_levels(symbol):
     st, cfg = b["state"], b["config"]
     levels = {"anchor": st["anchor_price"], "tp_price": None, "next_nachkauf_price": None,
               "grid_step_abs": None, "tp_step_abs": None}
+    if cfg.get("entry_mode") in ("grid_scalp", "maker_scalp"):
+        # Linien kommen direkt aus dem Maker-Modul (TP, SL, naechster Nachkauf / Einstiegs-Level)
+        levels.update({k: v for k, v in (st.get("gs_levels") or {}).items()})
+        return levels
     is_g2 = cfg.get("entry_mode") == "grid_v2"
     step_fn = compute_step_abs_g2 if is_g2 else compute_step_abs
     if st["position"] is None:
@@ -3419,6 +3423,7 @@ async function refresh() {
   const datasets = [{ label: 'Preis', data: prices, borderColor:'#60a5fa', pointRadius:0, borderWidth:2 }];
   if (gl.anchor) datasets.push({ label:'Anker', data: Array(n).fill(gl.anchor), borderColor:'#9ca3af', borderDash:[4,4], pointRadius:0, borderWidth:1 });
   if (gl.tp_price) datasets.push({ label:'TP', data: Array(n).fill(gl.tp_price), borderColor:'#4ade80', borderDash:[6,3], pointRadius:0, borderWidth:1 });
+  if (gl.sl_price) datasets.push({ label:'SL', data: Array(n).fill(gl.sl_price), borderColor:'#ef4444', borderDash:[3,3], pointRadius:0, borderWidth:1 });
   if (gl.next_nachkauf_price) datasets.push({ label:'Nächster Nachkauf', data: Array(n).fill(gl.next_nachkauf_price), borderColor:'#f87171', borderDash:[6,3], pointRadius:0, borderWidth:1 });
   if (gl.next_entry_long) datasets.push({ label:'Entry Long ab', data: Array(n).fill(gl.next_entry_long), borderColor:'#4ade80', borderDash:[2,2], pointRadius:0, borderWidth:1 });
   if (gl.next_entry_short) datasets.push({ label:'Entry Short ab', data: Array(n).fill(gl.next_entry_short), borderColor:'#f87171', borderDash:[2,2], pointRadius:0, borderWidth:1 });
