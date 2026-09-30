@@ -301,30 +301,65 @@ def _ema(values, n):
     return e
 
 
+_int_candles = {}   # symbol -> {"closed": [(h,l,c)], "cur": [minute,h,l,c]}
+
+
+def _feed_internal(symbol, mid):
+    """Baut 1m-Kerzen aus Lighters eigenem Mid-Preis (Fallback, wenn Binance nichts liefert)."""
+    d = _int_candles.setdefault(symbol, {"closed": [], "cur": None})
+    m = int(time.time() // 60)
+    cur = d["cur"]
+    if cur is None or cur[0] != m:
+        if cur is not None:
+            d["closed"].append((cur[1], cur[2], cur[3]))
+            if len(d["closed"]) > 300:
+                del d["closed"][:len(d["closed"]) - 300]
+        d["cur"] = [m, mid, mid, mid]
+    else:
+        cur[1] = max(cur[1], mid); cur[2] = min(cur[2], mid); cur[3] = mid
+
+
 async def _maker_context(symbol, cfg):
-    """Gibt {"trend": up/down/flat, "vol_spike": bool} zurueck oder None (keine Daten)."""
+    """Gibt {"trend": up/down/flat, "vol_spike": bool, "quelle": ...} zurueck oder None.
+    Quelle 1: Binance-1m-Futures (WS-Cache). Quelle 2 (Fallback): eigene 1m-Kerzen aus dem
+    Lighter-Preis - braucht nach einem Neustart ca. ms_ema_slow Minuten Aufwaermzeit."""
     c = _ctx_cache.get(symbol)
     if c and time.time() - c["t"] < 5:
         return c
-    from strategies import fetch_candles_binance  # Lazy-Import (Zirkelimport vermeiden)
-    res = await fetch_candles_binance(symbol, "1m", 120, "futures")
-    if not res:
-        return None
-    _ts, _o, hi, lo, cl = res[:5]
     slow_n = int(_ms(cfg, "ms_ema_slow"))
-    if len(cl) < slow_n + 10:
+    closed_c = hi_r = lo_r = cur_rng = None
+    quelle = None
+    try:
+        from strategies import fetch_candles_binance  # Lazy-Import (Zirkelimport vermeiden)
+        res = await fetch_candles_binance(symbol, "1m", 120, "futures")
+    except Exception:
+        res = None
+    if res:
+        _ts, _o, hi, lo, cl = res[:5]
+        if len(cl) >= slow_n + 10:
+            closed_c = cl[:-1]                       # letzte Kerze laeuft noch
+            hi_r, lo_r = hi[-21:-1], lo[-21:-1]
+            cur_rng = hi[-1] - lo[-1]
+            quelle = "binance"
+    if closed_c is None:
+        d = _int_candles.get(symbol)
+        if d and len(d["closed"]) >= slow_n and d["cur"]:
+            closed_c = [x[2] for x in d["closed"]]
+            hi_r = [x[0] for x in d["closed"][-20:]]
+            lo_r = [x[1] for x in d["closed"][-20:]]
+            cur_rng = d["cur"][1] - d["cur"][2]
+            quelle = "lighter-eigen"
+    if closed_c is None:
         return None
-    closed = cl[:-1]                      # letzte Kerze laeuft noch
-    fast = _ema(closed[-(slow_n * 3):], int(_ms(cfg, "ms_ema_fast")))
-    slow = _ema(closed[-(slow_n * 3):], slow_n)
+    fast = _ema(closed_c[-(slow_n * 3):], int(_ms(cfg, "ms_ema_fast")))
+    slow = _ema(closed_c[-(slow_n * 3):], slow_n)
     d_bps = (fast - slow) / slow * 1e4
     band = float(_ms(cfg, "ms_flat_band_bps"))
     trend = "up" if d_bps > band else "down" if d_bps < -band else "flat"
-    ranges = [h - l for h, l in zip(hi[-21:-1], lo[-21:-1])]
+    ranges = [h - l for h, l in zip(hi_r, lo_r)]
     avg_rng = sum(ranges) / len(ranges) if ranges else 0.0
-    cur_rng = hi[-1] - lo[-1]
     spike = avg_rng > 0 and cur_rng > float(_ms(cfg, "ms_vol_mult")) * avg_rng
-    ctx = {"t": time.time(), "trend": trend, "vol_spike": spike, "ema_bps": round(d_bps, 2)}
+    ctx = {"t": time.time(), "trend": trend, "vol_spike": spike, "ema_bps": round(d_bps, 2), "quelle": quelle}
     _ctx_cache[symbol] = ctx
     return ctx
 
@@ -707,6 +742,7 @@ async def grid_scalp_tick(client, symbol):
 
     # 4) SOLL gegen IST abgleichen
     if mode == "maker_scalp":
+        _feed_internal(symbol, mid)
         ctx = await _maker_context(symbol, cfg)
         entries_ok = ctx is not None
         trend = ctx["trend"] if ctx else "flat"
@@ -718,14 +754,16 @@ async def grid_scalp_tick(client, symbol):
             entries_ok = False
         st["ms_trend"] = trend
         if ctx is None:
-            st["ms_ctx"] = "KEINE Binance-1m-Kerzen -> keine Entries"
+            d_ = _int_candles.get(symbol)
+            st["ms_ctx"] = (f"Aufwaermen: eigene 1m-Kerzen {len(d_['closed']) if d_ else 0}/{int(_ms(cfg,'ms_ema_slow'))}, "
+                            f"Binance liefert nichts -> keine Entries")
             if time.time() - float(st.get("ms_ctx_warn") or 0) >= 60:
                 st["ms_ctx_warn"] = time.time()
-                debug_log(f"⚠️ [{symbol}] Maker-Scalp: keine Binance-1m-Futures-Kerzen (Bann/Stream nicht warm?) - keine neuen Entries")
+                debug_log(f"⚠️ [{symbol}] Maker-Scalp: Binance liefert keine 1m-Kerzen - nutze eigene Lighter-Kerzen, warte auf Aufwaermzeit")
         elif time.time() < float(st.get("ms_pause_until") or 0):
             st["ms_ctx"] = f"Vol-Pause noch {round(float(st['ms_pause_until']) - time.time())}s"
         else:
-            st["ms_ctx"] = f"ok (EMA-Abstand {ctx.get('ema_bps')} bps)"
+            st["ms_ctx"] = f"ok [{ctx.get('quelle')}] (EMA-Abstand {ctx.get('ema_bps')} bps)"
         desired = _desired_maker(symbol, cfg, pos_size, avg_entry, best_bid, best_ask, trend, entries_ok)
     else:
         desired = _desired_orders(symbol, cfg, st, pos_size, avg_entry, best_bid, best_ask)
