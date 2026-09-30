@@ -177,7 +177,7 @@ def default_config():
         # Binance USD-M Perpetual (fapi.binance.com) statt Spot - dieselben Symbolnamen, aber
         # eigener (leicht abweichender) Kurs. Wichtig zum 1:1-Vergleich mit TradingView-Charts
         # auf ".P"-Symbolen (z.B. "BTCUSDT.P"), die selbst auf dem Perpetual-Kurs basieren.
-        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "grid_v2", "grid_scalp", "ab_breakout" (weitere folgen bei Bedarf)
+        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "grid_v2", "grid_scalp", "maker_scalp", "ab_breakout" (weitere folgen bei Bedarf)
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
         "grid_mode": os.getenv("GRID_MODE", "pct"),  # "pct" oder "usd"
@@ -207,6 +207,19 @@ def default_config():
         "gs_requote_ticks": int(os.getenv("GS_REQUOTE_TICKS", "2")),
         "gs_max_open_orders": int(os.getenv("GS_MAX_OPEN_ORDERS", "8")),
         "gs_poll_seconds": float(os.getenv("GS_POLL_SECONDS", "2.0")),
+        # ===== Maker-Scalp (entry_mode "maker_scalp", Trend-Skew + Post-Only-Quotes, Defaults siehe MAKER_DEFAULTS in grid_scalp.py) =====
+        "ms_notional_usd": float(os.getenv("MS_NOTIONAL_USD", "300")),
+        "ms_tp_bps": float(os.getenv("MS_TP_BPS", "5")),
+        "ms_sl_bps": float(os.getenv("MS_SL_BPS", "30")),
+        "ms_add_step_bps": float(os.getenv("MS_ADD_STEP_BPS", "4")),
+        "ms_max_levels": int(os.getenv("MS_MAX_LEVELS", "3")),
+        "ms_vol_mult": float(os.getenv("MS_VOL_MULT", "2.0")),
+        "ms_vol_pause_s": int(os.getenv("MS_VOL_PAUSE_S", "60")),
+        "ms_sl_pause_s": int(os.getenv("MS_SL_PAUSE_S", "300")),
+        "ms_max_sl_per_day": int(os.getenv("MS_MAX_SL_PER_DAY", "3")),
+        "ms_ema_fast": int(os.getenv("MS_EMA_FAST", "20")),
+        "ms_ema_slow": int(os.getenv("MS_EMA_SLOW", "50")),
+        "ms_flat_band_bps": float(os.getenv("MS_FLAT_BAND_BPS", "1.0")),
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
         # Grid/AB-Breakout/RSI/MVWAP) - kein eigenes scalp_position_size_usd noetig.
@@ -1365,6 +1378,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
+      <option value="maker_scalp">Maker-Scalp (Post-Only-Quotes + Trend-Skew, TP/Stopp in bps, Vol-R&uuml;ckzug, Tageslimit)</option>
       <option value="scalp_vwap_obv_rsi">Scalp VWAP OBV RSI (Mean-Reversion, VWAP-Bänder + OBV RSI, TP1/TP2)</option>
       <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
@@ -1965,6 +1979,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_scalp"><label>Requote-Drift (Ticks)</label><input type="number" step="1" id="gs_requote_ticks"></div>
   <div data-mode="grid_scalp"><label>Max. offene Orders</label><input type="number" step="1" id="gs_max_open_orders"></div>
   <div data-mode="grid_scalp"><label>Poll-Intervall (Sek.)</label><input type="number" step="any" id="gs_poll_seconds"></div>
+  <div data-mode="maker_scalp"><label>Notional pro Order ($)</label><input type="number" step="any" id="ms_notional_usd"></div>
+  <div data-mode="maker_scalp"><label>Take-Profit (bps, 1 bps = 0.01%)</label><input type="number" step="any" id="ms_tp_bps"></div>
+  <div data-mode="maker_scalp"><label>Stopp (bps gegen die Position)</label><input type="number" step="any" id="ms_sl_bps"></div>
+  <div data-mode="maker_scalp"><label>Nachkauf-Abstand (bps)</label><input type="number" step="any" id="ms_add_step_bps"></div>
+  <div data-mode="maker_scalp"><label>Max. Stufen (Inventar-Limit)</label><input type="number" step="any" id="ms_max_levels"></div>
+  <div data-mode="maker_scalp"><label>Volatilit&auml;ts-R&uuml;ckzug ab x-facher 1m-Spanne</label><input type="number" step="any" id="ms_vol_mult"></div>
+  <div data-mode="maker_scalp"><label>Pause nach Vol-R&uuml;ckzug (Sek.)</label><input type="number" step="any" id="ms_vol_pause_s"></div>
+  <div data-mode="maker_scalp"><label>Pause nach Stopp (Sek.)</label><input type="number" step="any" id="ms_sl_pause_s"></div>
+  <div data-mode="maker_scalp"><label>Max. Stopps pro Tag (danach Pause bis Tageswechsel)</label><input type="number" step="any" id="ms_max_sl_per_day"></div>
+  <div data-mode="maker_scalp"><label>Trend: schnelle EMA (1m)</label><input type="number" step="any" id="ms_ema_fast"></div>
+  <div data-mode="maker_scalp"><label>Trend: langsame EMA (1m)</label><input type="number" step="any" id="ms_ema_slow"></div>
+  <div data-mode="maker_scalp"><label>Trend: EMA-Abstand unter dem 'flat' gilt (bps)</label><input type="number" step="any" id="ms_flat_band_bps"></div>
   <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
     <select class="cfg" id="grid_sl_enabled">
       <option value="false">Aus (Standard)</option>
@@ -3344,6 +3370,18 @@ async function refresh() {
     document.getElementById('gs_requote_ticks').value = data.config.gs_requote_ticks;
     document.getElementById('gs_max_open_orders').value = data.config.gs_max_open_orders;
     document.getElementById('gs_poll_seconds').value = data.config.gs_poll_seconds;
+    document.getElementById('ms_notional_usd').value = data.config.ms_notional_usd;
+    document.getElementById('ms_tp_bps').value = data.config.ms_tp_bps;
+    document.getElementById('ms_sl_bps').value = data.config.ms_sl_bps;
+    document.getElementById('ms_add_step_bps').value = data.config.ms_add_step_bps;
+    document.getElementById('ms_max_levels').value = data.config.ms_max_levels;
+    document.getElementById('ms_vol_mult').value = data.config.ms_vol_mult;
+    document.getElementById('ms_vol_pause_s').value = data.config.ms_vol_pause_s;
+    document.getElementById('ms_sl_pause_s').value = data.config.ms_sl_pause_s;
+    document.getElementById('ms_max_sl_per_day').value = data.config.ms_max_sl_per_day;
+    document.getElementById('ms_ema_fast').value = data.config.ms_ema_fast;
+    document.getElementById('ms_ema_slow').value = data.config.ms_ema_slow;
+    document.getElementById('ms_flat_band_bps').value = data.config.ms_flat_band_bps;
     document.getElementById('grid_anchor_follow_pct').value = data.config.grid_anchor_follow_pct;
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('binance_market_type').value = data.config.binance_market_type;
@@ -3684,6 +3722,18 @@ function buildConfigPayload() {
     gs_requote_ticks: parseInt(document.getElementById('gs_requote_ticks').value),
     gs_max_open_orders: parseInt(document.getElementById('gs_max_open_orders').value),
     gs_poll_seconds: parseFloat(document.getElementById('gs_poll_seconds').value),
+    ms_notional_usd: parseFloat(document.getElementById('ms_notional_usd').value),
+    ms_tp_bps: parseFloat(document.getElementById('ms_tp_bps').value),
+    ms_sl_bps: parseFloat(document.getElementById('ms_sl_bps').value),
+    ms_add_step_bps: parseFloat(document.getElementById('ms_add_step_bps').value),
+    ms_max_levels: parseInt(document.getElementById('ms_max_levels').value),
+    ms_vol_mult: parseFloat(document.getElementById('ms_vol_mult').value),
+    ms_vol_pause_s: parseInt(document.getElementById('ms_vol_pause_s').value),
+    ms_sl_pause_s: parseInt(document.getElementById('ms_sl_pause_s').value),
+    ms_max_sl_per_day: parseInt(document.getElementById('ms_max_sl_per_day').value),
+    ms_ema_fast: parseInt(document.getElementById('ms_ema_fast').value),
+    ms_ema_slow: parseInt(document.getElementById('ms_ema_slow').value),
+    ms_flat_band_bps: parseFloat(document.getElementById('ms_flat_band_bps').value),
     grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
@@ -3859,6 +3909,7 @@ async def handle_config_update(request):
                 "gs_step_notional_usd", "gs_max_levels", "gs_step_pct", "gs_tp_usd",
                 "gs_flatten_usd", "gs_cooldown_min", "gs_anchor_follow_pct",
                 "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
+                "ms_notional_usd", "ms_tp_bps", "ms_sl_bps", "ms_add_step_bps", "ms_max_levels", "ms_vol_mult", "ms_vol_pause_s", "ms_sl_pause_s", "ms_max_sl_per_day", "ms_ema_fast", "ms_ema_slow", "ms_flat_band_bps",
                 "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",
