@@ -5343,17 +5343,30 @@ async def check_liq_candle(symbol, buyers_pct, sellers_pct, price):
     tp1_pct = cfg.get("liq_tp1_pct", 50.0)
     tp2_pct = cfg.get("liq_tp2_pct", 85.0)
 
+    tp1_require_profit = cfg.get("liq_tp1_require_profit", True)
+    entry_ref = st.get("avg_entry_price")
+
     if pos == "long":
         pct = buyers_pct
         if pct is None:
             return
         if not st.get("liq_tp1_done"):
             if pct >= tp1_pct:
-                debug_log(f"🎯 [{symbol}] Liquidity Waves TP1 (Buyers%={round(pct,1)}): LONG @ {price} - schließe 50%, SL -> Einstieg")
-                ok = await execute_partial_exit(symbol, price, 0.5, "TP1")
-                if ok and st["position"] is not None:
-                    st["liq_tp1_done"] = True
-                    st["liq_sl_price"] = st["avg_entry_price"]  # Breakeven
+                # TP1 haengt am Buyers%-Wert (Imbalance-Level), nicht am Preis - die Level werden
+                # laufend durch den Preis selbst gueltig/ungueltig (siehe Modul-Docstring), sodass
+                # Buyers% auch dann Richtung tp1_pct laufen kann, wenn der Preis sich GEGEN die
+                # Position bewegt hat. Ohne diese Sperre feuert "TP1" dann bei Verlust. Bei Sperre:
+                # einfach weiter warten (naechste Kerze erneut pruefen), bis entweder profitabel
+                # oder der SL greift.
+                profitable = entry_ref is None or price >= entry_ref
+                if not tp1_require_profit or profitable:
+                    debug_log(f"🎯 [{symbol}] Liquidity Waves TP1 (Buyers%={round(pct,1)}): LONG @ {price} - schließe 50%, SL -> Einstieg")
+                    ok = await execute_partial_exit(symbol, price, 0.5, "TP1")
+                    if ok and st["position"] is not None:
+                        st["liq_tp1_done"] = True
+                        st["liq_sl_price"] = st["avg_entry_price"]  # Breakeven
+                else:
+                    debug_log(f"⏳ [{symbol}] Liquidity Waves TP1 (Buyers%={round(pct,1)}) erreicht, aber noch im Minus ({price} < Einstieg {entry_ref}) - warte auf TP2 oder SL")
             return
         if pct >= tp2_pct:
             debug_log(f"🎯 [{symbol}] Liquidity Waves TP2 (Buyers%={round(pct,1)}): LONG @ {price} - schließe Rest")
@@ -5368,11 +5381,15 @@ async def check_liq_candle(symbol, buyers_pct, sellers_pct, price):
             return
         if not st.get("liq_tp1_done"):
             if pct >= tp1_pct:
-                debug_log(f"🎯 [{symbol}] Liquidity Waves TP1 (Sellers%={round(pct,1)}): SHORT @ {price} - schließe 50%, SL -> Einstieg")
-                ok = await execute_partial_exit(symbol, price, 0.5, "TP1")
-                if ok and st["position"] is not None:
-                    st["liq_tp1_done"] = True
-                    st["liq_sl_price"] = st["avg_entry_price"]  # Breakeven
+                profitable = entry_ref is None or price <= entry_ref
+                if not tp1_require_profit or profitable:
+                    debug_log(f"🎯 [{symbol}] Liquidity Waves TP1 (Sellers%={round(pct,1)}): SHORT @ {price} - schließe 50%, SL -> Einstieg")
+                    ok = await execute_partial_exit(symbol, price, 0.5, "TP1")
+                    if ok and st["position"] is not None:
+                        st["liq_tp1_done"] = True
+                        st["liq_sl_price"] = st["avg_entry_price"]  # Breakeven
+                else:
+                    debug_log(f"⏳ [{symbol}] Liquidity Waves TP1 (Sellers%={round(pct,1)}) erreicht, aber noch im Minus ({price} > Einstieg {entry_ref}) - warte auf TP2 oder SL")
             return
         if pct >= tp2_pct:
             debug_log(f"🎯 [{symbol}] Liquidity Waves TP2 (Sellers%={round(pct,1)}): SHORT @ {price} - schließe Rest")
@@ -5479,6 +5496,7 @@ def backtest_liquidity_waves(candles, cfg):
     tp1_pct = float(cfg.get("liq_tp1_pct", 50.0))
     tp2_pct = float(cfg.get("liq_tp2_pct", 85.0))
     sl_usd = float(cfg.get("liq_sl_usd", 5.0))
+    tp1_require_profit = cfg.get("liq_tp1_require_profit", True)
     margin, leverage = cfg["margin"], cfg["leverage"]
 
     buyers_pct_arr, sellers_pct_arr = compute_liqwave_series(o, h, l, c, body_max_pct, max_levels, side_filter, dup_remove, dup_tolerance_usd)
@@ -5508,11 +5526,16 @@ def backtest_liquidity_waves(candles, cfg):
                 if pct is not None:
                     if not position["tp1_done"]:
                         if pct >= tp1_pct:
-                            close_size = position["size"] * 0.5
-                            _bt_close_trade(trades, pdir, entry, price, close_size, i, position["entry_i"], "TP1", ts=ts)
-                            position["size"] -= close_size
-                            position["tp1_done"] = True
-                            position["sl_price"] = entry  # Breakeven
+                            # Siehe check_liq_candle: TP1 haengt am Imbalance-%, nicht am Preis, und
+                            # kann so bei Verlust feuern - Sperre bis mind. Breakeven, sonst weiter
+                            # bis TP2 oder SL warten.
+                            profitable = (price >= entry) if pdir == "long" else (price <= entry)
+                            if not tp1_require_profit or profitable:
+                                close_size = position["size"] * 0.5
+                                _bt_close_trade(trades, pdir, entry, price, close_size, i, position["entry_i"], "TP1", ts=ts)
+                                position["size"] -= close_size
+                                position["tp1_done"] = True
+                                position["sl_price"] = entry  # Breakeven
                     elif pct >= tp2_pct:
                         _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP2", ts=ts)
                         position = None

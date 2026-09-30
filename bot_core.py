@@ -256,6 +256,7 @@ def default_config():
         "liq_tp1_pct": float(os.getenv("LIQ_TP1_PCT", "50.0")),  # TP1 (50% Teil-Exit, SL -> Einstieg) sobald Buyers%/Sellers% wieder hier steht
         "liq_tp2_pct": float(os.getenv("LIQ_TP2_PCT", "85.0")),  # TP2 (Rest-Exit) sobald Buyers%/Sellers% hier steht
         "liq_sl_usd": float(os.getenv("LIQ_SL_USD", "5.0")),  # fester $-Verlust ab Ø-Einstieg
+        "liq_tp1_require_profit": os.getenv("LIQ_TP1_REQUIRE_PROFIT", "true").lower() == "true",  # TP1 haengt am Imbalance-%, nicht am Preis - kann sonst im Minus feuern; wenn an, wird dann bis TP2/SL gewartet
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -1908,6 +1909,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="liquidity_waves"><label>TP1-Schwelle (%, 50% Teil-Exit, SL → Einstieg)</label><input type="number" step="1" min="1" max="99" id="liq_tp1_pct"></div>
   <div data-mode="liquidity_waves"><label>TP2-Schwelle (%, Rest-Exit)</label><input type="number" step="1" min="1" max="100" id="liq_tp2_pct"></div>
   <div data-mode="liquidity_waves"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="liq_sl_usd"></div>
+  <div data-mode="liquidity_waves" style="grid-column:1/-1;">
+    <label><input type="checkbox" id="liq_tp1_require_profit" style="width:auto; vertical-align:middle;"> TP1 nur wenn mindestens Breakeven (sonst warten auf TP2 oder SL, statt mit Verlust zu schließen)</label>
+  </div>
 
 
 
@@ -3310,6 +3314,7 @@ async function refresh() {
     document.getElementById('liq_tp1_pct').value = data.config.liq_tp1_pct;
     document.getElementById('liq_tp2_pct').value = data.config.liq_tp2_pct;
     document.getElementById('liq_sl_usd').value = data.config.liq_sl_usd;
+    document.getElementById('liq_tp1_require_profit').checked = !!data.config.liq_tp1_require_profit;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -3649,6 +3654,7 @@ function buildConfigPayload() {
     liq_tp1_pct: parseFloat(document.getElementById('liq_tp1_pct').value),
     liq_tp2_pct: parseFloat(document.getElementById('liq_tp2_pct').value),
     liq_sl_usd: parseFloat(document.getElementById('liq_sl_usd').value),
+    liq_tp1_require_profit: document.getElementById('liq_tp1_require_profit').checked,
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -3884,7 +3890,7 @@ async def handle_config_update(request):
                 "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_nachkauf_require_reversal", "scalp_tp1_require_profit", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
                 "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period",
                 "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
-                "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd"]:
+                "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
