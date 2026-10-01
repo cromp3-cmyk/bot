@@ -2193,7 +2193,37 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
         }
 
-    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+    if entry_mode == "wellenanker":
+        max_candles = BACKTEST_MAX_CANDLES.get("wellenanker", 100_000)
+        resolution = cfg.get("wa_timeframe", "15m")
+        if resolution in SUB_MINUTE_RESOLUTIONS:
+            max_candles = min(max_candles, 5000)
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+        if err:
+            return {"error": err}
+        n1 = int(cfg.get("wa_n1", 10))
+        n2 = int(cfg.get("wa_n2", 21))
+        sig_len = int(cfg.get("wa_sig_len", 4))
+        min_needed = n1 + n2 + sig_len + 20
+        if not candles or len(candles[4]) < min_needed:
+            return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+        n_candles = len(candles[4])
+
+        trades = backtest_wellenanker(candles, cfg)
+        closed_trades = [t for t in trades if t["pnl"] is not None]
+        stats = summarize_backtest_trades(closed_trades, exclude_top_n)
+        stats_long = summarize_backtest_trades([t for t in closed_trades if t["dir"] == "long"], exclude_top_n)
+        stats_short = summarize_backtest_trades([t for t in closed_trades if t["dir"] == "short"], exclude_top_n)
+        actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+        return {
+            "symbol": symbol, "entry_mode": entry_mode, "resolution": resolution,
+            "requested_days": days, "actual_days_covered": round(actual_days, 1),
+            "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
+            "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
+            "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
+        }
+
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 AB_SWEEP_MAX_COMBOS = 600
 AB_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -2475,6 +2505,7 @@ BACKTEST_MAX_CANDLES = {
     "ab_breakout": 100_000,
     "scalp_vwap_obv_rsi": 100_000,
     "liquidity_waves": 100_000,
+    "wellenanker": 100_000,
 }
 
 
@@ -5722,3 +5753,306 @@ async def run_liq_sweep(symbol, cfg, days, entry_min=1.0, entry_max=10.0, entry_
         "combos_tested": len(results), "entries_tested": entries, "levels_tested": levels_list,
         "results": best_sorted[:30], "worst_results": worst_sorted[:20],
     }
+
+
+# ============================================================================
+# WELLENANKER - Nachbau des gleichnamigen Pine-Script-Indikators (entry_mode "wellenanker")
+# ============================================================================
+# Kern ist der WaveTrend-Oszillator (wt1 = Welle, wt2 = Signallinie, siehe compute_wavetrend_series,
+# 1:1 nach f_wave im Original). Ein Long-Punkt entsteht, wenn wt1 wt2 von unten kreuzt (crossUp),
+# WAEHREND wt2 unter -wa_zone1 steht (tief im ueberverkauften Bereich) - spiegelbildlich der
+# Short-Punkt bei crossDn mit wt2 ueber +wa_zone1. Das Original hat daneben noch Geldfluss,
+# Divergenzen, "starke" Punkte (RSI+Geldfluss-Bestaetigung) und ein HTF-Panel - das ist hier
+# bewusst NICHT nachgebaut (nur die reinen WaveTrend-Punkte als Handelssignal, Nutzer-Vorgabe),
+# kann bei Bedarf spaeter ergaenzt werden.
+#
+# Exit/TP (Nutzer-Vorgabe, ueber wa_tp_mode waehlbar):
+#   "gegentrade"    - Exit bei entgegengesetztem Punkt (Long schliesst bei Short-Punkt und umgekehrt)
+#   "ueberlauf"     - Exit sobald wt2 wieder bis zur Ueberlauflinie (wa_ueberlauf_level, Default 45,
+#                      entspricht "ovr" im Original) zurueckgelaufen ist - fruehere Teil-Erholung
+#                      aus dem Extrem, bevor ein vollstaendiger Gegentrade ansteht
+#   "fester_betrag" - fester Dollar-Gewinn ab Ø-Einstieg (wie bei anderen Strategien)
+# SL ist immer ein fester Dollar-Verlust ab Ø-Einstieg (wa_sl_usd). Nachkauf: bis zu wa_max_nachkauf
+# (0-4) weitere Einstiege bei jedem weiteren Punkt in dieselbe Richtung, waehrend TP/SL noch nicht
+# gegriffen haben - Ø-Einstieg wird dabei neu gewichtet (wie bei Liquidity Waves).
+
+def compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode):
+    """1:1-Nachbau von f_wave() aus dem Original: esa = EMA(src, n1), d = EMA(|src-esa|, n1),
+    ci = (src-esa)/(0.015*d), wt1 = EMA(ci, n2), wt2 = SMA(wt1, sig_len)."""
+    n = len(c)
+    if src_mode == "hlc3":
+        src = [(h[i] + l[i] + c[i]) / 3 for i in range(n)]
+    elif src_mode == "ohlc4":
+        src = [(o[i] + h[i] + l[i] + c[i]) / 4 for i in range(n)]
+    elif src_mode == "hl2":
+        src = [(h[i] + l[i]) / 2 for i in range(n)]
+    else:
+        src = list(c)
+    esa = _ema_series(src, n1)
+    abs_diff = [abs(src[i] - esa[i]) for i in range(n)]
+    d = _ema_series(abs_diff, n1)
+    ci = [0.0 if d[i] == 0 else (src[i] - esa[i]) / (0.015 * d[i]) for i in range(n)]
+    wt1 = _ema_series(ci, n2)
+    wt2 = _sma_series(wt1, sig_len)
+    return wt1, wt2
+
+
+def _wa_reset_state(st):
+    st["wa_sl_price"] = None
+    st["wa_tp_price"] = None
+
+
+def _wa_update_sl_tp(st, cfg):
+    """Nach jedem Erst-/Nachkauf neu berechnen, weil sich Ø-Einstieg (und die Coin-Groesse) mit
+    jeder weiteren Stufe aendern - wie _scalp_update_sl. SL ist immer aktiv, TP-Preis nur im
+    Modus 'fester_betrag' (die anderen beiden TP-Modi haengen am WaveTrend-Wert, nicht am Preis,
+    und werden candle-weise in check_wa_candle geprueft)."""
+    pos = st["position"]
+    entry_ref = st.get("avg_entry_price")
+    coin_size = st.get("total_coin_size")
+    if pos is None or not entry_ref or not coin_size:
+        return
+    sl_distance = float(cfg.get("wa_sl_usd", 5.0)) / coin_size
+    st["wa_sl_price"] = entry_ref - sl_distance if pos == "long" else entry_ref + sl_distance
+    if cfg.get("wa_tp_mode", "gegentrade") == "fester_betrag":
+        tp_distance = float(cfg.get("wa_tp_usd", 10.0)) / coin_size
+        st["wa_tp_price"] = entry_ref + tp_distance if pos == "long" else entry_ref - tp_distance
+    else:
+        st["wa_tp_price"] = None
+
+
+async def check_wa_sl(symbol, price):
+    """Jeden Tick (Live-Preis): fester SL, plus TP im Modus 'fester_betrag' - beides preisbasiert.
+    Die anderen beiden TP-Modi (Gegentrade/Ueberlauf) haengen am WaveTrend-Wert und werden nur bei
+    neu geschlossenen Kerzen in check_wa_candle geprueft."""
+    b = BOTS[symbol]
+    st = b["state"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    sl_price = st.get("wa_sl_price")
+    hit_sl = sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price))
+    if hit_sl:
+        debug_log(f"🚪 [{symbol}] Wellenanker SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, "SL")
+        if st["position"] is None:
+            _wa_reset_state(st)
+        return
+    tp_price = st.get("wa_tp_price")
+    hit_tp = tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price))
+    if hit_tp:
+        debug_log(f"🎯 [{symbol}] Wellenanker TP (fester Betrag): {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP-FESTER-BETRAG")
+        if st["position"] is None:
+            _wa_reset_state(st)
+
+
+async def check_wa_candle(symbol, long_raw, short_raw, wt2, price):
+    """Bei JEDER neu geschlossenen Kerze: TP-Gegentrade/Ueberlauf einer offenen Position pruefen,
+    sonst Nachkauf bei erneutem Punkt in dieselbe Richtung, sonst (keine Position) Neueinstieg."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None or wt2 is None:
+        return
+    pos = st["position"]
+    tp_mode = cfg.get("wa_tp_mode", "gegentrade")
+    ueberlauf_level = cfg.get("wa_ueberlauf_level", 45.0)
+    max_nachkauf = max(0, min(4, int(cfg.get("wa_max_nachkauf", 0) or 0)))
+
+    if pos in ("long", "short"):
+        is_long = pos == "long"
+        opposite_signal = short_raw if is_long else long_raw
+        same_signal = long_raw if is_long else short_raw
+        if tp_mode == "gegentrade" and opposite_signal:
+            debug_log(f"🎯 [{symbol}] Wellenanker TP (Gegentrade): {pos.upper()} @ {price}")
+            await execute_exit(symbol, price, "TP-GEGENTRADE")
+            if st["position"] is None:
+                _wa_reset_state(st)
+            return
+        if tp_mode == "ueberlauf":
+            reached = (wt2 >= -ueberlauf_level) if is_long else (wt2 <= ueberlauf_level)
+            if reached:
+                debug_log(f"🎯 [{symbol}] Wellenanker TP (Überlauflinie, wt2={round(wt2,1)}): {pos.upper()} @ {price}")
+                await execute_exit(symbol, price, "TP-UEBERLAUF")
+                if st["position"] is None:
+                    _wa_reset_state(st)
+                return
+        if same_signal and max_nachkauf > 0 and st.get("entry_count", 0) < 1 + max_nachkauf:
+            debug_log(f"➕ [{symbol}] Wellenanker Nachkauf ({st.get('entry_count', 0) + 1}/{1 + max_nachkauf}): {pos.upper()} @ {price}")
+            ok = await execute_entry(symbol, pos, price, is_add_on=True)
+            if ok:
+                _wa_update_sl_tp(st, cfg)
+        return
+
+    # Keine Position offen: Neueinstieg
+    if long_raw:
+        target = "long"
+    elif short_raw:
+        target = "short"
+    else:
+        return
+    debug_log(f"📡 [{symbol}] Wellenanker Punkt: {target.upper()} @ {price}")
+    await execute_entry(symbol, target, price, is_add_on=False)
+    if st["position"] is not None:
+        _wa_update_sl_tp(st, cfg)
+
+
+async def wa_poll_loop(symbol):
+    """Wellenanker - Struktur identisch zu liq_poll_loop (Kerzen ueber fetch_candles_binance_multi,
+    Signal nur bei NEU geschlossener Kerze), SL/fester-TP jeden Tick aus dem Live-Preis
+    (check_wa_sl), Gegentrade/Ueberlauf-TP + Nachkauf + Neueinstieg nur bei neu geschlossener
+    Kerze (check_wa_candle), weil der WaveTrend-Wert sich nur pro Kerze aendert."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "wellenanker" and cfg["bot_active"] and b["state"].get("session_started"):
+                resolution = cfg.get("wa_timeframe", "15m")
+                n1 = int(cfg.get("wa_n1", 10))
+                n2 = int(cfg.get("wa_n2", 21))
+                sig_len = int(cfg.get("wa_sig_len", 4))
+                min_needed = n1 + n2 + sig_len + 20
+                needed_bars = min(1000, max(min_needed * 3, 200))
+                st = b["state"]
+
+                data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                if data:
+                    timestamps, opens, highs, lows, closes = data
+                    closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                else:
+                    closed_ts = None
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+
+                if st["position"] is not None and st["last_price"] is not None:
+                    await check_wa_sl(symbol, st["last_price"])
+
+                if closed_ts and len(closed_c) > min_needed:
+                    candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
+                    max_age_seconds = 300
+                    if candle_age_seconds > max_age_seconds:
+                        debug_log(f"⚠️ [{symbol}] Wellenanker: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
+                    else:
+                        last_ts = closed_ts[-1]
+                        if last_ts != last_processed_ts:
+                            last_processed_ts = last_ts
+                            wt1_arr, wt2_arr = compute_wavetrend_series(closed_o, closed_h, closed_l, closed_c, n1, n2, sig_len, cfg.get("wa_src", "close"))
+                            z1 = cfg.get("wa_zone1", 53.0)
+                            cross_up = wt1_arr[-2] <= wt2_arr[-2] and wt1_arr[-1] > wt2_arr[-1]
+                            cross_dn = wt1_arr[-2] >= wt2_arr[-2] and wt1_arr[-1] < wt2_arr[-1]
+                            long_raw = cross_up and wt2_arr[-1] < -z1
+                            short_raw = cross_dn and wt2_arr[-1] > z1
+                            st["wa_wt2_last"] = wt2_arr[-1]
+                            await check_wa_candle(symbol, long_raw, short_raw, wt2_arr[-1], closed_c[-1])
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            debug_log(f"💓 [{symbol}] Wellenanker aktiv: wt2={round(st.get('wa_wt2_last') or 0, 1)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    if not closed_ts:
+                        debug_log(f"⏳ [{symbol}] Wellenanker wartet: keine Kerzen erhalten (Auflösung {resolution})")
+                    else:
+                        debug_log(f"⏳ [{symbol}] Wellenanker wartet: zu wenig Kerzen ({len(closed_c)}/{min_needed + 1} nötig)")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Wellenanker-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+
+        await asyncio.sleep(5)
+
+
+def backtest_wellenanker(candles, cfg):
+    """Backtest fuer Wellenanker - simuliert dieselben Regeln wie check_wa_candle/check_wa_sl.
+    'candles' ist das uebliche 6er-Tupel MIT Volumen (ts,o,h,l,c,v) - Volumen wird hier nicht
+    gebraucht (Geldfluss ist nicht Teil der Handelslogik, siehe Modul-Docstring)."""
+    ts, o, h, l, c, _vol = candles
+    n = len(c)
+    n1 = int(cfg.get("wa_n1", 10))
+    n2 = int(cfg.get("wa_n2", 21))
+    sig_len = int(cfg.get("wa_sig_len", 4))
+    src_mode = cfg.get("wa_src", "close")
+    z1 = float(cfg.get("wa_zone1", 53.0))
+    tp_mode = cfg.get("wa_tp_mode", "gegentrade")
+    ueberlauf_level = float(cfg.get("wa_ueberlauf_level", 45.0))
+    tp_usd = float(cfg.get("wa_tp_usd", 10.0))
+    sl_usd = float(cfg.get("wa_sl_usd", 5.0))
+    max_nachkauf = max(0, min(4, int(cfg.get("wa_max_nachkauf", 0) or 0)))
+    margin, leverage = cfg["margin"], cfg["leverage"]
+
+    wt1_arr, wt2_arr = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode)
+    min_needed = n1 + n2 + sig_len + 20
+
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price","entries"}
+    trades = []
+
+    def _recalc_sl_tp(pos):
+        distance_sl = sl_usd / pos["size"] if pos["size"] else 0
+        pos["sl_price"] = pos["entry"] - distance_sl if pos["dir"] == "long" else pos["entry"] + distance_sl
+        if tp_mode == "fester_betrag":
+            distance_tp = tp_usd / pos["size"] if pos["size"] else 0
+            pos["tp_price"] = pos["entry"] + distance_tp if pos["dir"] == "long" else pos["entry"] - distance_tp
+        else:
+            pos["tp_price"] = None
+
+    for i in range(min_needed, n):
+        price = c[i]
+        cross_up = wt1_arr[i - 1] <= wt2_arr[i - 1] and wt1_arr[i] > wt2_arr[i]
+        cross_dn = wt1_arr[i - 1] >= wt2_arr[i - 1] and wt1_arr[i] < wt2_arr[i]
+        long_raw = cross_up and wt2_arr[i] < -z1
+        short_raw = cross_dn and wt2_arr[i] > z1
+
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl_price = position["sl_price"]
+            hit_sl = (pdir == "long" and l[i] <= sl_price) or (pdir == "short" and h[i] >= sl_price)
+            if hit_sl:
+                _bt_close_trade(trades, pdir, entry, sl_price, position["size"], i, position["entry_i"], "SL", ts=ts)
+                position = None
+                continue
+            tp_price = position.get("tp_price")
+            if tp_price is not None:
+                hit_tp = (pdir == "long" and h[i] >= tp_price) or (pdir == "short" and l[i] <= tp_price)
+                if hit_tp:
+                    _bt_close_trade(trades, pdir, entry, tp_price, position["size"], i, position["entry_i"], "TP-FESTER-BETRAG", ts=ts)
+                    position = None
+                    continue
+            if tp_mode == "gegentrade" and ((pdir == "long" and short_raw) or (pdir == "short" and long_raw)):
+                _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP-GEGENTRADE", ts=ts)
+                position = None
+                continue
+            if tp_mode == "ueberlauf":
+                reached = (wt2_arr[i] >= -ueberlauf_level) if pdir == "long" else (wt2_arr[i] <= ueberlauf_level)
+                if reached:
+                    _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP-UEBERLAUF", ts=ts)
+                    position = None
+                    continue
+            if max_nachkauf > 0 and position["entries"] < 1 + max_nachkauf:
+                same_dir_signal = (pdir == "long" and long_raw) or (pdir == "short" and short_raw)
+                if same_dir_signal:
+                    add_size = (margin * leverage) / price
+                    new_size = position["size"] + add_size
+                    position["entry"] = (entry * position["size"] + price * add_size) / new_size
+                    position["size"] = new_size
+                    position["entries"] += 1
+                    _recalc_sl_tp(position)
+                    _bt_record_addon(trades, pdir, price, i, position["entry_i"], position["entries"], ts=ts, is_add_on=True)
+            continue
+
+        if long_raw:
+            target = "long"
+        elif short_raw:
+            target = "short"
+        else:
+            continue
+
+        size = (margin * leverage) / price
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "entries": 1}
+        _recalc_sl_tp(position)
+        _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+
+    return trades

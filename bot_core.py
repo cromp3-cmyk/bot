@@ -259,6 +259,24 @@ def default_config():
         "liq_tp1_require_profit": os.getenv("LIQ_TP1_REQUIRE_PROFIT", "true").lower() == "true",  # TP1 haengt am Imbalance-%, nicht am Preis - kann sonst im Minus feuern; wenn an, wird dann bis TP2/SL gewartet
         "liq_max_nachkauf": int(os.getenv("LIQ_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X Nachkaeufe
         "liq_nachkauf_progress_pct": float(os.getenv("LIQ_NACHKAUF_PROGRESS_PCT", "30.0")),  # Nachkauf nur, wenn Buyers%/Sellers% seit Einstieg mind. hierhin gestiegen war, TP1 aber nicht erreicht wurde, und dann wieder unter die Einstiegs-Schwelle faellt (erneutes Einstiegssignal)
+        # ===== Wellenanker (WaveTrend-Punkte, siehe compute_wavetrend_series in strategies.py) =====
+        # Long-Punkt: WaveTrend-Welle (wt1) kreuzt die Signallinie (wt2) von unten, waehrend wt2
+        # unter -wa_zone1 steht (ueberverkauft) - Short-Punkt spiegelbildlich ueber +wa_zone1.
+        # TP ueber wa_tp_mode waehlbar: "gegentrade" (Exit bei entgegengesetztem Punkt), "ueberlauf"
+        # (Exit sobald wt2 wieder bis wa_ueberlauf_level zurueckgelaufen ist) oder "fester_betrag"
+        # ($-Gewinn). SL ist immer ein fester $-Verlust (wa_sl_usd). Nachkauf: bis zu wa_max_nachkauf
+        # (0-4) weitere Einstiege bei jedem weiteren Punkt in dieselbe Richtung.
+        "wa_timeframe": os.getenv("WA_TIMEFRAME", "15m"),
+        "wa_src": os.getenv("WA_SRC", "close"),  # close/hlc3/ohlc4/hl2 - Quelle der Welle
+        "wa_n1": int(os.getenv("WA_N1", "10")),  # Kanal-Laenge
+        "wa_n2": int(os.getenv("WA_N2", "21")),  # Durchschnitt-Laenge
+        "wa_sig_len": int(os.getenv("WA_SIG_LEN", "4")),  # Signallinien-Glaettung
+        "wa_zone1": float(os.getenv("WA_ZONE1", "53.0")),  # Zone: Long-Punkt wenn wt2 < -zone1, Short wenn wt2 > zone1
+        "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 4)
+        "wa_tp_mode": os.getenv("WA_TP_MODE", "gegentrade"),  # gegentrade / ueberlauf / fester_betrag
+        "wa_ueberlauf_level": float(os.getenv("WA_UEBERLAUF_LEVEL", "45.0")),  # nur Modus "ueberlauf" - entspricht "Überlauf" im Original
+        "wa_tp_usd": float(os.getenv("WA_TP_USD", "10.0")),  # nur Modus "fester_betrag"
+        "wa_sl_usd": float(os.getenv("WA_SL_USD", "5.0")),  # fester $-Verlust ab Ø-Einstieg
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -495,6 +513,10 @@ def default_state():
         "liq_sellers_pct": None,
         "liq_peak_pct": None,  # hoechster Buyers%/Sellers%-Wert seit Einstieg/letztem Nachkauf (Nachkauf-Trigger)
         "liq_nachkauf_count": 0,
+        # ===== Wellenanker State =====
+        "wa_sl_price": None,
+        "wa_tp_price": None,
+        "wa_wt2_last": None,  # zuletzt berechneter WaveTrend-Signalwert, nur fuers Dashboard
     }
 
 
@@ -644,6 +666,7 @@ PERSISTED_STATE_KEYS = [
     "scalp_obv_rsi", "scalp_candle_seq", "scalp_last_entry_seq", "scalp_halfway_lock_done",
     "scalp_left_band_since_fill",
     "liq_sl_price", "liq_tp1_done", "liq_peak_pct", "liq_nachkauf_count",
+    "wa_sl_price", "wa_tp_price",
 ]
 
 
@@ -1371,6 +1394,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
       <option value="scalp_vwap_obv_rsi">Scalp VWAP OBV RSI (Mean-Reversion, VWAP-Bänder + OBV RSI, TP1/TP2)</option>
       <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
+      <option value="wellenanker">Wellenanker (WaveTrend-Punkte, Nachkauf, TP Gegentrade/Überlauf/Fest, $-SL)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
       <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
       <option value="mvwap_mf_signal">Multi-VWAP Money-Flow Signal (VWAP+MFI/CMF-Oszillator dreht Richtung, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
@@ -1919,6 +1943,53 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="liquidity_waves"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="2" id="liq_max_nachkauf"></div>
   <div data-mode="liquidity_waves"><label>Nachkauf-Trigger: Fortschritt Richtung TP1 (%), danach zurück unter Einstiegs-Schwelle (nur bei Max. Nachkäufe &gt; 0)</label><input type="number" step="1" min="1" max="99" id="liq_nachkauf_progress_pct"></div>
 
+  <div data-mode="wellenanker" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌊 <b>Wellenanker</b>: Nachbau der WaveTrend-Punkte (ohne Geldfluss/Divergenzen/Panel). Long-Punkt,
+    wenn die Welle die Signallinie von unten kreuzt, während die Signallinie unter -Zone1 steht
+    (Short spiegelbildlich über +Zone1). TP wählbar: Gegentrade (Exit beim entgegengesetzten Punkt),
+    Überlauflinie (Exit sobald die Signallinie wieder bis dahin zurückgelaufen ist) oder fester
+    $-Betrag. SL ist immer ein fester $-Verlust ab Ø-Einstieg. Nachkauf bei jedem weiteren Punkt in
+    dieselbe Richtung (bis zu 4).
+  </div>
+  <div data-mode="wellenanker"><label>Zeitrahmen</label>
+    <select class="cfg" id="wa_timeframe">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="wa_timeframe_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="wellenanker"><label>Quelle der Welle</label>
+    <select class="cfg" id="wa_src">
+      <option value="close">Close</option>
+      <option value="hlc3">HLC3</option>
+      <option value="ohlc4">OHLC4</option>
+      <option value="hl2">HL2</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker"><label>Kanal-Länge</label><input type="number" step="1" min="1" id="wa_n1"></div>
+  <div data-mode="wellenanker"><label>Durchschnitt-Länge</label><input type="number" step="1" min="1" id="wa_n2"></div>
+  <div data-mode="wellenanker"><label>Signallinien-Glättung</label><input type="number" step="1" min="1" id="wa_sig_len"></div>
+  <div data-mode="wellenanker"><label>Zone 1 (Long &lt; -X, Short &gt; X)</label><input type="number" step="1" min="1" max="100" id="wa_zone1"></div>
+  <div data-mode="wellenanker"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="4" id="wa_max_nachkauf"></div>
+  <div data-mode="wellenanker"><label>TP-Modus</label>
+    <select class="cfg" id="wa_tp_mode">
+      <option value="gegentrade">Gegentrade (Exit beim entgegengesetzten Punkt)</option>
+      <option value="ueberlauf">Überlauflinie (Exit bei Rücklauf zur Linie)</option>
+      <option value="fester_betrag">Fester $-Betrag</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="ueberlauf"><label>Überlauflinie (±)</label><input type="number" step="1" min="1" max="100" id="wa_ueberlauf_level"></div>
+  <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="fester_betrag"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="wa_tp_usd"></div>
+  <div data-mode="wellenanker"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="wa_sl_usd"></div>
 
 
 
@@ -2796,7 +2867,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3447,6 +3518,17 @@ async function refresh() {
     document.getElementById('liq_tp1_require_profit').checked = !!data.config.liq_tp1_require_profit;
     document.getElementById('liq_max_nachkauf').value = data.config.liq_max_nachkauf;
     document.getElementById('liq_nachkauf_progress_pct').value = data.config.liq_nachkauf_progress_pct;
+    setResolutionField('wa_timeframe', data.config.wa_timeframe);
+    document.getElementById('wa_src').value = data.config.wa_src;
+    document.getElementById('wa_n1').value = data.config.wa_n1;
+    document.getElementById('wa_n2').value = data.config.wa_n2;
+    document.getElementById('wa_sig_len').value = data.config.wa_sig_len;
+    document.getElementById('wa_zone1').value = data.config.wa_zone1;
+    document.getElementById('wa_max_nachkauf').value = data.config.wa_max_nachkauf;
+    document.getElementById('wa_tp_mode').value = data.config.wa_tp_mode;
+    document.getElementById('wa_ueberlauf_level').value = data.config.wa_ueberlauf_level;
+    document.getElementById('wa_tp_usd').value = data.config.wa_tp_usd;
+    document.getElementById('wa_sl_usd').value = data.config.wa_sl_usd;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -3789,6 +3871,17 @@ function buildConfigPayload() {
     liq_tp1_require_profit: document.getElementById('liq_tp1_require_profit').checked,
     liq_max_nachkauf: parseInt(document.getElementById('liq_max_nachkauf').value),
     liq_nachkauf_progress_pct: parseFloat(document.getElementById('liq_nachkauf_progress_pct').value),
+    wa_timeframe: getResolutionField('wa_timeframe'),
+    wa_src: document.getElementById('wa_src').value,
+    wa_n1: parseInt(document.getElementById('wa_n1').value),
+    wa_n2: parseInt(document.getElementById('wa_n2').value),
+    wa_sig_len: parseInt(document.getElementById('wa_sig_len').value),
+    wa_zone1: parseFloat(document.getElementById('wa_zone1').value),
+    wa_max_nachkauf: parseInt(document.getElementById('wa_max_nachkauf').value),
+    wa_tp_mode: document.getElementById('wa_tp_mode').value,
+    wa_ueberlauf_level: parseFloat(document.getElementById('wa_ueberlauf_level').value),
+    wa_tp_usd: parseFloat(document.getElementById('wa_tp_usd').value),
+    wa_sl_usd: parseFloat(document.getElementById('wa_sl_usd').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -3968,6 +4061,7 @@ async def handle_status(request):
         "liq_sl_price": st.get("liq_sl_price"), "liq_tp1_done": st.get("liq_tp1_done"),
         "liq_buyers_pct": st.get("liq_buyers_pct"), "liq_sellers_pct": st.get("liq_sellers_pct"),
         "liq_peak_pct": st.get("liq_peak_pct"), "liq_nachkauf_count": st.get("liq_nachkauf_count"),
+        "wa_sl_price": st.get("wa_sl_price"), "wa_tp_price": st.get("wa_tp_price"), "wa_wt2_last": st.get("wa_wt2_last"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -4026,7 +4120,9 @@ async def handle_config_update(request):
                 "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period",
                 "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
                 "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
-                "liq_max_nachkauf", "liq_nachkauf_progress_pct"]:
+                "liq_max_nachkauf", "liq_nachkauf_progress_pct",
+                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_zone1", "wa_max_nachkauf",
+                "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
