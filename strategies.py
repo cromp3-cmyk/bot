@@ -5304,6 +5304,8 @@ def compute_liqwave_series(o, h, l, c, body_max_pct, max_levels, side_filter, du
 def _liq_reset_state(st):
     st["liq_sl_price"] = None
     st["liq_tp1_done"] = False
+    st["liq_peak_pct"] = None
+    st["liq_nachkauf_count"] = 0
 
 
 def _liq_set_sl(st, cfg, entry_ref, target):
@@ -5346,11 +5348,21 @@ async def check_liq_candle(symbol, buyers_pct, sellers_pct, price):
     tp1_require_profit = cfg.get("liq_tp1_require_profit", True)
     entry_ref = st.get("avg_entry_price")
 
+    max_nachkauf = max(0, int(cfg.get("liq_max_nachkauf", 0) or 0))
+    nachkauf_progress_pct = cfg.get("liq_nachkauf_progress_pct", 30.0)
+    entry_threshold = cfg.get("liq_entry_threshold_pct", 5.0)
+
     if pos == "long":
         pct = buyers_pct
         if pct is None:
             return
         if not st.get("liq_tp1_done"):
+            # Hoechsten seit Einstieg (bzw. seit dem letzten Nachkauf) erreichten Buyers%-Wert
+            # mitfuehren - Grundlage fuer den Nachkauf-Trigger unten (siehe Modul-Docstring).
+            peak = st.get("liq_peak_pct")
+            if peak is None or pct > peak:
+                peak = pct
+                st["liq_peak_pct"] = peak
             if pct >= tp1_pct:
                 # TP1 haengt am Buyers%-Wert (Imbalance-Level), nicht am Preis - die Level werden
                 # laufend durch den Preis selbst gueltig/ungueltig (siehe Modul-Docstring), sodass
@@ -5367,6 +5379,19 @@ async def check_liq_candle(symbol, buyers_pct, sellers_pct, price):
                         st["liq_sl_price"] = st["avg_entry_price"]  # Breakeven
                 else:
                     debug_log(f"⏳ [{symbol}] Liquidity Waves TP1 (Buyers%={round(pct,1)}) erreicht, aber noch im Minus ({price} < Einstieg {entry_ref}) - warte auf TP2 oder SL")
+                return
+            # Nachkauf: TP1 wurde nicht erreicht, aber Buyers% ist seit dem Einstieg/letzten
+            # Nachkauf schon mind. nachkauf_progress_pct hoch gewesen (echter Fortschritt Richtung
+            # TP1) und faellt jetzt wieder auf/unter die urspruengliche Einstiegs-Schwelle zurueck -
+            # das ist ein erneutes Einstiegssignal, also nachkaufen (bis liq_max_nachkauf mal).
+            nachkauf_count = st.get("liq_nachkauf_count", 0)
+            if max_nachkauf > 0 and peak >= nachkauf_progress_pct and pct < entry_threshold and nachkauf_count < max_nachkauf:
+                debug_log(f"➕ [{symbol}] Liquidity Waves Nachkauf {nachkauf_count + 1}/{max_nachkauf} (Buyers% Hoch={round(peak,1)} -> jetzt {round(pct,1)}): LONG @ {price}")
+                ok = await execute_entry(symbol, "long", price, is_add_on=True)
+                if ok:
+                    st["liq_nachkauf_count"] = nachkauf_count + 1
+                    st["liq_peak_pct"] = pct  # naechste Runde neu zaehlen
+                    _liq_set_sl(st, cfg, st["avg_entry_price"], "long")
             return
         if pct >= tp2_pct:
             debug_log(f"🎯 [{symbol}] Liquidity Waves TP2 (Buyers%={round(pct,1)}): LONG @ {price} - schließe Rest")
@@ -5380,6 +5405,10 @@ async def check_liq_candle(symbol, buyers_pct, sellers_pct, price):
         if pct is None:
             return
         if not st.get("liq_tp1_done"):
+            peak = st.get("liq_peak_pct")
+            if peak is None or pct > peak:
+                peak = pct
+                st["liq_peak_pct"] = peak
             if pct >= tp1_pct:
                 profitable = entry_ref is None or price <= entry_ref
                 if not tp1_require_profit or profitable:
@@ -5390,6 +5419,15 @@ async def check_liq_candle(symbol, buyers_pct, sellers_pct, price):
                         st["liq_sl_price"] = st["avg_entry_price"]  # Breakeven
                 else:
                     debug_log(f"⏳ [{symbol}] Liquidity Waves TP1 (Sellers%={round(pct,1)}) erreicht, aber noch im Minus ({price} > Einstieg {entry_ref}) - warte auf TP2 oder SL")
+                return
+            nachkauf_count = st.get("liq_nachkauf_count", 0)
+            if max_nachkauf > 0 and peak >= nachkauf_progress_pct and pct < entry_threshold and nachkauf_count < max_nachkauf:
+                debug_log(f"➕ [{symbol}] Liquidity Waves Nachkauf {nachkauf_count + 1}/{max_nachkauf} (Sellers% Hoch={round(peak,1)} -> jetzt {round(pct,1)}): SHORT @ {price}")
+                ok = await execute_entry(symbol, "short", price, is_add_on=True)
+                if ok:
+                    st["liq_nachkauf_count"] = nachkauf_count + 1
+                    st["liq_peak_pct"] = pct
+                    _liq_set_sl(st, cfg, st["avg_entry_price"], "short")
             return
         if pct >= tp2_pct:
             debug_log(f"🎯 [{symbol}] Liquidity Waves TP2 (Sellers%={round(pct,1)}): SHORT @ {price} - schließe Rest")
@@ -5481,12 +5519,13 @@ async def liq_poll_loop(symbol):
 
 
 def backtest_liquidity_waves(candles, cfg):
-    """Backtest fuer Liquidity Waves - simuliert dieselben Regeln wie check_liq_candle/
-    check_liq_sl: SL wird pro Kerze gegen High/Low geprueft (wie ueberall sonst im Backtest),
-    TP1/TP2 gegen den PRO KERZE berechneten Buyers%/Sellers%-Wert (Kerzenschluss-basiert, wie
-    live). 'candles' ist ein 5er-Tupel OHNE Volumen (ts, o, h, l, c) - wird hier nicht gebraucht."""
+    """Backtest fuer Liquidity Waves - duenner Wrapper um _liq_simulate_trades (siehe dort), der
+    alle Parameter aus der Config liest und einmal die Buyers%/Sellers%-Serie berechnet. Getrennt
+    von der eigentlichen Simulation, damit der Monte-Carlo-Sweep (run_liq_sweep) dieselbe
+    Simulation fuer viele Einstiegs-Schwellen wiederverwenden kann, ohne fuer jede einzelne davon
+    die (teure) Level-Berechnung neu zu machen. 'candles' ist ein 5er-Tupel OHNE Volumen
+    (ts, o, h, l, c) - wird hier nicht gebraucht."""
     ts, o, h, l, c = candles
-    n = len(c)
     body_max_pct = float(cfg.get("liq_body_max_pct", 50.0))
     max_levels = int(cfg.get("liq_max_levels", 50))
     side_filter = cfg.get("liq_side_filter", True)
@@ -5497,12 +5536,23 @@ def backtest_liquidity_waves(candles, cfg):
     tp2_pct = float(cfg.get("liq_tp2_pct", 85.0))
     sl_usd = float(cfg.get("liq_sl_usd", 5.0))
     tp1_require_profit = cfg.get("liq_tp1_require_profit", True)
+    max_nachkauf = max(0, int(cfg.get("liq_max_nachkauf", 0) or 0))
+    nachkauf_progress_pct = float(cfg.get("liq_nachkauf_progress_pct", 30.0))
     margin, leverage = cfg["margin"], cfg["leverage"]
 
     buyers_pct_arr, sellers_pct_arr = compute_liqwave_series(o, h, l, c, body_max_pct, max_levels, side_filter, dup_remove, dup_tolerance_usd)
-
     min_needed = max(max_levels * 3, 60)
-    position = None  # {"dir","entry","size","entry_i","sl_price","tp1_done"}
+
+    return _liq_simulate_trades(o, h, l, c, ts, buyers_pct_arr, sellers_pct_arr, entry_threshold, tp1_pct, tp2_pct,
+                                 sl_usd, tp1_require_profit, max_nachkauf, nachkauf_progress_pct, margin, leverage, min_needed)
+
+
+def _liq_simulate_trades(o, h, l, c, ts, buyers_pct_arr, sellers_pct_arr, entry_threshold, tp1_pct, tp2_pct,
+                          sl_usd, tp1_require_profit, max_nachkauf, nachkauf_progress_pct, margin, leverage, min_needed):
+    """Die eigentliche Handelssimulation fuer Liquidity Waves, getrennt von der (teuren) Level-
+    Berechnung (compute_liqwave_series) - siehe backtest_liquidity_waves/run_liq_sweep."""
+    n = len(c)
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp1_done","peak_pct","nachkauf_count"}
     trades = []
 
     def _recalc_sl(pos):
@@ -5525,6 +5575,12 @@ def backtest_liquidity_waves(candles, cfg):
                 pct = buyers_pct if pdir == "long" else sellers_pct
                 if pct is not None:
                     if not position["tp1_done"]:
+                        # Hoechsten seit Einstieg/letztem Nachkauf erreichten Wert mitfuehren -
+                        # Grundlage fuer den Nachkauf-Trigger unten (siehe check_liq_candle).
+                        peak = position.get("peak_pct")
+                        if peak is None or pct > peak:
+                            peak = pct
+                            position["peak_pct"] = peak
                         if pct >= tp1_pct:
                             # Siehe check_liq_candle: TP1 haengt am Imbalance-%, nicht am Preis, und
                             # kann so bei Verlust feuern - Sperre bis mind. Breakeven, sonst weiter
@@ -5536,6 +5592,19 @@ def backtest_liquidity_waves(candles, cfg):
                                 position["size"] -= close_size
                                 position["tp1_done"] = True
                                 position["sl_price"] = entry  # Breakeven
+                        elif (max_nachkauf > 0 and peak >= nachkauf_progress_pct and pct < entry_threshold
+                              and position["nachkauf_count"] < max_nachkauf):
+                            # TP1 nicht erreicht, aber der Wert war schon mal weit genug Richtung TP1
+                            # (peak) und faellt jetzt wieder auf/unter die Einstiegs-Schwelle zurueck -
+                            # erneutes Einstiegssignal, also nachkaufen (Ø-Einstieg neu gewichten).
+                            add_size = (margin * leverage) / price
+                            new_size = position["size"] + add_size
+                            position["entry"] = (entry * position["size"] + price * add_size) / new_size
+                            position["size"] = new_size
+                            position["nachkauf_count"] += 1
+                            position["peak_pct"] = pct  # naechste Runde neu zaehlen
+                            _recalc_sl(position)
+                            _bt_record_addon(trades, pdir, price, i, position["entry_i"], position["nachkauf_count"] + 1, ts=ts, is_add_on=True)
                     elif pct >= tp2_pct:
                         _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP2", ts=ts)
                         position = None
@@ -5549,7 +5618,7 @@ def backtest_liquidity_waves(candles, cfg):
             continue
 
         size = (margin * leverage) / price
-        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "tp1_done": False}
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "tp1_done": False, "peak_pct": None, "nachkauf_count": 0}
         _recalc_sl(position)
         _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
 
@@ -5557,3 +5626,99 @@ def backtest_liquidity_waves(candles, cfg):
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
 
     return trades
+
+
+def _liq_sweep_compute(candles, levels_list, entries, body_max_pct, side_filter, dup_remove, dup_tolerance_usd,
+                        tp1_pct, tp2_pct, sl_usd, tp1_require_profit, max_nachkauf, nachkauf_progress_pct,
+                        margin, leverage, exclude_top_n):
+    """Rechenteil des Liquidity-Waves-'Monte-Carlo'-Sweeps (Einstiegs-Schwelle x Levels keep alive),
+    reine CPU-Arbeit im Thread. Fuer jeden Levels-Wert wird compute_liqwave_series NUR EINMAL
+    berechnet (teuerster Teil) und dann fuer jede Einstiegs-Schwelle wiederverwendet - die
+    Einstiegs-Schwelle beeinflusst nur die Simulation (_liq_simulate_trades), nicht die Level/
+    Buyers%/Sellers%-Berechnung selbst."""
+    ts, o, h, l, c = candles
+    results = []
+    for max_levels in levels_list:
+        buyers_pct_arr, sellers_pct_arr = compute_liqwave_series(o, h, l, c, body_max_pct, max_levels, side_filter, dup_remove, dup_tolerance_usd)
+        min_needed = max(max_levels * 3, 60)
+        for entry_threshold in entries:
+            trades = _liq_simulate_trades(o, h, l, c, ts, buyers_pct_arr, sellers_pct_arr, entry_threshold, tp1_pct, tp2_pct,
+                                           sl_usd, tp1_require_profit, max_nachkauf, nachkauf_progress_pct, margin, leverage, min_needed)
+            closed_trades = [t for t in trades if t["pnl"] is not None]
+            stats = summarize_backtest_trades(closed_trades, exclude_top_n)
+            results.append({"liq_entry_threshold_pct": entry_threshold, "liq_max_levels": max_levels, **stats})
+    return results
+
+
+async def run_liq_sweep(symbol, cfg, days, entry_min=1.0, entry_max=10.0, entry_step=1.0,
+                         levels_min=30, levels_max=100, levels_step=5, exclude_top_n=1):
+    """'Monte-Carlo'-Sweep fuer Liquidity Waves ueber Einstiegs-Schwelle (Buyers%/Sellers%) und
+    Levels keep alive (Nutzer-Vorgabe). TP1/TP2/SL, Nachkauf-Einstellungen, Sweep-Erkennung
+    (Koerper-%), Side-Filter und Duplikat-Entfernung kommen unveraendert aus der aktuellen Config -
+    nur die beiden genannten Werte werden gegeneinander getestet."""
+    max_candles = BACKTEST_MAX_CANDLES.get("liquidity_waves", 100_000)
+    resolution = cfg.get("liq_timeframe", "5m")
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    candles_vol, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    ts, o, h, l, c, _vol = candles_vol
+    n = len(c)
+
+    def _float_range(lo, hi, step):
+        lo, hi, step = float(lo), float(hi), max(1e-9, float(step))
+        vals, v = [], lo
+        while v <= hi + 1e-9:
+            vals.append(round(v, 4))
+            v += step
+        return sorted(set(vals))
+
+    def _int_range(lo, hi, step):
+        lo, hi, step = int(lo), int(hi), max(1, int(step))
+        return sorted(set(v for v in range(lo, hi + 1, step) if v >= 1))
+
+    entries = _float_range(entry_min, entry_max, entry_step)
+    levels_list = _int_range(levels_min, levels_max, levels_step)
+    if not entries or not levels_list:
+        return {"error": "Die eingestellten Bereiche für Einstiegs-Schwelle/Levels ergeben keine gültigen Werte."}
+
+    min_needed_max = max(levels_list) * 3 + 10  # grober Vorab-Check, die genaue Grenze haengt pro Levels-Wert ab (siehe _liq_sweep_compute)
+    if n < max(min_needed_max, 60):
+        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~{max(min_needed_max, 60)} nötig)."}
+
+    combos = [(e, lv) for e in entries for lv in levels_list]
+    if len(combos) > AB_SIGNAL_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({len(combos)}, Limit {AB_SIGNAL_SWEEP_MAX_COMBOS}) - Bereiche verkleinern oder Schrittweiten vergrößern."}
+
+    body_max_pct = float(cfg.get("liq_body_max_pct", 50.0))
+    side_filter = cfg.get("liq_side_filter", True)
+    dup_remove = cfg.get("liq_dup_remove", True)
+    dup_tolerance_usd = float(cfg.get("liq_dup_tolerance_usd", 0.0))
+    tp1_pct = float(cfg.get("liq_tp1_pct", 50.0))
+    tp2_pct = float(cfg.get("liq_tp2_pct", 85.0))
+    sl_usd = float(cfg.get("liq_sl_usd", 5.0))
+    tp1_require_profit = cfg.get("liq_tp1_require_profit", True)
+    max_nachkauf = max(0, int(cfg.get("liq_max_nachkauf", 0) or 0))
+    nachkauf_progress_pct = float(cfg.get("liq_nachkauf_progress_pct", 30.0))
+    margin, leverage = cfg["margin"], cfg["leverage"]
+
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(
+        None, _liq_sweep_compute, (ts, o, h, l, c), levels_list, entries,
+        body_max_pct, side_filter, dup_remove, dup_tolerance_usd,
+        tp1_pct, tp2_pct, sl_usd, tp1_require_profit, max_nachkauf, nachkauf_progress_pct,
+        margin, leverage, exclude_top_n)
+
+    rank_key = lambda r: (r["trades"] >= AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
+    best_sorted = sorted(results, key=rank_key, reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": n,
+        "min_reliable_trades": AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": len(results), "entries_tested": entries, "levels_tested": levels_list,
+        "results": best_sorted[:30], "worst_results": worst_sorted[:20],
+    }

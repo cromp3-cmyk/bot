@@ -177,7 +177,7 @@ def default_config():
         # Binance USD-M Perpetual (fapi.binance.com) statt Spot - dieselben Symbolnamen, aber
         # eigener (leicht abweichender) Kurs. Wichtig zum 1:1-Vergleich mit TradingView-Charts
         # auf ".P"-Symbolen (z.B. "BTCUSDT.P"), die selbst auf dem Perpetual-Kurs basieren.
-        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "grid_v2", "grid_scalp", "maker_scalp", "ab_breakout" (weitere folgen bei Bedarf)
+        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "grid_v2", "grid_scalp", "ab_breakout" (weitere folgen bei Bedarf)
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
         "grid_mode": os.getenv("GRID_MODE", "pct"),  # "pct" oder "usd"
@@ -207,19 +207,6 @@ def default_config():
         "gs_requote_ticks": int(os.getenv("GS_REQUOTE_TICKS", "2")),
         "gs_max_open_orders": int(os.getenv("GS_MAX_OPEN_ORDERS", "8")),
         "gs_poll_seconds": float(os.getenv("GS_POLL_SECONDS", "2.0")),
-        # ===== Maker-Scalp (entry_mode "maker_scalp", Trend-Skew + Post-Only-Quotes, Defaults siehe MAKER_DEFAULTS in grid_scalp.py) =====
-        "ms_notional_usd": float(os.getenv("MS_NOTIONAL_USD", "300")),
-        "ms_tp_bps": float(os.getenv("MS_TP_BPS", "5")),
-        "ms_sl_bps": float(os.getenv("MS_SL_BPS", "30")),
-        "ms_add_step_bps": float(os.getenv("MS_ADD_STEP_BPS", "4")),
-        "ms_max_levels": int(os.getenv("MS_MAX_LEVELS", "3")),
-        "ms_vol_mult": float(os.getenv("MS_VOL_MULT", "2.0")),
-        "ms_vol_pause_s": int(os.getenv("MS_VOL_PAUSE_S", "60")),
-        "ms_sl_pause_s": int(os.getenv("MS_SL_PAUSE_S", "300")),
-        "ms_max_sl_per_day": int(os.getenv("MS_MAX_SL_PER_DAY", "3")),
-        "ms_ema_fast": int(os.getenv("MS_EMA_FAST", "20")),
-        "ms_ema_slow": int(os.getenv("MS_EMA_SLOW", "50")),
-        "ms_flat_band_bps": float(os.getenv("MS_FLAT_BAND_BPS", "1.0")),
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
         # Grid/AB-Breakout/RSI/MVWAP) - kein eigenes scalp_position_size_usd noetig.
@@ -270,6 +257,8 @@ def default_config():
         "liq_tp2_pct": float(os.getenv("LIQ_TP2_PCT", "85.0")),  # TP2 (Rest-Exit) sobald Buyers%/Sellers% hier steht
         "liq_sl_usd": float(os.getenv("LIQ_SL_USD", "5.0")),  # fester $-Verlust ab Ø-Einstieg
         "liq_tp1_require_profit": os.getenv("LIQ_TP1_REQUIRE_PROFIT", "true").lower() == "true",  # TP1 haengt am Imbalance-%, nicht am Preis - kann sonst im Minus feuern; wenn an, wird dann bis TP2/SL gewartet
+        "liq_max_nachkauf": int(os.getenv("LIQ_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X Nachkaeufe
+        "liq_nachkauf_progress_pct": float(os.getenv("LIQ_NACHKAUF_PROGRESS_PCT", "30.0")),  # Nachkauf nur, wenn Buyers%/Sellers% seit Einstieg mind. hierhin gestiegen war, TP1 aber nicht erreicht wurde, und dann wieder unter die Einstiegs-Schwelle faellt (erneutes Einstiegssignal)
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -504,6 +493,8 @@ def default_state():
         "liq_tp1_done": False,
         "liq_buyers_pct": None,  # zuletzt berechneter Wert, nur fuers Dashboard
         "liq_sellers_pct": None,
+        "liq_peak_pct": None,  # hoechster Buyers%/Sellers%-Wert seit Einstieg/letztem Nachkauf (Nachkauf-Trigger)
+        "liq_nachkauf_count": 0,
     }
 
 
@@ -652,7 +643,7 @@ PERSISTED_STATE_KEYS = [
     "scalp_sl_price", "scalp_tp1_done", "scalp_mean_price", "scalp_upper_band", "scalp_lower_band",
     "scalp_obv_rsi", "scalp_candle_seq", "scalp_last_entry_seq", "scalp_halfway_lock_done",
     "scalp_left_band_since_fill",
-    "liq_sl_price", "liq_tp1_done",
+    "liq_sl_price", "liq_tp1_done", "liq_peak_pct", "liq_nachkauf_count",
 ]
 
 
@@ -842,10 +833,6 @@ def calc_grid_levels(symbol):
     st, cfg = b["state"], b["config"]
     levels = {"anchor": st["anchor_price"], "tp_price": None, "next_nachkauf_price": None,
               "grid_step_abs": None, "tp_step_abs": None}
-    if cfg.get("entry_mode") in ("grid_scalp", "maker_scalp"):
-        # Linien kommen direkt aus dem Maker-Modul (TP, SL, naechster Nachkauf / Einstiegs-Level)
-        levels.update({k: v for k, v in (st.get("gs_levels") or {}).items()})
-        return levels
     is_g2 = cfg.get("entry_mode") == "grid_v2"
     step_fn = compute_step_abs_g2 if is_g2 else compute_step_abs
     if st["position"] is None:
@@ -1382,7 +1369,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
-      <option value="maker_scalp">Maker-Scalp (Post-Only-Quotes + Trend-Skew, TP/Stopp in bps, Vol-R&uuml;ckzug, Tageslimit)</option>
       <option value="scalp_vwap_obv_rsi">Scalp VWAP OBV RSI (Mean-Reversion, VWAP-Bänder + OBV RSI, TP1/TP2)</option>
       <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
@@ -1930,6 +1916,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="liquidity_waves" style="grid-column:1/-1;">
     <label><input type="checkbox" id="liq_tp1_require_profit" style="width:auto; vertical-align:middle;"> TP1 nur wenn mindestens Breakeven (sonst warten auf TP2 oder SL, statt mit Verlust zu schließen)</label>
   </div>
+  <div data-mode="liquidity_waves"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="2" id="liq_max_nachkauf"></div>
+  <div data-mode="liquidity_waves"><label>Nachkauf-Trigger: Fortschritt Richtung TP1 (%), danach zurück unter Einstiegs-Schwelle (nur bei Max. Nachkäufe &gt; 0)</label><input type="number" step="1" min="1" max="99" id="liq_nachkauf_progress_pct"></div>
 
 
 
@@ -1983,18 +1971,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_scalp"><label>Requote-Drift (Ticks)</label><input type="number" step="1" id="gs_requote_ticks"></div>
   <div data-mode="grid_scalp"><label>Max. offene Orders</label><input type="number" step="1" id="gs_max_open_orders"></div>
   <div data-mode="grid_scalp"><label>Poll-Intervall (Sek.)</label><input type="number" step="any" id="gs_poll_seconds"></div>
-  <div data-mode="maker_scalp"><label>Notional pro Order ($)</label><input type="number" step="any" id="ms_notional_usd"></div>
-  <div data-mode="maker_scalp"><label>Take-Profit (bps, 1 bps = 0.01%)</label><input type="number" step="any" id="ms_tp_bps"></div>
-  <div data-mode="maker_scalp"><label>Stopp (bps gegen die Position)</label><input type="number" step="any" id="ms_sl_bps"></div>
-  <div data-mode="maker_scalp"><label>Nachkauf-Abstand (bps)</label><input type="number" step="any" id="ms_add_step_bps"></div>
-  <div data-mode="maker_scalp"><label>Max. Stufen (Inventar-Limit)</label><input type="number" step="any" id="ms_max_levels"></div>
-  <div data-mode="maker_scalp"><label>Volatilit&auml;ts-R&uuml;ckzug ab x-facher 1m-Spanne</label><input type="number" step="any" id="ms_vol_mult"></div>
-  <div data-mode="maker_scalp"><label>Pause nach Vol-R&uuml;ckzug (Sek.)</label><input type="number" step="any" id="ms_vol_pause_s"></div>
-  <div data-mode="maker_scalp"><label>Pause nach Stopp (Sek.)</label><input type="number" step="any" id="ms_sl_pause_s"></div>
-  <div data-mode="maker_scalp"><label>Max. Stopps pro Tag (danach Pause bis Tageswechsel)</label><input type="number" step="any" id="ms_max_sl_per_day"></div>
-  <div data-mode="maker_scalp"><label>Trend: schnelle EMA (1m)</label><input type="number" step="any" id="ms_ema_fast"></div>
-  <div data-mode="maker_scalp"><label>Trend: langsame EMA (1m)</label><input type="number" step="any" id="ms_ema_slow"></div>
-  <div data-mode="maker_scalp"><label>Trend: EMA-Abstand unter dem 'flat' gilt (bps)</label><input type="number" step="any" id="ms_flat_band_bps"></div>
   <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
     <select class="cfg" id="grid_sl_enabled">
       <option value="false">Aus (Standard)</option>
@@ -2382,6 +2358,63 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="ab_lookback">Breakout-Range ⇅</th>
       <th class="sortable" data-key="ab_fast_len">Schnelle EMA ⇅</th>
       <th class="sortable" data-key="ab_slow_len">Langsame EMA ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<div data-mode-section="liquidity_waves" style="display:none;">
+<h2 class="section-title">🎲 Liquidity Waves Sweep (Einstiegs-Schwelle × Levels keep alive)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet die Einstiegs-Schwelle (Buyers%/Sellers%) gegen "Levels keep alive". TP1/TP2/SL,
+    Nachkauf-Einstellungen, Sweep-Erkennung (max. Körper-%), Side-Filter und Duplikat-Entfernung
+    kommen unverändert aus den Einstellungen oben.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="liq-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="liq-sweep-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Einstiegs-Schwelle (%) von</label><input type="number" step="0.5" min="0.1" id="liq-sweep-entry-min" value="1" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.5" min="0.1" id="liq-sweep-entry-max" value="10" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.5" min="0.1" id="liq-sweep-entry-step" value="1" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Levels keep alive von</label><input type="number" step="1" min="1" id="liq-sweep-levels-min" value="30" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="1" id="liq-sweep-levels-max" value="100" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="liq-sweep-levels-step" value="5" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-liq-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="liq-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="liq-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="liq-sweep-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="liq_entry_threshold_pct">Einstiegs-Schwelle % ⇅</th>
+      <th class="sortable" data-key="liq_max_levels">Levels keep alive ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="liq-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="liq-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="liq_entry_threshold_pct">Einstiegs-Schwelle % ⇅</th>
+      <th class="sortable" data-key="liq_max_levels">Levels keep alive ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -2816,6 +2849,12 @@ function resetBacktestUI() {
   document.getElementById('rf-sweep-worst-title').style.display = 'none';
   window.rfSweepResultsData = [];
   window.rfSweepWorstData = [];
+  document.getElementById('liq-sweep-status').innerText = '';
+  document.getElementById('liq-sweep-results-table').style.display = 'none';
+  document.getElementById('liq-sweep-worst-table').style.display = 'none';
+  document.getElementById('liq-sweep-worst-title').style.display = 'none';
+  window.liqSweepResultsData = [];
+  window.liqSweepWorstData = [];
 }
 
 document.getElementById('btn-ab-sig-sweep').addEventListener('click', async () => {
@@ -2883,6 +2922,67 @@ const abSigSweepRowHtml = (r) => `
   </tr>`;
 const renderAbSigSweepResults = makeSortableTable('ab-sig-sweep-results-table', () => window.abSigSweepResultsData, abSigSweepRowHtml);
 const renderAbSigSweepWorst = makeSortableTable('ab-sig-sweep-worst-table', () => window.abSigSweepWorstData, abSigSweepRowHtml);
+
+document.getElementById('btn-liq-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-liq-sweep');
+  const statusEl = document.getElementById('liq-sweep-status');
+  const tables = {top: document.getElementById('liq-sweep-results-table'), worst: document.getElementById('liq-sweep-worst-table')};
+  const titles = {top: document.getElementById('liq-sweep-top-title'), worst: document.getElementById('liq-sweep-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('liq-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('liq-sweep-exclude-top-n').value) || 0,
+    entry_min: parseFloat(document.getElementById('liq-sweep-entry-min').value),
+    entry_max: parseFloat(document.getElementById('liq-sweep-entry-max').value),
+    entry_step: parseFloat(document.getElementById('liq-sweep-entry-step').value),
+    levels_min: parseInt(document.getElementById('liq-sweep-levels-min').value),
+    levels_max: parseInt(document.getElementById('liq-sweep-levels-max').value),
+    levels_step: parseInt(document.getElementById('liq-sweep-levels-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen...`;
+  try {
+    const res = await fetch(`/api/liq_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.liqSweepResultsData = data.results || [];
+      window.liqSweepWorstData = data.worst_results || [];
+      renderLiqSweepResults();
+      renderLiqSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.liqSweepResultsData = [];
+window.liqSweepWorstData = [];
+const liqSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.liq_entry_threshold_pct}</td>
+    <td>${r.liq_max_levels}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderLiqSweepResults = makeSortableTable('liq-sweep-results-table', () => window.liqSweepResultsData, liqSweepRowHtml);
+const renderLiqSweepWorst = makeSortableTable('liq-sweep-worst-table', () => window.liqSweepWorstData, liqSweepRowHtml);
 
 document.getElementById('btn-ab-sweep-tf-6-20').addEventListener('click', () => {
   const boxes = Array.from(document.querySelectorAll('.ab-sweep-tf')).filter(x => { const m = parseInt(x.value); return x.value.endsWith('m') && m >= 6 && m <= 20 && m !== 15; });
@@ -3345,6 +3445,8 @@ async function refresh() {
     document.getElementById('liq_tp2_pct').value = data.config.liq_tp2_pct;
     document.getElementById('liq_sl_usd').value = data.config.liq_sl_usd;
     document.getElementById('liq_tp1_require_profit').checked = !!data.config.liq_tp1_require_profit;
+    document.getElementById('liq_max_nachkauf').value = data.config.liq_max_nachkauf;
+    document.getElementById('liq_nachkauf_progress_pct').value = data.config.liq_nachkauf_progress_pct;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -3374,18 +3476,6 @@ async function refresh() {
     document.getElementById('gs_requote_ticks').value = data.config.gs_requote_ticks;
     document.getElementById('gs_max_open_orders').value = data.config.gs_max_open_orders;
     document.getElementById('gs_poll_seconds').value = data.config.gs_poll_seconds;
-    document.getElementById('ms_notional_usd').value = data.config.ms_notional_usd;
-    document.getElementById('ms_tp_bps').value = data.config.ms_tp_bps;
-    document.getElementById('ms_sl_bps').value = data.config.ms_sl_bps;
-    document.getElementById('ms_add_step_bps').value = data.config.ms_add_step_bps;
-    document.getElementById('ms_max_levels').value = data.config.ms_max_levels;
-    document.getElementById('ms_vol_mult').value = data.config.ms_vol_mult;
-    document.getElementById('ms_vol_pause_s').value = data.config.ms_vol_pause_s;
-    document.getElementById('ms_sl_pause_s').value = data.config.ms_sl_pause_s;
-    document.getElementById('ms_max_sl_per_day').value = data.config.ms_max_sl_per_day;
-    document.getElementById('ms_ema_fast').value = data.config.ms_ema_fast;
-    document.getElementById('ms_ema_slow').value = data.config.ms_ema_slow;
-    document.getElementById('ms_flat_band_bps').value = data.config.ms_flat_band_bps;
     document.getElementById('grid_anchor_follow_pct').value = data.config.grid_anchor_follow_pct;
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('binance_market_type').value = data.config.binance_market_type;
@@ -3423,7 +3513,6 @@ async function refresh() {
   const datasets = [{ label: 'Preis', data: prices, borderColor:'#60a5fa', pointRadius:0, borderWidth:2 }];
   if (gl.anchor) datasets.push({ label:'Anker', data: Array(n).fill(gl.anchor), borderColor:'#9ca3af', borderDash:[4,4], pointRadius:0, borderWidth:1 });
   if (gl.tp_price) datasets.push({ label:'TP', data: Array(n).fill(gl.tp_price), borderColor:'#4ade80', borderDash:[6,3], pointRadius:0, borderWidth:1 });
-  if (gl.sl_price) datasets.push({ label:'SL', data: Array(n).fill(gl.sl_price), borderColor:'#ef4444', borderDash:[3,3], pointRadius:0, borderWidth:1 });
   if (gl.next_nachkauf_price) datasets.push({ label:'Nächster Nachkauf', data: Array(n).fill(gl.next_nachkauf_price), borderColor:'#f87171', borderDash:[6,3], pointRadius:0, borderWidth:1 });
   if (gl.next_entry_long) datasets.push({ label:'Entry Long ab', data: Array(n).fill(gl.next_entry_long), borderColor:'#4ade80', borderDash:[2,2], pointRadius:0, borderWidth:1 });
   if (gl.next_entry_short) datasets.push({ label:'Entry Short ab', data: Array(n).fill(gl.next_entry_short), borderColor:'#f87171', borderDash:[2,2], pointRadius:0, borderWidth:1 });
@@ -3698,6 +3787,8 @@ function buildConfigPayload() {
     liq_tp2_pct: parseFloat(document.getElementById('liq_tp2_pct').value),
     liq_sl_usd: parseFloat(document.getElementById('liq_sl_usd').value),
     liq_tp1_require_profit: document.getElementById('liq_tp1_require_profit').checked,
+    liq_max_nachkauf: parseInt(document.getElementById('liq_max_nachkauf').value),
+    liq_nachkauf_progress_pct: parseFloat(document.getElementById('liq_nachkauf_progress_pct').value),
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -3727,18 +3818,6 @@ function buildConfigPayload() {
     gs_requote_ticks: parseInt(document.getElementById('gs_requote_ticks').value),
     gs_max_open_orders: parseInt(document.getElementById('gs_max_open_orders').value),
     gs_poll_seconds: parseFloat(document.getElementById('gs_poll_seconds').value),
-    ms_notional_usd: parseFloat(document.getElementById('ms_notional_usd').value),
-    ms_tp_bps: parseFloat(document.getElementById('ms_tp_bps').value),
-    ms_sl_bps: parseFloat(document.getElementById('ms_sl_bps').value),
-    ms_add_step_bps: parseFloat(document.getElementById('ms_add_step_bps').value),
-    ms_max_levels: parseInt(document.getElementById('ms_max_levels').value),
-    ms_vol_mult: parseFloat(document.getElementById('ms_vol_mult').value),
-    ms_vol_pause_s: parseInt(document.getElementById('ms_vol_pause_s').value),
-    ms_sl_pause_s: parseInt(document.getElementById('ms_sl_pause_s').value),
-    ms_max_sl_per_day: parseInt(document.getElementById('ms_max_sl_per_day').value),
-    ms_ema_fast: parseInt(document.getElementById('ms_ema_fast').value),
-    ms_ema_slow: parseInt(document.getElementById('ms_ema_slow').value),
-    ms_flat_band_bps: parseFloat(document.getElementById('ms_flat_band_bps').value),
     grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
@@ -3888,6 +3967,7 @@ async def handle_status(request):
         "scalp_price_history": st.get("scalp_price_history", [])[-500:],
         "liq_sl_price": st.get("liq_sl_price"), "liq_tp1_done": st.get("liq_tp1_done"),
         "liq_buyers_pct": st.get("liq_buyers_pct"), "liq_sellers_pct": st.get("liq_sellers_pct"),
+        "liq_peak_pct": st.get("liq_peak_pct"), "liq_nachkauf_count": st.get("liq_nachkauf_count"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -3914,7 +3994,6 @@ async def handle_config_update(request):
                 "gs_step_notional_usd", "gs_max_levels", "gs_step_pct", "gs_tp_usd",
                 "gs_flatten_usd", "gs_cooldown_min", "gs_anchor_follow_pct",
                 "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
-                "ms_notional_usd", "ms_tp_bps", "ms_sl_bps", "ms_add_step_bps", "ms_max_levels", "ms_vol_mult", "ms_vol_pause_s", "ms_sl_pause_s", "ms_max_sl_per_day", "ms_ema_fast", "ms_ema_slow", "ms_flat_band_bps",
                 "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",
@@ -3946,7 +4025,8 @@ async def handle_config_update(request):
                 "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_nachkauf_require_reversal", "scalp_tp1_require_profit", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
                 "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period",
                 "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
-                "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit"]:
+                "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
+                "liq_max_nachkauf", "liq_nachkauf_progress_pct"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -4068,6 +4148,43 @@ async def handle_ab_signal_sweep(request):
 
     result = await run_ab_signal_sweep(symbol, cfg, days, lookback_min, lookback_max, lookback_step,
                                         fast_min, fast_max, fast_step, slow_min, slow_max, slow_step, exclude_top_n)
+    return web.json_response(result)
+
+
+async def handle_liq_sweep(request):
+    """'Monte-Carlo'-Sweep fuer Liquidity Waves: Einstiegs-Schwelle x Levels keep alive,
+    siehe run_liq_sweep."""
+    from strategies import run_liq_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        entry_min = max(0.1, float(body.get("entry_min", 1.0)))
+        entry_max = max(entry_min, float(body.get("entry_max", 10.0)))
+        entry_step = max(0.1, float(body.get("entry_step", 1.0)))
+        levels_min = max(1, int(body.get("levels_min", 30)))
+        levels_max = max(levels_min, int(body.get("levels_max", 100)))
+        levels_step = max(1, int(body.get("levels_step", 5)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    try:
+        result = await run_liq_sweep(symbol, cfg, days, entry_min, entry_max, entry_step,
+                                      levels_min, levels_max, levels_step, exclude_top_n)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Liquidity-Waves-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
 
