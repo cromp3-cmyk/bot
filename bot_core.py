@@ -2443,6 +2443,69 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="wellenanker" style="display:none;">
+<h2 class="section-title">🎲 Wellenanker Sweep (Zone 1 × Max. Nachkäufe × Stop-Loss $)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet Zone 1 gegen Max. Nachkäufe (0-4) und Stop-Loss ($). TP-Modus (samt Überlauflinie/TP-
+    Betrag) sowie die Wellen-Parameter (Kanal-/Durchschnitt-Länge, Signallinien-Glättung, Quelle,
+    Wellen-Skalierung) kommen unverändert aus den Einstellungen oben.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="wa-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="wa-sweep-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zone 1 von</label><input type="number" step="1" min="1" id="wa-sweep-zone1-min" value="30" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="1" id="wa-sweep-zone1-max" value="80" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="wa-sweep-zone1-step" value="1" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Max. Nachkäufe von</label><input type="number" step="1" min="0" max="4" id="wa-sweep-nachkauf-min" value="0" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="0" max="4" id="wa-sweep-nachkauf-max" value="4" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Stop-Loss ($) von</label><input type="number" step="0.5" min="0.1" id="wa-sweep-sl-min" value="5" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.5" min="0.1" id="wa-sweep-sl-max" value="25" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.5" min="0.1" id="wa-sweep-sl-step" value="2" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-wa-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="wa-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="wa-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="wa-sweep-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="wa_zone1">Zone 1 ⇅</th>
+      <th class="sortable" data-key="wa_max_nachkauf">Max. Nachkäufe ⇅</th>
+      <th class="sortable" data-key="wa_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="wa-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="wa-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="wa_zone1">Zone 1 ⇅</th>
+      <th class="sortable" data-key="wa_max_nachkauf">Max. Nachkäufe ⇅</th>
+      <th class="sortable" data-key="wa_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="liquidity_waves" style="display:none;">
 <h2 class="section-title">🎲 Liquidity Waves Sweep (Einstiegs-Schwelle × Levels keep alive)</h2>
 <div class="panel-card">
@@ -2928,6 +2991,12 @@ function resetBacktestUI() {
   document.getElementById('liq-sweep-worst-title').style.display = 'none';
   window.liqSweepResultsData = [];
   window.liqSweepWorstData = [];
+  document.getElementById('wa-sweep-status').innerText = '';
+  document.getElementById('wa-sweep-results-table').style.display = 'none';
+  document.getElementById('wa-sweep-worst-table').style.display = 'none';
+  document.getElementById('wa-sweep-worst-title').style.display = 'none';
+  window.waSweepResultsData = [];
+  window.waSweepWorstData = [];
 }
 
 document.getElementById('btn-ab-sig-sweep').addEventListener('click', async () => {
@@ -3056,6 +3125,70 @@ const liqSweepRowHtml = (r) => `
   </tr>`;
 const renderLiqSweepResults = makeSortableTable('liq-sweep-results-table', () => window.liqSweepResultsData, liqSweepRowHtml);
 const renderLiqSweepWorst = makeSortableTable('liq-sweep-worst-table', () => window.liqSweepWorstData, liqSweepRowHtml);
+
+document.getElementById('btn-wa-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-wa-sweep');
+  const statusEl = document.getElementById('wa-sweep-status');
+  const tables = {top: document.getElementById('wa-sweep-results-table'), worst: document.getElementById('wa-sweep-worst-table')};
+  const titles = {top: document.getElementById('wa-sweep-top-title'), worst: document.getElementById('wa-sweep-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('wa-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('wa-sweep-exclude-top-n').value) || 0,
+    zone1_min: parseFloat(document.getElementById('wa-sweep-zone1-min').value),
+    zone1_max: parseFloat(document.getElementById('wa-sweep-zone1-max').value),
+    zone1_step: parseFloat(document.getElementById('wa-sweep-zone1-step').value),
+    nachkauf_min: parseInt(document.getElementById('wa-sweep-nachkauf-min').value),
+    nachkauf_max: parseInt(document.getElementById('wa-sweep-nachkauf-max').value),
+    sl_min: parseFloat(document.getElementById('wa-sweep-sl-min').value),
+    sl_max: parseFloat(document.getElementById('wa-sweep-sl-max').value),
+    sl_step: parseFloat(document.getElementById('wa-sweep-sl-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen...`;
+  try {
+    const res = await fetch(`/api/wa_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.waSweepResultsData = data.results || [];
+      window.waSweepWorstData = data.worst_results || [];
+      renderWaSweepResults();
+      renderWaSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.waSweepResultsData = [];
+window.waSweepWorstData = [];
+const waSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.wa_zone1}</td>
+    <td>${r.wa_max_nachkauf}</td>
+    <td>${r.wa_sl_usd}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderWaSweepResults = makeSortableTable('wa-sweep-results-table', () => window.waSweepResultsData, waSweepRowHtml);
+const renderWaSweepWorst = makeSortableTable('wa-sweep-worst-table', () => window.waSweepWorstData, waSweepRowHtml);
 
 document.getElementById('btn-ab-sweep-tf-6-20').addEventListener('click', () => {
   const boxes = Array.from(document.querySelectorAll('.ab-sweep-tf')).filter(x => { const m = parseInt(x.value); return x.value.endsWith('m') && m >= 6 && m <= 20 && m !== 15; });
@@ -4284,6 +4417,45 @@ async def handle_liq_sweep(request):
                                       levels_min, levels_max, levels_step, exclude_top_n)
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] Liquidity-Waves-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_wa_sweep(request):
+    """'Monte-Carlo'-Sweep fuer Wellenanker: Zone 1 x Max. Nachkäufe (0-4) x Stop-Loss ($),
+    siehe run_wa_sweep."""
+    from strategies import run_wa_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        zone1_min = max(1.0, float(body.get("zone1_min", 30.0)))
+        zone1_max = max(zone1_min, float(body.get("zone1_max", 80.0)))
+        zone1_step = max(0.1, float(body.get("zone1_step", 1.0)))
+        nachkauf_min = max(0, min(4, int(body.get("nachkauf_min", 0))))
+        nachkauf_max = max(nachkauf_min, min(4, int(body.get("nachkauf_max", 4))))
+        sl_min = max(0.1, float(body.get("sl_min", 5.0)))
+        sl_max = max(sl_min, float(body.get("sl_max", 25.0)))
+        sl_step = max(0.1, float(body.get("sl_step", 2.0)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    try:
+        result = await run_wa_sweep(symbol, cfg, days, zone1_min, zone1_max, zone1_step,
+                                     nachkauf_min, nachkauf_max, sl_min, sl_max, sl_step, exclude_top_n)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Wellenanker-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 

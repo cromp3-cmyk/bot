@@ -2356,6 +2356,7 @@ async def run_ab_sweep(symbol, cfg, days, timeframes, st_mult_min=0.1, st_mult_m
 
 AB_SIGNAL_SWEEP_MAX_COMBOS = 600
 AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES = 5
+WA_SWEEP_MAX_COMBOS = 3000  # Wellenanker-Sweep hat 3 Dimensionen (Zone 1 x Nachkauf x SL) statt 2, daher hoeheres Limit als AB_SIGNAL_SWEEP_MAX_COMBOS
 
 
 def _ab_signal_sweep_compute(candles, cfg, base_params, trend_ok, aso_ok, combos, exclude_top_n):
@@ -5979,7 +5980,6 @@ def backtest_wellenanker(candles, cfg):
     'candles' ist das uebliche 6er-Tupel MIT Volumen (ts,o,h,l,c,v) - Volumen wird hier nicht
     gebraucht (Geldfluss ist nicht Teil der Handelslogik, siehe Modul-Docstring)."""
     ts, o, h, l, c, _vol = candles
-    n = len(c)
     n1 = int(cfg.get("wa_n1", 10))
     n2 = int(cfg.get("wa_n2", 21))
     sig_len = int(cfg.get("wa_sig_len", 4))
@@ -5996,6 +5996,15 @@ def backtest_wellenanker(candles, cfg):
     wt1_arr, wt2_arr = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode, wave_scale)
     min_needed = n1 + n2 + sig_len + 20
 
+    return _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
+                                sl_usd, max_nachkauf, margin, leverage, min_needed)
+
+
+def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
+                         sl_usd, max_nachkauf, margin, leverage, min_needed):
+    """Die eigentliche Handelssimulation fuer Wellenanker, getrennt von der (teuren) WaveTrend-
+    Berechnung (compute_wavetrend_series) - siehe backtest_wellenanker/run_wa_sweep."""
+    n = len(c)
     position = None  # {"dir","entry","size","entry_i","sl_price","tp_price","entries"}
     trades = []
 
@@ -6073,3 +6082,97 @@ def backtest_wellenanker(candles, cfg):
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
 
     return trades
+
+
+def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list, tp_mode,
+                       ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n):
+    """Rechenteil des Wellenanker-'Monte-Carlo'-Sweeps (Zone 1 x Max. Nachkäufe x Stop-Loss $),
+    reine CPU-Arbeit im Thread. wt1_arr/wt2_arr (die WaveTrend-Welle/Signallinie) haengen nur von
+    n1/n2/sig_len/Quelle/Wellen-Skalierung ab und werden darum NUR EINMAL vor dem Sweep berechnet
+    (siehe run_wa_sweep) - Zone 1, Nachkauf-Anzahl und SL beeinflussen nur die Simulation
+    (_wa_simulate_trades), nicht die Welle selbst."""
+    ts, o, h, l, c = candles
+    results = []
+    for z1 in zone1_list:
+        for max_nachkauf in nachkauf_list:
+            for sl_usd in sl_list:
+                trades = _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level,
+                                              tp_usd, sl_usd, max_nachkauf, margin, leverage, min_needed)
+                closed_trades = [t for t in trades if t["pnl"] is not None]
+                stats = summarize_backtest_trades(closed_trades, exclude_top_n)
+                results.append({"wa_zone1": z1, "wa_max_nachkauf": max_nachkauf, "wa_sl_usd": sl_usd, **stats})
+    return results
+
+
+async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_step=1.0,
+                        nachkauf_min=0, nachkauf_max=4, sl_min=5.0, sl_max=25.0, sl_step=2.0, exclude_top_n=1):
+    """'Monte-Carlo'-Sweep fuer Wellenanker ueber Zone 1 x Max. Nachkäufe (0-4) x Stop-Loss ($).
+    TP-Modus (gegentrade/ueberlauf/fester_betrag) samt Überlauflinie/TP-Betrag sowie die Wellen-
+    Parameter (n1/n2/sig_len/Quelle/Wellen-Skalierung) kommen unveraendert aus der aktuellen Config -
+    nur Zone 1, Nachkauf-Anzahl und SL werden gegeneinander getestet. wt1/wt2 werden nur EINMAL
+    berechnet (teuerster Teil), da sie von keinem der drei Sweep-Parameter abhaengen."""
+    max_candles = BACKTEST_MAX_CANDLES.get("wellenanker", 100_000)
+    resolution = cfg.get("wa_timeframe", "15m")
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    candles_vol, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    ts, o, h, l, c, _vol = candles_vol
+    n = len(c)
+
+    def _float_range(lo, hi, step):
+        lo, hi, step = float(lo), float(hi), max(1e-9, float(step))
+        vals, v = [], lo
+        while v <= hi + 1e-9:
+            vals.append(round(v, 4))
+            v += step
+        return sorted(set(vals))
+
+    def _int_range(lo, hi, step):
+        lo, hi, step = int(lo), int(hi), max(1, int(step))
+        return sorted(set(v for v in range(lo, hi + 1, step) if v >= 0))
+
+    zone1_list = _float_range(zone1_min, zone1_max, zone1_step)
+    nachkauf_list = [v for v in _int_range(nachkauf_min, nachkauf_max, 1) if 0 <= v <= 4]
+    sl_list = _float_range(sl_min, sl_max, sl_step)
+    if not zone1_list or not nachkauf_list or not sl_list:
+        return {"error": "Die eingestellten Bereiche für Zone 1/Nachkäufe/SL ergeben keine gültigen Werte."}
+
+    n1 = int(cfg.get("wa_n1", 10))
+    n2 = int(cfg.get("wa_n2", 21))
+    sig_len = int(cfg.get("wa_sig_len", 4))
+    min_needed = n1 + n2 + sig_len + 20
+    if n < max(min_needed, 60):
+        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~{max(min_needed, 60)} nötig)."}
+
+    combos = [(z1, nk, sl) for z1 in zone1_list for nk in nachkauf_list for sl in sl_list]
+    if len(combos) > WA_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({len(combos)}, Limit {WA_SWEEP_MAX_COMBOS}) - Bereiche verkleinern oder Schrittweiten vergrößern."}
+
+    src_mode = cfg.get("wa_src", "close")
+    wave_scale = float(cfg.get("wa_wave_scale", 1.35))
+    tp_mode = cfg.get("wa_tp_mode", "gegentrade")
+    ueberlauf_level = float(cfg.get("wa_ueberlauf_level", 45.0))
+    tp_usd = float(cfg.get("wa_tp_usd", 10.0))
+    margin, leverage = cfg["margin"], cfg["leverage"]
+
+    wt1_arr, wt2_arr = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode, wave_scale)
+
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(
+        None, _wa_sweep_compute, (ts, o, h, l, c), wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list,
+        tp_mode, ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n)
+
+    rank_key = lambda r: (r["trades"] >= AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
+    best_sorted = sorted(results, key=rank_key, reverse=True)
+    worst_sorted = sorted(results, key=lambda r: r["total_pnl_usd"])
+
+    actual_days = (ts[-1] - ts[0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round(actual_days, 1), "candles_processed": n,
+        "min_reliable_trades": AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES,
+        "combos_tested": len(results), "zone1_tested": zone1_list, "nachkauf_tested": nachkauf_list, "sl_tested": sl_list,
+        "results": best_sorted[:30], "worst_results": worst_sorted[:20],
+    }

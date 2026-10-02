@@ -13,7 +13,7 @@ from bot_core import (
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_ab_sweep, handle_ab_signal_sweep, handle_liq_sweep,
+    handle_manual_trade, handle_backtest, handle_ab_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
@@ -45,6 +45,7 @@ async def start_web_server():
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
     app.router.add_post("/api/ab_signal_sweep", handle_ab_signal_sweep)
     app.router.add_post("/api/liq_sweep", handle_liq_sweep)
+    app.router.add_post("/api/wa_sweep", handle_wa_sweep)
     app.router.add_get("/api/global_settings", handle_global_settings_get)
     app.router.add_post("/api/global_settings", handle_global_settings_update)
     app.router.add_post("/api/reset", handle_reset)
