@@ -271,6 +271,7 @@ def default_config():
         "wa_n1": int(os.getenv("WA_N1", "10")),  # Kanal-Laenge
         "wa_n2": int(os.getenv("WA_N2", "21")),  # Durchschnitt-Laenge
         "wa_sig_len": int(os.getenv("WA_SIG_LEN", "4")),  # Signallinien-Glaettung
+        "wa_wave_scale": float(os.getenv("WA_WAVE_SCALE", "1.35")),  # streckt die Welle (wt1 *= wave_scale), damit sie die Zonen so oft erreicht wie im Original-Indikator
         "wa_zone1": float(os.getenv("WA_ZONE1", "53.0")),  # Zone: Long-Punkt wenn wt2 < -zone1, Short wenn wt2 > zone1
         "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 4)
         "wa_tp_mode": os.getenv("WA_TP_MODE", "gegentrade"),  # gegentrade / ueberlauf / fester_betrag
@@ -1978,6 +1979,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wellenanker"><label>Kanal-Länge</label><input type="number" step="1" min="1" id="wa_n1"></div>
   <div data-mode="wellenanker"><label>Durchschnitt-Länge</label><input type="number" step="1" min="1" id="wa_n2"></div>
   <div data-mode="wellenanker"><label>Signallinien-Glättung</label><input type="number" step="1" min="1" id="wa_sig_len"></div>
+  <div data-mode="wellenanker"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" max="3.0" id="wa_wave_scale"></div>
   <div data-mode="wellenanker"><label>Zone 1 (Long &lt; -X, Short &gt; X)</label><input type="number" step="1" min="1" max="100" id="wa_zone1"></div>
   <div data-mode="wellenanker"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="4" id="wa_max_nachkauf"></div>
   <div data-mode="wellenanker"><label>TP-Modus</label>
@@ -3523,6 +3525,7 @@ async function refresh() {
     document.getElementById('wa_n1').value = data.config.wa_n1;
     document.getElementById('wa_n2').value = data.config.wa_n2;
     document.getElementById('wa_sig_len').value = data.config.wa_sig_len;
+    document.getElementById('wa_wave_scale').value = data.config.wa_wave_scale;
     document.getElementById('wa_zone1').value = data.config.wa_zone1;
     document.getElementById('wa_max_nachkauf').value = data.config.wa_max_nachkauf;
     document.getElementById('wa_tp_mode').value = data.config.wa_tp_mode;
@@ -3876,6 +3879,7 @@ function buildConfigPayload() {
     wa_n1: parseInt(document.getElementById('wa_n1').value),
     wa_n2: parseInt(document.getElementById('wa_n2').value),
     wa_sig_len: parseInt(document.getElementById('wa_sig_len').value),
+    wa_wave_scale: parseFloat(document.getElementById('wa_wave_scale').value),
     wa_zone1: parseFloat(document.getElementById('wa_zone1').value),
     wa_max_nachkauf: parseInt(document.getElementById('wa_max_nachkauf').value),
     wa_tp_mode: document.getElementById('wa_tp_mode').value,
@@ -4121,7 +4125,7 @@ async def handle_config_update(request):
                 "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
                 "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
                 "liq_max_nachkauf", "liq_nachkauf_progress_pct",
-                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_zone1", "wa_max_nachkauf",
+                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_max_nachkauf",
                 "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd"]:
         if key in body:
             cfg[key] = body[key]

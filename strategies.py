@@ -5776,9 +5776,13 @@ async def run_liq_sweep(symbol, cfg, days, entry_min=1.0, entry_max=10.0, entry_
 # (0-4) weitere Einstiege bei jedem weiteren Punkt in dieselbe Richtung, waehrend TP/SL noch nicht
 # gegriffen haben - Ø-Einstieg wird dabei neu gewichtet (wie bei Liquidity Waves).
 
-def compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode):
+def compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode, wave_scale=1.0):
     """1:1-Nachbau von f_wave() aus dem Original: esa = EMA(src, n1), d = EMA(|src-esa|, n1),
-    ci = (src-esa)/(0.015*d), wt1 = EMA(ci, n2), wt2 = SMA(wt1, sig_len)."""
+    ci = (src-esa)/(0.015*d), wt1 = EMA(ci, n2) * wave_scale, wt2 = SMA(wt1, sig_len).
+    wave_scale (Original: "Wellen-Skalierung", Default 1.35) streckt die Welle, damit sie die
+    Zonen (±zone1 etc.) so oft erreicht wie im Original - ohne die Skalierung faellt wt1 bei
+    manchen Symbolen/Zeitrahmen zu selten unter/ueber die Zone-Schwellen, wodurch kaum Punkte
+    entstehen."""
     n = len(c)
     if src_mode == "hlc3":
         src = [(h[i] + l[i] + c[i]) / 3 for i in range(n)]
@@ -5792,7 +5796,7 @@ def compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode):
     abs_diff = [abs(src[i] - esa[i]) for i in range(n)]
     d = _ema_series(abs_diff, n1)
     ci = [0.0 if d[i] == 0 else (src[i] - esa[i]) / (0.015 * d[i]) for i in range(n)]
-    wt1 = _ema_series(ci, n2)
+    wt1 = [v * wave_scale for v in _ema_series(ci, n2)]
     wt2 = _sma_series(wt1, sig_len)
     return wt1, wt2
 
@@ -5947,7 +5951,7 @@ async def wa_poll_loop(symbol):
                         last_ts = closed_ts[-1]
                         if last_ts != last_processed_ts:
                             last_processed_ts = last_ts
-                            wt1_arr, wt2_arr = compute_wavetrend_series(closed_o, closed_h, closed_l, closed_c, n1, n2, sig_len, cfg.get("wa_src", "close"))
+                            wt1_arr, wt2_arr = compute_wavetrend_series(closed_o, closed_h, closed_l, closed_c, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
                             z1 = cfg.get("wa_zone1", 53.0)
                             cross_up = wt1_arr[-2] <= wt2_arr[-2] and wt1_arr[-1] > wt2_arr[-1]
                             cross_dn = wt1_arr[-2] >= wt2_arr[-2] and wt1_arr[-1] < wt2_arr[-1]
@@ -5986,9 +5990,10 @@ def backtest_wellenanker(candles, cfg):
     tp_usd = float(cfg.get("wa_tp_usd", 10.0))
     sl_usd = float(cfg.get("wa_sl_usd", 5.0))
     max_nachkauf = max(0, min(4, int(cfg.get("wa_max_nachkauf", 0) or 0)))
+    wave_scale = float(cfg.get("wa_wave_scale", 1.35))
     margin, leverage = cfg["margin"], cfg["leverage"]
 
-    wt1_arr, wt2_arr = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode)
+    wt1_arr, wt2_arr = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode, wave_scale)
     min_needed = n1 + n2 + sig_len + 20
 
     position = None  # {"dir","entry","size","entry_i","sl_price","tp_price","entries"}
