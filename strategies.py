@@ -5864,10 +5864,17 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price):
         opposite_signal = short_raw if is_long else long_raw
         same_signal = long_raw if is_long else short_raw
         if tp_mode == "gegentrade" and opposite_signal:
-            debug_log(f"🎯 [{symbol}] Wellenanker TP (Gegentrade): {pos.upper()} @ {price}")
+            # "Gegentrade" heisst: die Gegenposition wird direkt eroeffnet, nicht nur glatt gestellt -
+            # wie der RSI-FLIP bei der RSI-Signal-Strategie.
+            target = "short" if is_long else "long"
+            debug_log(f"🔄 [{symbol}] Wellenanker Gegentrade: {pos.upper()} -> {target.upper()} @ {price}")
             await execute_exit(symbol, price, "TP-GEGENTRADE")
-            if st["position"] is None:
-                _wa_reset_state(st)
+            if st["position"] is not None:
+                return  # Exit fehlgeschlagen (z.B. Order-Fehler) - keine neue Position eroeffnen
+            _wa_reset_state(st)
+            await execute_entry(symbol, target, price, is_add_on=False)
+            if st["position"] is not None:
+                _wa_update_sl_tp(st, cfg)
             return
         if tp_mode == "ueberlauf":
             reached = (wt2 >= -ueberlauf_level) if is_long else (wt2 <= ueberlauf_level)
@@ -6019,8 +6026,13 @@ def backtest_wellenanker(candles, cfg):
                     position = None
                     continue
             if tp_mode == "gegentrade" and ((pdir == "long" and short_raw) or (pdir == "short" and long_raw)):
+                # "Gegentrade" = direkter Flip in die Gegenrichtung, siehe check_wa_candle
                 _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP-GEGENTRADE", ts=ts)
-                position = None
+                target = "short" if pdir == "long" else "long"
+                size = (margin * leverage) / price
+                position = {"dir": target, "entry": price, "size": size, "entry_i": i, "entries": 1}
+                _recalc_sl_tp(position)
+                _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
                 continue
             if tp_mode == "ueberlauf":
                 reached = (wt2_arr[i] >= -ueberlauf_level) if pdir == "long" else (wt2_arr[i] <= ueberlauf_level)
