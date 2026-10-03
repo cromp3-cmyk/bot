@@ -1,7 +1,7 @@
 """
 screener.py - Coin-Screener: Unterseite /screener mit einer Kachel pro Coin.
 
-Jede Kachel zeigt (pro Zeitrahmen 1m/5m/15m/1h/4h, umschaltbar) vier Kreise (Moneyflow, RSI, MACD,
+Jede Kachel zeigt (pro Zeitrahmen 10s/1m/5m/15m/1h/4h, umschaltbar) vier Kreise (Moneyflow, RSI, MACD,
 ADX) und drei Signal-Balken (Wellenanker, Liquidity Waves, MO7). Ein Klick auf die Kachel oeffnet
 ein Popup mit allen Zeitrahmen nebeneinander.
 
@@ -33,15 +33,20 @@ from strategies import (
 # ============================================================================
 # KONFIGURATION
 # ============================================================================
-TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h"]
-# Wie viele Kerzen je Zeitrahmen aus dem Cache gelesen werden (der Cache selbst haelt mehr/weniger,
+TIMEFRAMES = ["10s", "1m", "5m", "15m", "1h", "4h"]
+# Sekunden-Zeitrahmen gibt es bei Binance nicht nativ: sie werden aus den 1s-Kerzen (nur SPOT) zusammengerechnet.
+SECOND_AGG = {"10s": 10}  # Zeitrahmen -> Anzahl 1s-Kerzen je Kerze
+# Wie viele Kerzen je Zeitrahmen aus dem Cache gelesen werden (bei "10s": 1s-Rohkerzen) (der Cache selbst haelt mehr/weniger,
 # je nach REST-Seed - 4h hat z.B. nur ~200). Mehr als ~600 bringt fuer die Signale nichts.
-CANDLES_BACK = {"1m": 600, "5m": 600, "15m": 500, "1h": 300, "4h": 200}
+CANDLES_BACK = {"10s": 6000, "1m": 600, "5m": 600, "15m": 500, "1h": 300, "4h": 200}
 MIN_CANDLES = 60  # darunter gilt der Zeitrahmen als "laedt noch"
 SCREENER_INTERVAL = float(os.getenv("SCREENER_INTERVAL", "10"))  # Sekunden zwischen zwei Berechnungsrunden
 # Welche Coins? Standard: dieselben wie der Bot (GRID_SYMBOLS). Optional eigene Liste per Umgebungs-
 # variable SCREENER_COINS="BTC,ETH,SOL" (Coins ohne Binance-Paar werden als "keine Daten" gezeigt).
 SCREENER_COINS = [s.strip().upper() for s in os.getenv("SCREENER_COINS", "").split(",") if s.strip()] or list(SYMBOLS)
+
+# Link zum Coin auf Lighter (Button in jeder Kachel, oeffnet in neuem Fenster). {coin} wird durch das Symbol ersetzt.
+LIGHTER_TRADE_URL = os.getenv("LIGHTER_TRADE_URL", "https://app.lighter.xyz/trade/{coin}")
 
 # Moneyflow-Kreis: Buyers% = Taker-Buy-Volumen / Gesamtvolumen ueber die letzten N Kerzen des Zeitrahmens
 MF_WINDOW = 30
@@ -111,6 +116,34 @@ def _percentrank(c, i, length=100):
     w = c[i - length:i]
     cur = c[i]
     return sum(1 for x in w if x <= cur) / length * 100
+
+
+def _resample_1s(candles, factor):
+    """Fasst 1s-Kerzen (mit Taker-Feldern) zu `factor`-Sekunden-Kerzen zusammen. Das erste Bucket wird
+    verworfen, wenn die Historie mitten darin beginnt (weniger als die Haelfte der Sekunden)."""
+    out = []
+    cur = None
+    bucket_ms = factor * 1000
+    for x in candles:
+        b = x["ts"] // bucket_ms
+        if cur is None or cur["b"] != b:
+            if cur is not None:
+                out.append(cur)
+            cur = {"b": b, "ts": b * bucket_ms, "o": x["o"], "h": x["h"], "l": x["l"], "c": x["c"], "v": x["v"],
+                   "tb": x.get("tb", 0.0), "n": x.get("n", 0), "k": 1}
+        else:
+            cur["h"] = max(cur["h"], x["h"])
+            cur["l"] = min(cur["l"], x["l"])
+            cur["c"] = x["c"]
+            cur["v"] += x["v"]
+            cur["tb"] += x.get("tb", 0.0)
+            cur["n"] += x.get("n", 0)
+            cur["k"] += 1
+    if cur is not None:
+        out.append(cur)
+    if len(out) > 1 and out[0]["k"] < factor * 0.5:
+        out = out[1:]
+    return out
 
 
 def _event_age(idx, last_closed):
@@ -391,6 +424,8 @@ def _compute_coin(tf_candles):
     """Laeuft im Thread (rein CPU): {tf: candles|None} -> {tf: ergebnis|None}"""
     result = {}
     for tf, candles in tf_candles.items():
+        if candles and tf in SECOND_AGG:
+            candles = _resample_1s(candles, SECOND_AGG[tf])
         result[tf] = compute_tf(candles) if candles else None
     return result
 
@@ -409,13 +444,25 @@ async def screener_loop():
                     continue
                 market = _market_for(sym)
                 tf_candles = {}
+                unavailable = set()
                 for tf in TIMEFRAMES:
-                    binance_ws.ensure_subscribed(market, pair, tf)
-                    tf_candles[tf] = binance_ws.get_cached_candles_ext(market, pair, tf, CANDLES_BACK[tf])
+                    if tf in SECOND_AGG:
+                        if sym in BINANCE_FUTURES_ONLY_SYMBOLS:
+                            unavailable.add(tf)  # XAU/XAG/LIT: nur Futures, und die haben keine 1s-Kerzen
+                            tf_candles[tf] = None
+                            continue
+                        binance_ws.ensure_subscribed("spot", pair, "1s")
+                        tf_candles[tf] = binance_ws.get_cached_candles_ext("spot", pair, "1s", CANDLES_BACK[tf])
+                    else:
+                        binance_ws.ensure_subscribed(market, pair, tf)
+                        tf_candles[tf] = binance_ws.get_cached_candles_ext(market, pair, tf, CANDLES_BACK[tf])
                 res = await asyncio.to_thread(_compute_coin, tf_candles)
+                for tf in unavailable:
+                    res[tf] = {"loading": True, "unavailable": True, "n": 0}
                 price = None
-                for tf in TIMEFRAMES:  # kleinster verfuegbarer Zeitrahmen = frischester Preis
-                    if tf_candles[tf]:
+                # Preis bevorzugt aus dem normalen Markt (nicht aus dem Spot-1s-Stream, falls der Bot auf Futures laeuft)
+                for tf in [t for t in TIMEFRAMES if t not in SECOND_AGG] + list(SECOND_AGG):
+                    if tf_candles.get(tf):
                         price = tf_candles[tf][-1]["c"]
                         break
                 chg24 = None
@@ -467,6 +514,8 @@ header nav a:hover{color:#fff}
 #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(460px,1fr));gap:18px;padding:24px 28px;align-items:start}
 .hbtn{background:#1d2128;border:1px solid #2a303a;color:#aab2c0;font:600 12px Inter,system-ui,sans-serif;padding:6px 12px;border-radius:8px;cursor:pointer;margin-left:16px}
 .hbtn:hover{color:#fff;border-color:#3a4150}
+.lbtn{background:#1d2128;border:1px solid #2a303a;color:#93c5fd;text-decoration:none;font:600 11px Inter,system-ui,sans-serif;padding:4px 9px;border-radius:8px;margin-left:12px;white-space:nowrap}
+.lbtn:hover{color:#fff;border-color:#3a4150}
 .chev{color:#7d8696;font-size:14px;margin-left:10px;transition:transform .15s}
 .tile.open .chev{transform:rotate(180deg)}
 .thead{cursor:pointer}
@@ -534,9 +583,9 @@ header nav a:hover{color:#fff}
 <script>
 const G='#1fcf6e',R='#f0354b',Y='#f5b83d',B='#8aa4d6',GR='#7d8696',TRK='#262b35';
 const GL={[G]:'rgba(31,207,110,.35)',[R]:'rgba(240,53,75,.35)',[Y]:'rgba(245,184,61,.3)',[B]:'rgba(138,164,214,.25)',[GR]:'rgba(125,134,150,.2)'};
-const TF_LABEL={'1m':'1 min','5m':'5 min','15m':'15 min','1h':'1 Std','4h':'4 Std'};
+const TF_LABEL={'10s':'10 sek','1m':'1 min','5m':'5 min','15m':'15 min','1h':'1 Std','4h':'4 Std'};
 const CIRC=2*Math.PI*44;
-let DATA=null, TFS=['1m','5m','15m','1h','4h'], SEL={};
+let DATA=null, TFS=['10s','1m','5m','15m','1h','4h'], SEL={};
 try{SEL=JSON.parse(localStorage.getItem('screener_tf')||'{}')}catch(e){}
 let EXP=new Set();
 try{EXP=new Set(JSON.parse(localStorage.getItem('screener_exp')||'[]'))}catch(e){}
@@ -674,20 +723,27 @@ function dotsRow(d){
   return `<div class="dots" data-toggle="1">${dotList(d).map(x=>`<div class="di" title="${x[0]}: ${x[3]}"><i style="background:${x[2]};box-shadow:0 0 9px ${GL[x[2]]||'transparent'}"></i><span>${x[1]}</span></div>`).join('')}</div>`;
 }
 function tile(c){
-  if(!c.available)return `<div class="tile off"><div class="row between center"><span class="coin">${c.coin}</span></div><div class="loading">Keine Binance-Daten für diesen Coin</div></div>`;
+  if(!c.available)return `<div class="tile off"><div class="row between center"><span class="coin">${c.coin}</span>${lighterLink(c.coin)}</div><div class="loading">Keine Binance-Daten für diesen Coin</div></div>`;
   const tf=SEL[c.coin]||'15m';
   const d=c.tfs&&c.tfs[tf];
   const open=EXP.has(c.coin);
   const chg=c.chg24;
   const head=`<div class="row between center thead" data-toggle="1"><div class="row center" style="gap:12px;flex-wrap:wrap">
     <span class="coin">${c.coin}</span><span class="pill">${tf}</span><span class="price mono" style="font-size:16px;color:#cfd5e0">${fmtPrice(c.price)}</span></div>
-    <div class="row center"><span class="mono" style="font-size:13px;font-weight:700;color:${chg==null?GR:chg>=0?G:R}">${chg==null?'':sgn(chg,2)+'%'}</span><span class="chev">▾</span></div></div>`;
+    <div class="row center"><span class="mono" style="font-size:13px;font-weight:700;color:${chg==null?GR:chg>=0?G:R}">${chg==null?'':sgn(chg,2)+'%'}</span>${lighterLink(c.coin)}<span class="chev">▾</span></div></div>`;
   const bar=`<div class="tfbar">${TFS.map(t=>`<button data-coin="${c.coin}" data-tf="${t}" class="${t===tf?'act':''}">${TF_LABEL[t]}</button>`).join('')}</div>`;
   const ready=d&&!d.loading;
-  const quick=ready?dotsRow(d):`<div class="loading" style="padding:10px 0">Lade Kerzen … (${d?d.n:0}/60, WS-Cache wärmt auf)</div>`;
+  const quick=ready?dotsRow(d):(d&&d.unavailable?`<div class="loading" style="padding:10px 0">Dieser Zeitrahmen ist für ${c.coin} nicht verfügbar (nur als Futures auf Binance)</div>`
+    :`<div class="loading" style="padding:10px 0">Lade Kerzen … (${d?d.n:0}/60, WS-Cache wärmt auf)</div>`);
+  // Hintergrund einfärben: ab 4 von 7 Punkten in derselben Farbe, je mehr Punkte desto kräftiger
+  let tintStyle='',tintTip='';
+  if(ready){const dl=dotList(d),g=dl.filter(x=>x[2]===G).length,r=dl.filter(x=>x[2]===R).length,n=Math.max(g,r);
+    tintTip=`${g} grün · ${r} rot · ${dl.length-g-r} neutral`;
+    if(n>=4){const rgb=g>r?'31,207,110':'240,53,75',lvl=n-3,a=[0.10,0.17,0.25,0.34][lvl-1];
+      tintStyle=`background:linear-gradient(180deg,rgba(${rgb},${a}),rgba(${rgb},${(a*0.45).toFixed(3)})),linear-gradient(180deg,#171a21,#12151b);border-color:rgba(${rgb},${(0.28+lvl*0.1).toFixed(2)});`;}}
   let body='';
   if(open&&ready)body=rings(d)+waBar(c,tf)+lwBar(c,tf)+moBar(c,tf)+`<button class="detailbtn" data-detail="${c.coin}">Details · alle Zeitrahmen →</button>`;
-  return `<div class="tile${open?' open':''}" data-coin="${c.coin}">${head}${bar}${quick}${body}</div>`;
+  return `<div class="tile${open?' open':''}" data-coin="${c.coin}" style="${tintStyle}" title="${tintTip}">${head}${bar}${quick}${body}</div>`;
 }
 function render(){
   if(!DATA)return;
@@ -733,10 +789,13 @@ function renderModal(){
   document.getElementById('modal').style.display='flex';
 }
 const MF_N=__MF_WINDOW__;
+const LIGHTER_URL='__LIGHTER_URL__';
+const lighterLink=coin=>`<a class="lbtn" data-lighter="1" href="${LIGHTER_URL.replace('{coin}',encodeURIComponent(coin))}" target="_blank" rel="noopener" title="${coin} auf Lighter öffnen (neues Fenster)">Lighter ↗</a>`;
 function closeModal(){openCoin=null;document.getElementById('modal').style.display='none'}
 document.getElementById('modal').addEventListener('click',e=>{if(e.target.id==='modal'||e.target.id==='closeModal')closeModal()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 document.getElementById('grid').addEventListener('click',e=>{
+  if(e.target.closest('a[data-lighter]'))return; // normaler Link: neues Fenster, Kachel bleibt unveraendert
   const b=e.target.closest('button[data-tf]');
   if(b){SEL[b.dataset.coin]=b.dataset.tf;saveSel();render();return}
   const dt=e.target.closest('button[data-detail]');
@@ -763,4 +822,4 @@ load();setInterval(load,5000);
 </script>
 </body>
 </html>
-""".replace("__MF_WINDOW__", str(MF_WINDOW))
+""".replace("__MF_WINDOW__", str(MF_WINDOW)).replace("__LIGHTER_URL__", LIGHTER_TRADE_URL)
