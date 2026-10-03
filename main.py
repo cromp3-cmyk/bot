@@ -29,6 +29,7 @@ from copytrade import (
 )
 from binance_ws import binance_ws_cache_loop
 from grid_scalp import grid_scalp_poll_loop
+from screener import screener_loop, handle_screener_index, handle_screener_api
 
 
 async def start_web_server():
@@ -49,6 +50,8 @@ async def start_web_server():
     app.router.add_get("/api/global_settings", handle_global_settings_get)
     app.router.add_post("/api/global_settings", handle_global_settings_update)
     app.router.add_post("/api/reset", handle_reset)
+    app.router.add_get("/screener", handle_screener_index)
+    app.router.add_get("/api/screener", handle_screener_api)
     app.router.add_get("/copytrading", handle_ct_index)
     app.router.add_get("/api/ct/status", handle_ct_status)
     app.router.add_post("/api/ct/watch", handle_ct_watch)
@@ -118,6 +121,7 @@ async def main():
         ct_watch_loop(),
         state_persist_loop(),
         binance_ws_cache_loop(),
+        screener_loop(),
         return_exceptions=True,
     )
     # Alle obigen Loops sind 'while True' - normalerweise kehrt hier nichts jemals zurueck. Landet

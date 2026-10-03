@@ -141,6 +141,24 @@ def get_cached_candles(market_type, pair, interval, count_back):
     return timestamps, opens, highs, lows, closes, volumes
 
 
+def get_cached_candles_ext(market_type, pair, interval, count_back):
+    """Wie get_cached_candles, liefert aber die Kerzen als Liste von Dicts MIT den Zusatzfeldern
+    'tb' (Taker-Buy-Basisvolumen) und 'n' (Trades) - fuer den Coin-Screener. Gleiche Frische-/
+    Warm-Regeln: None, solange der Stream nicht warm oder eingefroren ist. Rein lesend, kein
+    REST-Fallback (der Screener soll NIE selbst Binance anfragen)."""
+    st = _streams.get(market_type, {}).get(_key(pair, interval))
+    if st is None or not st.ready or not st.candles:
+        return None
+    max_staleness = INTERVAL_SECONDS.get(interval, 60) * STALENESS_MULTIPLIER + STALENESS_BUFFER_SECONDS
+    if time.time() - st.last_update_ts > max_staleness:
+        # eingefroren: wie in get_cached_candles neu abonnieren lassen (sonst koennte ein Stream, den
+        # NUR der Screener nutzt, nie wieder anspringen)
+        st.ready = False
+        _pending_subscribe[market_type].add(_key(pair, interval))
+        return None
+    return [dict(c) for c in list(st.candles)[-count_back:]]
+
+
 async def _seed_stream_history(market_type, pair, interval):
     """Laedt einmalig Historie per REST fuer einen frisch abonnierten Stream. Nutzt
     bewusst die Bann-/Throttle-Infrastruktur aus strategies.py (per Lazy-Import, um einen
@@ -192,6 +210,10 @@ async def _seed_stream_history(market_type, pair, interval):
         st.candles.append({
             "ts": int(k[0]), "o": float(k[1]), "h": float(k[2]),
             "l": float(k[3]), "c": float(k[4]), "v": float(k[5]),
+            # Zusatzfelder fuer den Coin-Screener (Moneyflow/Buyers%): REST-Kline-Index 8 = Anzahl
+            # Trades, 9 = Taker-Buy-Basisvolumen. Gleiche Antwort wie vorher, nur zwei Felder mehr.
+            "tb": float(k[9]) if len(k) > 9 else 0.0,
+            "n": int(k[8]) if len(k) > 8 else 0,
         })
     st.ready = True
     st.last_update_ts = time.time()
@@ -212,6 +234,8 @@ def _apply_kline_event(market_type, payload):
     candle = {
         "ts": ts, "o": float(k["o"]), "h": float(k["h"]),
         "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"]),
+        # Kline-Event: "V" = Taker-Buy-Basisvolumen, "n" = Anzahl Trades (fuer den Coin-Screener)
+        "tb": float(k.get("V", 0.0)), "n": int(k.get("n", 0)),
     }
     if st.candles and st.candles[-1]["ts"] == ts:
         st.candles[-1] = candle  # laufende (noch nicht geschlossene) Kerze aktualisieren
