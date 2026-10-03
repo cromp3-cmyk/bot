@@ -464,7 +464,18 @@ header h1{margin:0;font-size:18px;font-weight:700}
 header nav a{color:#7d8696;text-decoration:none;font-size:13px;margin-left:18px}
 header nav a:hover{color:#fff}
 #status{font-size:12px;color:#7d8696;margin-left:16px}
-#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:22px;padding:24px 28px}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(460px,1fr));gap:18px;padding:24px 28px;align-items:start}
+.hbtn{background:#1d2128;border:1px solid #2a303a;color:#aab2c0;font:600 12px Inter,system-ui,sans-serif;padding:6px 12px;border-radius:8px;cursor:pointer;margin-left:16px}
+.hbtn:hover{color:#fff;border-color:#3a4150}
+.chev{color:#7d8696;font-size:14px;margin-left:10px;transition:transform .15s}
+.tile.open .chev{transform:rotate(180deg)}
+.thead{cursor:pointer}
+.dots{display:flex;justify-content:space-between;gap:6px;padding:2px 4px 0;cursor:pointer}
+.di{display:flex;flex-direction:column;align-items:center;gap:5px;flex:1;min-width:0}
+.di i{display:block;width:14px;height:14px;border-radius:50%}
+.di span{font-size:9px;font-weight:600;letter-spacing:.08em;color:#7d8696}
+.detailbtn{align-self:flex-end;background:none;border:0;color:#7d8696;font:600 12px Inter,system-ui,sans-serif;cursor:pointer;padding:4px 0}
+.detailbtn:hover{color:#fff}
 .tile{background:linear-gradient(180deg,#171a21 0%,#12151b 100%);border:1px solid #242932;border-radius:16px;padding:20px 22px;display:flex;flex-direction:column;gap:14px;box-shadow:0 10px 30px rgba(0,0,0,.4);cursor:pointer;transition:border-color .15s}
 .tile:hover{border-color:#3a4150}
 .tile.off{opacity:.55;cursor:default}
@@ -479,7 +490,7 @@ header nav a:hover{color:#fff}
 .tfbar button.act{background:#2a303a;color:#fff}
 .rings{display:flex;justify-content:space-between;gap:12px}
 .ring{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:8px}
-.ringbox{position:relative;width:104px;height:104px}
+.ringbox{position:relative;width:min(104px,100%);aspect-ratio:1}
 .ringbox .mid{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
 .ringbox .val{font-size:24px;font-weight:600;letter-spacing:-.01em}
 .cap{font-size:9px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:#7d8696}
@@ -510,12 +521,12 @@ header nav a:hover{color:#fff}
 #modal th{color:#aab2c0;font-weight:600}
 #modal .sec td{padding-top:16px;color:#fff;font-weight:700;border-bottom:1px solid #2a303a}
 .x{background:none;border:0;color:#7d8696;font-size:20px;cursor:pointer}
-@media(max-width:600px){#grid{grid-template-columns:1fr;padding:14px}.ringbox{width:84px;height:84px}.ringbox svg{width:84px;height:84px}}
+@media(max-width:600px){#grid{grid-template-columns:1fr;padding:14px}}
 </style>
 </head>
 <body>
 <header>
-  <h1>Coin Screener <span id="status"></span></h1>
+  <h1>Coin Screener <span id="status"></span><button class="hbtn" id="toggleAll">Alle aufklappen</button></h1>
   <nav><a href="/">Bot-Dashboard</a><a href="/copytrading">Copy-Trading</a></nav>
 </header>
 <div id="grid"><div class="loading">Lade ...</div></div>
@@ -527,6 +538,9 @@ const TF_LABEL={'1m':'1 min','5m':'5 min','15m':'15 min','1h':'1 Std','4h':'4 St
 const CIRC=2*Math.PI*44;
 let DATA=null, TFS=['1m','5m','15m','1h','4h'], SEL={};
 try{SEL=JSON.parse(localStorage.getItem('screener_tf')||'{}')}catch(e){}
+let EXP=new Set();
+try{EXP=new Set(JSON.parse(localStorage.getItem('screener_exp')||'[]'))}catch(e){}
+function saveExp(){try{localStorage.setItem('screener_exp',JSON.stringify([...EXP]))}catch(e){}}
 function saveSel(){try{localStorage.setItem('screener_tf',JSON.stringify(SEL))}catch(e){}}
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const dash=p=>(CIRC*clamp(p,0,100)/100).toFixed(1)+' '+CIRC.toFixed(1);
@@ -536,7 +550,7 @@ const sgn=(v,d=1)=>v==null?'–':(v>0?'+':'')+v.toFixed(d);
 function ago(n){return n===0?'auf der letzten Kerze':n===1?'vor 1 Kerze':'vor '+n+' Kerzen'}
 
 function ring(title,value,sub,color,arc,track){
-  return `<div class="ring"><div class="ringbox"><svg width="104" height="104" viewBox="0 0 104 104" style="filter:drop-shadow(0 0 7px ${GL[color]||'transparent'})">
+  return `<div class="ring"><div class="ringbox"><svg viewBox="0 0 104 104" style="width:100%;height:100%;filter:drop-shadow(0 0 7px ${GL[color]||'transparent'})">
   <circle cx="52" cy="52" r="44" fill="none" stroke="${track||TRK}" stroke-width="7"/>
   <circle cx="52" cy="52" r="44" fill="none" stroke="${color}" stroke-width="7" stroke-linecap="round" stroke-dasharray="${dash(arc)}" transform="rotate(-90 52 52)"/></svg>
   <div class="mid"><div class="val" style="color:${color}">${value}</div><div class="cap">${sub}</div></div></div><div class="title">${title}</div></div>`;
@@ -638,25 +652,49 @@ function moBar(c,tf){
   <div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px">${parts}</div>
   <div class="note">${lastTxt}</div></div>`;
 }
+function dotList(d){
+  const out=[];
+  const mf=d.mf&&d.mf.buyers;
+  out.push(['Moneyflow','MF',mf==null?GR:mf>50?G:mf<50?R:GR,mf==null?'keine Daten':mf.toFixed(1)+'% Buyers']);
+  const rsi=d.rsi;
+  out.push(['RSI','RSI',rsi==null?GR:rsi<=30?G:rsi>=70?R:GR,rsi==null?'keine Daten':rsi.toFixed(0)+(rsi<=30?' · überverkauft':rsi>=70?' · überkauft':' · neutral')]);
+  const m=d.macd;
+  out.push(['MACD','MACD',m?(m.bull?G:R):GR,m?(m.bull?'bullish':'bearish'):'keine Daten']);
+  const a=d.adx;
+  out.push(['ADX','ADX',a&&a.value!=null?(a.value<20?GR:a.up?G:R):GR,a&&a.value!=null?a.value.toFixed(0)+(a.value<20?' · Seitwärts':a.up?' · Trend aufwärts':' · Trend abwärts'):'keine Daten']);
+  const w=d.wa;
+  out.push(['Wellenanker','WA',w?(w.state===1?G:w.state===-1?R:GR):GR,w?(w.state===1?'LONG':w.state===-1?'SHORT':'ABWARTEN'):'keine Daten']);
+  const l=d.lw;
+  out.push(['Liquidity Waves','LW',l?(l.pos==='long'?G:l.pos==='short'?R:GR):GR,l?(l.pos==='long'?'LONG aktiv':l.pos==='short'?'SHORT aktiv':'kein Signal'):'keine Daten']);
+  const o=d.mo7;
+  out.push(['MO7','MO7',o?(o.status==='oversold'?G:o.status==='overbought'?R:GR):GR,o?o.value.toFixed(1)+(o.status==='oversold'?' · überverkauft':o.status==='overbought'?' · überkauft':' · neutral'):'keine Daten']);
+  return out;
+}
+function dotsRow(d){
+  return `<div class="dots" data-toggle="1">${dotList(d).map(x=>`<div class="di" title="${x[0]}: ${x[3]}"><i style="background:${x[2]};box-shadow:0 0 9px ${GL[x[2]]||'transparent'}"></i><span>${x[1]}</span></div>`).join('')}</div>`;
+}
 function tile(c){
   if(!c.available)return `<div class="tile off"><div class="row between center"><span class="coin">${c.coin}</span></div><div class="loading">Keine Binance-Daten für diesen Coin</div></div>`;
   const tf=SEL[c.coin]||'15m';
   const d=c.tfs&&c.tfs[tf];
+  const open=EXP.has(c.coin);
   const chg=c.chg24;
-  const head=`<div class="row between" style="align-items:flex-start"><div style="display:flex;flex-direction:column;gap:6px">
-    <div class="row center" style="gap:10px"><span class="coin">${c.coin}</span><span class="pill">${tf}</span></div>
-    <span class="price mono">${fmtPrice(c.price)}</span></div>
-    <div style="text-align:right"><div class="mono" style="font-size:13px;font-weight:700;color:${chg==null?GR:chg>=0?G:R}">${chg==null?'':sgn(chg,2)+'%'}</div><div class="cap" style="margin-top:4px">${chg==null?'':'24h'}</div></div></div>`;
+  const head=`<div class="row between center thead" data-toggle="1"><div class="row center" style="gap:12px;flex-wrap:wrap">
+    <span class="coin">${c.coin}</span><span class="pill">${tf}</span><span class="price mono" style="font-size:16px;color:#cfd5e0">${fmtPrice(c.price)}</span></div>
+    <div class="row center"><span class="mono" style="font-size:13px;font-weight:700;color:${chg==null?GR:chg>=0?G:R}">${chg==null?'':sgn(chg,2)+'%'}</span><span class="chev">▾</span></div></div>`;
   const bar=`<div class="tfbar">${TFS.map(t=>`<button data-coin="${c.coin}" data-tf="${t}" class="${t===tf?'act':''}">${TF_LABEL[t]}</button>`).join('')}</div>`;
-  let body;
-  if(!d||d.loading)body=`<div class="loading">Lade Kerzen … (${d?d.n:0}/60, WS-Cache wärmt auf)</div>`;
-  else body=rings(d)+waBar(c,tf)+lwBar(c,tf)+moBar(c,tf);
-  return `<div class="tile" data-coin="${c.coin}">${head}${bar}${body}</div>`;
+  const ready=d&&!d.loading;
+  const quick=ready?dotsRow(d):`<div class="loading" style="padding:10px 0">Lade Kerzen … (${d?d.n:0}/60, WS-Cache wärmt auf)</div>`;
+  let body='';
+  if(open&&ready)body=rings(d)+waBar(c,tf)+lwBar(c,tf)+moBar(c,tf)+`<button class="detailbtn" data-detail="${c.coin}">Details · alle Zeitrahmen →</button>`;
+  return `<div class="tile${open?' open':''}" data-coin="${c.coin}">${head}${bar}${quick}${body}</div>`;
 }
 function render(){
   if(!DATA)return;
   document.getElementById('grid').innerHTML=DATA.coins.map(tile).join('');
   document.getElementById('status').textContent=DATA.updated?'· Stand '+new Date(DATA.updated*1000).toLocaleTimeString('de-DE'):'· wartet auf erste Berechnung';
+  const av=DATA.coins.filter(c=>c.available).map(c=>c.coin);
+  document.getElementById('toggleAll').textContent=(av.length&&av.every(x=>EXP.has(x)))?'Alle zuklappen':'Alle aufklappen';
   if(openCoin)renderModal();
 }
 let openCoin=null;
@@ -700,9 +738,23 @@ document.getElementById('modal').addEventListener('click',e=>{if(e.target.id==='
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 document.getElementById('grid').addEventListener('click',e=>{
   const b=e.target.closest('button[data-tf]');
-  if(b){SEL[b.dataset.coin]=b.dataset.tf;saveSel();render();e.stopPropagation();return}
+  if(b){SEL[b.dataset.coin]=b.dataset.tf;saveSel();render();return}
+  const dt=e.target.closest('button[data-detail]');
+  if(dt){openCoin=dt.dataset.detail;renderModal();return}
   const t=e.target.closest('.tile[data-coin]');
-  if(t){openCoin=t.dataset.coin;renderModal()}
+  if(!t)return;
+  const coin=t.dataset.coin;
+  // zugeklappt: Klick irgendwo auf die Kachel klappt auf; aufgeklappt: nur Kopf bzw. Punkt-Zeile klappt zu
+  if(!EXP.has(coin)||e.target.closest('[data-toggle]')){
+    if(EXP.has(coin))EXP.delete(coin);else EXP.add(coin);
+    saveExp();render();
+  }
+});
+document.getElementById('toggleAll').addEventListener('click',()=>{
+  if(!DATA)return;
+  const avail=DATA.coins.filter(c=>c.available).map(c=>c.coin);
+  if(avail.every(x=>EXP.has(x)))EXP=new Set();else EXP=new Set(avail);
+  saveExp();render();
 });
 async function load(){
   try{const r=await fetch('/api/screener');if(r.ok){DATA=await r.json();if(DATA.timeframes)TFS=DATA.timeframes;render()}}catch(e){}
