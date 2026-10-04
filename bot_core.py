@@ -1340,7 +1340,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
       <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
     </label>
-    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><span id="mode-badge"></span><span id="active-badge"></span>
+    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
 </div>
 <div class="container">

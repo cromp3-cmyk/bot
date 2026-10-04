@@ -589,7 +589,7 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>📡 Copy-Trading <span id="mode-badge"></span> <a href="/">← zurück zum Grid-Bot</a> <a href="/screener" style="margin-left:14px;">🔍 Coin Screener →</a></h1>
+<h1>📡 Copy-Trading <span id="mode-badge"></span> <a href="/">← zurück zum Grid-Bot</a> <a href="/screener" style="margin-left:14px;">🔍 Coin Screener →</a><a href="/scalp" style="margin-left:14px;">⚡ Scalp →</a></h1>
 <div id="leaderboard-error"></div>
 
 <h2>Trendmeter (Top 20 Coins - Long/Short-Verteilung der beobachteten Trader)</h2>

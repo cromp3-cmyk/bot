@@ -30,6 +30,10 @@ from copytrade import (
 from binance_ws import binance_ws_cache_loop
 from grid_scalp import grid_scalp_poll_loop
 from screener import screener_loop, handle_screener_index, handle_screener_api
+from scalp import (
+    scalp_loop, handle_scalp_index, handle_scalp_chart, handle_scalp_status,
+    handle_scalp_order, handle_scalp_close, handle_scalp_tpsl, handle_scalp_auto,
+)
 
 
 async def start_web_server():
@@ -52,6 +56,13 @@ async def start_web_server():
     app.router.add_post("/api/reset", handle_reset)
     app.router.add_get("/screener", handle_screener_index)
     app.router.add_get("/api/screener", handle_screener_api)
+    app.router.add_get("/scalp", handle_scalp_index)
+    app.router.add_get("/api/scalp/chart", handle_scalp_chart)
+    app.router.add_get("/api/scalp/status", handle_scalp_status)
+    app.router.add_post("/api/scalp/order", handle_scalp_order)
+    app.router.add_post("/api/scalp/close", handle_scalp_close)
+    app.router.add_post("/api/scalp/tpsl", handle_scalp_tpsl)
+    app.router.add_post("/api/scalp/auto", handle_scalp_auto)
     app.router.add_get("/copytrading", handle_ct_index)
     app.router.add_get("/api/ct/status", handle_ct_status)
     app.router.add_post("/api/ct/watch", handle_ct_watch)
@@ -122,6 +133,7 @@ async def main():
         state_persist_loop(),
         binance_ws_cache_loop(),
         screener_loop(),
+        scalp_loop(),
         return_exceptions=True,
     )
     # Alle obigen Loops sind 'while True' - normalerweise kehrt hier nichts jemals zurueck. Landet
