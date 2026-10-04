@@ -594,6 +594,10 @@ async def handle_scalp_tpsl(request):
 
 async def handle_scalp_auto(request):
     b = await _body(request)
+    if isinstance(b.get("wa"), dict):
+        # Wellenanker-Einstellungen laufen ueber diese (schon immer vorhandene) Route - so braucht es dafuer keine
+        # zusaetzliche Route in main.py
+        return await _wa_update(b["wa"])
     sym = str(b.get("coin", "")).upper()
     if sym not in BOTS:
         return web.json_response({"error": "coin ungültig"}, status=400)
@@ -635,7 +639,10 @@ async def handle_scalp_auto(request):
 
 
 async def handle_scalp_wa(request):
-    b = await _body(request)
+    return await _wa_update(await _body(request))
+
+
+async def _wa_update(b):
     try:
         _apply_wa(b)
     except ValueError as e:
@@ -961,7 +968,7 @@ function waBusy(){return ['wa-n1','wa-n2','wa-z1','wa-src'].some(i=>document.act
 function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src}
 async function saveWa(){
  const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value};
- try{const r=await api('/api/scalp/wa',body);toast(r.persistent?'Wellenanker-Einstellungen gespeichert (Autotrade startet mit neuer Basislinie)':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);loadedKey=null;waKey='';loadChart()}
+ try{const r=await api('/api/scalp/auto',{coin,wa:body});toast(r.persistent?'Wellenanker-Einstellungen gespeichert (Autotrade startet mit neuer Basislinie)':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);loadedKey=null;waKey='';loadChart()}
  catch(e){toast(e.message,true)}
 }
 ['wa-n1','wa-n2','wa-z1','wa-src'].forEach(i=>$(i).addEventListener('change',saveWa));
