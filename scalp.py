@@ -694,7 +694,7 @@ button{font-family:inherit;cursor:pointer}
 const G='#1fcf6e',R='#f0354b',TFS=['10s','15s','30s','1m','5m','15m'];
 const $=id=>document.getElementById(id);
 function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
-let coin=null,tf=TFS.includes(ls('scalp_tf'))?ls('scalp_tf'):'1m',ST=null,loadedKey=null,lastChart=null;
+let lastT=0,coin=null,tf=TFS.includes(ls('scalp_tf'))?ls('scalp_tf'):'1m',ST=null,loadedKey=null,lastChart=null;
 const tzoff=-new Date().getTimezoneOffset()*60;
 function fmtP(p){if(p==null||isNaN(p))return '–';const d=p>=1000?1:p>=10?2:p>=1?3:5;return Number(p).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d})}
 function digits(p){return p>=1000?1:p>=10?2:p>=1?3:5}
@@ -764,10 +764,13 @@ function applyChart(d,key){
   candle.applyOptions({priceFormat:{type:'price',precision:dg,minMove:Math.pow(10,-dg)}});
   candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);
   const n=cd.length;pc.timeScale().setVisibleLogicalRange({from:Math.max(0,n-110),to:n+6});
-  loadedKey=key;
- }else{
-  try{cd.slice(-3).forEach(c=>candle.update(c));w1.slice(-3).forEach(c=>wt1s.update(c));w2.slice(-3).forEach(c=>wt2s.update(c))}
+  loadedKey=key;lastT=cd.length?cd[cd.length-1].time:0;
+ }else if(cd.length){
+  /* nur die letzte Kerze aktualisieren bzw. neue anhaengen (aeltere Zeiten wuerde die Bibliothek ablehnen) */
+  const upd=(s,arr)=>{for(const p of arr){if(p.time>=lastT)s.update(p)}};
+  try{upd(candle,cd);upd(wt1s,w1);upd(wt2s,w2)}
   catch(e){candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2)}
+  lastT=cd[cd.length-1].time;
  }
  const ms=d.markers.map(m=>({time:m.time+tzoff,pos:m.kind==='long'?'belowBar':'aboveBar',color:m.kind==='long'?G:R,shape:m.kind==='long'?'arrowUp':'arrowDown',text:m.ext?'◆':m.strong?'◉':''}));
  candle.setMarkers(ms.map(m=>({time:m.time,position:m.pos,color:m.color,shape:m.shape,text:m.text})));
@@ -788,11 +791,19 @@ async function loadChart(){
 async function pollChart(){await loadChart();setTimeout(pollChart,1000)}
 
 /* ---------- Status ---------- */
+let chipsSig='';
+$('chips').addEventListener('click',ev=>{const b=ev.target.closest('.chip');if(b)switchCoin(b.dataset.c)});
 function renderChips(list){
- $('chips').innerHTML=list.map(c=>{const up=c.chg24==null?'':(c.chg24>=0?'+':'')+c.chg24.toFixed(2)+'%',col=c.chg24==null?'var(--mut)':c.chg24>=0?G:R;
+ /* Buttons bleiben bestehen (sonst gehen Klicks verloren, weil sie jede Sekunde neu gebaut wuerden) - nur der Inhalt wird aktualisiert */
+ const sig=list.map(c=>c.coin).join(',');
+ if(sig!==chipsSig){chipsSig=sig;$('chips').innerHTML=list.map(c=>'<button class="chip" data-c="'+c.coin+'"></button>').join('')}
+ const bs=$('chips').children;
+ list.forEach((c,i)=>{const b=bs[i];if(!b)return;b.className='chip'+(c.coin===coin?' on':'')+(c.binance?'':' off');b.innerHTML=chipHtml(c)});
+}
+function chipHtml(c){
+ return (c=>{const up=c.chg24==null?'':(c.chg24>=0?'+':'')+c.chg24.toFixed(2)+'%',col=c.chg24==null?'var(--mut)':c.chg24>=0?G:R;
   const dot=c.pos==='long'?G:c.pos==='short'?R:'#3a4150';
-  return '<button class="chip'+(c.coin===coin?' on':'')+(c.binance?'':' off')+'" data-c="'+c.coin+'"><span class="t">'+c.coin+'<span class="dot" style="background:'+dot+'"></span></span><span class="mono" style="font-size:11px;color:#aab2c0">'+fmtP(c.price)+'</span><span class="mono" style="font-size:11px;font-weight:700;color:'+col+'">'+(up||(c.auto?'AUTO':'&nbsp;'))+'</span></button>'}).join('');
- document.querySelectorAll('.chip').forEach(b=>b.addEventListener('click',()=>switchCoin(b.dataset.c)));
+  return '<span class="t">'+c.coin+'<span class="dot" style="background:'+dot+'"></span></span><span class="mono" style="font-size:11px;color:#aab2c0">'+fmtP(c.price)+'</span><span class="mono" style="font-size:11px;font-weight:700;color:'+col+'">'+(up||(c.auto?'AUTO':'&nbsp;'))+'</span>'})(c);
 }
 function setChk(id,v){$('a-'+id).checked=!!v;$('c-'+id).classList.toggle('on',!!v)}
 function renderStatus(s){
