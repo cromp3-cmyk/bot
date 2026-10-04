@@ -74,7 +74,7 @@ def _auto_cfg(sym):
     a = AUTO.get(sym)
     if a is None:
         a = {"enabled": False, "normal": False, "strong": True, "ext": True, "long": True, "short": True,
-             "tp_usd": 8.0, "sl_usd": 4.0, "tf": "1m", "last_ts": None}
+             "tp_usd": 8.0, "sl_usd": 4.0, "usd": 0.0, "tf": "1m", "last_ts": None}
         AUTO[sym] = a
     return a
 
@@ -164,10 +164,10 @@ def _compute_chart(main_raw, tf, other_raws):
         t = x["ts"] // 1000
         candles.append({"time": t, "open": x["o"], "high": x["h"], "low": x["l"], "close": x["c"]})
         a, b = _r(wt1[i], 2), _r(wt2[i], 2)
-        if a is not None:
-            w1.append({"time": t, "value": a})
-        if b is not None:
-            w2.append({"time": t, "value": b})
+        # Leere Punkte als "Whitespace" mitgeben, damit WT-Reihen und Kerzen gleich viele Eintraege haben
+        # (der Wellenanker-Chart folgt dem Preis-Chart ueber den Index)
+        w1.append({"time": t, "value": a} if a is not None else {"time": t})
+        w2.append({"time": t, "value": b} if b is not None else {"time": t})
     markers = []
     for e in events:
         if e["idx"] >= off:
@@ -226,8 +226,29 @@ def _clear_tpsl(sym):
     TPSL.pop(sym, None)
 
 
-async def _place(sym, direction, source):
-    """Gemeinsame Order-Logik (wie handle_manual_trade). -> (ok, fehlertext)"""
+MAX_SIZE_FACTOR = 20.0   # Schutz vor Tippfehlern: hoechstens das 20-fache der Bot-Standardgroesse
+
+
+def _size_mult(sym, usd):
+    """Gewuenschte Positionsgroesse in USDC -> size_multiplier fuer execute_entry (1.0 = Bot-Standard)."""
+    if not usd:
+        return 1.0, None
+    cfg = BOTS[sym]["config"]
+    base = (cfg.get("margin") or 0) * (cfg.get("leverage") or 0)
+    if base <= 0:
+        return 1.0, None
+    mult = float(usd) / base
+    if mult > MAX_SIZE_FACTOR:
+        return None, f"Größe zu hoch (max. {int(base * MAX_SIZE_FACTOR)} USDC = {int(MAX_SIZE_FACTOR)}× Bot-Größe)"
+    return mult, None
+
+
+async def _place(sym, direction, source, usd=None):
+    """Gemeinsame Order-Logik (wie handle_manual_trade). usd = Positionsgroesse in USDC (leer = Bot-Standard).
+    -> (ok, fehlertext)"""
+    mult, err = _size_mult(sym, usd)
+    if err:
+        return False, err
     async with _lock(sym):
         st = BOTS[sym]["state"]
         price = st.get("last_price")
@@ -240,7 +261,7 @@ async def _place(sym, direction, source):
             _clear_tpsl(sym)
             price = st.get("last_price") or price
         is_add_on = st["position"] == direction
-        ok = await execute_entry(sym, direction, price, is_add_on=is_add_on)
+        ok = await execute_entry(sym, direction, price, is_add_on=is_add_on, size_multiplier=mult)
         if not ok:
             return False, "Order fehlgeschlagen – siehe Log"
         return True, None
@@ -322,7 +343,7 @@ async def _run_auto(sym):
     if st.get("position") == ev["kind"]:
         _log(sym, f"{a['tf']} {ev['kind'].capitalize()} {sig} – Position läuft schon in diese Richtung, übersprungen")
         return
-    ok, err = await _place(sym, ev["kind"], "SCALP-AUTO")
+    ok, err = await _place(sym, ev["kind"], "SCALP-AUTO", a.get("usd") or None)
     if not ok:
         _log(sym, f"{a['tf']} {ev['kind'].capitalize()} {sig} → FEHLER: {err}", "err")
         return
@@ -430,7 +451,13 @@ async def handle_scalp_order(request):
     direction = b.get("direction")
     if sym not in BOTS or direction not in ("long", "short"):
         return web.json_response({"error": "coin/direction ungültig"}, status=400)
-    ok, err = await _place(sym, direction, "SCALP")
+    try:
+        usd = float(b.get("usd")) if b.get("usd") not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Größe ist keine Zahl"}, status=400)
+    if usd is not None and usd <= 0:
+        usd = None
+    ok, err = await _place(sym, direction, "SCALP", usd)
     if not ok:
         return web.json_response({"error": err}, status=500)
     return web.json_response({"success": True})
@@ -492,7 +519,7 @@ async def handle_scalp_auto(request):
     for k in ("normal", "strong", "ext", "long", "short", "enabled"):
         if k in b:
             new[k] = bool(b[k])
-    for k in ("tp_usd", "sl_usd"):
+    for k in ("tp_usd", "sl_usd", "usd"):
         if k in b:
             try:
                 new[k] = max(0.0, float(b[k]))
@@ -502,6 +529,10 @@ async def handle_scalp_auto(request):
         if b["tf"] not in TFS:
             return web.json_response({"error": "tf ungültig"}, status=400)
         new["tf"] = b["tf"]
+    if new["usd"]:
+        _, serr = _size_mult(sym, new["usd"])
+        if serr:
+            return web.json_response({"error": serr}, status=400)
     if new["enabled"] and not (new["normal"] or new["strong"] or new["ext"]):
         return web.json_response({"error": "Mindestens eine Signalart wählen (normal / stark / extrem)"}, status=400)
     if new["enabled"] and not (new["long"] or new["short"]):
@@ -621,6 +652,9 @@ button{font-family:inherit;cursor:pointer}
    <div class="card">
     <b style="font-size:13px">Order · Market</b>
     <div class="row" style="flex-wrap:nowrap"><button class="btn long" id="bLong" style="flex:1">Long / Buy</button><button class="btn short" id="bShort" style="flex:1">Short / Sell</button></div>
+    <div style="display:flex;flex-direction:column;gap:6px"><span class="lab">Größe (USDC, Positionswert)</span>
+     <div class="row" style="flex-wrap:nowrap;gap:8px"><input class="inp" id="o-usd" inputmode="decimal" placeholder="Bot-Größe"><span class="mono small" style="white-space:nowrap">USDC</span></div>
+     <div class="q"><button data-s="1">1×</button><button data-s="2">2×</button><button data-s="5">5×</button></div></div>
     <div style="font-size:12px;color:#aab2c0;line-height:1.5" id="sizeTxt">Größe wie bei den Bots</div>
     <div class="small">Gleiche Richtung = Nachkauf (Ø-Einstieg wird angepasst). Gegenrichtung = erst schließen, dann neu eröffnen.</div>
    </div>
@@ -632,6 +666,7 @@ button{font-family:inherit;cursor:pointer}
     <div class="grid2">
      <div class="cell"><span class="lab">Zeitebene</span><b id="aTf" style="font-size:13px">folgt Chart</b></div>
      <div class="cell"><span class="lab">Gegensignal</span><b style="font-size:13px">schließen + neu</b></div>
+     <div class="cell" style="grid-column:span 2"><span class="lab">Größe (USDC, leer = Bot-Größe)</span><input class="inp" id="a-usd" inputmode="decimal" style="min-height:30px;padding:0;border:0;background:transparent;font-size:13px"></div>
      <div class="cell"><span class="lab" style="color:var(--g)">Auto-TP ($)</span><input class="inp tp" id="a-tp" inputmode="decimal" style="min-height:30px;padding:0;border:0;background:transparent;font-size:13px"></div>
      <div class="cell"><span class="lab" style="color:var(--r)">Auto-SL ($)</span><input class="inp sl" id="a-sl" inputmode="decimal" style="min-height:30px;padding:0;border:0;background:transparent;font-size:13px"></div>
     </div>
@@ -671,14 +706,12 @@ const LW=window.LightweightCharts;
 const base={layout:{background:{type:'solid',color:'#12151b'},textColor:'#7d8696',fontFamily:"'JetBrains Mono',monospace",fontSize:10},
  grid:{vertLines:{color:'rgba(255,255,255,0.04)'},horzLines:{color:'rgba(255,255,255,0.045)'}},
  rightPriceScale:{borderColor:'#1f242c',minimumWidth:76},timeScale:{borderColor:'#1f242c',timeVisible:true,secondsVisible:true,rightOffset:6},autoSize:true};
-const pc=LW.createChart($('chart'),base),wc=LW.createChart($('wachart'),base);
+const pc=LW.createChart($('chart'),base),wc=LW.createChart($('wachart'),Object.assign({},base,{handleScroll:false,handleScale:false}));
 const candle=pc.addCandlestickSeries({upColor:G,downColor:R,borderVisible:false,wickUpColor:G,wickDownColor:R,lastValueVisible:true,priceLineVisible:true});
 const wt1s=wc.addLineSeries({color:'#7FB5F0',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
 const wt2s=wc.addLineSeries({color:'#2F7BFF',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
 [[75,'rgba(255,255,255,.25)',3],[36,'rgba(240,53,75,.6)',2],[0,'#3a4150',0],[-36,'rgba(31,207,110,.6)',2],[-75,'rgba(255,255,255,.25)',3]].forEach(a=>wt2s.createPriceLine({price:a[0],color:a[1],lineWidth:1,lineStyle:a[2],axisLabelVisible:true,title:''}));
-let syncing=false;
-function sync(from,to){return r=>{if(syncing||!r)return;syncing=true;try{to.timeScale().setVisibleLogicalRange(r)}catch(e){}syncing=false}}
-pc.timeScale().subscribeVisibleLogicalRangeChange(sync(pc,wc));wc.timeScale().subscribeVisibleLogicalRangeChange(sync(wc,pc));
+pc.timeScale().subscribeVisibleLogicalRangeChange(r=>{if(r)try{wc.timeScale().setVisibleLogicalRange(r)}catch(e){}});
 
 /* ---------- Linien (Einstieg / TP / SL) + Ziehen ---------- */
 const lines={entry:null,tp:null,sl:null},vals={tp:null,sl:null};let drag=null;
@@ -712,7 +745,7 @@ async function saveTpsl(){
  await pollStatusOnce();
 }
 ['tp','sl'].forEach(k=>{$(k+'-in').addEventListener('change',async()=>{const t=$(k+'-in').value.trim().replace(',','.');vals[k]=t===''?null:parseFloat(t);if(vals[k]!=null&&isNaN(vals[k]))vals[k]=null;await saveTpsl()})});
-document.querySelectorAll('.q button').forEach(b=>b.addEventListener('click',async()=>{
+document.querySelectorAll('.q button[data-k]').forEach(b=>b.addEventListener('click',async()=>{
  const pos=ST&&ST.coin&&ST.coin.position;if(!pos||!pos.avg||!pos.size){toast('Keine offene Position',true);return}
  const d=pos.side==='long'?1:-1,u=parseFloat(b.dataset.u),off=u/pos.size;
  vals[b.dataset.k]=b.dataset.k==='tp'?pos.avg+d*off:pos.avg-d*off;await saveTpsl()}));
@@ -751,7 +784,7 @@ async function loadChart(){
  if(!coin)return;const key=coin+'|'+tf;
  try{const d=await api('/api/scalp/chart?coin='+coin+'&tf='+tf);if(key!==coin+'|'+tf)return;applyChart(d,key)}catch(e){}
 }
-async function pollChart(){await loadChart();setTimeout(pollChart,2000)}
+async function pollChart(){await loadChart();setTimeout(pollChart,1000)}
 
 /* ---------- Status ---------- */
 function renderChips(list){
@@ -766,7 +799,7 @@ function renderStatus(s){
  const c=s.coin;if(!c)return;
  $('cname').textContent=c.symbol;$('cprice').textContent=fmtP(c.price);$('pPrice').textContent=fmtP(c.price);
  const b=$('badge');b.textContent=c.dry_run?'DRY-RUN':'LIVE';b.className='pill '+(c.dry_run?'y':'r');
- $('sizeTxt').innerHTML='Größe wie bei den Bots: <b style="color:#fff">'+c.margin+' USDC × '+c.leverage+'x = '+Number(c.notional).toLocaleString('en-US')+' USDC</b>';
+ $('sizeTxt').innerHTML='Bot-Größe: <b style="color:#fff">'+c.margin+' USDC × '+c.leverage+'x = '+Number(c.notional).toLocaleString('en-US')+' USDC</b> (leer lassen = diese Größe)';window.__notional=c.notional;
  $('posT').textContent='Position · '+c.symbol;
  const p=c.position;
  if(p){const l=p.side==='long';$('posPill').textContent=l?'LONG':'SHORT';$('posPill').className='pill '+(l?'g':'r');
@@ -788,7 +821,7 @@ function renderStatus(s){
  $('autoCard').style.borderColor=a.enabled?G:'';$('autoCard').style.boxShadow=a.enabled?'0 0 18px rgba(31,207,110,.12)':'';
  $('autoT').textContent='Autotrade · '+c.symbol;$('aTf').textContent='folgt Chart · '+(a.enabled?a.tf:tf);
  ['normal','strong','ext','long','short'].forEach(k=>{if(!autoDirty)setChk(k,a[k])});
- if(document.activeElement!==$('a-tp')&&!autoDirty)$('a-tp').value=a.tp_usd;if(document.activeElement!==$('a-sl')&&!autoDirty)$('a-sl').value=a.sl_usd;
+ if(document.activeElement!==$('a-usd')&&!autoDirty)$('a-usd').value=a.usd||'';if(document.activeElement!==$('a-tp')&&!autoDirty)$('a-tp').value=a.tp_usd;if(document.activeElement!==$('a-sl')&&!autoDirty)$('a-sl').value=a.sl_usd;
  const lg=(s.log||[]).slice(0,4);
  $('alog').innerHTML=lg.length?lg.map(e=>{const t=new Date(e.t*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});return '<div class="feed" style="justify-content:flex-start;gap:8px"><span class="mono" style="color:var(--mut)">'+t+'</span><span>'+e.coin+' · '+e.text+'</span></div>'}).join(''):'';
 }
@@ -805,24 +838,26 @@ function renderTfBar(){$('tfbar').innerHTML=TFS.map(t=>'<button data-t="'+t+'" c
   if(ST&&ST.coin&&ST.coin.auto.enabled){try{await api('/api/scalp/auto',{coin,tf});toast('Autotrade folgt jetzt '+tf+' (neue Basislinie)')}catch(e){toast(e.message,true)}pollStatusOnce()}}))}
 async function order(dir){
  const c=ST&&ST.coin;if(!c)return;
- try{await api('/api/scalp/order',{coin,direction:dir});toast((dir==='long'?'Long':'Short')+' ausgeführt'+(c.dry_run?' (Dry-Run)':''))}catch(e){toast(e.message,true)}
+ const usd=parseFloat($('o-usd').value.replace(',','.'))||null;
+ try{await api('/api/scalp/order',{coin,direction:dir,usd});toast((dir==='long'?'Long':'Short')+' ausgeführt'+(c.dry_run?' (Dry-Run)':''))}catch(e){toast(e.message,true)}
  pollStatusOnce();
 }
 $('bLong').addEventListener('click',()=>order('long'));$('bShort').addEventListener('click',()=>order('short'));
 $('bClose').addEventListener('click',async()=>{try{await api('/api/scalp/close',{coin});toast('Position geschlossen')}catch(e){toast(e.message,true)}pollStatusOnce()});
 async function autoSend(extra){
  const body=Object.assign({coin,tf,normal:$('a-normal').checked,strong:$('a-strong').checked,ext:$('a-ext').checked,long:$('a-long').checked,short:$('a-short').checked,
-  tp_usd:parseFloat($('a-tp').value.replace(',','.'))||0,sl_usd:parseFloat($('a-sl').value.replace(',','.'))||0},extra||{});
+  usd:parseFloat($('a-usd').value.replace(',','.'))||0,tp_usd:parseFloat($('a-tp').value.replace(',','.'))||0,sl_usd:parseFloat($('a-sl').value.replace(',','.'))||0},extra||{});
  try{await api('/api/scalp/auto',body)}catch(e){toast(e.message,true)}
  autoDirty=false;pollStatusOnce();
 }
 ['normal','strong','ext','long','short'].forEach(k=>$('a-'+k).addEventListener('change',()=>{$('c-'+k).classList.toggle('on',$('a-'+k).checked);autoDirty=true;autoSend()}));
-['a-tp','a-sl'].forEach(i=>$(i).addEventListener('change',()=>{autoDirty=true;autoSend()}));
+['a-tp','a-sl','a-usd'].forEach(i=>$(i).addEventListener('change',()=>{autoDirty=true;autoSend()}));
 $('autoSw').addEventListener('click',()=>{
  const c=ST&&ST.coin;if(!c)return;const turnOn=!c.auto.enabled;
  if(turnOn&&!c.dry_run&&!confirm('Autotrade LIVE einschalten?\n\nBei jedem passenden Signal ('+tf+') wird auf '+coin+' automatisch eine ECHTE Market-Order ausgeführt ('+c.notional+' USDC).')){return}
  autoSend({enabled:turnOn});
 });
+document.querySelectorAll('.q button[data-s]').forEach(b=>b.addEventListener('click',()=>{const n=window.__notional||0;if(n)$('o-usd').value=Math.round(n*parseFloat(b.dataset.s))}));
 renderTfBar();renderTfStates({});pollStatus();pollChart();
 </script></body></html>
 """
