@@ -46,7 +46,8 @@ TFS = ["10s", "15s", "30s", "1m", "5m", "15m"]
 SECOND_AGG = {"10s": 10, "15s": 15, "30s": 30}   # aus 1s-Spot-Kerzen zusammengerechnet
 CHART_BARS = 200                                  # so viele Kerzen gehen an den Browser
 WARMUP_BARS = 150                                 # zusaetzliche Kerzen fuer das Einschwingen der Indikatoren
-MIN_BARS = 60                                     # darunter "laedt noch"
+MIN_BARS = 60                                     # Autotrade: darunter keine Signale (Indikator noch nicht eingeschwungen)
+MIN_CHART_BARS = 30                               # Chart: ab so vielen Kerzen wird schon gezeichnet (mit Hinweis)
 TFSTATE_TTL = 5.0                                 # Sekunden, wie lange die Zeitebenen-Uebersicht gecacht wird
 SCALP_COINS = [s for s in SYMBOLS]
 AUTO_CHECK_EVERY = 2                              # Sekunden zwischen zwei Signalpruefungen des Autotrades
@@ -104,12 +105,12 @@ def _raw_candles(sym, tf):
     return binance_ws.get_cached_candles_ext(market, pair, tf, CHART_BARS + WARMUP_BARS), None
 
 
-def _prepare(raw, tf):
+def _prepare(raw, tf, min_bars=MIN_BARS):
     if not raw:
         return None
     if tf in SECOND_AGG:
         raw = _resample_1s(raw, SECOND_AGG[tf])
-    return raw if len(raw) >= MIN_BARS else None
+    return raw if len(raw) >= min_bars else None
 
 
 def _wa_series(cs):
@@ -147,10 +148,10 @@ def _tf_state(cs):
 
 def _compute_chart(main_raw, tf, other_raws):
     """Laeuft im Thread. other_raws: {tf: raw} nur fuer die Zeitebenen-Uebersicht (kann leer sein)."""
-    cs = _prepare(main_raw, tf)
+    cs = _prepare(main_raw, tf, MIN_CHART_BARS)
     states = {}
     for t, raw in other_raws.items():
-        c2 = _prepare(raw, t)
+        c2 = _prepare(raw, t, MIN_CHART_BARS)
         states[t] = None if c2 is None else _tf_state(c2)
     if cs is None:
         return None, states
@@ -175,7 +176,7 @@ def _compute_chart(main_raw, tf, other_raws):
             markers.append({"time": x["ts"] // 1000, "kind": e["kind"], "strong": bool(e["strong"]),
                             "ext": bool(e["ext"]), "price": x["c"], "live": e["idx"] == n - 1})
     a, b = wt1[-1], wt2[-1]
-    return {"candles": candles, "wt1": w1, "wt2": w2, "markers": markers,
+    return {"candles": candles, "wt1": w1, "wt2": w2, "markers": markers, "warm": n >= MIN_BARS, "bars": n,
             "wt1v": _r(a, 1), "wt2v": _r(b, 1), "diff": _r(a - b, 1)}, states
 
 
@@ -771,7 +772,7 @@ function applyChart(d,key){
  const ms=d.markers.map(m=>({time:m.time+tzoff,pos:m.kind==='long'?'belowBar':'aboveBar',color:m.kind==='long'?G:R,shape:m.kind==='long'?'arrowUp':'arrowDown',text:m.ext?'◆':m.strong?'◉':''}));
  candle.setMarkers(ms.map(m=>({time:m.time,position:m.pos,color:m.color,shape:m.shape,text:m.text})));
  wt2s.setMarkers(d.markers.map(m=>({time:m.time+tzoff,position:'inBar',color:m.kind==='long'?G:R,shape:m.ext?'square':'circle',size:m.strong?2:1})));
- $('wt1v').textContent='WT1 '+(d.wt1v>0?'+':'')+d.wt1v;$('wt2v').textContent='WT2 '+(d.wt2v>0?'+':'')+d.wt2v;$('wdv').textContent='Δ '+(d.diff>0?'+':'')+d.diff;
+ $('wt1v').textContent='WT1 '+(d.wt1v>0?'+':'')+d.wt1v;$('wt2v').textContent='WT2 '+(d.wt2v>0?'+':'')+d.wt2v;$('wdv').textContent='Δ '+(d.diff>0?'+':'')+d.diff+(d.warm?'':'  ⚠ nur '+d.bars+' Kerzen Historie – Indikator noch ungenau');
  const f=d.markers.slice(-5).reverse();
  $('feed').innerHTML=f.length?f.map(m=>{const l=m.kind==='long',t=new Date(m.time*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   return '<div class="feed"><span class="mono" style="color:var(--mut)">'+t+' · '+d.tf+'</span><span class="pill '+(l?'g':'r')+'" style="padding:3px 10px">'+(l?'Long':'Short')+' '+(m.ext?'◆':m.strong?'◉':'●')+'</span><span class="mono" style="color:#cfd5e0">'+fmtP(m.price)+'</span></div>'}).join(''):'<div class="small">Noch keine Signale im sichtbaren Bereich.</div>';
@@ -858,6 +859,7 @@ $('autoSw').addEventListener('click',()=>{
  autoSend({enabled:turnOn});
 });
 document.querySelectorAll('.q button[data-s]').forEach(b=>b.addEventListener('click',()=>{const n=window.__notional||0;if(n)$('o-usd').value=Math.round(n*parseFloat(b.dataset.s))}));
+document.querySelectorAll('.inp').forEach(i=>i.addEventListener('focus',()=>setTimeout(()=>i.select(),0)));
 renderTfBar();renderTfStates({});pollStatus();pollChart();
 </script></body></html>
 """
