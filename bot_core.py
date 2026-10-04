@@ -274,7 +274,6 @@ def default_config():
         "wa_wave_scale": float(os.getenv("WA_WAVE_SCALE", "1.35")),  # streckt die Welle (wt1 *= wave_scale), damit sie die Zonen so oft erreicht wie im Original-Indikator
         "wa_zone1": float(os.getenv("WA_ZONE1", "53.0")),  # Zone: Long-Punkt wenn wt2 < -zone1, Short wenn wt2 > zone1
         "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 4)
-        "wa_nachkauf_min_abstand_pct": float(os.getenv("WA_NACHKAUF_MIN_ABSTAND_PCT", "0.1")),  # Nachkauf nur, wenn der Kurs sich seit dem letzten Einstieg/Nachkauf um mind. diesen % gegen die Position bewegt hat
         "wa_tp_mode": os.getenv("WA_TP_MODE", "gegentrade"),  # gegentrade / ueberlauf / fester_betrag
         "wa_ueberlauf_level": float(os.getenv("WA_UEBERLAUF_LEVEL", "45.0")),  # nur Modus "ueberlauf" - entspricht "Überlauf" im Original
         "wa_tp_usd": float(os.getenv("WA_TP_USD", "10.0")),  # nur Modus "fester_betrag"
@@ -519,7 +518,6 @@ def default_state():
         "wa_sl_price": None,
         "wa_tp_price": None,
         "wa_wt2_last": None,  # zuletzt berechneter WaveTrend-Signalwert, nur fuers Dashboard
-        "wa_last_nachkauf_price": None,  # Kurs des letzten Einstiegs/Nachkaufs - Basis fuer wa_nachkauf_min_abstand_pct
     }
 
 
@@ -669,7 +667,7 @@ PERSISTED_STATE_KEYS = [
     "scalp_obv_rsi", "scalp_candle_seq", "scalp_last_entry_seq", "scalp_halfway_lock_done",
     "scalp_left_band_since_fill",
     "liq_sl_price", "liq_tp1_done", "liq_peak_pct", "liq_nachkauf_count",
-    "wa_sl_price", "wa_tp_price", "wa_last_nachkauf_price",
+    "wa_sl_price", "wa_tp_price",
 ]
 
 
@@ -1297,6 +1295,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .badge.live { background:rgba(240,82,107,0.15); color:#fca5b1; border:1px solid rgba(240,82,107,0.4); }
   .badge.active { background:rgba(34,197,94,0.15); color:#86efac; border:1px solid rgba(34,197,94,0.35); }
   .badge.paused { background:rgba(251,191,36,0.15); color:#fde68a; border:1px solid rgba(251,191,36,0.35); }
+  .badge.pending { background:rgba(240,82,107,0.18); color:#fecdd3; border:1px solid rgba(240,82,107,0.55); animation: pendingPulse 1.6s ease-in-out infinite; }
+  @keyframes pendingPulse { 0%,100% { box-shadow:0 0 0 0 rgba(240,82,107,0.45); } 50% { box-shadow:0 0 0 6px rgba(240,82,107,0); } }
+  .start-banner { flex:1 1 100%; background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.5); color:#fecdd3; border-radius:12px; padding:10px 16px; font-size:13px; line-height:1.5; }
+  .coin-pill.pending { border-color:rgba(240,82,107,0.6); }
   .panel-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 20px; padding: 22px; margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
   .grid-stack-item-content { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
   .widget-drag-handle { cursor: move; padding: 8px 12px; font-size: 12px; font-weight: 700; color: var(--text-dim); background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--panel-border); user-select: none; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
@@ -1342,7 +1344,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
       <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
     </label>
-    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><span id="mode-badge"></span><span id="active-badge"></span>
+    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
 </div>
 <div class="container">
@@ -1984,7 +1986,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wellenanker"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" max="3.0" id="wa_wave_scale"></div>
   <div data-mode="wellenanker"><label>Zone 1 (Long &lt; -X, Short &gt; X)</label><input type="number" step="1" min="1" max="100" id="wa_zone1"></div>
   <div data-mode="wellenanker"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="4" id="wa_max_nachkauf"></div>
-  <div data-mode="wellenanker"><label>Nachkauf erst ab Kursabstand (%)</label><input type="number" step="0.05" min="0" id="wa_nachkauf_min_abstand_pct"></div>
   <div data-mode="wellenanker"><label>TP-Modus</label>
     <select class="cfg" id="wa_tp_mode">
       <option value="gegentrade">Gegentrade (Exit beim entgegengesetzten Punkt)</option>
@@ -3481,16 +3482,28 @@ async function refresh() {
   // Uebersichts-Pills fuer alle Coins
   const overviewRes = await fetch('/api/overview');
   const overview = await overviewRes.json();
-  document.getElementById('coin-overview').innerHTML = Object.entries(overview).map(([sym, o]) => `
-    <div class="coin-pill ${sym===currentSymbol?'selected':''}" onclick="document.getElementById('symbol-select').value='${sym}'; document.getElementById('symbol-select').dispatchEvent(new Event('change'));">
-      ${sym}: ${o.position || 'flach'} | PnL $${o.total_pnl_usd}
-    </div>
-  `).join('');
+  // Start-Zustand je Coin: laeuft (gruen) / gestoppt / "nach Deploy NICHT gestartet" (rot - gespeichert aktiv, aber laeuft in diesem Prozess nicht)
+  const stateOf = o => !o.bot_active ? 'stopped' : (o.session_started ? 'running' : 'pending');
+  const pendingCoins = Object.entries(overview).filter(([s, o]) => stateOf(o) === 'pending');
+  const pendingWithPos = pendingCoins.filter(([s, o]) => o.position).map(([s]) => s);
+  const startBanner = pendingCoins.length ? `<div class="start-banner">⚠️ <b>${pendingCoins.length} Bot${pendingCoins.length>1?'s sind':' ist'} nach dem Deploy NICHT gestartet:</b> ${pendingCoins.map(([s]) => s).join(', ')}.
+      Sie sind als „aktiv“ gespeichert, laufen aber erst nach einem Klick auf <b>Start</b> (Coin wählen → Start).${pendingWithPos.length ? ` <b>Achtung: offene Position ohne laufenden Bot bei ${pendingWithPos.join(', ')}</b> – TP/SL/Strategie werden nicht überwacht!` : ''}</div>` : '';
+  document.getElementById('coin-overview').innerHTML = startBanner + Object.entries(overview).map(([sym, o]) => {
+    const stt = stateOf(o);
+    const icon = stt === 'running' ? '🟢' : stt === 'pending' ? '⚠️' : '⏸️';
+    const tip = stt === 'running' ? 'Bot läuft' : stt === 'pending' ? 'Nach Deploy NICHT gestartet – Start klicken' : 'Bot gestoppt';
+    return `
+    <div class="coin-pill ${sym===currentSymbol?'selected':''} ${stt==='pending'?'pending':''}" title="${tip}" onclick="document.getElementById('symbol-select').value='${sym}'; document.getElementById('symbol-select').dispatchEvent(new Event('change'));">
+      ${icon} ${sym}: ${o.position || 'flach'} | PnL $${o.total_pnl_usd}
+    </div>`;
+  }).join('');
 
   document.getElementById('mode-badge').innerHTML =
     data.config.dry_run ? '<span class="badge dry">DRY RUN</span>' : '<span class="badge live">LIVE</span>';
   document.getElementById('active-badge').innerHTML =
-    data.config.bot_active ? '<span class="badge active">AKTIV</span>' : '<span class="badge paused">GESTOPPT</span>';
+    !data.config.bot_active ? '<span class="badge paused">GESTOPPT</span>'
+      : (data.session_started ? '<span class="badge active">AKTIV</span>'
+        : '<span class="badge pending" title="Als aktiv gespeichert, läuft aber erst nach Klick auf Start">⚠️ NICHT GESTARTET – Start klicken</span>');
   document.getElementById('live-warn').style.display = data.config.dry_run ? 'none' : 'block';
 
   const gl = data.grid_levels || {};
@@ -3664,7 +3677,6 @@ async function refresh() {
     document.getElementById('wa_wave_scale').value = data.config.wa_wave_scale;
     document.getElementById('wa_zone1').value = data.config.wa_zone1;
     document.getElementById('wa_max_nachkauf').value = data.config.wa_max_nachkauf;
-    document.getElementById('wa_nachkauf_min_abstand_pct').value = data.config.wa_nachkauf_min_abstand_pct;
     document.getElementById('wa_tp_mode').value = data.config.wa_tp_mode;
     document.getElementById('wa_ueberlauf_level').value = data.config.wa_ueberlauf_level;
     document.getElementById('wa_tp_usd').value = data.config.wa_tp_usd;
@@ -4019,7 +4031,6 @@ function buildConfigPayload() {
     wa_wave_scale: parseFloat(document.getElementById('wa_wave_scale').value),
     wa_zone1: parseFloat(document.getElementById('wa_zone1').value),
     wa_max_nachkauf: parseInt(document.getElementById('wa_max_nachkauf').value),
-    wa_nachkauf_min_abstand_pct: parseFloat(document.getElementById('wa_nachkauf_min_abstand_pct').value),
     wa_tp_mode: document.getElementById('wa_tp_mode').value,
     wa_ueberlauf_level: parseFloat(document.getElementById('wa_ueberlauf_level').value),
     wa_tp_usd: parseFloat(document.getElementById('wa_tp_usd').value),
@@ -4166,7 +4177,10 @@ async def handle_overview(request):
     result = {}
     for s in SYMBOLS:
         st = BOTS[s]["state"]
-        result[s] = {"position": st["position"], "total_pnl_usd": round(st["stats"]["total_pnl_usd"], 3)}
+        result[s] = {"position": st["position"], "total_pnl_usd": round(st["stats"]["total_pnl_usd"], 3),
+                     # Start-Zustand: bot_active = gespeicherter Wunsch, session_started = laeuft in DIESEM Prozess wirklich
+                     # (faellt nach jedem Deploy/Neustart auf False, siehe handle_control)
+                     "bot_active": bool(BOTS[s]["config"].get("bot_active")), "session_started": bool(st.get("session_started"))}
     return web.json_response(result)
 
 
@@ -4179,6 +4193,7 @@ async def handle_status(request):
     win_rate = round(stats["wins"] / stats["trades"] * 100, 1) if stats["trades"] else 0
     payload = {
         "symbol": symbol, "last_price": st["last_price"], "anchor_price": st["anchor_price"],
+        "session_started": bool(st.get("session_started")),
         "position": st["position"], "avg_entry_price": round(st["avg_entry_price"], 2) if st["avg_entry_price"] else None,
         "total_coin_size": st["total_coin_size"],
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),
@@ -4264,7 +4279,7 @@ async def handle_config_update(request):
                 "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
                 "liq_max_nachkauf", "liq_nachkauf_progress_pct",
                 "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_max_nachkauf",
-                "wa_nachkauf_min_abstand_pct", "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd"]:
+                "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)

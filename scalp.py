@@ -27,7 +27,7 @@ import traceback
 
 from aiohttp import web
 
-from bot_core import debug_log, SYMBOLS, BOTS, execute_entry, execute_exit
+from bot_core import debug_log, SYMBOLS, BOTS, execute_entry, execute_exit, get_redis
 import binance_ws
 from strategies import (
     BINANCE_SYMBOL_MAP, BINANCE_FUTURES_ONLY_SYMBOLS,
@@ -58,6 +58,85 @@ AUTO_CHECK_EVERY = 2                              # Sekunden zwischen zwei Signa
 TPSL = {}        # sym -> {"side": "long"/"short", "tp": float|None, "sl": float|None}
 AUTO = {}        # sym -> Autotrade-Einstellungen
 AUTO_LOG = []    # neueste zuerst
+WA_SOURCES = ("close", "hlc3", "ohlc4", "hl2")
+WA_CFG = {"n1": WA_N1, "n2": WA_N2, "z1": WA_Z1, "src": "close"}   # Wellenanker-Einstellungen (gelten fuer alle Coins)
+WA_FILE = os.getenv("SCALP_SETTINGS_FILE", "scalp_settings.json")
+
+
+def _z3():
+    return max(WA_Z3, WA_CFG["z1"] + 15.0)
+
+
+REDIS_KEY = "scalp:settings"   # eigener Schluessel - die Bot-Configs (gridbot:*) bleiben unangetastet
+
+
+async def _load_wa():
+    """Laedt die Wellenanker-Einstellungen: zuerst aus Redis (ueberlebt Neustarts/Deploys), sonst aus der Datei."""
+    import json
+    raw = None
+    try:
+        r = await get_redis()
+        if r is not None:
+            raw = await asyncio.wait_for(r.get(REDIS_KEY), timeout=5)
+    except Exception as e:
+        debug_log("⚠️ Scalp: Einstellungen aus Redis laden fehlgeschlagen", {"error": str(e)})
+    if not raw:
+        try:
+            with open(WA_FILE) as f:
+                raw = f.read()
+        except Exception:
+            raw = None
+    if raw:
+        try:
+            _apply_wa(json.loads(raw))
+            debug_log("✅ Scalp: Wellenanker-Einstellungen geladen", dict(WA_CFG))
+        except Exception as e:
+            debug_log("⚠️ Scalp: gespeicherte Einstellungen ungueltig", {"error": str(e)})
+
+
+async def _save_wa():
+    """Speichert in Redis (dauerhaft) und zusaetzlich in eine Datei als Notnagel. -> True, wenn Redis geklappt hat."""
+    import json
+    data = json.dumps(WA_CFG)
+    ok = False
+    try:
+        r = await get_redis()
+        if r is not None:
+            await asyncio.wait_for(r.set(REDIS_KEY, data), timeout=5)
+            ok = True
+    except Exception as e:
+        debug_log("⚠️ Scalp: Einstellungen in Redis speichern fehlgeschlagen", {"error": str(e)})
+    try:
+        with open(WA_FILE, "w") as f:
+            f.write(data)
+    except Exception:
+        pass
+    return ok
+
+
+def _apply_wa(d):
+    """Validiert und uebernimmt Wellenanker-Einstellungen. Wirft ValueError mit Klartext."""
+    new = dict(WA_CFG)
+    try:
+        if "n1" in d:
+            new["n1"] = int(d["n1"])
+        if "n2" in d:
+            new["n2"] = int(d["n2"])
+        if "z1" in d:
+            new["z1"] = float(d["z1"])
+    except (TypeError, ValueError):
+        raise ValueError("Kanal-/Durchschnitt-Länge und Zone müssen Zahlen sein")
+    if "src" in d:
+        if d["src"] not in WA_SOURCES:
+            raise ValueError("Quelle muss eine von " + ", ".join(WA_SOURCES) + " sein")
+        new["src"] = d["src"]
+    if not 2 <= new["n1"] <= 100:
+        raise ValueError("Kanal-Länge: 2 bis 100")
+    if not 2 <= new["n2"] <= 200:
+        raise ValueError("Durchschnitt-Länge: 2 bis 200")
+    if not 5 <= new["z1"] <= 90:
+        raise ValueError("Zone: 5 bis 90")
+    WA_CFG.update(new)
 _locks = {}
 _tfstate_cache = {}   # sym -> (ts, {tf: state})
 _last_err_log = {}
@@ -120,18 +199,19 @@ def _wa_series(cs):
     c = [x["c"] for x in cs]
     v = [x["v"] for x in cs]
     n = len(c)
-    wt1, wt2 = compute_wavetrend_series(o, h, l, c, WA_N1, WA_N2, WA_SIG, "close", WA_SCALE)
+    z1, z3 = WA_CFG["z1"], _z3()
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, WA_CFG["n1"], WA_CFG["n2"], WA_SIG, WA_CFG["src"], WA_SCALE)
     rsi = compute_rsi(c, WA_RSI_LEN)
     mf = _wave_moneyflow(h, l, c, v)
     events = []
     for i in range(1, n):
         up = wt1[i] > wt2[i] and wt1[i - 1] <= wt2[i - 1]
         dn = wt1[i] < wt2[i] and wt1[i - 1] >= wt2[i - 1]
-        if up and wt2[i] < -WA_Z1:
-            events.append({"kind": "long", "idx": i, "ext": wt2[i] < -WA_Z3,
+        if up and wt2[i] < -z1:
+            events.append({"kind": "long", "idx": i, "ext": wt2[i] < -z3,
                            "strong": rsi[i] < WA_RSI_LONG_MAX and mf[i] > mf[i - 1]})
-        elif dn and wt2[i] > WA_Z1:
-            events.append({"kind": "short", "idx": i, "ext": wt2[i] > WA_Z3,
+        elif dn and wt2[i] > z1:
+            events.append({"kind": "short", "idx": i, "ext": wt2[i] > z3,
                            "strong": rsi[i] > WA_RSI_SHORT_MIN and mf[i] < mf[i - 1]})
     return wt1, wt2, events
 
@@ -141,9 +221,10 @@ def _tf_state(cs):
     h = [x["h"] for x in cs]
     l = [x["l"] for x in cs]
     c = [x["c"] for x in cs]
-    wt1, wt2 = compute_wavetrend_series(o, h, l, c, WA_N1, WA_N2, WA_SIG, "close", WA_SCALE)
+    z1 = WA_CFG["z1"]
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, WA_CFG["n1"], WA_CFG["n2"], WA_SIG, WA_CFG["src"], WA_SCALE)
     a, b = wt1[-1], wt2[-1]
-    return 1 if (b < -WA_Z1 and a > b) else -1 if (b > WA_Z1 and a < b) else 0
+    return 1 if (b < -z1 and a > b) else -1 if (b > z1 and a < b) else 0
 
 
 def _compute_chart(main_raw, tf, other_raws):
@@ -355,6 +436,7 @@ async def _run_auto(sym):
 
 async def scalp_loop():
     """In main.py's asyncio.gather einhaengen."""
+    await _load_wa()
     await asyncio.sleep(8)
     tick = 0
     while True:
@@ -411,7 +493,7 @@ async def handle_scalp_chart(request):
         states = dict(cached[1], **states)
     if data is None:
         return web.json_response({"ok": False, "reason": "lädt noch … (Kerzen werden aufgebaut)", "tfstates": states})
-    data.update({"ok": True, "tfstates": states, "tf": tf, "coin": sym})
+    data.update({"ok": True, "tfstates": states, "tf": tf, "coin": sym, "wa": dict(WA_CFG, z3=_z3())})
     return web.json_response(data)
 
 
@@ -552,6 +634,20 @@ async def handle_scalp_auto(request):
     return web.json_response({"success": True})
 
 
+async def handle_scalp_wa(request):
+    b = await _body(request)
+    try:
+        _apply_wa(b)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    saved = await _save_wa()
+    _tfstate_cache.clear()
+    for a in AUTO.values():
+        a["last_ts"] = None   # neue Basislinie: Signale mit den neuen Einstellungen zaehlen erst ab jetzt
+    _log("ALLE", f"Wellenanker-Einstellungen: Kanal {WA_CFG['n1']}, Durchschnitt {WA_CFG['n2']}, Zone ±{WA_CFG['z1']:g}, Quelle {WA_CFG['src']}")
+    return web.json_response({"success": True, "persistent": saved, "wa": dict(WA_CFG, z3=_z3())})
+
+
 async def handle_scalp_index(request):
     return web.Response(text=SCALP_HTML, content_type="text/html")
 
@@ -612,6 +708,7 @@ button{font-family:inherit;cursor:pointer}
 .tfs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
 .tfs div{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;background:#0d1015;border-radius:9px;font-size:10px;font-weight:700}
 .feed{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;background:#0d1015;border-radius:9px;font-size:11px}
+.wafld{display:flex;flex-direction:column;gap:4px;flex:1 1 110px;min-width:100px}.wafld .inp{min-height:38px;font-size:13px;width:100%}
 .small{font-size:11px;color:var(--mut);line-height:1.5}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);padding:10px 18px;border-radius:10px;background:#1d2128;border:1px solid #3a4150;color:#fff;font-size:13px;display:none;z-index:50;max-width:90vw}
 #toast.bad{border-color:var(--r)}
@@ -632,8 +729,14 @@ button{font-family:inherit;cursor:pointer}
    </div>
    <div class="cwrap"><div id="chart"></div><div id="cmsg"></div></div>
    <div class="row" style="justify-content:space-between;padding-top:6px">
-    <div class="row" style="gap:10px;align-items:baseline"><b style="font-size:13px">Wellenanker</b><span class="lab">WaveTrend · Zonen ±36 / ±75</span></div>
+    <div class="row" style="gap:10px;align-items:baseline"><b style="font-size:13px">Wellenanker</b><span class="lab" id="wazones">WaveTrend</span></div>
     <div class="row mono" style="gap:14px;font-size:12px;font-weight:700"><span id="wt1v" style="color:#7FB5F0">WT1 –</span><span id="wt2v" style="color:#2F7BFF">WT2 –</span><span id="wdv" style="color:#aab2c0">Δ –</span></div>
+   </div>
+   <div class="row" style="gap:8px">
+    <label class="wafld"><span class="lab">Kanal-Länge</span><input class="inp" id="wa-n1" inputmode="numeric"></label>
+    <label class="wafld"><span class="lab">Durchschnitt-Länge</span><input class="inp" id="wa-n2" inputmode="numeric"></label>
+    <label class="wafld"><span class="lab">Zone ±</span><input class="inp" id="wa-z1" inputmode="decimal"></label>
+    <label class="wafld"><span class="lab">Quelle der Welle</span><select class="inp" id="wa-src"><option value="close">close</option><option value="hlc3">hlc3 (H+L+C)/3</option><option value="ohlc4">ohlc4</option><option value="hl2">hl2 (H+L)/2</option></select></label>
    </div>
    <div class="cwrap"><div id="wachart"></div></div>
    <div class="row small" style="gap:16px"><span>▲▼ Long/Short-Signal</span><span>◉ stark (RSI + Geldfluss)</span><span>◆ extrem (±75)</span><span>TP/SL-Linie mit der Maus ziehen</span></div>
@@ -694,7 +797,7 @@ button{font-family:inherit;cursor:pointer}
 const G='#1fcf6e',R='#f0354b',TFS=['10s','15s','30s','1m','5m','15m'];
 const $=id=>document.getElementById(id);
 function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
-let lastT=0,coin=null,tf=TFS.includes(ls('scalp_tf'))?ls('scalp_tf'):'1m',ST=null,loadedKey=null,lastChart=null;
+let waKey='',lastT=0,coin=null,tf=TFS.includes(ls('scalp_tf'))?ls('scalp_tf'):'1m',ST=null,loadedKey=null,lastChart=null;
 const tzoff=-new Date().getTimezoneOffset()*60;
 function fmtP(p){if(p==null||isNaN(p))return '–';const d=p>=1000?1:p>=10?2:p>=1?3:5;return Number(p).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d})}
 function digits(p){return p>=1000?1:p>=10?2:p>=1?3:5}
@@ -711,7 +814,13 @@ const pc=LW.createChart($('chart'),base),wc=LW.createChart($('wachart'),Object.a
 const candle=pc.addCandlestickSeries({upColor:G,downColor:R,borderVisible:false,wickUpColor:G,wickDownColor:R,lastValueVisible:true,priceLineVisible:true});
 const wt1s=wc.addLineSeries({color:'#7FB5F0',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
 const wt2s=wc.addLineSeries({color:'#2F7BFF',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
-[[75,'rgba(255,255,255,.25)',3],[36,'rgba(240,53,75,.6)',2],[0,'#3a4150',0],[-36,'rgba(31,207,110,.6)',2],[-75,'rgba(255,255,255,.25)',3]].forEach(a=>wt2s.createPriceLine({price:a[0],color:a[1],lineWidth:1,lineStyle:a[2],axisLabelVisible:true,title:''}));
+let zoneLines=[];
+function setZones(z1,z3){
+ zoneLines.forEach(l=>wt2s.removePriceLine(l));zoneLines=[];
+ [[z3,'rgba(255,255,255,.25)',3],[z1,'rgba(240,53,75,.6)',2],[0,'#3a4150',0],[-z1,'rgba(31,207,110,.6)',2],[-z3,'rgba(255,255,255,.25)',3]].forEach(a=>zoneLines.push(wt2s.createPriceLine({price:a[0],color:a[1],lineWidth:1,lineStyle:a[2],axisLabelVisible:true,title:''})));
+ $('wazones').textContent='WaveTrend · Zonen ±'+z1+' / ±'+z3;
+}
+setZones(36,75);
 pc.timeScale().subscribeVisibleLogicalRangeChange(r=>{if(r)try{wc.timeScale().setVisibleLogicalRange(r)}catch(e){}});
 
 /* ---------- Linien (Einstieg / TP / SL) + Ziehen ---------- */
@@ -755,6 +864,10 @@ document.querySelectorAll('.q button[data-k]').forEach(b=>b.addEventListener('cl
 function shift(arr){return arr.map(x=>Object.assign({},x,{time:x.time+tzoff}))}
 function applyChart(d,key){
  renderTfStates(d.tfstates||{});
+ if(d.wa){
+  const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src;
+  if(k!==waKey){waKey=k;setZones(d.wa.z1,d.wa.z3);if(!waBusy())fillWa(d.wa)}
+ }
  const msg=$('cmsg');
  if(!d.ok){msg.textContent=d.reason||'keine Daten';msg.style.display='flex';return}
  msg.style.display='none';
@@ -842,6 +955,16 @@ async function pollStatusOnce(){
  try{const s=await api('/api/scalp/status'+(coin?('?coin='+coin):''));if(!coin&&s.coins.length){coin=ls('scalp_coin')&&s.coins.some(c=>c.coin===ls('scalp_coin'))?ls('scalp_coin'):s.coins[0].coin;return pollStatusOnce()}ST=s;renderStatus(s)}catch(e){}
 }
 async function pollStatus(){await pollStatusOnce();setTimeout(pollStatus,1000)}
+
+/* ---------- Wellenanker-Einstellungen ---------- */
+function waBusy(){return ['wa-n1','wa-n2','wa-z1','wa-src'].some(i=>document.activeElement===$(i))}
+function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src}
+async function saveWa(){
+ const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value};
+ try{const r=await api('/api/scalp/wa',body);toast(r.persistent?'Wellenanker-Einstellungen gespeichert (Autotrade startet mit neuer Basislinie)':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);loadedKey=null;waKey='';loadChart()}
+ catch(e){toast(e.message,true)}
+}
+['wa-n1','wa-n2','wa-z1','wa-src'].forEach(i=>$(i).addEventListener('change',saveWa));
 
 /* ---------- Aktionen ---------- */
 function switchCoin(c){if(c===coin)return;coin=c;ls('scalp_coin',c);loadedKey=null;ST=null;['entry','tp','sl'].forEach(k=>setLine(k,null));candle.setData([]);wt1s.setData([]);wt2s.setData([]);candle.setMarkers([]);wt2s.setMarkers([]);autoDirty=false;$('cname').textContent=c;pollStatusOnce();loadChart()}
