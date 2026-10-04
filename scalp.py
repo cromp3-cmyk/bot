@@ -29,6 +29,7 @@ from aiohttp import web
 
 from bot_core import debug_log, SYMBOLS, BOTS, execute_entry, execute_exit, get_redis
 import binance_ws
+import lighter_candles
 from strategies import (
     BINANCE_SYMBOL_MAP, BINANCE_FUTURES_ONLY_SYMBOLS,
     compute_rsi, compute_wavetrend_series,
@@ -170,6 +171,9 @@ def _log(sym, text, kind="info"):
 # ============================================================================
 def _raw_candles(sym, tf):
     """-> (candles|None, reason|None). Abonniert die noetigen Streams im WS-Cache (kein eigener Traffic)."""
+    if tf in SECOND_AGG and sym in lighter_candles.COINS:
+        back = SECOND_AGG[tf] * (CHART_BARS + WARMUP_BARS)
+        return lighter_candles.get(sym, back), None
     pair = BINANCE_SYMBOL_MAP.get(sym)
     if not pair:
         return None, "Kein Binance-Paar für diesen Coin – Chart nicht verfügbar"

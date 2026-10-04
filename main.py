@@ -30,6 +30,7 @@ from copytrade import (
 from binance_ws import binance_ws_cache_loop
 from grid_scalp import grid_scalp_poll_loop
 from screener import screener_loop, handle_screener_index, handle_screener_api
+from lighter_candles import lighter_candles_loop
 from scalp import (
     scalp_loop, handle_scalp_index, handle_scalp_chart, handle_scalp_status,
     handle_scalp_order, handle_scalp_close, handle_scalp_tpsl, handle_scalp_auto, handle_scalp_wa,
@@ -135,6 +136,7 @@ async def main():
         binance_ws_cache_loop(),
         screener_loop(),
         scalp_loop(),
+        lighter_candles_loop(),
         return_exceptions=True,
     )
     # Alle obigen Loops sind 'while True' - normalerweise kehrt hier nichts jemals zurueck. Landet
