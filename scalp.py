@@ -140,6 +140,7 @@ def _apply_wa(d):
     WA_CFG.update(new)
 _locks = {}
 _tfstate_cache = {}   # sym -> (ts, {tf: state})
+_chipsig_cache = {}   # tf -> (ts, {sym: state})
 _last_err_log = {}
 
 
@@ -503,14 +504,35 @@ async def handle_scalp_chart(request):
     return web.json_response(data)
 
 
+def _all_sigs(tf):
+    """Wellenanker-Zustand (1 long / -1 short / 0 keiner / None keine Daten) aller Coins fuer EINE Zeitebene. Laeuft im Thread."""
+    out = {}
+    for s in SCALP_COINS:
+        try:
+            raw, _ = _raw_candles(s, tf)
+            cs = _prepare(raw, tf, MIN_CHART_BARS)
+            out[s] = None if cs is None else _tf_state(cs)
+        except Exception:
+            out[s] = None
+    return out
+
+
 async def handle_scalp_status(request):
     sym = _coin_arg(request)
+    tfq = request.query.get("tf", "")
+    sigs = {}
+    if tfq in TFS:
+        ent = _chipsig_cache.get(tfq)
+        if ent is None or time.time() - ent[0] > 3:
+            ent = (time.time(), await asyncio.to_thread(_all_sigs, tfq))
+            _chipsig_cache[tfq] = ent
+        sigs = ent[1]
     coins = []
     for s in SCALP_COINS:
         st = BOTS[s]["state"]
         sc = SCREENER_STATE.get("coins", {}).get(s) or {}
         coins.append({"coin": s, "price": st.get("last_price"), "chg24": sc.get("chg24"), "pos": st.get("position"),
-                      "auto": bool(AUTO.get(s, {}).get("enabled")),
+                      "auto": bool(AUTO.get(s, {}).get("enabled")), "sig": sigs.get(s),
                       "binance": s in BINANCE_SYMBOL_MAP or s in lighter_candles.COINS})
     out = {"coins": coins, "log": AUTO_LOG[:12]}
     if sym:
@@ -654,7 +676,7 @@ async def _wa_update(b):
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
     saved = await _save_wa()
-    _tfstate_cache.clear()
+    _tfstate_cache.clear(); _chipsig_cache.clear()
     for a in AUTO.values():
         a["last_ts"] = None   # neue Basislinie: Signale mit den neuen Einstellungen zaehlen erst ab jetzt
     _log("ALLE", f"Wellenanker-Einstellungen: Kanal {WA_CFG['n1']}, Durchschnitt {WA_CFG['n2']}, Zone ±{WA_CFG['z1']:g}, Quelle {WA_CFG['src']}")
@@ -685,10 +707,12 @@ button{font-family:inherit;cursor:pointer}
 .card{background:linear-gradient(180deg,#171a21,#12151b);border:1px solid var(--bd);border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px}
 .mono{font-family:'JetBrains Mono',monospace}
 .lab{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)}
-.chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
 .chip{flex:0 0 auto;min-width:96px;min-height:56px;display:flex;flex-direction:column;gap:3px;padding:8px 14px;text-align:left;border-radius:12px;border:1px solid var(--bd);background:#12151b;color:#e9ecf1}
-.chip.on{border-color:#3b82f6;background:rgba(59,130,246,.12)}
+.chip.on{box-shadow:0 0 0 2px #3b82f6;background:rgba(59,130,246,.12)}
 .chip.off{opacity:.45}
+.chip.sl{border-color:var(--g);background:rgba(31,207,110,.16)}
+.chip.ss{border-color:var(--r);background:rgba(240,53,75,.16)}
 .chip .t{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:14px;font-weight:700}
 .dot{display:block;width:8px;height:8px;border-radius:50%;background:#3a4150}
 .tfbar{display:flex;gap:4px;padding:4px;background:#0d1015;border:1px solid #1f242c;border-radius:12px}
@@ -707,7 +731,7 @@ button{font-family:inherit;cursor:pointer}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .pill{font-size:11px;font-weight:700;padding:5px 12px;border-radius:20px}
 .pill.g{background:rgba(31,207,110,.14);color:var(--g)}.pill.r{background:rgba(240,53,75,.14);color:var(--r)}.pill.y{background:rgba(245,184,61,.14);color:var(--y)}.pill.n{background:#1d2128;color:var(--mut)}
-.inp{flex:1;min-width:0;min-height:44px;padding:0 12px;border-radius:10px;border:1px solid #2a303a;background:#0d1015;color:#fff;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700}
+.inp{color-scheme:dark;flex:1;min-width:0;min-height:44px;padding:0 12px;border-radius:10px;border:1px solid #2a303a;background:#0d1015;color:#fff;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700}
 .inp.tp{border-color:var(--g)}.inp.sl{border-color:var(--r)}
 .q{display:flex;gap:6px}.q button{flex:1;min-height:36px;border:1px solid #2a303a;border-radius:9px;background:#1d2128;color:#cfd5e0;font-size:12px;font-weight:600}
 .chk{min-height:36px;display:flex;align-items:center;gap:6px;padding:0 12px;border-radius:9px;background:#0d1015;border:1px solid #2a303a;font-size:12px;font-weight:600;color:var(--mut);cursor:pointer;user-select:none}
@@ -746,9 +770,9 @@ button{font-family:inherit;cursor:pointer}
     <div class="row mono" style="gap:14px;font-size:12px;font-weight:700"><span id="wt1v" style="color:#7FB5F0">WT1 –</span><span id="wt2v" style="color:#2F7BFF">WT2 –</span><span id="wdv" style="color:#aab2c0">Δ –</span></div>
    </div>
    <div class="row" style="gap:8px">
-    <label class="wafld"><span class="lab">Kanal-Länge</span><input class="inp" id="wa-n1" inputmode="numeric"></label>
-    <label class="wafld"><span class="lab">Durchschnitt-Länge</span><input class="inp" id="wa-n2" inputmode="numeric"></label>
-    <label class="wafld"><span class="lab">Zone ±</span><input class="inp" id="wa-z1" inputmode="decimal"></label>
+    <label class="wafld"><span class="lab">Kanal-Länge</span><input class="inp" id="wa-n1" type="number" step="1" min="2" max="100"></label>
+    <label class="wafld"><span class="lab">Durchschnitt-Länge</span><input class="inp" id="wa-n2" type="number" step="1" min="2" max="200"></label>
+    <label class="wafld"><span class="lab">Zone ±</span><input class="inp" id="wa-z1" type="number" step="1" min="5" max="90"></label>
     <label class="wafld"><span class="lab">Quelle der Welle</span><select class="inp" id="wa-src"><option value="close">close</option><option value="hlc3">hlc3 (H+L+C)/3</option><option value="ohlc4">ohlc4</option><option value="hl2">hl2 (H+L)/2</option></select></label>
    </div>
    <div class="cwrap"><div id="wachart"></div></div>
@@ -770,7 +794,7 @@ button{font-family:inherit;cursor:pointer}
     <b style="font-size:13px">Order · Market</b>
     <div class="row" style="flex-wrap:nowrap"><button class="btn long" id="bLong" style="flex:1">Long / Buy</button><button class="btn short" id="bShort" style="flex:1">Short / Sell</button></div>
     <div style="display:flex;flex-direction:column;gap:6px"><span class="lab">Größe (USDC, Positionswert)</span>
-     <div class="row" style="flex-wrap:nowrap;gap:8px"><input class="inp" id="o-usd" inputmode="decimal" placeholder="Bot-Größe"><span class="mono small" style="white-space:nowrap">USDC</span></div>
+     <div class="row" style="flex-wrap:nowrap;gap:8px"><input class="inp" id="o-usd" type="number" step="10" min="0" placeholder="Bot-Größe"><span class="mono small" style="white-space:nowrap">USDC</span></div>
      <div class="q"><button data-s="1">1×</button><button data-s="2">2×</button><button data-s="5">5×</button></div></div>
     <div style="font-size:12px;color:#aab2c0;line-height:1.5" id="sizeTxt">Größe wie bei den Bots</div>
     <div class="small">Gleiche Richtung = Nachkauf (Ø-Einstieg wird angepasst). Gegenrichtung = erst schließen, dann neu eröffnen.</div>
@@ -783,9 +807,9 @@ button{font-family:inherit;cursor:pointer}
     <div class="grid2">
      <div class="cell"><span class="lab">Zeitebene</span><b id="aTf" style="font-size:13px">folgt Chart</b></div>
      <div class="cell"><span class="lab">Gegensignal</span><b style="font-size:13px">schließen + neu</b></div>
-     <div class="cell" style="grid-column:span 2"><span class="lab">Größe (USDC, leer = Bot-Größe)</span><input class="inp" id="a-usd" inputmode="decimal" style="min-height:30px;padding:0;border:0;background:transparent;font-size:13px"></div>
-     <div class="cell"><span class="lab" style="color:var(--g)">Auto-TP ($)</span><input class="inp tp" id="a-tp" inputmode="decimal" style="min-height:30px;padding:0;border:0;background:transparent;font-size:13px"></div>
-     <div class="cell"><span class="lab" style="color:var(--r)">Auto-SL ($)</span><input class="inp sl" id="a-sl" inputmode="decimal" style="min-height:30px;padding:0;border:0;background:transparent;font-size:13px"></div>
+     <div class="cell" style="grid-column:span 2"><span class="lab">Größe (USDC, leer = Bot-Größe)</span><input class="inp" id="a-usd" type="number" step="10" min="0" style="min-height:30px;padding:0;border:0;background:transparent;font-size:13px"></div>
+     <div class="cell"><span class="lab" style="color:var(--g)">Auto-TP ($)</span><input class="inp tp" id="a-tp" type="number" step="1" min="0" style="min-height:30px;padding:0;border:0;background:transparent;font-size:13px"></div>
+     <div class="cell"><span class="lab" style="color:var(--r)">Auto-SL ($)</span><input class="inp sl" id="a-sl" type="number" step="1" min="0" style="min-height:30px;padding:0;border:0;background:transparent;font-size:13px"></div>
     </div>
     <div id="alog" style="display:flex;flex-direction:column;gap:6px"></div>
     <div class="small">Gilt nur für den gewählten Coin. Je Kerze höchstens eine Auto-Order, Signale vor dem Einschalten zählen nicht. Läuft die Position schon in Signalrichtung, wird nicht nachgekauft. Beim Neustart des Bots ist Autotrade wieder AUS.</div>
@@ -793,10 +817,10 @@ button{font-family:inherit;cursor:pointer}
    <div class="card">
     <div class="row" style="justify-content:space-between"><b style="font-size:13px">Take-Profit / Stop-Loss</b><span class="pill n" id="tpPill">keine</span></div>
     <div style="display:flex;flex-direction:column;gap:6px"><span class="lab" style="color:var(--g)">Take-Profit</span>
-     <div class="row" style="flex-wrap:nowrap;gap:8px"><input class="inp tp" id="tp-in" inputmode="decimal" placeholder="Preis"><span class="mono" id="tpPnl" style="font-size:12px;font-weight:700;color:var(--g);white-space:nowrap"></span></div>
+     <div class="row" style="flex-wrap:nowrap;gap:8px"><input class="inp tp" id="tp-in" type="number" step="any" placeholder="Preis"><span class="mono" id="tpPnl" style="font-size:12px;font-weight:700;color:var(--g);white-space:nowrap"></span></div>
      <div class="q"><button data-k="tp" data-u="5">+$5</button><button data-k="tp" data-u="10">+$10</button><button data-k="tp" data-u="20">+$20</button></div></div>
     <div style="display:flex;flex-direction:column;gap:6px"><span class="lab" style="color:var(--r)">Stop-Loss</span>
-     <div class="row" style="flex-wrap:nowrap;gap:8px"><input class="inp sl" id="sl-in" inputmode="decimal" placeholder="Preis"><span class="mono" id="slPnl" style="font-size:12px;font-weight:700;color:var(--r);white-space:nowrap"></span></div>
+     <div class="row" style="flex-wrap:nowrap;gap:8px"><input class="inp sl" id="sl-in" type="number" step="any" placeholder="Preis"><span class="mono" id="slPnl" style="font-size:12px;font-weight:700;color:var(--r);white-space:nowrap"></span></div>
      <div class="q"><button data-k="sl" data-u="3">−$3</button><button data-k="sl" data-u="5">−$5</button><button data-k="sl" data-u="10">−$10</button></div></div>
     <div class="small">Eingabe und Linien im Chart gehören zusammen. Beim Erreichen schließt der Bot per Market-Order. Leeres Feld = entfernen.</div>
    </div>
@@ -924,7 +948,7 @@ function renderChips(list){
  const sig=list.map(c=>c.coin).join(',');
  if(sig!==chipsSig){chipsSig=sig;$('chips').innerHTML=list.map(c=>'<button class="chip" data-c="'+c.coin+'"></button>').join('')}
  const bs=$('chips').children;
- list.forEach((c,i)=>{const b=bs[i];if(!b)return;b.className='chip'+(c.coin===coin?' on':'')+(c.binance?'':' off');b.innerHTML=chipHtml(c)});
+ list.forEach((c,i)=>{const b=bs[i];if(!b)return;b.className='chip'+(c.coin===coin?' on':'')+(c.binance?'':' off')+(c.sig===1?' sl':c.sig===-1?' ss':'');b.innerHTML=chipHtml(c)});
 }
 function chipHtml(c){
  return (c=>{const up=c.chg24==null?'':(c.chg24>=0?'+':'')+c.chg24.toFixed(2)+'%',col=c.chg24==null?'var(--mut)':c.chg24>=0?G:R;
@@ -950,6 +974,7 @@ function renderStatus(s){
   setLine('entry',p&&p.avg?p.avg:null,{color:'rgba(233,236,241,.7)',title:p?(p.side==='long'?'LONG ':'SHORT ')+(p.pnl!=null?sg(p.pnl):''):''});
   vals.tp=c.tp;vals.sl=c.sl;
   setLine('tp',c.tp,{color:G,title:c.tp!=null?lineTitle('tp',c.tp):''});setLine('sl',c.sl,{color:R,title:c.sl!=null?lineTitle('sl',c.sl):''});
+  {const ref=c.tp!=null?c.tp:c.sl;if(ref!=null){const st=Math.pow(10,-digits(ref)).toFixed(digits(ref));$('tp-in').step=st;$('sl-in').step=st}}
   if(document.activeElement!==$('tp-in'))$('tp-in').value=c.tp!=null?c.tp.toFixed(digits(c.tp)):'';
   if(document.activeElement!==$('sl-in'))$('sl-in').value=c.sl!=null?c.sl.toFixed(digits(c.sl)):'';
   updTpslPnl();
@@ -965,7 +990,7 @@ function renderStatus(s){
 }
 let autoDirty=false;
 async function pollStatusOnce(){
- try{const s=await api('/api/scalp/status'+(coin?('?coin='+coin):''));if(!coin&&s.coins.length){coin=ls('scalp_coin')&&s.coins.some(c=>c.coin===ls('scalp_coin'))?ls('scalp_coin'):s.coins[0].coin;return pollStatusOnce()}ST=s;renderStatus(s)}catch(e){}
+ try{const s=await api('/api/scalp/status?tf='+tf+(coin?('&coin='+coin):''));if(!coin&&s.coins.length){coin=ls('scalp_coin')&&s.coins.some(c=>c.coin===ls('scalp_coin'))?ls('scalp_coin'):s.coins[0].coin;return pollStatusOnce()}ST=s;renderStatus(s)}catch(e){}
 }
 async function pollStatus(){await pollStatusOnce();setTimeout(pollStatus,1000)}
 

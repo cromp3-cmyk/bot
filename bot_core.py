@@ -274,6 +274,7 @@ def default_config():
         "wa_wave_scale": float(os.getenv("WA_WAVE_SCALE", "1.35")),  # streckt die Welle (wt1 *= wave_scale), damit sie die Zonen so oft erreicht wie im Original-Indikator
         "wa_zone1": float(os.getenv("WA_ZONE1", "53.0")),  # Zone: Long-Punkt wenn wt2 < -zone1, Short wenn wt2 > zone1
         "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 4)
+        "wa_nachkauf_min_pct": float(os.getenv("WA_NACHKAUF_MIN_PCT", "0")),  # Nachkauf nur, wenn der Kurs mind. X % vom letzten Einstieg entfernt ist (0 = aus)
         "wa_tp_mode": os.getenv("WA_TP_MODE", "gegentrade"),  # gegentrade / ueberlauf / fester_betrag
         "wa_ueberlauf_level": float(os.getenv("WA_UEBERLAUF_LEVEL", "45.0")),  # nur Modus "ueberlauf" - entspricht "Überlauf" im Original
         "wa_tp_usd": float(os.getenv("WA_TP_USD", "10.0")),  # nur Modus "fester_betrag"
@@ -1986,6 +1987,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wellenanker"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" max="3.0" id="wa_wave_scale"></div>
   <div data-mode="wellenanker"><label>Zone 1 (Long &lt; -X, Short &gt; X)</label><input type="number" step="1" min="1" max="100" id="wa_zone1"></div>
   <div data-mode="wellenanker"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="4" id="wa_max_nachkauf"></div>
+  <div data-mode="wellenanker"><label>Nachkauf-Abstand zum letzten Einstieg (%, 0 = aus)</label><input type="number" step="0.01" min="0" id="wa_nachkauf_min_pct"></div>
   <div data-mode="wellenanker"><label>TP-Modus</label>
     <select class="cfg" id="wa_tp_mode">
       <option value="gegentrade">Gegentrade (Exit beim entgegengesetzten Punkt)</option>
@@ -3677,6 +3679,7 @@ async function refresh() {
     document.getElementById('wa_wave_scale').value = data.config.wa_wave_scale;
     document.getElementById('wa_zone1').value = data.config.wa_zone1;
     document.getElementById('wa_max_nachkauf').value = data.config.wa_max_nachkauf;
+    document.getElementById('wa_nachkauf_min_pct').value = data.config.wa_nachkauf_min_pct ?? 0;
     document.getElementById('wa_tp_mode').value = data.config.wa_tp_mode;
     document.getElementById('wa_ueberlauf_level').value = data.config.wa_ueberlauf_level;
     document.getElementById('wa_tp_usd').value = data.config.wa_tp_usd;
@@ -4031,6 +4034,7 @@ function buildConfigPayload() {
     wa_wave_scale: parseFloat(document.getElementById('wa_wave_scale').value),
     wa_zone1: parseFloat(document.getElementById('wa_zone1').value),
     wa_max_nachkauf: parseInt(document.getElementById('wa_max_nachkauf').value),
+    wa_nachkauf_min_pct: parseFloat(document.getElementById('wa_nachkauf_min_pct').value) || 0,
     wa_tp_mode: document.getElementById('wa_tp_mode').value,
     wa_ueberlauf_level: parseFloat(document.getElementById('wa_ueberlauf_level').value),
     wa_tp_usd: parseFloat(document.getElementById('wa_tp_usd').value),
@@ -4278,7 +4282,7 @@ async def handle_config_update(request):
                 "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
                 "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
                 "liq_max_nachkauf", "liq_nachkauf_progress_pct",
-                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_max_nachkauf",
+                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_max_nachkauf", "wa_nachkauf_min_pct",
                 "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd"]:
         if key in body:
             cfg[key] = body[key]

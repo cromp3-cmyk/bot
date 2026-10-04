@@ -10,7 +10,7 @@ import aiohttp
 import websockets
 from bot_core import debug_log, BASE_URL, WS_URL, MARKET_INDICES, get_redis
 
-COINS = [c.strip().upper() for c in os.environ.get("LIGHTER_1S_COINS", "HYPE").split(",") if c.strip() in MARKET_INDICES or c.strip().upper() in MARKET_INDICES]
+COINS = [c.strip().upper() for c in os.environ.get("LIGHTER_1S_COINS", "HYPE,XAU,XAG,LIT,WTI").split(",") if c.strip() in MARKET_INDICES or c.strip().upper() in MARKET_INDICES]
 MAX_CANDLES = 4000
 SNAP_EVERY = 60
 SNAP_TTL = 3 * 86400
