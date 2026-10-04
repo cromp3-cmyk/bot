@@ -174,6 +174,8 @@ def _raw_candles(sym, tf):
     if tf in SECOND_AGG and sym in lighter_candles.COINS:
         back = SECOND_AGG[tf] * (CHART_BARS + WARMUP_BARS)
         return lighter_candles.get(sym, back), None
+    if sym in lighter_candles.COINS:
+        return lighter_candles.get_tf(sym, tf, CHART_BARS + WARMUP_BARS), None
     pair = BINANCE_SYMBOL_MAP.get(sym)
     if not pair:
         return None, "Kein Binance-Paar für diesen Coin – Chart nicht verfügbar"
@@ -509,7 +511,7 @@ async def handle_scalp_status(request):
         sc = SCREENER_STATE.get("coins", {}).get(s) or {}
         coins.append({"coin": s, "price": st.get("last_price"), "chg24": sc.get("chg24"), "pos": st.get("position"),
                       "auto": bool(AUTO.get(s, {}).get("enabled")),
-                      "binance": s in BINANCE_SYMBOL_MAP})
+                      "binance": s in BINANCE_SYMBOL_MAP or s in lighter_candles.COINS})
     out = {"coins": coins, "log": AUTO_LOG[:12]}
     if sym:
         cfg = BOTS[sym]["config"]
@@ -630,7 +632,7 @@ async def handle_scalp_auto(request):
         return web.json_response({"error": "Mindestens eine Richtung wählen (Long / Short)"}, status=400)
     if new["enabled"] and new["tf"] in SECOND_AGG and sym in BINANCE_FUTURES_ONLY_SYMBOLS:
         return web.json_response({"error": f"{new['tf']} gibt es für {sym} nicht"}, status=400)
-    if new["enabled"] and sym not in BINANCE_SYMBOL_MAP:
+    if new["enabled"] and sym not in BINANCE_SYMBOL_MAP and sym not in lighter_candles.COINS:
         return web.json_response({"error": f"{sym} hat kein Binance-Paar – keine Signale möglich"}, status=400)
     if (not a["enabled"] and new["enabled"]) or new["tf"] != a["tf"]:
         new["last_ts"] = None   # neue Basislinie: nur Signale NACH jetzt zaehlen
@@ -751,7 +753,7 @@ button{font-family:inherit;cursor:pointer}
    </div>
    <div class="cwrap"><div id="wachart"></div></div>
    <div class="row small" style="gap:16px"><span>▲▼ Long/Short-Signal</span><span>◉ stark (RSI + Geldfluss)</span><span>◆ extrem (±75)</span><span>TP/SL-Linie mit der Maus ziehen</span></div>
-   <div class="small">Chart = Binance-Kerzen. Orders, TP/SL und Kurs oben = Lighter. TP/SL überwacht der Bot (Kurs-Check jede Sekunde) – es liegen keine Stop-Orders auf der Börse.</div>
+   <div class="small">Chart = Binance-Kerzen (HYPE: Lighter-Kerzen). Orders, TP/SL und Kurs oben = Lighter. TP/SL überwacht der Bot (Kurs-Check jede Sekunde) – es liegen keine Stop-Orders auf der Börse.</div>
   </div>
   <div class="right">
    <div class="card">

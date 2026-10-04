@@ -6,8 +6,9 @@ Eigene WS-Verbindung (beeinflusst trading_loop nicht), Snapshot in Redis (ueberl
 die Luecke waehrend des Neustarts bleibt aber leer - sie laesst sich nicht nachholen).
 """
 import asyncio, base64, json, os, time, zlib
+import aiohttp
 import websockets
-from bot_core import debug_log, WS_URL, MARKET_INDICES, get_redis
+from bot_core import debug_log, BASE_URL, WS_URL, MARKET_INDICES, get_redis
 
 COINS = [c.strip().upper() for c in os.environ.get("LIGHTER_1S_COINS", "HYPE").split(",") if c.strip() in MARKET_INDICES or c.strip().upper() in MARKET_INDICES]
 MAX_CANDLES = 4000
@@ -153,4 +154,101 @@ async def lighter_candles_loop():
     if not COINS:
         return
     await _load()
-    await asyncio.gather(_stream_loop(), _snap_loop())
+    await asyncio.gather(_stream_loop(), _snap_loop(), _rest_loop())
+
+
+# ---------------------------------------------------------------------------
+# 1m / 5m / 15m: native Lighter-REST-Kerzen (max. 500 pro Abruf), das letzte Stueck aus dem Live-Stream
+# ---------------------------------------------------------------------------
+REST_TFS = {"1m": 60, "5m": 300, "15m": 900}
+REST_EVERY = {"1m": 20, "5m": 60, "15m": 60}
+_rest = {}  # (sym, tf) -> [candle dicts]
+
+
+def _f(x, default=None):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+def _parse_rest(rows, tf_s):
+    out = []
+    prev = None
+    for r in rows or []:
+        t = r.get("t", r.get("timestamp"))
+        if t is None:
+            continue
+        t = int(t)
+        if t < 10**12:
+            t *= 1000
+        c = _f(r.get("c", r.get("close")))
+        o = _f(r.get("o", r.get("open")), c)
+        h = _f(r.get("h", r.get("high")))
+        l = _f(r.get("l", r.get("low")))
+        if c is None:
+            c = o if o is not None else prev
+        if c is None:
+            continue
+        o = c if o is None else o
+        h = max(o, c) if h is None else h
+        l = min(o, c) if l is None else l
+        v = _f(r.get("v", r.get("V", r.get("volume"))), 0.0) or 0.0
+        out.append({"ts": t // (tf_s * 1000) * (tf_s * 1000), "o": o, "h": h, "l": l, "c": c, "v": v, "tb": v * 0.5, "n": 0})
+        prev = c
+    out.sort(key=lambda x: x["ts"])
+    return out
+
+
+async def _fetch_rest(session, sym, tf):
+    tf_s = REST_TFS[tf]
+    now = int(time.time())
+    params = {"market_id": MARKET_INDICES[sym], "resolution": tf, "start_timestamp": (now - tf_s * 500) * 1000,
+              "end_timestamp": now * 1000, "count_back": 500}
+    async with session.get(f"{BASE_URL}/api/v1/candles", params=params, timeout=aiohttp.ClientTimeout(total=15)) as r:
+        data = await r.json(content_type=None)
+    rows = data.get("c") or data.get("candlesticks") or data.get("candles") or []
+    cs = _parse_rest(rows, tf_s)
+    if cs:
+        _rest[(sym, tf)] = cs
+    else:
+        debug_log(f"⚠️ [{sym}] Lighter-REST {tf}: keine Kerzen erkannt", {"antwort": str(data)[:300]})
+
+
+async def _rest_loop():
+    last = {}
+    async with aiohttp.ClientSession() as session:
+        while True:
+            for sym in COINS:
+                for tf in REST_TFS:
+                    if time.time() - last.get((sym, tf), 0) < REST_EVERY[tf]:
+                        continue
+                    last[(sym, tf)] = time.time()
+                    try:
+                        await _fetch_rest(session, sym, tf)
+                    except Exception as e:
+                        debug_log(f"⚠️ [{sym}] Lighter-REST {tf} fehlgeschlagen", {"error": str(e)})
+                    await asyncio.sleep(1)
+            await asyncio.sleep(5)
+
+
+def get_tf(sym, tf, count):
+    """1m/5m/15m: REST-Kerzen + aktuelle Kerze aus dem Live-Stream. None, solange noch nichts da ist."""
+    base = _rest.get((sym, tf))
+    if not base:
+        return None
+    tf_ms = REST_TFS[tf] * 1000
+    out = [dict(c) for c in base]
+    last_ts = out[-1]["ts"]
+    own = _candles.get(sym) or {}
+    for k in sorted(own):
+        if k < last_ts:
+            continue
+        b = k // tf_ms * tf_ms
+        c = own[k]
+        if b == out[-1]["ts"]:
+            x = out[-1]
+            x["h"] = max(x["h"], c["h"]); x["l"] = min(x["l"], c["l"]); x["c"] = c["c"]
+        elif b > out[-1]["ts"]:
+            out.append({"ts": b, "o": c["o"], "h": c["h"], "l": c["l"], "c": c["c"], "v": c["v"], "tb": c["tb"], "n": c["n"]})
+    return out[-count:]
