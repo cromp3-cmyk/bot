@@ -5805,6 +5805,7 @@ def compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode, wave_scale=1
 def _wa_reset_state(st):
     st["wa_sl_price"] = None
     st["wa_tp_price"] = None
+    st["wa_last_nachkauf_price"] = None
 
 
 def _wa_update_sl_tp(st, cfg):
@@ -5863,6 +5864,7 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price):
     tp_mode = cfg.get("wa_tp_mode", "gegentrade")
     ueberlauf_level = cfg.get("wa_ueberlauf_level", 45.0)
     max_nachkauf = max(0, min(4, int(cfg.get("wa_max_nachkauf", 0) or 0)))
+    nachkauf_min_abstand_pct = float(cfg.get("wa_nachkauf_min_abstand_pct", 0.1) or 0.0)
 
     if pos in ("long", "short"):
         is_long = pos == "long"
@@ -5879,6 +5881,7 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price):
             _wa_reset_state(st)
             await execute_entry(symbol, target, price, is_add_on=False)
             if st["position"] is not None:
+                st["wa_last_nachkauf_price"] = price
                 _wa_update_sl_tp(st, cfg)
             return
         if tp_mode == "ueberlauf":
@@ -5890,10 +5893,24 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price):
                     _wa_reset_state(st)
                 return
         if same_signal and max_nachkauf > 0 and st.get("entry_count", 0) < 1 + max_nachkauf:
-            debug_log(f"➕ [{symbol}] Wellenanker Nachkauf ({st.get('entry_count', 0) + 1}/{1 + max_nachkauf}): {pos.upper()} @ {price}")
-            ok = await execute_entry(symbol, pos, price, is_add_on=True)
-            if ok:
-                _wa_update_sl_tp(st, cfg)
+            # Nachkauf erst, wenn der Kurs sich seit dem letzten Einstieg/Nachkauf um mind.
+            # wa_nachkauf_min_abstand_pct % weiter gegen die Position bewegt hat - sonst wuerde
+            # bei dicht aufeinanderfolgenden Punkten (z.B. kurz hintereinander) sofort wieder im
+            # selben Kursbereich nachgekauft, ohne dass sich der Ø-Einstieg sinnvoll verbessert.
+            ref_price = st.get("wa_last_nachkauf_price")
+            abstand_ok = True
+            if ref_price:
+                abstand_pct = abs(price - ref_price) / ref_price * 100
+                moved_against = (price < ref_price) if is_long else (price > ref_price)
+                abstand_ok = moved_against and abstand_pct >= nachkauf_min_abstand_pct
+            if abstand_ok:
+                debug_log(f"➕ [{symbol}] Wellenanker Nachkauf ({st.get('entry_count', 0) + 1}/{1 + max_nachkauf}): {pos.upper()} @ {price}")
+                ok = await execute_entry(symbol, pos, price, is_add_on=True)
+                if ok:
+                    st["wa_last_nachkauf_price"] = price
+                    _wa_update_sl_tp(st, cfg)
+            else:
+                debug_log(f"➖ [{symbol}] Wellenanker Nachkauf übersprungen: Kurs noch keine {nachkauf_min_abstand_pct}% vom letzten Einstieg ({ref_price}) entfernt @ {price}")
         return
 
     # Keine Position offen: Neueinstieg
@@ -5906,6 +5923,7 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price):
     debug_log(f"📡 [{symbol}] Wellenanker Punkt: {target.upper()} @ {price}")
     await execute_entry(symbol, target, price, is_add_on=False)
     if st["position"] is not None:
+        st["wa_last_nachkauf_price"] = price
         _wa_update_sl_tp(st, cfg)
 
 
@@ -5996,16 +6014,18 @@ def backtest_wellenanker(candles, cfg):
     wt1_arr, wt2_arr = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode, wave_scale)
     min_needed = n1 + n2 + sig_len + 20
 
+    nachkauf_min_abstand_pct = float(cfg.get("wa_nachkauf_min_abstand_pct", 0.1) or 0.0)
+
     return _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
-                                sl_usd, max_nachkauf, margin, leverage, min_needed)
+                                sl_usd, max_nachkauf, nachkauf_min_abstand_pct, margin, leverage, min_needed)
 
 
 def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
-                         sl_usd, max_nachkauf, margin, leverage, min_needed):
+                         sl_usd, max_nachkauf, nachkauf_min_abstand_pct, margin, leverage, min_needed):
     """Die eigentliche Handelssimulation fuer Wellenanker, getrennt von der (teuren) WaveTrend-
     Berechnung (compute_wavetrend_series) - siehe backtest_wellenanker/run_wa_sweep."""
     n = len(c)
-    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price","entries"}
+    position = None  # {"dir","entry","size","entry_i","sl_price","tp_price","entries","last_nachkauf_price"}
     trades = []
 
     def _recalc_sl_tp(pos):
@@ -6044,7 +6064,7 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
                 _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP-GEGENTRADE", ts=ts)
                 target = "short" if pdir == "long" else "long"
                 size = (margin * leverage) / price
-                position = {"dir": target, "entry": price, "size": size, "entry_i": i, "entries": 1}
+                position = {"dir": target, "entry": price, "size": size, "entry_i": i, "entries": 1, "last_nachkauf_price": price}
                 _recalc_sl_tp(position)
                 _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
                 continue
@@ -6057,13 +6077,24 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
             if max_nachkauf > 0 and position["entries"] < 1 + max_nachkauf:
                 same_dir_signal = (pdir == "long" and long_raw) or (pdir == "short" and short_raw)
                 if same_dir_signal:
-                    add_size = (margin * leverage) / price
-                    new_size = position["size"] + add_size
-                    position["entry"] = (entry * position["size"] + price * add_size) / new_size
-                    position["size"] = new_size
-                    position["entries"] += 1
-                    _recalc_sl_tp(position)
-                    _bt_record_addon(trades, pdir, price, i, position["entry_i"], position["entries"], ts=ts, is_add_on=True)
+                    # Nachkauf nur, wenn der Kurs sich seit dem letzten Einstieg/Nachkauf um mind.
+                    # nachkauf_min_abstand_pct % weiter gegen die Position bewegt hat - siehe
+                    # check_wa_candle (live) fuer dieselbe Regel.
+                    ref_price = position.get("last_nachkauf_price")
+                    abstand_ok = True
+                    if ref_price:
+                        abstand_pct = abs(price - ref_price) / ref_price * 100
+                        moved_against = (price < ref_price) if pdir == "long" else (price > ref_price)
+                        abstand_ok = moved_against and abstand_pct >= nachkauf_min_abstand_pct
+                    if abstand_ok:
+                        add_size = (margin * leverage) / price
+                        new_size = position["size"] + add_size
+                        position["entry"] = (entry * position["size"] + price * add_size) / new_size
+                        position["size"] = new_size
+                        position["entries"] += 1
+                        position["last_nachkauf_price"] = price
+                        _recalc_sl_tp(position)
+                        _bt_record_addon(trades, pdir, price, i, position["entry_i"], position["entries"], ts=ts, is_add_on=True)
             continue
 
         if long_raw:
@@ -6074,7 +6105,7 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
             continue
 
         size = (margin * leverage) / price
-        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "entries": 1}
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "entries": 1, "last_nachkauf_price": price}
         _recalc_sl_tp(position)
         _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
 
@@ -6085,7 +6116,7 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
 
 
 def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list, tp_mode,
-                       ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n):
+                       ueberlauf_level, tp_usd, nachkauf_min_abstand_pct, margin, leverage, min_needed, exclude_top_n):
     """Rechenteil des Wellenanker-'Monte-Carlo'-Sweeps (Zone 1 x Max. Nachkäufe x Stop-Loss $),
     reine CPU-Arbeit im Thread. wt1_arr/wt2_arr (die WaveTrend-Welle/Signallinie) haengen nur von
     n1/n2/sig_len/Quelle/Wellen-Skalierung ab und werden darum NUR EINMAL vor dem Sweep berechnet
@@ -6097,7 +6128,7 @@ def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_l
         for max_nachkauf in nachkauf_list:
             for sl_usd in sl_list:
                 trades = _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level,
-                                              tp_usd, sl_usd, max_nachkauf, margin, leverage, min_needed)
+                                              tp_usd, sl_usd, max_nachkauf, nachkauf_min_abstand_pct, margin, leverage, min_needed)
                 closed_trades = [t for t in trades if t["pnl"] is not None]
                 stats = summarize_backtest_trades(closed_trades, exclude_top_n)
                 results.append({"wa_zone1": z1, "wa_max_nachkauf": max_nachkauf, "wa_sl_usd": sl_usd, **stats})
@@ -6155,6 +6186,7 @@ async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_
     tp_mode = cfg.get("wa_tp_mode", "gegentrade")
     ueberlauf_level = float(cfg.get("wa_ueberlauf_level", 45.0))
     tp_usd = float(cfg.get("wa_tp_usd", 10.0))
+    nachkauf_min_abstand_pct = float(cfg.get("wa_nachkauf_min_abstand_pct", 0.1) or 0.0)
     margin, leverage = cfg["margin"], cfg["leverage"]
 
     wt1_arr, wt2_arr = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode, wave_scale)
@@ -6162,7 +6194,7 @@ async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_
     loop = asyncio.get_event_loop()
     results = await loop.run_in_executor(
         None, _wa_sweep_compute, (ts, o, h, l, c), wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list,
-        tp_mode, ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n)
+        tp_mode, ueberlauf_level, tp_usd, nachkauf_min_abstand_pct, margin, leverage, min_needed, exclude_top_n)
 
     rank_key = lambda r: (r["trades"] >= AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
     best_sorted = sorted(results, key=rank_key, reverse=True)

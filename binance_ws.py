@@ -57,6 +57,10 @@ REST_SEED_LIMIT = {
     "15m": 500, "30m": 500, "1h": 300, "4h": 200,
 }
 
+# Wie viele REST-Seiten (je REST_SEED_LIMIT Kerzen) rueckwaerts beim Seed geholt werden. Nur "1s": dort reichen 1000
+# Kerzen (~16 Min) fuer 15s/30s-Charts nicht aus.
+SEED_PAGES = {"1s": 4}
+
 BINANCE_BASE_URLS = {
     "spot": "https://api.binance.com/api/v3/klines",
     "futures": "https://fapi.binance.com/fapi/v1/klines",
@@ -176,29 +180,48 @@ async def _seed_stream_history(market_type, pair, interval):
 
     base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
     limit = REST_SEED_LIMIT.get(interval, 500)
+    pages = SEED_PAGES.get(interval, 1)  # 1s: mehrere Seiten rueckwaerts (Scalp-Dashboard braucht mehr Sekunden-Historie)
+    data = []
+    end_time = None
     try:
-        await _binance_throttle(market_type, f"seed:{interval}")
-        # ERNEUT pruefen NACH dem Warten: waehrend der Drossel-Pause kann eine ANDERE gleichzeitig
-        # laufende Coin-Abfrage (viele Streams werden beim Bot-Start fast zeitgleich abonniert) in
-        # der Zwischenzeit einen Bann registriert haben - ohne diesen zweiten Check wuerden wir
-        # trotzdem noch feuern und einen aktiven Bann bei Binance nur weiter verlaengern.
-        if _binance_is_banned(market_type):
-            _pending_subscribe[market_type].add(_key(pair, interval))
-            return
-        url = f"{base_url}?symbol={pair}&interval={interval}&limit={limit}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                _binance_note_response(market_type, resp)
-                if resp.status in (418, 429):
-                    body = await resp.text()
-                    _binance_register_ban(market_type, pair, resp.status, body)
+        for page in range(pages):
+            await _binance_throttle(market_type, f"seed:{interval}")
+            # ERNEUT pruefen NACH dem Warten: waehrend der Drossel-Pause kann eine ANDERE gleichzeitig
+            # laufende Coin-Abfrage (viele Streams werden beim Bot-Start fast zeitgleich abonniert) in
+            # der Zwischenzeit einen Bann registriert haben - ohne diesen zweiten Check wuerden wir
+            # trotzdem noch feuern und einen aktiven Bann bei Binance nur weiter verlaengern.
+            if _binance_is_banned(market_type):
+                if page == 0:
+                    _pending_subscribe[market_type].add(_key(pair, interval))
                     return
-                if resp.status != 200:
-                    return
-                data = await resp.json()
+                break  # Bann mitten im Nachladen: mit dem, was da ist, weitermachen
+            url = f"{base_url}?symbol={pair}&interval={interval}&limit={limit}"
+            if end_time is not None:
+                url += f"&endTime={end_time}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    _binance_note_response(market_type, resp)
+                    if resp.status in (418, 429):
+                        body = await resp.text()
+                        _binance_register_ban(market_type, pair, resp.status, body)
+                        if page == 0:
+                            return
+                        break
+                    if resp.status != 200:
+                        if page == 0:
+                            return
+                        break
+                    chunk = await resp.json()
+            if not chunk or not isinstance(chunk, list):
+                break
+            data = chunk + data  # aeltere Seite DAVOR
+            end_time = int(chunk[0][0]) - 1
+            if len(chunk) < limit:
+                break
     except Exception as e:
         debug_log(f"⚠️ [WS-Cache] Seed-Historie fehlgeschlagen ({pair} {interval})", {"error": str(e)})
-        return
+        if not data:
+            return
 
     if not data or not isinstance(data, list):
         return
