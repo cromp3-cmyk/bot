@@ -329,14 +329,13 @@ def _compute_chart(main_raw, tf, other_raws):
         # (der Wellenanker-Chart folgt dem Preis-Chart ueber den Index)
         w1.append({"time": t, "value": a} if a is not None else {"time": t})
         w2.append({"time": t, "value": b} if b is not None else {"time": t})
-    st_up, st_dn = [], []
+    st_line = []
     if WA_CFG["strat"] == "st":
         line, dirs, events = _st_series(cs)   # Marker/Signale = Supertrend, die Welle bleibt nur als Anzeige
         for i in range(off, n):
             t = cs[i]["ts"] // 1000
             v = _r(line[i], 6) if line[i] is not None else None
-            st_up.append({"time": t, "value": v} if v is not None and dirs[i] == 1 else {"time": t})
-            st_dn.append({"time": t, "value": v} if v is not None and dirs[i] == -1 else {"time": t})
+            st_line.append({"time": t, "value": v, "up": dirs[i] == 1} if v is not None else {"time": t})
     markers = []
     for e in events:
         if e["idx"] >= off:
@@ -346,7 +345,7 @@ def _compute_chart(main_raw, tf, other_raws):
     a, b = wt1[-1], wt2[-1]
     return {"candles": candles, "wt1": w1, "wt2": w2, "markers": markers, "warm": n >= MIN_BARS, "bars": n,
             "wt1v": _r(a, 1), "wt2v": _r(b, 1), "diff": _r(a - b, 1),
-            "st_up": st_up, "st_dn": st_dn, "strat": WA_CFG["strat"]}, states
+            "st": st_line, "strat": WA_CFG["strat"]}, states
 
 
 def _auto_eval(raw, tf, last_ts):
@@ -938,8 +937,7 @@ const pc=LW.createChart($('chart'),base),wc=LW.createChart($('wachart'),Object.a
 const candle=pc.addCandlestickSeries({upColor:G,downColor:R,borderVisible:false,wickUpColor:G,wickDownColor:R,lastValueVisible:true,priceLineVisible:true});
 const wt1s=wc.addLineSeries({color:'#7FB5F0',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
 const wt2s=wc.addLineSeries({color:'#2F7BFF',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
-const stUp=pc.addLineSeries({color:G,lineWidth:2,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
-const stDn=pc.addLineSeries({color:R,lineWidth:2,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
+const stLine=pc.addLineSeries({color:G,lineWidth:2,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
 let zoneLines=[];
 function setZones(z1,z3){
  zoneLines.forEach(l=>wt2s.removePriceLine(l));zoneLines=[];
@@ -997,18 +995,18 @@ function applyChart(d,key){
  const msg=$('cmsg');
  if(!d.ok){msg.textContent=d.reason||'keine Daten';msg.style.display='flex';return}
  msg.style.display='none';
- const cd=shift(d.candles),w1=shift(d.wt1),w2=shift(d.wt2),su=shift(d.st_up||[]),sd=shift(d.st_dn||[]);
+ const cd=shift(d.candles),w1=shift(d.wt1),w2=shift(d.wt2),sl=shift(d.st||[]).map(x=>x.value==null?{time:x.time}:{time:x.time,value:x.value,color:x.up?G:R});
  if(loadedKey!==key){
   const p=cd.length?cd[cd.length-1].close:1,dg=digits(p);
   candle.applyOptions({priceFormat:{type:'price',precision:dg,minMove:Math.pow(10,-dg)}});
-  candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);stUp.setData(su);stDn.setData(sd);
+  candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);stLine.setData(sl);
   const n=cd.length;pc.timeScale().setVisibleLogicalRange({from:Math.max(0,n-110),to:n+6});
   loadedKey=key;lastT=cd.length?cd[cd.length-1].time:0;
  }else if(cd.length){
   /* nur die letzte Kerze aktualisieren bzw. neue anhaengen (aeltere Zeiten wuerde die Bibliothek ablehnen) */
   const upd=(s,arr)=>{for(const p of arr){if(p.time>=lastT)s.update(p)}};
-  try{upd(candle,cd);upd(wt1s,w1);upd(wt2s,w2);upd(stUp,su);upd(stDn,sd)}
-  catch(e){candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);stUp.setData(su);stDn.setData(sd)}
+  try{upd(candle,cd);upd(wt1s,w1);upd(wt2s,w2);upd(stLine,sl)}
+  catch(e){candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);stLine.setData(sl)}
   lastT=cd[cd.length-1].time;
  }
  const ms=d.markers.map(m=>({time:m.time+tzoff,pos:m.kind==='long'?'belowBar':'aboveBar',color:m.kind==='long'?G:R,shape:m.kind==='long'?'arrowUp':'arrowDown',text:m.ext?'◆':m.strong?'◉':''}));
@@ -1096,7 +1094,7 @@ async function saveWa(){
 WA_IDS.forEach(i=>$(i).addEventListener('change',saveWa));
 
 /* ---------- Aktionen ---------- */
-function switchCoin(c){if(c===coin)return;coin=c;ls('scalp_coin',c);loadedKey=null;ST=null;['entry','tp','sl'].forEach(k=>setLine(k,null));candle.setData([]);wt1s.setData([]);wt2s.setData([]);stUp.setData([]);stDn.setData([]);candle.setMarkers([]);wt2s.setMarkers([]);autoDirty=false;$('cname').textContent=c;pollStatusOnce();loadChart()}
+function switchCoin(c){if(c===coin)return;coin=c;ls('scalp_coin',c);loadedKey=null;ST=null;['entry','tp','sl'].forEach(k=>setLine(k,null));candle.setData([]);wt1s.setData([]);wt2s.setData([]);stLine.setData([]);candle.setMarkers([]);wt2s.setMarkers([]);autoDirty=false;$('cname').textContent=c;pollStatusOnce();loadChart()}
 function renderTfBar(){$('tfbar').innerHTML=TFS.map(t=>'<button data-t="'+t+'" class="'+(t===tf?'on':'')+'">'+t+'</button>').join('');
  document.querySelectorAll('#tfbar button').forEach(b=>b.addEventListener('click',async()=>{tf=b.dataset.t;ls('scalp_tf',tf);loadedKey=null;renderTfBar();loadChart();
   if(ST&&ST.coin&&ST.coin.auto.enabled){try{await api('/api/scalp/auto',{coin,tf});toast('Autotrade folgt jetzt '+tf+' (neue Basislinie)')}catch(e){toast(e.message,true)}pollStatusOnce()}}))}
