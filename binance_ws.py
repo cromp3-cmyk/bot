@@ -48,7 +48,10 @@ CACHEABLE_INTERVALS = {"1s", "1m", "3m", "5m", "15m", "30m", "1h", "4h"}
 # 20000 deckt auch 45s-Kerzen mit hohem count_back komfortabel ab; der Speicher-Mehrbedarf ist
 # trivial (kleine Dicts, gilt zudem nur fuer den "1s"-Stream in der Praxis - andere Intervalle
 # fuellen sich so langsam, dass sie diese Grenze nie erreichen).
-MAX_CANDLES_PER_STREAM = 20000
+# Speicher-Limit: ein Kerzen-Dict kostet ~0,5 KB, bei ~30 Coins x mehreren Zeitrahmen sprengten 20000 Kerzen pro
+# Stream (v.a. die 1s-Streams, die live staendig weiterwachsen) irgendwann die 512 MB von Render (OOM-Neustart).
+MAX_CANDLES_PER_STREAM = 1500
+MAX_CANDLES_BY_INTERVAL = {"1s": 7000, "1m": 3000}  # Screener braucht 6000 (10s x 600 Kerzen)
 
 # Wie viele Kerzen beim erstmaligen Abonnieren eines Streams per REST vorgeladen werden
 # (EINMALIG pro Stream, nicht wiederholt - danach nur noch WS-Push).
@@ -84,8 +87,8 @@ STALENESS_BUFFER_SECONDS = 30
 class _StreamState:
     __slots__ = ("candles", "ready", "last_update_ts", "saved_ts")
 
-    def __init__(self):
-        self.candles = deque(maxlen=MAX_CANDLES_PER_STREAM)  # Dicts: ts,o,h,l,c,v
+    def __init__(self, interval=None):
+        self.candles = deque(maxlen=MAX_CANDLES_BY_INTERVAL.get(interval, MAX_CANDLES_PER_STREAM))  # Dicts: ts,o,h,l,c,v
         self.ready = False  # True, sobald der einmalige REST-Seed durch ist
         self.last_update_ts = 0.0  # time.time() der letzten WS-Aktualisierung (oder des Seeds)
         self.saved_ts = 0.0  # time.time() der letzten Sicherung in Redis (siehe snapshot_loop)
@@ -112,7 +115,7 @@ def ensure_subscribed(market_type, pair, interval):
         return
     k = _key(pair, interval)
     if k not in _streams[market_type]:
-        _streams[market_type][k] = _StreamState()
+        _streams[market_type][k] = _StreamState(interval)
         _pending_subscribe[market_type].add(k)
 
 
