@@ -65,8 +65,15 @@ WA_CFG = {"n1": WA_N1, "n2": WA_N2, "z1": WA_Z1, "src": "close",
 WA_FILE = os.getenv("SCALP_SETTINGS_FILE", "scalp_settings.json")
 
 
-def _z3():
-    return max(WA_Z3, WA_CFG["z1"] + 15.0)
+COIN_CFG = {}   # sym -> eigene Strategie-Einstellungen (alles, was in WA_CFG steht). Coins ohne Eintrag nutzen WA_CFG als Standard.
+
+
+def _cfg(sym):
+    return COIN_CFG.get(sym) or WA_CFG
+
+
+def _z3(cfg=None):
+    return max(WA_Z3, (cfg or WA_CFG)["z1"] + 15.0)
 
 
 REDIS_KEY = "scalp:settings"   # eigener Schluessel - die Bot-Configs (gridbot:*) bleiben unangetastet
@@ -90,8 +97,16 @@ async def _load_wa():
             raw = None
     if raw:
         try:
-            _apply_wa(json.loads(raw))
-            debug_log("✅ Scalp: Wellenanker-Einstellungen geladen", dict(WA_CFG))
+            d = json.loads(raw)
+            if "default" in d or "coins" in d:
+                if isinstance(d.get("default"), dict):
+                    _apply_wa(d["default"])
+                for sym, c in (d.get("coins") or {}).items():
+                    if sym in BOTS and isinstance(c, dict):
+                        COIN_CFG[sym] = _validate_wa(c, WA_CFG)
+            else:
+                _apply_wa(d)   # altes Format: eine Einstellung fuer alle Coins -> wird zum Standard
+            debug_log("✅ Scalp: Strategie-Einstellungen geladen", {"standard": dict(WA_CFG), "eigene_coins": sorted(COIN_CFG)})
         except Exception as e:
             debug_log("⚠️ Scalp: gespeicherte Einstellungen ungueltig", {"error": str(e)})
 
@@ -99,7 +114,7 @@ async def _load_wa():
 async def _save_wa():
     """Speichert in Redis (dauerhaft) und zusaetzlich in eine Datei als Notnagel. -> True, wenn Redis geklappt hat."""
     import json
-    data = json.dumps(WA_CFG)
+    data = json.dumps({"default": WA_CFG, "coins": COIN_CFG})
     ok = False
     try:
         r = await get_redis()
@@ -117,8 +132,12 @@ async def _save_wa():
 
 
 def _apply_wa(d):
-    """Validiert und uebernimmt Wellenanker-Einstellungen. Wirft ValueError mit Klartext."""
-    new = dict(WA_CFG)
+    WA_CFG.update(_validate_wa(d, WA_CFG))
+
+
+def _validate_wa(d, base):
+    """Validiert Strategie-Einstellungen auf Basis von `base` und gibt das neue Dict zurueck. Wirft ValueError mit Klartext."""
+    new = dict(base)
     try:
         if "n1" in d:
             new["n1"] = int(d["n1"])
@@ -153,7 +172,7 @@ def _apply_wa(d):
         raise ValueError("Durchschnitt-Länge: 2 bis 200")
     if not 5 <= new["z1"] <= 90:
         raise ValueError("Zone: 5 bis 90")
-    WA_CFG.update(new)
+    return new
 _locks = {}
 _tfstate_cache = {}   # sym -> (ts, {tf: state})
 _chipsig_cache = {}   # tf -> (ts, {sym: state})
@@ -216,15 +235,15 @@ def _prepare(raw, tf, min_bars=MIN_BARS):
     return raw if len(raw) >= min_bars else None
 
 
-def _wa_series(cs):
+def _wa_series(cs, cfg):
     o = [x["o"] for x in cs]
     h = [x["h"] for x in cs]
     l = [x["l"] for x in cs]
     c = [x["c"] for x in cs]
     v = [x["v"] for x in cs]
     n = len(c)
-    z1, z3 = WA_CFG["z1"], _z3()
-    wt1, wt2 = compute_wavetrend_series(o, h, l, c, WA_CFG["n1"], WA_CFG["n2"], WA_SIG, WA_CFG["src"], WA_SCALE)
+    z1, z3 = cfg["z1"], _z3(cfg)
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, cfg["n1"], cfg["n2"], WA_SIG, cfg["src"], WA_SCALE)
     rsi = compute_rsi(c, WA_RSI_LEN)
     mf = _wave_moneyflow(h, l, c, v)
     events = []
@@ -274,11 +293,11 @@ def _supertrend(h, l, c, length, mult):
     return line, dirs
 
 
-def _st_series(cs):
+def _st_series(cs, cfg):
     h = [x["h"] for x in cs]
     l = [x["l"] for x in cs]
     c = [x["c"] for x in cs]
-    line, dirs = _supertrend(h, l, c, WA_CFG["st_len"], WA_CFG["st_mult"])
+    line, dirs = _supertrend(h, l, c, cfg["st_len"], cfg["st_mult"])
     events = []
     for i in range(1, len(c)):
         if dirs[i] and dirs[i - 1] and dirs[i] != dirs[i - 1]:
@@ -286,37 +305,37 @@ def _st_series(cs):
     return line, dirs, events
 
 
-def _signal_events(cs):
+def _signal_events(cs, cfg):
     """Signale der gewaehlten Strategie (Autotrade nutzt nur diese)."""
-    if WA_CFG["strat"] == "st":
-        return _st_series(cs)[2]
-    return _wa_series(cs)[2]
+    if cfg["strat"] == "st":
+        return _st_series(cs, cfg)[2]
+    return _wa_series(cs, cfg)[2]
 
 
-def _tf_state(cs):
-    if WA_CFG["strat"] == "st":
-        return _st_series(cs)[1][-1]
+def _tf_state(cs, cfg):
+    if cfg["strat"] == "st":
+        return _st_series(cs, cfg)[1][-1]
     o = [x["o"] for x in cs]
     h = [x["h"] for x in cs]
     l = [x["l"] for x in cs]
     c = [x["c"] for x in cs]
-    z1 = WA_CFG["z1"]
-    wt1, wt2 = compute_wavetrend_series(o, h, l, c, WA_CFG["n1"], WA_CFG["n2"], WA_SIG, WA_CFG["src"], WA_SCALE)
+    z1 = cfg["z1"]
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, cfg["n1"], cfg["n2"], WA_SIG, cfg["src"], WA_SCALE)
     a, b = wt1[-1], wt2[-1]
     return 1 if (b < -z1 and a > b) else -1 if (b > z1 and a < b) else 0
 
 
-def _compute_chart(main_raw, tf, other_raws):
+def _compute_chart(main_raw, tf, other_raws, cfg):
     """Laeuft im Thread. other_raws: {tf: raw} nur fuer die Zeitebenen-Uebersicht (kann leer sein)."""
     cs = _prepare(main_raw, tf, MIN_CHART_BARS)
     states = {}
     for t, raw in other_raws.items():
         c2 = _prepare(raw, t, MIN_CHART_BARS)
-        states[t] = None if c2 is None else _tf_state(c2)
+        states[t] = None if c2 is None else _tf_state(c2, cfg)
     if cs is None:
         return None, states
-    wt1, wt2, events = _wa_series(cs)
-    states[tf] = _tf_state(cs)
+    wt1, wt2, events = _wa_series(cs, cfg)
+    states[tf] = _tf_state(cs, cfg)
     n = len(cs)
     off = max(0, n - CHART_BARS)
     candles, w1, w2 = [], [], []
@@ -330,8 +349,8 @@ def _compute_chart(main_raw, tf, other_raws):
         w1.append({"time": t, "value": a} if a is not None else {"time": t})
         w2.append({"time": t, "value": b} if b is not None else {"time": t})
     st_line = []
-    if WA_CFG["strat"] == "st":
-        line, dirs, events = _st_series(cs)   # Marker/Signale = Supertrend, die Welle bleibt nur als Anzeige
+    if cfg["strat"] == "st":
+        line, dirs, events = _st_series(cs, cfg)   # Marker/Signale = Supertrend, die Welle bleibt nur als Anzeige
         for i in range(off, n):
             t = cs[i]["ts"] // 1000
             v = _r(line[i], 6) if line[i] is not None else None
@@ -345,10 +364,10 @@ def _compute_chart(main_raw, tf, other_raws):
     a, b = wt1[-1], wt2[-1]
     return {"candles": candles, "wt1": w1, "wt2": w2, "markers": markers, "warm": n >= MIN_BARS, "bars": n,
             "wt1v": _r(a, 1), "wt2v": _r(b, 1), "diff": _r(a - b, 1),
-            "st": st_line, "strat": WA_CFG["strat"]}, states
+            "st": st_line, "strat": cfg["strat"]}, states
 
 
-def _auto_eval(raw, tf, last_ts):
+def _auto_eval(raw, tf, last_ts, cfg):
     """Thread: (ts_der_letzten_geschlossenen_Kerze, event|None). Rechnet nur, wenn eine neue Kerze zu ist."""
     cs = _prepare(raw, tf)
     if cs is None or len(cs) < MIN_BARS:
@@ -359,7 +378,7 @@ def _auto_eval(raw, tf, last_ts):
         return ts, None
     if last_ts is None:
         return ts, None   # Basislinie setzen: Signale, die schon da waren, zaehlen nicht
-    events = _signal_events(cs)
+    events = _signal_events(cs, cfg)
     for e in reversed(events):
         if e["idx"] == closed_idx:
             return ts, {"kind": e["kind"], "strong": bool(e["strong"]), "ext": bool(e["ext"]),
@@ -498,13 +517,13 @@ async def _run_auto(sym):
     raw, reason = _raw_candles(sym, a["tf"])
     if raw is None:
         return
-    ts, ev = await asyncio.to_thread(_auto_eval, raw, a["tf"], a["last_ts"])
+    ts, ev = await asyncio.to_thread(_auto_eval, raw, a["tf"], a["last_ts"], _cfg(sym))
     if ts is None:
         return
     a["last_ts"] = ts
     if ev is None:
         return
-    st_mode = WA_CFG["strat"] == "st"
+    st_mode = _cfg(sym)["strat"] == "st"
     kind_ok = st_mode or (a["normal"] and not ev["strong"] and not ev["ext"]) or (a["strong"] and ev["strong"]) or (a["ext"] and ev["ext"])
     if not kind_ok or not a[ev["kind"]]:
         return
@@ -574,14 +593,14 @@ async def handle_scalp_chart(request):
             if t != tf:
                 raw, _ = _raw_candles(sym, t)
                 other[t] = raw
-    data, states = await asyncio.to_thread(_compute_chart, main_raw, tf, other)
+    data, states = await asyncio.to_thread(_compute_chart, main_raw, tf, other, _cfg(sym))
     if other:
         _tfstate_cache[sym] = (time.time(), {k: v for k, v in states.items() if k != tf})
     elif cached:
         states = dict(cached[1], **states)
     if data is None:
         return web.json_response({"ok": False, "reason": "lädt noch … (Kerzen werden aufgebaut)", "tfstates": states})
-    data.update({"ok": True, "tfstates": states, "tf": tf, "coin": sym, "wa": dict(WA_CFG, z3=_z3())})
+    data.update({"ok": True, "tfstates": states, "tf": tf, "coin": sym, "wa": dict(_cfg(sym), z3=_z3(_cfg(sym)), own=sym in COIN_CFG)})
     return web.json_response(data)
 
 
@@ -592,7 +611,7 @@ def _all_sigs(tf):
         try:
             raw, _ = _raw_candles(s, tf, 120)
             cs = _prepare(raw, tf, MIN_CHART_BARS)
-            out[s] = None if cs is None else _tf_state(cs)
+            out[s] = None if cs is None else _tf_state(cs, _cfg(s))
         except Exception:
             out[s] = None
     return out
@@ -706,7 +725,7 @@ async def handle_scalp_auto(request):
     if isinstance(b.get("wa"), dict):
         # Wellenanker-Einstellungen laufen ueber diese (schon immer vorhandene) Route - so braucht es dafuer keine
         # zusaetzliche Route in main.py
-        return await _wa_update(b["wa"])
+        return await _wa_update(b["wa"], str(b.get("coin", "")).upper())
     sym = str(b.get("coin", "")).upper()
     if sym not in BOTS:
         return web.json_response({"error": "coin ungültig"}, status=400)
@@ -729,7 +748,7 @@ async def handle_scalp_auto(request):
         _, serr = _size_mult(sym, new["usd"])
         if serr:
             return web.json_response({"error": serr}, status=400)
-    if new["enabled"] and WA_CFG["strat"] == "wa" and not (new["normal"] or new["strong"] or new["ext"]):
+    if new["enabled"] and _cfg(sym)["strat"] == "wa" and not (new["normal"] or new["strong"] or new["ext"]):
         return web.json_response({"error": "Mindestens eine Signalart wählen (normal / stark / extrem)"}, status=400)
     if new["enabled"] and not (new["long"] or new["short"]):
         return web.json_response({"error": "Mindestens eine Richtung wählen (Long / Short)"}, status=400)
@@ -748,20 +767,26 @@ async def handle_scalp_auto(request):
 
 
 async def handle_scalp_wa(request):
-    return await _wa_update(await _body(request))
+    b = await _body(request)
+    return await _wa_update(b, str(b.get("coin", "")).upper())
 
 
-async def _wa_update(b):
+async def _wa_update(b, sym):
+    """Strategie-Einstellungen EINES Coins speichern (jeder Coin hat seine eigenen)."""
+    if sym not in BOTS:
+        return web.json_response({"error": "coin ungültig"}, status=400)
     try:
-        _apply_wa(b)
+        COIN_CFG[sym] = _validate_wa(b, _cfg(sym))
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
     saved = await _save_wa()
-    _tfstate_cache.clear(); _chipsig_cache.clear()
-    for a in AUTO.values():
+    c = COIN_CFG[sym]
+    _tfstate_cache.pop(sym, None); _chipsig_cache.clear()
+    a = AUTO.get(sym)
+    if a:
         a["last_ts"] = None   # neue Basislinie: Signale mit den neuen Einstellungen zaehlen erst ab jetzt
-    _log("ALLE", f"Strategie: {'Supertrend' if WA_CFG['strat'] == 'st' else 'Wellenanker'} (ATR {WA_CFG['st_len']}, Faktor {WA_CFG['st_mult']:g}) · Wellenanker-Einstellungen: Kanal {WA_CFG['n1']}, Durchschnitt {WA_CFG['n2']}, Zone ±{WA_CFG['z1']:g}, Quelle {WA_CFG['src']}")
-    return web.json_response({"success": True, "persistent": saved, "wa": dict(WA_CFG, z3=_z3())})
+    _log(sym, f"Strategie: {'Supertrend' if c['strat'] == 'st' else 'Wellenanker'} (ATR {c['st_len']}, Faktor {c['st_mult']:g}) · Wellenanker: Kanal {c['n1']}, Durchschnitt {c['n2']}, Zone ±{c['z1']:g}, Quelle {c['src']}")
+    return web.json_response({"success": True, "persistent": saved, "wa": dict(c, z3=_z3(c), own=True)})
 
 
 async def handle_scalp_index(request):
@@ -1088,7 +1113,7 @@ function waBusy(){return WA_IDS.some(i=>document.activeElement===$(i))}
 function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src;$('st-strat').value=w.strat||'wa';$('st-len').value=w.st_len;$('st-mult').value=w.st_mult}
 async function saveWa(){
  const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value,strat:$('st-strat').value,st_len:$('st-len').value,st_mult:String($('st-mult').value).replace(',','.')};
- try{const r=await api('/api/scalp/auto',{coin,wa:body});toast(r.persistent?'Einstellungen gespeichert (Autotrade startet mit neuer Basislinie)':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);loadedKey=null;waKey='';loadChart()}
+ try{const r=await api('/api/scalp/auto',{coin,wa:body});toast(r.persistent?'Einstellungen für '+coin+' gespeichert (Autotrade startet mit neuer Basislinie)':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);loadedKey=null;waKey='';loadChart()}
  catch(e){toast(e.message,true)}
 }
 WA_IDS.forEach(i=>$(i).addEventListener('change',saveWa));
