@@ -5896,6 +5896,8 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price, cross_up=Fals
         return
     pos = st["position"]
     tp_mode = cfg.get("wa_tp_mode", "gegentrade")
+    if _wa_entry_mode(cfg) == "cross" and tp_mode == "kreuzung":
+        tp_mode = "gegentrade"   # Kreuzung zu Kreuzung: dieselbe Kreuzung schliesst UND eroeffnet die Gegenrichtung (sonst wuerde nur eine Richtung gehandelt)
     ueberlauf_level = cfg.get("wa_ueberlauf_level", 45.0)
     max_nachkauf = max(0, min(20, int(cfg.get("wa_max_nachkauf", 0) or 0)))
 
@@ -6067,6 +6069,8 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
     """Die eigentliche Handelssimulation fuer Wellenanker, getrennt von der (teuren) WaveTrend-
     Berechnung (compute_wavetrend_series) - siehe backtest_wellenanker/run_wa_sweep."""
     n = len(c)
+    if entry_mode == "cross" and tp_mode == "kreuzung":
+        tp_mode = "gegentrade"   # siehe check_wa_candle: Kreuzung zu Kreuzung = Flip bei jeder Kreuzung
     position = None  # {"dir","entry","size","entry_i","sl_price","tp_price","entries"}
     trades = []
 

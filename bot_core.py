@@ -1993,7 +1993,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="wa_entry_mode">
       <option value="zone">Zone: Kreuzung der Linien außerhalb ±Zone 1</option>
       <option value="level">Level: Durchbruch durch −X (Long) / +X (Short)</option>
-      <option value="cross">Kreuzung zu Kreuzung: jede Kreuzung der beiden Linien (egal wo) – TP-Modus „Gegentrade" wählen = immer im Markt</option>
+      <option value="cross">Kreuzung zu Kreuzung: jede Kreuzung der beiden Linien (egal wo) = Wechsel Long ↔ Short</option>
     </select>
   </div>
   <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="zone"><label>Zone 1 (Long &lt; -X, Short &gt; X)</label><input type="number" step="1" min="1" max="100" id="wa_zone1"></div>
