@@ -61,7 +61,7 @@ AUTO = {}        # sym -> Autotrade-Einstellungen
 AUTO_LOG = []    # neueste zuerst
 WA_SOURCES = ("close", "hlc3", "ohlc4", "hl2")
 WA_CFG = {"n1": WA_N1, "n2": WA_N2, "z1": WA_Z1, "src": "close",
-          "strat": "wa", "st_len": 5, "st_mult": 1.5, "st_atr": "rma", "st_ema": 9, "candles": "normal"}   # strat: "wa" = Wellenanker-Signale, "st" = Supertrend-Signale   # Wellenanker-Einstellungen (gelten fuer alle Coins)
+          "strat": "wa", "candles": "normal"}   # strat: "wa" = Wellenanker-Signale, "ha" = Heikin-Ashi-Farbwechsel
 WA_FILE = os.getenv("SCALP_SETTINGS_FILE", "scalp_settings.json")
 
 
@@ -151,36 +151,16 @@ def _validate_wa(d, base):
         if d["src"] not in WA_SOURCES:
             raise ValueError("Quelle muss eine von " + ", ".join(WA_SOURCES) + " sein")
         new["src"] = d["src"]
-    try:
-        if "st_len" in d:
-            new["st_len"] = int(d["st_len"])
-        if "st_mult" in d:
-            new["st_mult"] = float(d["st_mult"])
-    except (TypeError, ValueError):
-        raise ValueError("Supertrend: ATR-Länge und Faktor müssen Zahlen sein")
-    try:
-        if "st_ema" in d:
-            new["st_ema"] = int(d["st_ema"])
-    except (TypeError, ValueError):
-        raise ValueError("Supertrend: EMA-Länge muss eine Zahl sein")
     if "candles" in d:
         if d["candles"] not in ("normal", "ha"):
             raise ValueError("Kerzen: normal oder Heikin-Ashi")
         new["candles"] = d["candles"]
-    if "st_atr" in d:
-        if d["st_atr"] not in ("rma", "sma"):
-            raise ValueError("ATR-Methode: Wilder (rma) oder SMA")
-        new["st_atr"] = d["st_atr"]
-    if not 2 <= new["st_ema"] <= 200:
-        raise ValueError("EMA-Länge: 2 bis 200")
     if "strat" in d:
-        if d["strat"] not in ("wa", "st"):
-            raise ValueError("Strategie muss Wellenanker oder Supertrend sein")
+        if d["strat"] == "st":   # alte Supertrend-Einstellung -> jetzt Heikin-Ashi-Wechsel
+            d = dict(d, strat="ha")
+        if d["strat"] not in ("wa", "ha"):
+            raise ValueError("Strategie muss Wellenanker oder Heikin-Ashi sein")
         new["strat"] = d["strat"]
-    if not 1 <= new["st_len"] <= 100:
-        raise ValueError("Supertrend ATR-Länge: 1 bis 100")
-    if not 0.5 <= new["st_mult"] <= 10:
-        raise ValueError("Supertrend Faktor: 0,5 bis 10")
     if not 2 <= new["n1"] <= 100:
         raise ValueError("Kanal-Länge: 2 bis 100")
     if not 2 <= new["n2"] <= 200:
@@ -286,81 +266,27 @@ def _heikin_ashi(cs):
     return out
 
 
-def _ema_series(c, n):
-    out = [None] * len(c)
-    if len(c) < n:
-        return out
-    a = sum(c[:n]) / n
-    out[n - 1] = a
-    k = 2.0 / (n + 1)
-    for i in range(n, len(c)):
-        a = c[i] * k + a * (1 - k)
-        out[i] = a
-    return out
-
-
-def _supertrend(o, h, l, c, length, mult, wilder=True):
-    """"HA Supertrend Trader" (Pine): Supertrend auf Heikin-Ashi-Close = (O+H+L+C)/4, ATR nach Wilder (Standard) oder als SMA.
-    -> (linie, richtung): richtung 1 = Aufwaerts (Linie unter dem Kurs), -1 = Abwaerts, 0 = noch nicht berechenbar."""
-    n = len(c)
-    line, dirs = [None] * n, [0] * n
-    if n <= length:
-        return line, dirs
-    hac = [(o[i] + h[i] + l[i] + c[i]) / 4 for i in range(n)]
-    tr = [h[0] - l[0]] + [max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1])) for i in range(1, n)]
-    atr = [None] * n
-    a = sum(tr[:length]) / length
-    atr[length - 1] = a
-    for i in range(length, n):
-        if wilder:
-            a = (a * (length - 1) + tr[i]) / length
-        else:
-            a = sum(tr[i - length + 1:i + 1]) / length
-        atr[i] = a
-    up = dn = None
-    trend = 1
-    for i in range(length - 1, n):
-        u, d = hac[i] - mult * atr[i], hac[i] + mult * atr[i]
-        if up is not None:
-            if hac[i - 1] > up:
-                u = max(u, up)
-            if hac[i - 1] < dn:
-                d = min(d, dn)
-            if trend == -1 and hac[i] > dn:
-                trend = 1
-            elif trend == 1 and hac[i] < up:
-                trend = -1
-        up, dn = u, d
-        line[i] = up if trend == 1 else dn
-        dirs[i] = trend
-    return line, dirs
-
-
-def _st_series(cs, cfg):
-    """Events wie im Pine-Skript: das Signal steht EINE Kerze NACH dem Richtungswechsel (idx = Wechsel + 1, nicht repaintend);
-    'flip' ist die Kerze des Wechsels selbst (der Autotrade handelt, sobald die geschlossen ist)."""
-    o = [x["o"] for x in cs]
-    h = [x["h"] for x in cs]
-    l = [x["l"] for x in cs]
-    c = [x["c"] for x in cs]
-    line, dirs = _supertrend(o, h, l, c, cfg["st_len"], cfg["st_mult"], cfg.get("st_atr", "rma") == "rma")
-    events = []
-    for i in range(1, len(c)):
-        if dirs[i] and dirs[i - 1] and dirs[i] != dirs[i - 1] and i + 1 < len(c):
-            events.append({"kind": "long" if dirs[i] == 1 else "short", "idx": i + 1, "flip": i, "ext": False, "strong": False})
-    return line, dirs, events
+def _ha_series(cs):
+    """Heikin-Ashi-Farbwechsel: gruene HA-Kerze (Close >= Open) = Long, rote = Short.
+    Signal auf der Kerze, bei der die Farbe wechselt (der Autotrade handelt, sobald sie geschlossen ist).
+    -> (ha_kerzen, richtung je Kerze, events)"""
+    ha = _heikin_ashi(cs)
+    dirs = [1 if k[3] >= k[0] else -1 for k in ha]
+    events = [{"kind": "long" if dirs[i] == 1 else "short", "idx": i, "flip": i, "ext": False, "strong": False}
+              for i in range(1, len(dirs)) if dirs[i] != dirs[i - 1]]
+    return ha, dirs, events
 
 
 def _signal_events(cs, cfg):
     """Signale der gewaehlten Strategie (Autotrade nutzt nur diese)."""
-    if cfg["strat"] == "st":
-        return _st_series(cs, cfg)[2]
+    if cfg["strat"] == "ha":
+        return _ha_series(cs)[2]
     return _wa_series(cs, cfg)[2]
 
 
 def _tf_state(cs, cfg):
-    if cfg["strat"] == "st":
-        return _st_series(cs, cfg)[1][-1]
+    if cfg["strat"] == "ha":
+        return _ha_series(cs)[1][-1]
     o = [x["o"] for x in cs]
     h = [x["h"] for x in cs]
     l = [x["l"] for x in cs]
@@ -398,17 +324,8 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
         # (der Wellenanker-Chart folgt dem Preis-Chart ueber den Index)
         w1.append({"time": t, "value": a} if a is not None else {"time": t})
         w2.append({"time": t, "value": b} if b is not None else {"time": t})
-    st_line, ema_line = [], []
-    if cfg["strat"] == "st":
-        line, dirs, events = _st_series(cs, cfg)   # Marker/Signale = Supertrend, die Welle bleibt nur als Anzeige
-        for i in range(off, n):
-            t = cs[i]["ts"] // 1000
-            v = _r(line[i], 6) if line[i] is not None else None
-            st_line.append({"time": t, "value": v, "up": dirs[i] == 1} if v is not None else {"time": t})
-        ema = _ema_series([x["c"] for x in cs], cfg["st_ema"])
-        for i in range(off, n):
-            t = cs[i]["ts"] // 1000
-            ema_line.append({"time": t, "value": _r(ema[i], 6), "up": cs[i]["c"] > ema[i]} if ema[i] is not None else {"time": t})
+    if cfg["strat"] == "ha":
+        events = _ha_series(cs)[2]   # Marker/Signale = HA-Farbwechsel, die Welle bleibt nur als Anzeige
     markers = []
     for e in events:
         if e["idx"] >= off:
@@ -418,7 +335,7 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
     a, b = wt1[-1], wt2[-1]
     return {"candles": candles, "wt1": w1, "wt2": w2, "markers": markers, "warm": n >= MIN_BARS, "bars": n,
             "wt1v": _r(a, 1), "wt2v": _r(b, 1), "diff": _r(a - b, 1),
-            "st": st_line, "ema": ema_line, "strat": cfg["strat"]}, states
+            "strat": cfg["strat"]}, states
 
 
 def _auto_eval(raw, tf, last_ts, cfg):
@@ -577,11 +494,11 @@ async def _run_auto(sym):
     a["last_ts"] = ts
     if ev is None:
         return
-    st_mode = _cfg(sym)["strat"] == "st"
+    st_mode = _cfg(sym)["strat"] == "ha"
     kind_ok = st_mode or (a["normal"] and not ev["strong"] and not ev["ext"]) or (a["strong"] and ev["strong"]) or (a["ext"] and ev["ext"])
     if not kind_ok or not a[ev["kind"]]:
         return
-    sig = "ST" if st_mode else ("◆" if ev["ext"] else "◉" if ev["strong"] else "●")
+    sig = "HA" if st_mode else ("◆" if ev["ext"] else "◉" if ev["strong"] else "●")
     st = BOTS[sym]["state"]
     if st.get("position") == ev["kind"]:
         _log(sym, f"{a['tf']} {ev['kind'].capitalize()} {sig} – Position läuft schon in diese Richtung, übersprungen")
@@ -839,7 +756,7 @@ async def _wa_update(b, sym):
     a = AUTO.get(sym)
     if a:
         a["last_ts"] = None   # neue Basislinie: Signale mit den neuen Einstellungen zaehlen erst ab jetzt
-    _log(sym, f"Strategie: {'Supertrend' if c['strat'] == 'st' else 'Wellenanker'} (HA, ATR {c['st_len']}/{c['st_atr']}, Faktor {c['st_mult']:g}, EMA {c['st_ema']}) · Wellenanker: Kanal {c['n1']}, Durchschnitt {c['n2']}, Zone ±{c['z1']:g}, Quelle {c['src']}")
+    _log(sym, f"Strategie: {'Heikin-Ashi-Wechsel' if c['strat'] == 'ha' else 'Wellenanker'} · Kerzen {c['candles']} · Wellenanker: Kanal {c['n1']}, Durchschnitt {c['n2']}, Zone ±{c['z1']:g}, Quelle {c['src']}")
     return web.json_response({"success": True, "persistent": saved, "wa": dict(c, z3=_z3(c), own=True)})
 
 
@@ -925,12 +842,8 @@ button{font-family:inherit;cursor:pointer}
     <div class="tfbar" id="tfbar"></div>
    </div>
    <div class="row" style="gap:8px;padding-bottom:6px">
-    <label class="wafld" style="flex:0 0 160px"><span class="lab">Strategie (Signale)</span><select class="inp" id="st-strat"><option value="wa">Wellenanker</option><option value="st">Supertrend</option></select></label>
+    <label class="wafld" style="flex:0 0 160px"><span class="lab">Strategie (Signale)</span><select class="inp" id="st-strat"><option value="wa">Wellenanker</option><option value="ha">Heikin-Ashi Wechsel</option></select></label>
     <label class="wafld" style="flex:0 0 150px"><span class="lab">Kerzen</span><select class="inp" id="st-candles"><option value="normal">Normal</option><option value="ha">Heikin-Ashi</option></select></label>
-    <label class="wafld stf" style="flex:0 0 110px"><span class="lab">ATR-Länge</span><input class="inp" id="st-len" type="number" step="1" min="1" max="100"></label>
-    <label class="wafld stf" style="flex:0 0 110px"><span class="lab">Faktor</span><input class="inp" id="st-mult" type="number" step="0.1" min="0.5" max="10"></label>
-    <label class="wafld stf" style="flex:0 0 130px"><span class="lab">ATR-Methode</span><select class="inp" id="st-atr"><option value="rma">Wilder (ATR)</option><option value="sma">SMA</option></select></label>
-    <label class="wafld stf" style="flex:0 0 110px"><span class="lab">EMA-Länge</span><input class="inp" id="st-ema" type="number" step="1" min="2" max="200"></label>
    </div>
    <div class="cwrap"><div id="chart"></div><div id="cmsg"></div></div>
    <div class="row" style="justify-content:space-between;padding-top:6px">
@@ -1019,8 +932,6 @@ const pc=LW.createChart($('chart'),base),wc=LW.createChart($('wachart'),Object.a
 const candle=pc.addCandlestickSeries({upColor:G,downColor:R,borderVisible:false,wickUpColor:G,wickDownColor:R,lastValueVisible:true,priceLineVisible:true});
 const wt1s=wc.addLineSeries({color:'#7FB5F0',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
 const wt2s=wc.addLineSeries({color:'#2F7BFF',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
-const stLine=pc.addLineSeries({color:G,lineWidth:2,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
-const emaLine=pc.addLineSeries({color:G,lineWidth:1,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
 let zoneLines=[];
 function setZones(z1,z3){
  zoneLines.forEach(l=>wt2s.removePriceLine(l));zoneLines=[];
@@ -1072,33 +983,33 @@ function shift(arr){return arr.map(x=>Object.assign({},x,{time:x.time+tzoff}))}
 function applyChart(d,key){
  renderTfStates(d.tfstates||{});
  if(d.wa){
-  const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.st_len+'|'+d.wa.st_mult+'|'+d.wa.st_atr+'|'+d.wa.st_ema+'|'+d.wa.candles;
+  const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.candles;
   if(k!==waKey){if(waKey!=='')loadedKey=null;waKey=k;applyMode(d.wa.strat);setZones(d.wa.z1,d.wa.z3);if(!waBusy())fillWa(d.wa)}
  }
  const msg=$('cmsg');
  if(!d.ok){msg.textContent=d.reason||'keine Daten';msg.style.display='flex';return}
  msg.style.display='none';
- const cd=shift(d.candles),w1=shift(d.wt1),w2=shift(d.wt2),sl=shift(d.st||[]).map(x=>x.value==null?{time:x.time}:{time:x.time,value:x.value,color:x.up?G:R}),el=shift(d.ema||[]).map(x=>x.value==null?{time:x.time}:{time:x.time,value:x.value,color:x.up?G:R});
+ const cd=shift(d.candles),w1=shift(d.wt1),w2=shift(d.wt2);
  if(loadedKey!==key){
   const p=cd.length?cd[cd.length-1].close:1,dg=digits(p);
   candle.applyOptions({priceFormat:{type:'price',precision:dg,minMove:Math.pow(10,-dg)}});
-  candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);stLine.setData(sl);emaLine.setData(el);
+  candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);;
   const n=cd.length;pc.timeScale().setVisibleLogicalRange({from:Math.max(0,n-110),to:n+6});
   loadedKey=key;lastT=cd.length?cd[cd.length-1].time:0;
  }else if(cd.length){
   /* nur die letzte Kerze aktualisieren bzw. neue anhaengen (aeltere Zeiten wuerde die Bibliothek ablehnen) */
   const upd=(s,arr)=>{for(const p of arr){if(p.time>=lastT)s.update(p)}};
-  try{upd(candle,cd);upd(wt1s,w1);upd(wt2s,w2);upd(stLine,sl);upd(emaLine,el)}
-  catch(e){candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);stLine.setData(sl);emaLine.setData(el)}
+  try{upd(candle,cd);upd(wt1s,w1);upd(wt2s,w2)}
+  catch(e){candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);}
   lastT=cd[cd.length-1].time;
  }
  const ms=d.markers.map(m=>({time:m.time+tzoff,pos:m.kind==='long'?'belowBar':'aboveBar',color:m.kind==='long'?G:R,shape:m.kind==='long'?'arrowUp':'arrowDown',text:m.ext?'◆':m.strong?'◉':''}));
  candle.setMarkers(ms.map(m=>({time:m.time,position:m.pos,color:m.color,shape:m.shape,text:m.text})));
- wt2s.setMarkers(d.strat==='st'?[]:d.markers.map(m=>({time:m.time+tzoff,position:'inBar',color:m.kind==='long'?G:R,shape:m.ext?'square':'circle',size:m.strong?2:1})));
+ wt2s.setMarkers(d.strat==='ha'?[]:d.markers.map(m=>({time:m.time+tzoff,position:'inBar',color:m.kind==='long'?G:R,shape:m.ext?'square':'circle',size:m.strong?2:1})));
  $('wt1v').textContent='WT1 '+(d.wt1v>0?'+':'')+d.wt1v;$('wt2v').textContent='WT2 '+(d.wt2v>0?'+':'')+d.wt2v;$('wdv').textContent='Δ '+(d.diff>0?'+':'')+d.diff+(d.warm?'':'  ⚠ nur '+d.bars+' Kerzen Historie – Indikator noch ungenau');
  const f=d.markers.slice(-5).reverse();
  $('feed').innerHTML=f.length?f.map(m=>{const l=m.kind==='long',t=new Date(m.time*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  return '<div class="feed"><span class="mono" style="color:var(--mut)">'+t+' · '+d.tf+'</span><span class="pill '+(l?'g':'r')+'" style="padding:3px 10px">'+(l?'Long':'Short')+' '+(d.strat==='st'?'ST':m.ext?'◆':m.strong?'◉':'●')+'</span><span class="mono" style="color:#cfd5e0">'+fmtP(m.price)+'</span></div>'}).join(''):'<div class="small">Noch keine Signale im sichtbaren Bereich.</div>';
+  return '<div class="feed"><span class="mono" style="color:var(--mut)">'+t+' · '+d.tf+'</span><span class="pill '+(l?'g':'r')+'" style="padding:3px 10px">'+(l?'Long':'Short')+' '+(d.strat==='ha'?'HA':m.ext?'◆':m.strong?'◉':'●')+'</span><span class="mono" style="color:#cfd5e0">'+fmtP(m.price)+'</span></div>'}).join(''):'<div class="small">Noch keine Signale im sichtbaren Bereich.</div>';
 }
 function renderTfStates(s){
  $('tfs').innerHTML=TFS.map(t=>{const v=s[t];const txt=v===undefined||v===null?'…':v===1?'LONG':v===-1?'SHORT':'ABWARTEN';const c=v===1?G:v===-1?R:'#7d8696';
@@ -1165,19 +1076,19 @@ async function pollStatusOnce(){
 async function pollStatus(){await pollStatusOnce();setTimeout(pollStatus,1000)}
 
 /* ---------- Wellenanker-Einstellungen ---------- */
-const WA_IDS=['wa-n1','wa-n2','wa-z1','wa-src','st-strat','st-len','st-mult','st-atr','st-ema','st-candles'];
-function applyMode(s){const st=s==='st';document.querySelectorAll('.stf').forEach(e=>e.style.display=st?'':'none');$('sigrow').style.display=st?'none':'';$('siglab').textContent=st?'Einstieg bei Supertrend-Richtungswechsel (grün = Long, rot = Short)':'Einstieg bei Signal';['leg1','leg2'].forEach(i=>$(i).style.display=st?'none':'')}
+const WA_IDS=['wa-n1','wa-n2','wa-z1','wa-src','st-strat','st-candles'];
+function applyMode(s){const st=s==='ha';$('sigrow').style.display=st?'none':'';$('siglab').textContent=st?'Einstieg bei Heikin-Ashi-Farbwechsel (grün = Long, rot = Short)':'Einstieg bei Signal';['leg1','leg2'].forEach(i=>$(i).style.display=st?'none':'')}
 function waBusy(){return WA_IDS.some(i=>document.activeElement===$(i))}
-function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src;$('st-strat').value=w.strat||'wa';$('st-len').value=w.st_len;$('st-mult').value=w.st_mult;$('st-atr').value=w.st_atr||'rma';$('st-ema').value=w.st_ema;$('st-candles').value=w.candles||'normal'}
+function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src;$('st-strat').value=w.strat||'wa';$('st-candles').value=w.candles||'normal'}
 async function saveWa(){
- const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value,strat:$('st-strat').value,st_len:$('st-len').value,st_mult:String($('st-mult').value).replace(',','.'),st_atr:$('st-atr').value,st_ema:$('st-ema').value,candles:$('st-candles').value};
+ const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value,strat:$('st-strat').value,candles:$('st-candles').value};
  try{const r=await api('/api/scalp/auto',{coin,wa:body});toast(r.persistent?'Einstellungen für '+coin+' gespeichert (Autotrade startet mit neuer Basislinie)':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);loadedKey=null;waKey='';loadChart()}
  catch(e){toast(e.message,true)}
 }
 WA_IDS.forEach(i=>$(i).addEventListener('change',saveWa));
 
 /* ---------- Aktionen ---------- */
-function switchCoin(c){if(c===coin)return;coin=c;ls('scalp_coin',c);loadedKey=null;ST=null;['entry','tp','sl'].forEach(k=>setLine(k,null));candle.setData([]);wt1s.setData([]);wt2s.setData([]);stLine.setData([]);emaLine.setData([]);candle.setMarkers([]);wt2s.setMarkers([]);autoDirty=false;$('cname').textContent=c;pollStatusOnce();loadChart()}
+function switchCoin(c){if(c===coin)return;coin=c;ls('scalp_coin',c);loadedKey=null;ST=null;['entry','tp','sl'].forEach(k=>setLine(k,null));candle.setData([]);wt1s.setData([]);wt2s.setData([]);candle.setMarkers([]);wt2s.setMarkers([]);autoDirty=false;$('cname').textContent=c;pollStatusOnce();loadChart()}
 function renderTfBar(){$('tfbar').innerHTML=TFS.map(t=>'<button data-t="'+t+'" class="'+(t===tf?'on':'')+'">'+t+'</button>').join('');
  document.querySelectorAll('#tfbar button').forEach(b=>b.addEventListener('click',async()=>{tf=b.dataset.t;ls('scalp_tf',tf);loadedKey=null;renderTfBar();loadChart();
   if(ST&&ST.coin&&ST.coin.auto.enabled){try{await api('/api/scalp/auto',{coin,tf});toast('Autotrade folgt jetzt '+tf+' (neue Basislinie)')}catch(e){toast(e.message,true)}pollStatusOnce()}}))}
