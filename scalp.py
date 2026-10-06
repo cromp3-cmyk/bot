@@ -32,7 +32,7 @@ import binance_ws
 import lighter_candles
 from strategies import (
     BINANCE_SYMBOL_MAP, BINANCE_FUTURES_ONLY_SYMBOLS,
-    compute_rsi, compute_wavetrend_series,
+    compute_rsi, compute_wavetrend_series, _wa_raw_signals,
 )
 from screener import (
     _resample_1s, _wave_moneyflow, _market_for, _r, SCREENER_STATE,
@@ -61,7 +61,7 @@ AUTO = {}        # sym -> Autotrade-Einstellungen
 AUTO_LOG = []    # neueste zuerst
 WA_SOURCES = ("close", "hlc3", "ohlc4", "hl2")
 WA_CFG = {"n1": WA_N1, "n2": WA_N2, "z1": WA_Z1, "src": "close",
-          "strat": "wa", "candles": "normal"}   # strat: "wa" = Wellenanker-Signale, "ha" = Heikin-Ashi-Farbwechsel
+          "strat": "wa", "candles": "normal", "w2_level": 10.0, "w2_line": "signal", "w2_profit": False}   # strat: "wa" = Wellenanker-Signale, "ha" = Heikin-Ashi-Farbwechsel, "w2" = Wellenanker 2 (Level-Durchbruch)
 WA_FILE = os.getenv("SCALP_SETTINGS_FILE", "scalp_settings.json")
 
 
@@ -151,6 +151,19 @@ def _validate_wa(d, base):
         if d["src"] not in WA_SOURCES:
             raise ValueError("Quelle muss eine von " + ", ".join(WA_SOURCES) + " sein")
         new["src"] = d["src"]
+    try:
+        if "w2_level" in d:
+            new["w2_level"] = float(d["w2_level"])
+    except (TypeError, ValueError):
+        raise ValueError("Wellenanker 2: Level muss eine Zahl sein")
+    if "w2_line" in d:
+        if d["w2_line"] not in ("signal", "wave", "both"):
+            raise ValueError("Wellenanker 2: Linie = Signallinie, Welle oder Beide")
+        new["w2_line"] = d["w2_line"]
+    if "w2_profit" in d:
+        new["w2_profit"] = d["w2_profit"] in (True, "true", "1", 1)
+    if not 0 <= new["w2_level"] <= 30:
+        raise ValueError("Wellenanker 2: Level 0 bis 30")
     if "candles" in d:
         if d["candles"] not in ("normal", "ha"):
             raise ValueError("Kerzen: normal oder Heikin-Ashi")
@@ -158,8 +171,8 @@ def _validate_wa(d, base):
     if "strat" in d:
         if d["strat"] == "st":   # alte Supertrend-Einstellung -> jetzt Heikin-Ashi-Wechsel
             d = dict(d, strat="ha")
-        if d["strat"] not in ("wa", "ha"):
-            raise ValueError("Strategie muss Wellenanker oder Heikin-Ashi sein")
+        if d["strat"] not in ("wa", "ha", "w2"):
+            raise ValueError("Strategie muss Wellenanker, Wellenanker 2 oder Heikin-Ashi sein")
         new["strat"] = d["strat"]
     if not 2 <= new["n1"] <= 100:
         raise ValueError("Kanal-Länge: 2 bis 100")
@@ -277,16 +290,37 @@ def _ha_series(cs):
     return ha, dirs, events
 
 
+def _w2_series(cs, cfg):
+    """Wellenanker 2: Durchbruch der Linie (Signal/Welle/Beide) durch -Level (Long) bzw. +Level (Short).
+    -> (wt1, wt2, events, cross_up_flags, cross_dn_flags)"""
+    o = [x["o"] for x in cs]
+    h = [x["h"] for x in cs]
+    l = [x["l"] for x in cs]
+    c = [x["c"] for x in cs]
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, cfg["n1"], cfg["n2"], WA_SIG, cfg["src"], WA_SCALE)
+    events, cu, cd = [], [False] * len(c), [False] * len(c)
+    for i in range(1, len(c)):
+        lo, sh, cu[i], cd[i] = _wa_raw_signals(wt1, wt2, i, cfg["w2_level"], "level", cfg["w2_line"])
+        if lo or sh:
+            events.append({"kind": "long" if lo else "short", "idx": i, "flip": i, "ext": False, "strong": False})
+    return wt1, wt2, events, cu, cd
+
+
 def _signal_events(cs, cfg):
     """Signale der gewaehlten Strategie (Autotrade nutzt nur diese)."""
     if cfg["strat"] == "ha":
         return _ha_series(cs)[2]
+    if cfg["strat"] == "w2":
+        return _w2_series(cs, cfg)[2]
     return _wa_series(cs, cfg)[2]
 
 
 def _tf_state(cs, cfg):
     if cfg["strat"] == "ha":
         return _ha_series(cs)[1][-1]
+    if cfg["strat"] == "w2":
+        w1, w2 = _w2_series(cs, cfg)[:2]
+        return 1 if w1[-1] > w2[-1] else -1 if w1[-1] < w2[-1] else 0
     o = [x["o"] for x in cs]
     h = [x["h"] for x in cs]
     l = [x["l"] for x in cs]
@@ -326,6 +360,8 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
         w2.append({"time": t, "value": b} if b is not None else {"time": t})
     if cfg["strat"] == "ha":
         events = _ha_series(cs)[2]   # Marker/Signale = HA-Farbwechsel, die Welle bleibt nur als Anzeige
+    elif cfg["strat"] == "w2":
+        events = _w2_series(cs, cfg)[2]   # Marker = Level-Durchbruch
     markers = []
     for e in events:
         if e["idx"] >= off:
@@ -349,6 +385,18 @@ def _auto_eval(raw, tf, last_ts, cfg):
         return ts, None
     if last_ts is None:
         return ts, None   # Basislinie setzen: Signale, die schon da waren, zaehlen nicht
+    if cfg["strat"] == "w2":
+        wt1, wt2, events, cu, cd = _w2_series(cs, cfg)
+        kind = None
+        for e in reversed(events):
+            if e["idx"] == closed_idx:
+                kind = e["kind"]
+            if e["idx"] <= closed_idx:
+                break
+        if kind is None and not cu[closed_idx] and not cd[closed_idx]:
+            return ts, None
+        return ts, {"kind": kind, "strong": False, "ext": False, "price": cs[closed_idx]["c"],
+                    "cross_up": cu[closed_idx], "cross_dn": cd[closed_idx]}
     events = _signal_events(cs, cfg)
     for e in reversed(events):
         if e.get("flip", e["idx"]) == closed_idx:
@@ -494,7 +542,11 @@ async def _run_auto(sym):
     a["last_ts"] = ts
     if ev is None:
         return
-    st_mode = _cfg(sym)["strat"] == "ha"
+    cfg = _cfg(sym)
+    if cfg["strat"] == "w2":
+        await _run_auto_w2(sym, a, ev, cfg)
+        return
+    st_mode = cfg["strat"] == "ha"
     kind_ok = st_mode or (a["normal"] and not ev["strong"] and not ev["ext"]) or (a["strong"] and ev["strong"]) or (a["ext"] and ev["ext"])
     if not kind_ok or not a[ev["kind"]]:
         return
@@ -510,6 +562,40 @@ async def _run_auto(sym):
     _set_tpsl_from_usd(sym, a["tp_usd"], a["sl_usd"])
     dry = BOTS[sym]["config"].get("dry_run")
     _log(sym, f"{a['tf']} {ev['kind'].capitalize()} {sig} → Market {ev['kind']}" + (" (Dry-Run)" if dry else ""), ev["kind"])
+
+
+async def _run_auto_w2(sym, a, ev, cfg):
+    """Wellenanker 2: TP = entgegengesetzte Kreuzung der beiden Linien (egal wo); Einstieg = Level-Durchbruch.
+    Option 'nicht im Minus schliessen': eine Gegenkreuzung bzw. ein Gegensignal schliesst/dreht die Position nur im Plus."""
+    st = BOTS[sym]["state"]
+    pos, price, avg = st.get("position"), st.get("last_price"), st.get("avg_entry_price")
+
+    def in_loss():
+        return bool(avg and price and ((price < avg) if pos == "long" else (price > avg)))
+
+    if pos and (ev["cross_dn"] if pos == "long" else ev["cross_up"]):
+        if cfg["w2_profit"] and in_loss():
+            _log(sym, f"{a['tf']} Gegenkreuzung ignoriert – {pos} liegt im Minus (nicht im Minus schließen)")
+        else:
+            ok, err = await _close(sym, "SCALP-W2-KREUZUNG")
+            _log(sym, f"{a['tf']} Gegenkreuzung → Position geschlossen" if ok else f"{a['tf']} Gegenkreuzung → FEHLER: {err}", "tp" if ok else "err")
+            pos = st.get("position")
+    kind = ev["kind"]
+    if not kind or not a[kind]:
+        return
+    if pos == kind:
+        _log(sym, f"{a['tf']} {kind.capitalize()} Level – Position läuft schon in diese Richtung, übersprungen")
+        return
+    if pos and cfg["w2_profit"] and in_loss():
+        _log(sym, f"{a['tf']} {kind.capitalize()} Level ignoriert – {pos} liegt im Minus (nicht im Minus schließen)")
+        return
+    ok, err = await _place(sym, kind, "SCALP-AUTO", a.get("usd") or None)
+    if not ok:
+        _log(sym, f"{a['tf']} {kind.capitalize()} Level → FEHLER: {err}", "err")
+        return
+    _set_tpsl_from_usd(sym, a["tp_usd"], a["sl_usd"])
+    dry = BOTS[sym]["config"].get("dry_run")
+    _log(sym, f"{a['tf']} {kind.capitalize()} Level → Market {kind}" + (" (Dry-Run)" if dry else ""), kind)
 
 
 async def scalp_loop():
@@ -756,7 +842,7 @@ async def _wa_update(b, sym):
     a = AUTO.get(sym)
     if a:
         a["last_ts"] = None   # neue Basislinie: Signale mit den neuen Einstellungen zaehlen erst ab jetzt
-    _log(sym, f"Strategie: {'Heikin-Ashi-Wechsel' if c['strat'] == 'ha' else 'Wellenanker'} · Kerzen {c['candles']} · Wellenanker: Kanal {c['n1']}, Durchschnitt {c['n2']}, Zone ±{c['z1']:g}, Quelle {c['src']}")
+    _log(sym, f"Strategie: {'Heikin-Ashi-Wechsel' if c['strat'] == 'ha' else 'Wellenanker 2 (Level ±' + format(c['w2_level'], 'g') + ', ' + c['w2_line'] + ', TP Gegenkreuzung' + (', nicht im Minus schließen' if c['w2_profit'] else '') + ')' if c['strat'] == 'w2' else 'Wellenanker'} · Kerzen {c['candles']} · Wellenanker: Kanal {c['n1']}, Durchschnitt {c['n2']}, Zone ±{c['z1']:g}, Quelle {c['src']}")
     return web.json_response({"success": True, "persistent": saved, "wa": dict(c, z3=_z3(c), own=True)})
 
 
@@ -842,7 +928,10 @@ button{font-family:inherit;cursor:pointer}
     <div class="tfbar" id="tfbar"></div>
    </div>
    <div class="row" style="gap:8px;padding-bottom:6px">
-    <label class="wafld" style="flex:0 0 160px"><span class="lab">Strategie (Signale)</span><select class="inp" id="st-strat"><option value="wa">Wellenanker</option><option value="ha">Heikin-Ashi Wechsel</option></select></label>
+    <label class="wafld" style="flex:0 0 210px"><span class="lab">Strategie (Signale)</span><select class="inp" id="st-strat"><option value="wa">Wellenanker</option><option value="w2">Wellenanker 2 (Level)</option><option value="ha">Heikin-Ashi Wechsel</option></select></label>
+    <label class="wafld w2f" style="flex:0 0 130px"><span class="lab">Level ± (0–30)</span><input class="inp" id="w2-level" type="number" step="0.5" min="0" max="30"></label>
+    <label class="wafld w2f" style="flex:0 0 150px"><span class="lab">Linie</span><select class="inp" id="w2-line"><option value="signal">Signallinie</option><option value="wave">Welle</option><option value="both">Beide</option></select></label>
+    <label class="wafld w2f" style="flex:0 0 200px"><span class="lab">Nicht im Minus schließen</span><select class="inp" id="w2-profit"><option value="false">Aus</option><option value="true">An</option></select></label>
     <label class="wafld" style="flex:0 0 150px"><span class="lab">Kerzen</span><select class="inp" id="st-candles"><option value="normal">Normal</option><option value="ha">Heikin-Ashi</option></select></label>
    </div>
    <div class="cwrap"><div id="chart"></div><div id="cmsg"></div></div>
@@ -853,7 +942,7 @@ button{font-family:inherit;cursor:pointer}
    <div class="row" style="gap:8px">
     <label class="wafld"><span class="lab">Kanal-Länge</span><input class="inp" id="wa-n1" type="number" step="1" min="2" max="100"></label>
     <label class="wafld"><span class="lab">Durchschnitt-Länge</span><input class="inp" id="wa-n2" type="number" step="1" min="2" max="200"></label>
-    <label class="wafld"><span class="lab">Zone ±</span><input class="inp" id="wa-z1" type="number" step="1" min="5" max="90"></label>
+    <label class="wafld zonef"><span class="lab">Zone ±</span><input class="inp" id="wa-z1" type="number" step="1" min="5" max="90"></label>
     <label class="wafld"><span class="lab">Quelle der Welle</span><select class="inp" id="wa-src"><option value="close">close</option><option value="hlc3">hlc3 (H+L+C)/3</option><option value="ohlc4">ohlc4</option><option value="hl2">hl2 (H+L)/2</option></select></label>
    </div>
    <div class="cwrap"><div id="wachart"></div></div>
@@ -933,8 +1022,9 @@ const candle=pc.addCandlestickSeries({upColor:G,downColor:R,borderVisible:false,
 const wt1s=wc.addLineSeries({color:'#7FB5F0',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
 const wt2s=wc.addLineSeries({color:'#2F7BFF',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
 let zoneLines=[];
-function setZones(z1,z3){
+function setZones(z1,z3,lvl){
  zoneLines.forEach(l=>wt2s.removePriceLine(l));zoneLines=[];
+ if(lvl){[[z1,'rgba(240,53,75,.8)',2],[0,'#3a4150',0],[-z1,'rgba(31,207,110,.8)',2]].forEach(a=>zoneLines.push(wt2s.createPriceLine({price:a[0],color:a[1],lineWidth:1,lineStyle:a[2],axisLabelVisible:true,title:''})));$('wazones').textContent='WaveTrend · Level ±'+z1;return}
  [[z3,'rgba(255,255,255,.25)',3],[z1,'rgba(240,53,75,.6)',2],[0,'#3a4150',0],[-z1,'rgba(31,207,110,.6)',2],[-z3,'rgba(255,255,255,.25)',3]].forEach(a=>zoneLines.push(wt2s.createPriceLine({price:a[0],color:a[1],lineWidth:1,lineStyle:a[2],axisLabelVisible:true,title:''})));
  $('wazones').textContent='WaveTrend · Zonen ±'+z1+' / ±'+z3;
 }
@@ -983,8 +1073,8 @@ function shift(arr){return arr.map(x=>Object.assign({},x,{time:x.time+tzoff}))}
 function applyChart(d,key){
  renderTfStates(d.tfstates||{});
  if(d.wa){
-  const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.candles;
-  if(k!==waKey){if(waKey!=='')loadedKey=null;waKey=k;applyMode(d.wa.strat);setZones(d.wa.z1,d.wa.z3);if(!waBusy())fillWa(d.wa)}
+  const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.candles+'|'+d.wa.w2_level+'|'+d.wa.w2_line+'|'+d.wa.w2_profit;
+  if(k!==waKey){if(waKey!=='')loadedKey=null;waKey=k;applyMode(d.wa.strat);if(d.wa.strat==='w2')setZones(d.wa.w2_level,d.wa.w2_level,true);else setZones(d.wa.z1,d.wa.z3);if(!waBusy())fillWa(d.wa)}
  }
  const msg=$('cmsg');
  if(!d.ok){msg.textContent=d.reason||'keine Daten';msg.style.display='flex';return}
@@ -1076,12 +1166,12 @@ async function pollStatusOnce(){
 async function pollStatus(){await pollStatusOnce();setTimeout(pollStatus,1000)}
 
 /* ---------- Wellenanker-Einstellungen ---------- */
-const WA_IDS=['wa-n1','wa-n2','wa-z1','wa-src','st-strat','st-candles'];
-function applyMode(s){const st=s==='ha';$('sigrow').style.display=st?'none':'';$('siglab').textContent=st?'Einstieg bei Heikin-Ashi-Farbwechsel (grün = Long, rot = Short)':'Einstieg bei Signal';['leg1','leg2'].forEach(i=>$(i).style.display=st?'none':'')}
+const WA_IDS=['wa-n1','wa-n2','wa-z1','wa-src','st-strat','st-candles','w2-level','w2-line','w2-profit'];
+function applyMode(s){const st=s==='ha'||s==='w2';document.querySelectorAll('.w2f').forEach(e=>e.style.display=s==='w2'?'':'none');document.querySelectorAll('.zonef').forEach(e=>e.style.display=s==='w2'?'none':'');$('sigrow').style.display=st?'none':'';$('siglab').textContent=s==='ha'?'Einstieg bei Heikin-Ashi-Farbwechsel (grün = Long, rot = Short)':s==='w2'?'Einstieg bei Level-Durchbruch · TP bei Gegenkreuzung der Linien':'Einstieg bei Signal';['leg1','leg2'].forEach(i=>$(i).style.display=st?'none':'')}
 function waBusy(){return WA_IDS.some(i=>document.activeElement===$(i))}
-function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src;$('st-strat').value=w.strat||'wa';$('st-candles').value=w.candles||'normal'}
+function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src;$('st-strat').value=w.strat||'wa';$('st-candles').value=w.candles||'normal';$('w2-level').value=w.w2_level;$('w2-line').value=w.w2_line||'signal';$('w2-profit').value=String(!!w.w2_profit)}
 async function saveWa(){
- const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value,strat:$('st-strat').value,candles:$('st-candles').value};
+ const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value,strat:$('st-strat').value,candles:$('st-candles').value,w2_level:String($('w2-level').value).replace(',','.'),w2_line:$('w2-line').value,w2_profit:$('w2-profit').value};
  try{const r=await api('/api/scalp/auto',{coin,wa:body});toast(r.persistent?'Einstellungen für '+coin+' gespeichert (Autotrade startet mit neuer Basislinie)':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);loadedKey=null;waKey='';loadChart()}
  catch(e){toast(e.message,true)}
 }
