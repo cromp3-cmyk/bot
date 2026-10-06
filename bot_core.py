@@ -2455,7 +2455,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <h2 class="section-title">🎲 Wellenanker Sweep (Zone 1 × Max. Nachkäufe × Stop-Loss $)</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet Zone 1 gegen Max. Nachkäufe (0-4) und Stop-Loss ($). TP-Modus (samt Überlauflinie/TP-
+    Testet Zone 1 gegen Max. Nachkäufe (0-20) und Stop-Loss ($). TP-Modus (samt Überlauflinie/TP-
     Betrag) sowie die Wellen-Parameter (Kanal-/Durchschnitt-Länge, Signallinien-Glättung, Quelle,
     Wellen-Skalierung) kommen unverändert aus den Einstellungen oben.
   </div>
@@ -4450,7 +4450,7 @@ async def handle_liq_sweep(request):
 
 
 async def handle_wa_sweep(request):
-    """'Monte-Carlo'-Sweep fuer Wellenanker: Zone 1 x Max. Nachkäufe (0-4) x Stop-Loss ($),
+    """'Monte-Carlo'-Sweep fuer Wellenanker: Zone 1 x Max. Nachkäufe (0-20) x Stop-Loss ($),
     siehe run_wa_sweep."""
     from strategies import run_wa_sweep
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()

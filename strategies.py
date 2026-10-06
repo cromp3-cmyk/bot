@@ -6010,11 +6010,13 @@ def backtest_wellenanker(candles, cfg):
     min_needed = n1 + n2 + sig_len + 20
 
     return _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
-                                sl_usd, max_nachkauf, margin, leverage, min_needed)
+                                sl_usd, max_nachkauf, margin, leverage, min_needed,
+                                bool(cfg.get("wa_reverse_only_profit")), float(cfg.get("wa_nachkauf_min_pct", 0) or 0))
 
 
 def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
-                         sl_usd, max_nachkauf, margin, leverage, min_needed):
+                         sl_usd, max_nachkauf, margin, leverage, min_needed, reverse_only_profit=False,
+                         nachkauf_min_pct=0.0):
     """Die eigentliche Handelssimulation fuer Wellenanker, getrennt von der (teuren) WaveTrend-
     Berechnung (compute_wavetrend_series) - siehe backtest_wellenanker/run_wa_sweep."""
     n = len(c)
@@ -6053,6 +6055,8 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
                     position = None
                     continue
             if tp_mode == "gegentrade" and ((pdir == "long" and short_raw) or (pdir == "short" and long_raw)):
+                if reverse_only_profit and ((price < entry) if pdir == "long" else (price > entry)):
+                    continue   # Option "Gegentrade nur im Plus": im Minus wird das Gegensignal ignoriert (wie live)
                 # "Gegentrade" = direkter Flip in die Gegenrichtung, siehe check_wa_candle
                 _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP-GEGENTRADE", ts=ts)
                 target = "short" if pdir == "long" else "long"
@@ -6069,7 +6073,10 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
                     continue
             if max_nachkauf > 0 and position["entries"] < 1 + max_nachkauf:
                 same_dir_signal = (pdir == "long" and long_raw) or (pdir == "short" and short_raw)
-                if same_dir_signal:
+                last_fill = position.get("last_entry") or position["entry"]
+                far_enough = nachkauf_min_pct <= 0 or abs(price - last_fill) / last_fill * 100 >= nachkauf_min_pct
+                if same_dir_signal and far_enough:
+                    position["last_entry"] = price
                     add_size = (margin * leverage) / price
                     new_size = position["size"] + add_size
                     position["entry"] = (entry * position["size"] + price * add_size) / new_size
@@ -6098,7 +6105,8 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
 
 
 def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list, tp_mode,
-                       ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n):
+                       ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n,
+                       reverse_only_profit=False, nachkauf_min_pct=0.0):
     """Rechenteil des Wellenanker-'Monte-Carlo'-Sweeps (Zone 1 x Max. Nachkäufe x Stop-Loss $),
     reine CPU-Arbeit im Thread. wt1_arr/wt2_arr (die WaveTrend-Welle/Signallinie) haengen nur von
     n1/n2/sig_len/Quelle/Wellen-Skalierung ab und werden darum NUR EINMAL vor dem Sweep berechnet
@@ -6110,7 +6118,8 @@ def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_l
         for max_nachkauf in nachkauf_list:
             for sl_usd in sl_list:
                 trades = _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level,
-                                              tp_usd, sl_usd, max_nachkauf, margin, leverage, min_needed)
+                                              tp_usd, sl_usd, max_nachkauf, margin, leverage, min_needed,
+                                              reverse_only_profit, nachkauf_min_pct)
                 closed_trades = [t for t in trades if t["pnl"] is not None]
                 stats = summarize_backtest_trades(closed_trades, exclude_top_n)
                 results.append({"wa_zone1": z1, "wa_max_nachkauf": max_nachkauf, "wa_sl_usd": sl_usd, **stats})
@@ -6119,7 +6128,7 @@ def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_l
 
 async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_step=1.0,
                         nachkauf_min=0, nachkauf_max=4, sl_min=5.0, sl_max=25.0, sl_step=2.0, exclude_top_n=1):
-    """'Monte-Carlo'-Sweep fuer Wellenanker ueber Zone 1 x Max. Nachkäufe (0-4) x Stop-Loss ($).
+    """'Monte-Carlo'-Sweep fuer Wellenanker ueber Zone 1 x Max. Nachkäufe (0-20) x Stop-Loss ($).
     TP-Modus (gegentrade/ueberlauf/fester_betrag) samt Überlauflinie/TP-Betrag sowie die Wellen-
     Parameter (n1/n2/sig_len/Quelle/Wellen-Skalierung) kommen unveraendert aus der aktuellen Config -
     nur Zone 1, Nachkauf-Anzahl und SL werden gegeneinander getestet. wt1/wt2 werden nur EINMAL
@@ -6147,7 +6156,7 @@ async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_
         return sorted(set(v for v in range(lo, hi + 1, step) if v >= 0))
 
     zone1_list = _float_range(zone1_min, zone1_max, zone1_step)
-    nachkauf_list = [v for v in _int_range(nachkauf_min, nachkauf_max, 1) if 0 <= v <= 4]
+    nachkauf_list = [v for v in _int_range(nachkauf_min, nachkauf_max, 1) if 0 <= v <= 20]
     sl_list = _float_range(sl_min, sl_max, sl_step)
     if not zone1_list or not nachkauf_list or not sl_list:
         return {"error": "Die eingestellten Bereiche für Zone 1/Nachkäufe/SL ergeben keine gültigen Werte."}
@@ -6175,7 +6184,8 @@ async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_
     loop = asyncio.get_event_loop()
     results = await loop.run_in_executor(
         None, _wa_sweep_compute, (ts, o, h, l, c), wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list,
-        tp_mode, ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n)
+        tp_mode, ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n,
+        bool(cfg.get("wa_reverse_only_profit")), float(cfg.get("wa_nachkauf_min_pct", 0) or 0))
 
     rank_key = lambda r: (r["trades"] >= AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
     best_sorted = sorted(results, key=rank_key, reverse=True)
