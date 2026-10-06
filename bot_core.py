@@ -273,7 +273,8 @@ def default_config():
         "wa_sig_len": int(os.getenv("WA_SIG_LEN", "4")),  # Signallinien-Glaettung
         "wa_wave_scale": float(os.getenv("WA_WAVE_SCALE", "1.35")),  # streckt die Welle (wt1 *= wave_scale), damit sie die Zonen so oft erreicht wie im Original-Indikator
         "wa_zone1": float(os.getenv("WA_ZONE1", "53.0")),  # Zone: Long-Punkt wenn wt2 < -zone1, Short wenn wt2 > zone1
-        "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 4)
+        "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 20)
+        "wa_reverse_only_profit": os.getenv("WA_REVERSE_ONLY_PROFIT", "false").lower() == "true",  # Gegentrade/Wechsel nur, wenn die laufende Position im Plus liegt (nie mit Verlust drehen)
         "wa_nachkauf_min_pct": float(os.getenv("WA_NACHKAUF_MIN_PCT", "0")),  # Nachkauf nur, wenn der Kurs mind. X % vom letzten Einstieg entfernt ist (0 = aus)
         "wa_tp_mode": os.getenv("WA_TP_MODE", "gegentrade"),  # gegentrade / ueberlauf / fester_betrag
         "wa_ueberlauf_level": float(os.getenv("WA_UEBERLAUF_LEVEL", "45.0")),  # nur Modus "ueberlauf" - entspricht "Überlauf" im Original
@@ -1986,7 +1987,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wellenanker"><label>Signallinien-Glättung</label><input type="number" step="1" min="1" id="wa_sig_len"></div>
   <div data-mode="wellenanker"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" max="3.0" id="wa_wave_scale"></div>
   <div data-mode="wellenanker"><label>Zone 1 (Long &lt; -X, Short &gt; X)</label><input type="number" step="1" min="1" max="100" id="wa_zone1"></div>
-  <div data-mode="wellenanker"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="4" id="wa_max_nachkauf"></div>
+  <div data-mode="wellenanker"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="20" id="wa_max_nachkauf"></div>
+  <div data-mode="wellenanker"><label><input type="checkbox" id="wa_reverse_only_profit" style="width:auto; vertical-align:middle;"> Gegentrade nur wenn die Position im Plus ist (nie mit Verlust schließen/drehen)</label></div>
   <div data-mode="wellenanker"><label>Nachkauf-Abstand zum letzten Einstieg (%, 0 = aus)</label><input type="number" step="0.01" min="0" id="wa_nachkauf_min_pct"></div>
   <div data-mode="wellenanker"><label>TP-Modus</label>
     <select class="cfg" id="wa_tp_mode">
@@ -2467,8 +2469,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div><label>Schritt</label><input type="number" step="1" min="1" id="wa-sweep-zone1-step" value="1" style="width:80px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Max. Nachkäufe von</label><input type="number" step="1" min="0" max="4" id="wa-sweep-nachkauf-min" value="0" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="1" min="0" max="4" id="wa-sweep-nachkauf-max" value="4" style="width:80px;"></div>
+    <div><label>Max. Nachkäufe von</label><input type="number" step="1" min="0" max="20" id="wa-sweep-nachkauf-min" value="0" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="0" max="20" id="wa-sweep-nachkauf-max" value="4" style="width:80px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <div><label>Stop-Loss ($) von</label><input type="number" step="0.5" min="0.1" id="wa-sweep-sl-min" value="5" style="width:80px;"></div>
@@ -3680,6 +3682,7 @@ async function refresh() {
     document.getElementById('wa_zone1').value = data.config.wa_zone1;
     document.getElementById('wa_max_nachkauf').value = data.config.wa_max_nachkauf;
     document.getElementById('wa_nachkauf_min_pct').value = data.config.wa_nachkauf_min_pct ?? 0;
+    document.getElementById('wa_reverse_only_profit').checked = !!data.config.wa_reverse_only_profit;
     document.getElementById('wa_tp_mode').value = data.config.wa_tp_mode;
     document.getElementById('wa_ueberlauf_level').value = data.config.wa_ueberlauf_level;
     document.getElementById('wa_tp_usd').value = data.config.wa_tp_usd;
@@ -4035,6 +4038,7 @@ function buildConfigPayload() {
     wa_zone1: parseFloat(document.getElementById('wa_zone1').value),
     wa_max_nachkauf: parseInt(document.getElementById('wa_max_nachkauf').value),
     wa_nachkauf_min_pct: parseFloat(document.getElementById('wa_nachkauf_min_pct').value) || 0,
+    wa_reverse_only_profit: document.getElementById('wa_reverse_only_profit').checked,
     wa_tp_mode: document.getElementById('wa_tp_mode').value,
     wa_ueberlauf_level: parseFloat(document.getElementById('wa_ueberlauf_level').value),
     wa_tp_usd: parseFloat(document.getElementById('wa_tp_usd').value),
@@ -4282,7 +4286,7 @@ async def handle_config_update(request):
                 "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
                 "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
                 "liq_max_nachkauf", "liq_nachkauf_progress_pct",
-                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_max_nachkauf", "wa_nachkauf_min_pct",
+                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_max_nachkauf", "wa_nachkauf_min_pct", "wa_reverse_only_profit",
                 "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd"]:
         if key in body:
             cfg[key] = body[key]
@@ -4458,8 +4462,8 @@ async def handle_wa_sweep(request):
         zone1_min = max(1.0, float(body.get("zone1_min", 30.0)))
         zone1_max = max(zone1_min, float(body.get("zone1_max", 80.0)))
         zone1_step = max(0.1, float(body.get("zone1_step", 1.0)))
-        nachkauf_min = max(0, min(4, int(body.get("nachkauf_min", 0))))
-        nachkauf_max = max(nachkauf_min, min(4, int(body.get("nachkauf_max", 4))))
+        nachkauf_min = max(0, min(20, int(body.get("nachkauf_min", 0))))
+        nachkauf_max = max(nachkauf_min, min(20, int(body.get("nachkauf_max", 4))))
         sl_min = max(0.1, float(body.get("sl_min", 5.0)))
         sl_max = max(sl_min, float(body.get("sl_max", 25.0)))
         sl_step = max(0.1, float(body.get("sl_step", 2.0)))

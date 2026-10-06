@@ -5862,7 +5862,7 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price):
     pos = st["position"]
     tp_mode = cfg.get("wa_tp_mode", "gegentrade")
     ueberlauf_level = cfg.get("wa_ueberlauf_level", 45.0)
-    max_nachkauf = max(0, min(4, int(cfg.get("wa_max_nachkauf", 0) or 0)))
+    max_nachkauf = max(0, min(20, int(cfg.get("wa_max_nachkauf", 0) or 0)))
 
     if pos in ("long", "short"):
         is_long = pos == "long"
@@ -5872,6 +5872,12 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price):
             # "Gegentrade" heisst: die Gegenposition wird direkt eroeffnet, nicht nur glatt gestellt -
             # wie der RSI-FLIP bei der RSI-Signal-Strategie.
             target = "short" if is_long else "long"
+            avg_entry = st.get("avg_entry_price")
+            if cfg.get("wa_reverse_only_profit") and avg_entry and ((price < avg_entry) if is_long else (price > avg_entry)):
+                # Option "Gegentrade nur im Plus": die Position liegt im Minus -> NICHT mit Verlust schliessen/drehen,
+                # das Gegensignal wird ignoriert, SL/TP-Logik laeuft weiter wie sonst.
+                debug_log(f"⏭️ [{symbol}] Wellenanker Gegensignal ignoriert: {pos.upper()} liegt im Minus (Ø {round(avg_entry, 6)}, jetzt {price}) - kein Verlust-Wechsel")
+                return
             debug_log(f"🔄 [{symbol}] Wellenanker Gegentrade: {pos.upper()} -> {target.upper()} @ {price}")
             await execute_exit(symbol, price, "TP-GEGENTRADE")
             if st["position"] is not None:
@@ -5996,7 +6002,7 @@ def backtest_wellenanker(candles, cfg):
     ueberlauf_level = float(cfg.get("wa_ueberlauf_level", 45.0))
     tp_usd = float(cfg.get("wa_tp_usd", 10.0))
     sl_usd = float(cfg.get("wa_sl_usd", 5.0))
-    max_nachkauf = max(0, min(4, int(cfg.get("wa_max_nachkauf", 0) or 0)))
+    max_nachkauf = max(0, min(20, int(cfg.get("wa_max_nachkauf", 0) or 0)))
     wave_scale = float(cfg.get("wa_wave_scale", 1.35))
     margin, leverage = cfg["margin"], cfg["leverage"]
 
