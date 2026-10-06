@@ -5805,6 +5805,11 @@ def compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, src_mode, wave_scale=1
 WA_LEVEL_LINES = ("signal", "wave", "both")
 
 
+def _wa_entry_mode(cfg):
+    m = cfg.get("wa_entry_mode", "zone")
+    return m if m in ("level", "cross") else "zone"
+
+
 def _wa_raw_signals(wt1, wt2, i, level, entry_mode="zone", line="signal"):
     """Einstiegssignale der Kerze i -> (long_raw, short_raw, cross_up, cross_dn).
     Modus 'zone': Kreuzung wt1/wt2 ausserhalb von +-level (wie bisher, level = Zone 1).
@@ -5814,7 +5819,10 @@ def _wa_raw_signals(wt1, wt2, i, level, entry_mode="zone", line="signal"):
     a1, b1, a0, b0 = wt1[i], wt2[i], wt1[i - 1], wt2[i - 1]
     cross_up = a0 <= b0 and a1 > b1
     cross_dn = a0 >= b0 and a1 < b1
-    if entry_mode == "level":
+    if entry_mode == "cross":
+        # Kreuzung zu Kreuzung: jede Kreuzung der beiden Linien ist ein Signal, egal wo (Long = wt1 kreuzt wt2 nach oben)
+        long_raw, short_raw = cross_up, cross_dn
+    elif entry_mode == "level":
         if line == "wave":
             lo1, lo0, hi1, hi0 = a1, a0, a1, a0
         elif line == "both":
@@ -6004,10 +6012,10 @@ async def wa_poll_loop(symbol):
                         if last_ts != last_processed_ts:
                             last_processed_ts = last_ts
                             wt1_arr, wt2_arr = compute_wavetrend_series(closed_o, closed_h, closed_l, closed_c, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
-                            lvl_mode = cfg.get("wa_entry_mode", "zone") == "level"
-                            z1 = float(cfg.get("wa_level", 10.0)) if lvl_mode else cfg.get("wa_zone1", 53.0)
+                            emode = _wa_entry_mode(cfg)
+                            z1 = float(cfg.get("wa_level", 10.0)) if emode == "level" else cfg.get("wa_zone1", 53.0)
                             long_raw, short_raw, cross_up, cross_dn = _wa_raw_signals(
-                                wt1_arr, wt2_arr, -1, z1, "level" if lvl_mode else "zone", cfg.get("wa_level_line", "signal"))
+                                wt1_arr, wt2_arr, -1, z1, emode, cfg.get("wa_level_line", "signal"))
                             st["wa_wt2_last"] = wt2_arr[-1]
                             await check_wa_candle(symbol, long_raw, short_raw, wt2_arr[-1], closed_c[-1], cross_up, cross_dn)
                         if due_heartbeat:
@@ -6034,7 +6042,7 @@ def backtest_wellenanker(candles, cfg):
     n2 = int(cfg.get("wa_n2", 21))
     sig_len = int(cfg.get("wa_sig_len", 4))
     src_mode = cfg.get("wa_src", "close")
-    entry_mode = "level" if cfg.get("wa_entry_mode", "zone") == "level" else "zone"
+    entry_mode = _wa_entry_mode(cfg)
     z1 = float(cfg.get("wa_level", 10.0)) if entry_mode == "level" else float(cfg.get("wa_zone1", 53.0))
     tp_mode = cfg.get("wa_tp_mode", "gegentrade")
     ueberlauf_level = float(cfg.get("wa_ueberlauf_level", 45.0))
@@ -6199,12 +6207,12 @@ async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_
         lo, hi, step = int(lo), int(hi), max(1, int(step))
         return sorted(set(v for v in range(lo, hi + 1, step) if v >= 0))
 
-    entry_mode = "level" if cfg.get("wa_entry_mode", "zone") == "level" else "zone"
+    entry_mode = _wa_entry_mode(cfg)
     # Level-Modus: "zone1_*" ist dann der Level-Abstand (0-30) und zusaetzlich wird ueber die Linie (Signal/Welle/Beide) getestet
     lines = [x for x in (level_lines or [cfg.get("wa_level_line", "signal")]) if x in WA_LEVEL_LINES] if entry_mode == "level" else ["-"]
     if not lines:
         return {"error": "Keine Linie (Signallinie/Welle/Beide) für den Sweep gewählt."}
-    zone1_list = _float_range(zone1_min, zone1_max, zone1_step)
+    zone1_list = [0.0] if entry_mode == "cross" else _float_range(zone1_min, zone1_max, zone1_step)   # Kreuzungs-Modus hat keinen Abstand
     nachkauf_list = [v for v in _int_range(nachkauf_min, nachkauf_max, 1) if 0 <= v <= 20]
     sl_list = _float_range(sl_min, sl_max, sl_step)
     if not zone1_list or not nachkauf_list or not sl_list:
