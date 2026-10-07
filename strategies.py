@@ -6018,16 +6018,20 @@ async def wa_poll_loop(symbol):
                     if candle_age_seconds > max_age_seconds:
                         debug_log(f"⚠️ [{symbol}] Wellenanker: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
                     else:
-                        last_ts = closed_ts[-1]
-                        if last_ts != last_processed_ts:
-                            last_processed_ts = last_ts
-                            wt1_arr, wt2_arr = compute_wavetrend_series(closed_o, closed_h, closed_l, closed_c, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
-                            emode = _wa_entry_mode(cfg)
-                            z1 = float(cfg.get("wa_level", 10.0)) if emode == "level" else cfg.get("wa_zone1", 53.0)
-                            long_raw, short_raw, cross_up, cross_dn = _wa_raw_signals(
-                                wt1_arr, wt2_arr, -1, z1, emode, cfg.get("wa_level_line", "signal"))
-                            st["wa_wt2_last"] = wt2_arr[-1]
-                            await check_wa_candle(symbol, long_raw, short_raw, wt2_arr[-1], closed_c[-1], cross_up, cross_dn)
+                        # LIVE: die noch laufende Kerze auswerten, Signal feuert SOFORT (nicht erst bei Kerzenschluss).
+                        # Pro Kerze feuert dasselbe Signal nur einmal (Merker = Kerzen-ts + Signal).
+                        wt1_arr, wt2_arr = compute_wavetrend_series(opens, highs, lows, closes, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
+                        emode = _wa_entry_mode(cfg)
+                        z1 = float(cfg.get("wa_level", 10.0)) if emode == "level" else cfg.get("wa_zone1", 53.0)
+                        long_raw, short_raw, cross_up, cross_dn = _wa_raw_signals(
+                            wt1_arr, wt2_arr, -1, z1, emode, cfg.get("wa_level_line", "signal"))
+                        st["wa_wt2_last"] = wt2_arr[-1]
+                        sig_key = (timestamps[-1], bool(long_raw), bool(short_raw), bool(cross_up), bool(cross_dn))
+                        if last_processed_ts is None:
+                            last_processed_ts = sig_key   # Basislinie nach (Neu)Start: vorhandene Signale zaehlen nicht
+                        elif sig_key != last_processed_ts:
+                            last_processed_ts = sig_key
+                            await check_wa_candle(symbol, long_raw, short_raw, wt2_arr[-1], closes[-1], cross_up, cross_dn)
                         if due_heartbeat:
                             last_heartbeat = now
                             debug_log(f"💓 [{symbol}] Wellenanker aktiv: wt2={round(st.get('wa_wt2_last') or 0, 1)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
@@ -6040,7 +6044,7 @@ async def wa_poll_loop(symbol):
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Wellenanker-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
 
 
 def backtest_wellenanker(candles, cfg):

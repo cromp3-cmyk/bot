@@ -51,7 +51,7 @@ MIN_BARS = 60                                     # Autotrade: darunter keine Si
 MIN_CHART_BARS = 30                               # Chart: ab so vielen Kerzen wird schon gezeichnet (mit Hinweis)
 TFSTATE_TTL = 5.0                                 # Sekunden, wie lange die Zeitebenen-Uebersicht gecacht wird
 SCALP_COINS = [s for s in SYMBOLS]
-AUTO_CHECK_EVERY = 2                              # Sekunden zwischen zwei Signalpruefungen des Autotrades
+AUTO_CHECK_EVERY = 1                              # Sekunden zwischen zwei Signalpruefungen des Autotrades
 
 # ============================================================================
 # ZUSTAND (nur im Speicher)
@@ -376,36 +376,38 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
 
 
 def _auto_eval(raw, tf, last_ts, cfg):
-    """Thread: (ts_der_letzten_geschlossenen_Kerze, event|None). Rechnet nur, wenn eine neue Kerze zu ist."""
+    """Thread: (neuer_merker, event|None). LIVE: wertet die noch laufende Kerze aus und feuert SOFORT, sobald dort ein Signal
+    entsteht (nicht erst bei Kerzenschluss). Merker = (Kerzen-ts, Signal): pro Kerze feuert dasselbe Signal nur einmal."""
     cs = _prepare(raw, tf)
     if cs is None or len(cs) < MIN_BARS:
         return None, None
-    closed_idx = len(cs) - 2
-    ts = cs[closed_idx]["ts"]
-    if last_ts is not None and ts <= last_ts:
-        return ts, None
-    if last_ts is None:
-        return ts, None   # Basislinie setzen: Signale, die schon da waren, zaehlen nicht
+    idx = len(cs) - 1
+    ts = cs[idx]["ts"]
+    ev = None
     if cfg["strat"] in ("w2", "wx"):
         wt1, wt2, events, cu, cd = _w2_series(cs, cfg)
         kind = None
         for e in reversed(events):
-            if e["idx"] == closed_idx:
+            if e["idx"] == idx:
                 kind = e["kind"]
-            if e["idx"] <= closed_idx:
+            if e["idx"] <= idx:
                 break
-        if kind is None and not cu[closed_idx] and not cd[closed_idx]:
-            return ts, None
-        return ts, {"kind": kind, "strong": False, "ext": False, "price": cs[closed_idx]["c"],
-                    "cross_up": cu[closed_idx], "cross_dn": cd[closed_idx]}
-    events = _signal_events(cs, cfg)
-    for e in reversed(events):
-        if e.get("flip", e["idx"]) == closed_idx:
-            return ts, {"kind": e["kind"], "strong": bool(e["strong"]), "ext": bool(e["ext"]),
-                        "price": cs[closed_idx]["c"]}
-        if e.get("flip", e["idx"]) < closed_idx:
-            break
-    return ts, None
+        if kind is not None or cu[idx] or cd[idx]:
+            ev = {"kind": kind, "strong": False, "ext": False, "price": cs[idx]["c"],
+                  "cross_up": cu[idx], "cross_dn": cd[idx]}
+    else:
+        for e in reversed(_signal_events(cs, cfg)):
+            if e.get("flip", e["idx"]) == idx:
+                ev = {"kind": e["kind"], "strong": bool(e["strong"]), "ext": bool(e["ext"]), "price": cs[idx]["c"]}
+                break
+            if e.get("flip", e["idx"]) < idx:
+                break
+    key = (ts, None if ev is None else (ev["kind"], bool(ev.get("cross_up")), bool(ev.get("cross_dn"))))
+    if last_ts is None:
+        return key, None   # Basislinie: was schon da ist, zaehlt nicht
+    if ev is None or key == last_ts:
+        return last_ts, None
+    return key, ev
 
 
 # ============================================================================
