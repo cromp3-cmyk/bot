@@ -27,7 +27,7 @@ import traceback
 
 from aiohttp import web
 
-from bot_core import debug_log, SYMBOLS, BOTS, execute_entry, execute_exit, get_redis
+from bot_core import debug_log, SYMBOLS, BOTS, execute_entry, execute_exit, execute_reverse, get_redis
 import binance_ws
 import lighter_candles
 from strategies import (
@@ -463,11 +463,11 @@ async def _place(sym, direction, source, usd=None):
         if price is None:
             return False, "kein aktueller Preis bekannt"
         if st["position"] is not None and st["position"] != direction:
-            await execute_exit(sym, price, f"{source}-REVERSE")
-            if st["position"] is not None:
-                return False, "Schließen fehlgeschlagen – siehe Log"
-            _clear_tpsl(sym)
-            price = st.get("last_price") or price
+            # Gegenrichtung: schneller Wechsel mit EINER Order (Reverse) statt Schliessen + Neueroeffnen
+            if await execute_reverse(sym, price, f"{source}-REVERSE", size_multiplier=mult):
+                _clear_tpsl(sym)
+                return True, None
+            return False, "Reverse fehlgeschlagen – siehe Log"
         is_add_on = st["position"] == direction
         ok = await execute_entry(sym, direction, price, is_add_on=is_add_on, size_multiplier=mult)
         if not ok:
@@ -743,6 +743,25 @@ async def handle_scalp_close(request):
     return web.json_response({"success": True})
 
 
+async def handle_scalp_reverse(request):
+    """Reverse: laufende Position schliessen und SOFORT in die Gegenrichtung mit gleicher Positionsgroesse (USDC) eroeffnen."""
+    b = await _body(request)
+    sym = str(b.get("coin", "")).upper()
+    if sym not in BOTS:
+        return web.json_response({"error": "coin ungültig"}, status=400)
+    st = BOTS[sym]["state"]
+    side, size, price = st.get("position"), st.get("total_coin_size"), st.get("last_price")
+    if side is None or not size or not price:
+        return web.json_response({"error": "keine offene Position zum Umkehren"}, status=400)
+    target = "short" if side == "long" else "long"
+    usd = float(size) * float(price)
+    ok, err = await _place(sym, target, "SCALP-REVERSE", usd)   # _place schliesst die Gegenposition und eroeffnet neu
+    if not ok:
+        return web.json_response({"error": err}, status=500)
+    _log(sym, f"Reverse: {side} → {target} ({usd:,.0f} USDC)", target)
+    return web.json_response({"success": True, "direction": target})
+
+
 async def handle_scalp_tpsl(request):
     b = await _body(request)
     sym = str(b.get("coin", "")).upper()
@@ -856,7 +875,7 @@ async def handle_scalp_index(request):
 # ============================================================================
 SCALP_HTML = r"""<!DOCTYPE html>
 <html lang="de"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#07080b"><meta name="apple-mobile-web-app-capable" content="yes">
 <title>Scalp Dashboard</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
@@ -914,8 +933,49 @@ button{font-family:inherit;cursor:pointer}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);padding:10px 18px;border-radius:10px;background:#1d2128;border:1px solid #3a4150;color:#fff;font-size:13px;display:none;z-index:50;max-width:90vw}
 #toast.bad{border-color:var(--r)}
 .main{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+.cfgbox{border:1px solid var(--bd);border-radius:12px;background:#0d1015;padding:0 10px}
+.cfgbox summary{min-height:44px;display:flex;align-items:center;font-size:13px;font-weight:700;cursor:pointer;list-style:none;color:#cfd5e0}
+.cfgbox summary::-webkit-details-marker{display:none}
+.cfgbox summary::after{content:"▾";margin-left:auto;color:var(--mut)}
+.cfgbox[open] summary::after{content:"▴"}
+.cfgbox>.row{padding-bottom:10px}
+#mbar{display:none}
+@media (max-width:760px){
+ html{-webkit-text-size-adjust:100%}
+ body{padding-bottom:calc(112px + env(safe-area-inset-bottom))}
+ .wrap{padding:10px 10px 16px;gap:10px}
+ .wrap>.row{gap:6px}
+ .wrap h1{font-size:16px!important}
+ nav.row{gap:14px!important;font-size:12px!important;overflow-x:auto;flex-wrap:nowrap!important;white-space:nowrap;width:100%}
+ .chips{flex-wrap:nowrap;overflow-x:auto;gap:6px;padding-bottom:2px;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+ .chips::-webkit-scrollbar{display:none}
+ .chip{min-width:84px;min-height:46px;padding:6px 10px}
+ .chip .t{font-size:13px}
+ .main{gap:10px}
+ .left,.right{flex:1 1 100%;max-width:100%}
+ .card{padding:12px;border-radius:14px;gap:10px}
+ #chart{height:min(46vh,380px)}#wachart{height:130px}
+ .tfbar{width:100%;overflow-x:auto}.tfbar button{flex:1 0 auto;min-width:44px;min-height:40px;padding:0 10px}
+ .inp,.wafld .inp,select.inp{font-size:16px;min-height:44px}
+ .wafld{flex:1 1 44%!important;min-width:0}
+ .wafld[style*="flex:0 0"]{flex:1 1 44%!important}
+ .btn{min-height:52px}
+ .q button{min-height:42px}
+ .chk{min-height:42px}
+ .cell b{font-size:13px}
+ #toast{bottom:calc(120px + env(safe-area-inset-bottom))}
+ #mbar{display:block;position:fixed;left:0;right:0;bottom:0;z-index:40;padding:8px 10px calc(8px + env(safe-area-inset-bottom));background:rgba(10,12,16,.96);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-top:1px solid var(--bd)}
+ #mbar .mtop{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:700;padding:0 2px 6px}
+ #mbar .mtop #mpnl{flex:1}#mbar .mtop #mcoin{color:var(--mut);font-size:12px}
+ #mbar .mbtns{display:flex;gap:8px}
+ #mbar .btn{flex:1;min-height:50px;font-size:15px;padding:0}
+ #mbar .btn.rev{flex:0 0 56px;background:#6d3fd6;color:#fff;font-size:20px}
+ #mbar .btn.cls{flex:0 0 56px;background:#1d2128;color:#cfd5e0;border:1px solid #3a4150;font-size:18px}
+ #mbar .btn:disabled{opacity:.35}
+}
 .left{flex:999 1 640px;min-width:0}.right{flex:1 1 340px;max-width:420px;min-width:0;display:flex;flex-direction:column;gap:14px}
 </style></head><body>
+<div id="mbar"><div class="mtop"><span id="mpill" class="pill n">FLAT</span><span id="mpnl" class="mono">–</span><span id="mcoin" class="mono"></span></div><div class="mbtns"><button class="btn long" id="mLong">Long</button><button class="btn short" id="mShort">Short</button><button class="btn rev" id="mRev">⇄</button><button class="btn cls" id="mClose">✕</button></div></div>
 <div class="wrap">
  <div class="row" style="justify-content:space-between">
   <div class="row"><h1 style="margin:0;font-size:18px">Scalp Dashboard</h1><span id="badge" class="pill n">…</span></div>
@@ -928,6 +988,7 @@ button{font-family:inherit;cursor:pointer}
     <div class="row" style="align-items:baseline"><span id="cname" style="font-size:22px;font-weight:700">–</span><span id="cprice" class="mono" style="font-size:20px;font-weight:700">–</span></div>
     <div class="tfbar" id="tfbar"></div>
    </div>
+   <details id="cfgbox" class="cfgbox"><summary>⚙ Einstellungen · Strategie &amp; Wellenanker</summary>
    <div class="row" style="gap:8px;padding-bottom:6px">
     <label class="wafld" style="flex:0 0 210px"><span class="lab">Strategie (Signale)</span><select class="inp" id="st-strat"><option value="wa">Wellenanker</option><option value="w2">Wellenanker 2 (Level)</option><option value="wx">Kreuzung zu Kreuzung</option><option value="ha">Heikin-Ashi Wechsel</option></select></label>
     <label class="wafld w2f w2lf" style="flex:0 0 130px"><span class="lab">Level ± (0–30)</span><input class="inp" id="w2-level" type="number" step="0.5" min="0" max="30"></label>
@@ -935,19 +996,20 @@ button{font-family:inherit;cursor:pointer}
     <label class="wafld w2f" style="flex:0 0 200px"><span class="lab">Nicht im Minus schließen</span><select class="inp" id="w2-profit"><option value="false">Aus</option><option value="true">An</option></select></label>
     <label class="wafld" style="flex:0 0 150px"><span class="lab">Kerzen</span><select class="inp" id="st-candles"><option value="normal">Normal</option><option value="ha">Heikin-Ashi</option></select></label>
    </div>
-   <div class="cwrap"><div id="chart"></div><div id="cmsg"></div></div>
-   <div class="row" style="justify-content:space-between;padding-top:6px">
-    <div class="row" style="gap:10px;align-items:baseline"><b style="font-size:13px">Wellenanker</b><span class="lab" id="wazones">WaveTrend</span></div>
-    <div class="row mono" style="gap:14px;font-size:12px;font-weight:700"><span id="wt1v" style="color:#7FB5F0">WT1 –</span><span id="wt2v" style="color:#2F7BFF">WT2 –</span><span id="wdv" style="color:#aab2c0">Δ –</span></div>
-   </div>
    <div class="row" style="gap:8px">
     <label class="wafld"><span class="lab">Kanal-Länge</span><input class="inp" id="wa-n1" type="number" step="1" min="2" max="100"></label>
     <label class="wafld"><span class="lab">Durchschnitt-Länge</span><input class="inp" id="wa-n2" type="number" step="1" min="2" max="200"></label>
     <label class="wafld zonef"><span class="lab">Zone ±</span><input class="inp" id="wa-z1" type="number" step="1" min="5" max="90"></label>
     <label class="wafld"><span class="lab">Quelle der Welle</span><select class="inp" id="wa-src"><option value="close">close</option><option value="hlc3">hlc3 (H+L+C)/3</option><option value="ohlc4">ohlc4</option><option value="hl2">hl2 (H+L)/2</option></select></label>
    </div>
+   </details>
+   <div class="cwrap"><div id="chart"></div><div id="cmsg"></div></div>
+   <div class="row" style="justify-content:space-between;padding-top:6px">
+    <div class="row" style="gap:10px;align-items:baseline"><b style="font-size:13px">Wellenanker</b><span class="lab" id="wazones">WaveTrend</span></div>
+    <div class="row mono" style="gap:14px;font-size:12px;font-weight:700"><span id="wt1v" style="color:#7FB5F0">WT1 –</span><span id="wt2v" style="color:#2F7BFF">WT2 –</span><span id="wdv" style="color:#aab2c0">Δ –</span></div>
+   </div>
    <div class="cwrap"><div id="wachart"></div></div>
-   <div class="row small" style="gap:16px"><span>▲▼ Long/Short-Signal</span><span id="leg1">◉ stark (RSI + Geldfluss)</span><span id="leg2">◆ extrem (±75)</span><span>TP/SL-Linie mit der Maus ziehen</span></div>
+   <div class="row small" style="gap:16px"><span>▲▼ Long/Short-Signal</span><span id="leg1">◉ stark (RSI + Geldfluss)</span><span id="leg2">◆ extrem (±75)</span><span>TP/SL-Linie mit Finger/Maus ziehen</span></div>
    <div class="small">Chart = Binance-Kerzen (HYPE: Lighter-Kerzen). Orders, TP/SL und Kurs oben = Lighter. TP/SL überwacht der Bot (Kurs-Check jede Sekunde) – es liegen keine Stop-Orders auf der Börse.</div>
   </div>
   <div class="right">
@@ -959,7 +1021,7 @@ button{font-family:inherit;cursor:pointer}
      <div class="cell"><span class="lab">Kurs</span><b id="pPrice">–</b></div>
      <div class="cell"><span class="lab">Gewinn / Verlust</span><b id="pPnl">–</b></div>
     </div>
-    <button class="btn ghost" id="bClose">Position schließen</button>
+    <div class="row" style="gap:8px;flex-wrap:nowrap"><button class="btn ghost" id="bClose" style="flex:1">Position schließen</button><button class="btn ghost" id="bRev" style="flex:1" title="Position schließen und sofort in Gegenrichtung mit gleicher Größe öffnen">⇄ Reverse</button></div>
    </div>
    <div class="card">
     <b style="font-size:13px">Order · Market</b>
@@ -1140,7 +1202,7 @@ function renderStatus(s){
   $('pSize').textContent=(p.size!=null?Number(p.size).toFixed(4):'–')+' '+c.symbol;$('pAvg').textContent=fmtP(p.avg);
   const pn=p.pnl;$('pPnl').textContent=pn==null?'–':sg(pn)+(p.roi!=null?' ('+(p.roi>=0?'+':'−')+Math.abs(p.roi).toFixed(1)+'%)':'');$('pPnl').style.color=pn==null?'#fff':pn>=0?G:R}
  else{$('posPill').textContent='FLAT';$('posPill').className='pill n';['pSize','pAvg','pPnl'].forEach(i=>{$(i).textContent='–';$(i).style.color='#fff'})}
- $('bClose').disabled=!p;
+ $('bClose').disabled=!p;$('bRev').disabled=!p;
  /* Linien */
  if(!drag){
   setLine('entry',p&&p.avg?p.avg:null,{color:'rgba(233,236,241,.7)',title:p?(p.side==='long'?'LONG ':'SHORT ')+(p.pnl!=null?sg(p.pnl):''):''});
@@ -1178,6 +1240,16 @@ async function saveWa(){
 }
 WA_IDS.forEach(i=>$(i).addEventListener('change',saveWa));
 
+/* ---------- Handy: Einstellungen einklappen + feste Leiste unten ---------- */
+(function(){const d=$('cfgbox');if(d)d.open=window.innerWidth>760;
+ const map={mLong:'bLong',mShort:'bShort',mRev:'bRev',mClose:'bClose'};
+ Object.keys(map).forEach(k=>$(k).addEventListener('click',()=>{const t=$(map[k]);if(!t.disabled)t.click()}));
+ function sync(){try{$('mpill').textContent=$('posPill').textContent;$('mpill').className=$('posPill').className;
+  const pnl=$('pPnl').textContent;$('mpnl').textContent=pnl&&pnl!=='–'?'P/L '+pnl:'';$('mpnl').style.color=getComputedStyle($('pPnl')).color;
+  $('mcoin').textContent=$('cname').textContent+' '+$('cprice').textContent;
+  $('mRev').disabled=$('bRev').disabled;$('mClose').disabled=$('bClose').disabled}catch(e){}}
+ setInterval(sync,600);sync()})();
+
 /* ---------- Aktionen ---------- */
 function switchCoin(c){if(c===coin)return;coin=c;ls('scalp_coin',c);loadedKey=null;ST=null;['entry','tp','sl'].forEach(k=>setLine(k,null));candle.setData([]);wt1s.setData([]);wt2s.setData([]);candle.setMarkers([]);wt2s.setMarkers([]);autoDirty=false;$('cname').textContent=c;pollStatusOnce();loadChart()}
 function renderTfBar(){$('tfbar').innerHTML=TFS.map(t=>'<button data-t="'+t+'" class="'+(t===tf?'on':'')+'">'+t+'</button>').join('');
@@ -1190,6 +1262,7 @@ async function order(dir){
  pollStatusOnce();
 }
 $('bLong').addEventListener('click',()=>order('long'));$('bShort').addEventListener('click',()=>order('short'));
+$('bRev').addEventListener('click',async()=>{$('bRev').disabled=true;try{const r=await api('/api/scalp/reverse',{coin});toast('Reverse → '+(r.direction==='long'?'Long':'Short'))}catch(e){toast(e.message,true)}pollStatusOnce()});
 $('bClose').addEventListener('click',async()=>{try{await api('/api/scalp/close',{coin});toast('Position geschlossen')}catch(e){toast(e.message,true)}pollStatusOnce()});
 async function autoSend(extra){
  const body=Object.assign({coin,tf,normal:$('a-normal').checked,strong:$('a-strong').checked,ext:$('a-ext').checked,long:$('a-long').checked,short:$('a-short').checked,

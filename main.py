@@ -12,7 +12,7 @@ from bot_core import (
     debug_log, PORT, SYMBOLS, BOTS, load_bot_configs, load_bot_state, state_persist_loop,
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
-    handle_config_update, handle_control, handle_close_position, handle_reset,
+    handle_config_update, handle_control, handle_close_position, handle_reverse_position, handle_reset,
     handle_manual_trade, handle_backtest, handle_ab_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
@@ -33,7 +33,7 @@ from screener import screener_loop, handle_screener_index, handle_screener_api
 from lighter_candles import lighter_candles_loop
 from scalp import (
     scalp_loop, handle_scalp_index, handle_scalp_chart, handle_scalp_status,
-    handle_scalp_order, handle_scalp_close, handle_scalp_tpsl, handle_scalp_auto, handle_scalp_wa,
+    handle_scalp_order, handle_scalp_close, handle_scalp_reverse, handle_scalp_tpsl, handle_scalp_auto, handle_scalp_wa,
 )
 
 
@@ -46,6 +46,7 @@ async def start_web_server():
     app.router.add_post("/api/config", handle_config_update)
     app.router.add_post("/api/control", handle_control)
     app.router.add_post("/api/close", handle_close_position)
+    app.router.add_post("/api/reverse", handle_reverse_position)
     app.router.add_post("/api/manual_trade", handle_manual_trade)
     app.router.add_post("/api/backtest", handle_backtest)
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
@@ -62,6 +63,7 @@ async def start_web_server():
     app.router.add_get("/api/scalp/status", handle_scalp_status)
     app.router.add_post("/api/scalp/order", handle_scalp_order)
     app.router.add_post("/api/scalp/close", handle_scalp_close)
+    app.router.add_post("/api/scalp/reverse", handle_scalp_reverse)
     app.router.add_post("/api/scalp/tpsl", handle_scalp_tpsl)
     app.router.add_post("/api/scalp/auto", handle_scalp_auto)
     app.router.add_post("/api/scalp/wa", handle_scalp_wa)

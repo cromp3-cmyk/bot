@@ -1044,6 +1044,117 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
     return True
 
 
+async def execute_reverse(symbol, price, reason, size_multiplier=None):
+    """SCHNELLER WECHSEL Long <-> Short mit EINER einzigen Market-Order (wie der "Reverse"-Knopf bei Lighter):
+    die Order ist so gross wie die alte Position PLUS die neue Position, in Gegenrichtung und OHNE reduce_only -
+    die Boerse dreht die Position dadurch in einem Schritt. Das ist viel schneller als execute_exit (wartet auf
+    Bestaetigung des realisierten PnL) + execute_entry (wartet auf den Fill-Preis).
+    size_multiplier=None -> neue Position gleich gross (USDC-Wert) wie die alte; sonst margin*leverage*size_multiplier.
+    Der Bot-State wird sofort mit dem Zielpreis umgestellt, der ECHTE Einstiegspreis wird danach im Hintergrund
+    von der Boerse geholt und nachgetragen (_reverse_confirm). Gibt True zurueck, wenn die Position gedreht wurde."""
+    async with _get_symbol_lock(symbol):
+        return await _execute_reverse_locked(symbol, price, reason, size_multiplier)
+
+
+async def _execute_reverse_locked(symbol, price, reason, size_multiplier=None):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    market_index = MARKET_INDICES[symbol]
+    if st["position"] is None or not st.get("total_coin_size") or not st.get("avg_entry_price") or not price:
+        return False
+
+    _t0 = time.time()
+    closing_side = st["position"]
+    target = "short" if closing_side == "long" else "long"
+    old_size = st["total_coin_size"]
+    avg_old = st["avg_entry_price"]
+    pnl_usd = (price - avg_old) * old_size if closing_side == "long" else (avg_old - price) * old_size
+
+    precision = get_precision(symbol)
+    new_usdc = old_size * price if size_multiplier is None else cfg["margin"] * cfg["leverage"] * size_multiplier
+    new_base = int((new_usdc / price) * precision)
+    new_units = new_base / precision
+    old_base = int(round(old_size * precision))
+
+    if not cfg["dry_run"]:
+        client = get_lighter_client()
+        if client is None:
+            debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Reverse übersprungen (Position bleibt wie sie ist!)")
+            return False
+        if new_base * (1 / precision) < get_min_base_amount(symbol):
+            await _safe_close_client(client)
+            debug_log(f"⚠️ [{symbol}] Reverse: neue Position unter Mindestgröße - abgebrochen")
+            return False
+        is_ask = closing_side == "long"   # Long wird verkauft (is_ask), Short wird gekauft
+        tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, old_base + new_base, price, reduce_only=False)
+        await _safe_close_client(client)
+        if err:
+            debug_log(f"⚠️ [{symbol}] Reverse-Order fehlgeschlagen - Position bleibt unverändert", {"error": str(err)})
+            return False
+        debug_log(f"⚡ [{symbol}] REVERSE ausgeführt (1 Order, {round((time.time() - _t0) * 1000)} ms): {closing_side.upper()} -> {target.upper()} @ ~{price}", {"tx_hash": str(tx_hash)})
+
+    stats = st["stats"]
+    stats["trades"] += 1
+    stats["total_pnl_usd"] += pnl_usd
+    stats["wins" if pnl_usd > 0 else "losses"] += 1
+    st["trade_log"].append({
+        "side": closing_side, "avg_entry": round(avg_old, 2), "exit": price,
+        "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3),
+        "opened_at": st.get("position_opened_at"), "closed_at": now_local().isoformat(), "reason": reason,
+    })
+    debug_log(f"🏁 [{symbol}] Position gedreht ({reason}): {closing_side.upper()} Ø{round(avg_old,2)} -> {price} | PnL ${round(pnl_usd,3)} (Schätzung)")
+
+    st["position"] = target
+    st["avg_entry_price"] = price
+    st["total_coin_size"] = new_units
+    st["position_opened_at"] = now_local().isoformat()
+    st["last_entry_price"] = price
+    st["entry_count"] = 1
+    st["anchor_price"] = price
+    st["g2_trigger_armed"] = True
+    st["g2_levels"] = None
+    st["current_position_entries"] = [{"time": now_local().isoformat(), "price": round(price, 6), "size": round(new_units, 8),
+                                       "stufe": 1, "is_add_on": False}]
+    debug_log(f"📈 [{symbol}] Neue Position: {target.upper()} @ {price} | Stufe 1")
+    await save_bot_state()
+    if not cfg["dry_run"]:
+        asyncio.create_task(_reverse_confirm(symbol, target, avg_old))
+    return True
+
+
+async def _reverse_confirm(symbol, target, avg_old):
+    """Hintergrund nach einem Reverse: den ECHTEN Ø-Einstiegspreis der neuen Position von der Boerse holen und im
+    Bot-State nachtragen (der Zielpreis war nur eine Schaetzung). Schlaegt das fehl, bleibt der Zielpreis stehen."""
+    try:
+        await asyncio.sleep(1.0)
+        client = get_lighter_client()
+        if client is None:
+            return
+        try:
+            for _ in range(6):
+                pos = await get_account_position_from_exchange(client, MARKET_INDICES[symbol], retries=1, delay=0)
+                try:
+                    real = float(pos.avg_entry_price) if pos is not None and pos.avg_entry_price is not None else None
+                except (TypeError, ValueError):
+                    real = None
+                if real and real > 0 and abs(real - avg_old) > 1e-9:
+                    st = BOTS[symbol]["state"]
+                    if st.get("position") == target and st.get("entry_count") == 1:
+                        old = st["avg_entry_price"]
+                        st["avg_entry_price"] = real
+                        st["last_entry_price"] = real
+                        if st.get("current_position_entries"):
+                            st["current_position_entries"][0]["price"] = round(real, 6)
+                        debug_log(f"🎯 [{symbol}] Reverse: echter Einstiegspreis von der Börse {real} (Ziel war {round(old, 6)})")
+                        await save_bot_state()
+                    return
+                await asyncio.sleep(0.7)
+        finally:
+            await _safe_close_client(client)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Reverse-Bestätigung fehlgeschlagen (ignoriert)", {"error": str(e)})
+
+
 async def execute_partial_exit(symbol, price, fraction, reason):
     async with _get_symbol_lock(symbol):
         return await _execute_partial_exit_locked(symbol, price, fraction, reason)
@@ -1385,6 +1496,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <button id="btn-start" class="start">▶️ Start</button>
   <button id="btn-stop" class="stop">⏸️ Stop</button>
   <button id="btn-close" class="danger">✖️ Position jetzt schließen</button>
+  <button id="btn-reverse" class="danger" style="background:#7c3aed;" title="Position mit einer einzigen Order in die Gegenrichtung drehen (gleiche Größe)">⇄ Reverse (Long ↔ Short)</button>
   <button id="btn-reset" class="neutral">🔄 Reset (Statistik)</button>
 </div>
 
@@ -2007,7 +2119,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="wellenanker"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="20" id="wa_max_nachkauf"></div>
   <div data-mode="wellenanker"><label><input type="checkbox" id="wa_reverse_only_profit" style="width:auto; vertical-align:middle;"> Gegentrade nur wenn die Position im Plus ist (nie mit Verlust schließen/drehen)</label></div>
-  <div data-mode="wellenanker"><label>Nachkauf-Abstand zum letzten Einstieg (%, 0 = aus)</label><input type="number" step="0.01" min="0" id="wa_nachkauf_min_pct"></div>
+  <div data-mode="wellenanker"><label>Nachkauf-Abstand zum letzten Einstieg (%, 0 = aus) – bei „Kreuzung zu Kreuzung": nachkaufen, wenn der Kurs so viel % GEGEN die Position läuft</label><input type="number" step="0.01" min="0" id="wa_nachkauf_min_pct"></div>
   <div data-mode="wellenanker"><label>TP-Modus</label>
     <select class="cfg" id="wa_tp_mode">
       <option value="gegentrade">Gegentrade (Exit beim entgegengesetzten Punkt)</option>
@@ -2776,6 +2888,13 @@ document.getElementById('btn-close').addEventListener('click', async () => {
   if (data.error) alert(data.error);
   refresh();
 });
+document.getElementById('btn-reverse').addEventListener('click', async () => {
+  if (!confirm(`Position für ${currentSymbol} jetzt in die Gegenrichtung drehen (gleiche Größe)?`)) return;
+  const res = await fetch(`/api/reverse?symbol=${currentSymbol}`, { method:'POST' });
+  const data = await res.json();
+  if (data.error) alert(data.error);
+  refresh();
+});
 document.getElementById('btn-reset').addEventListener('click', async () => {
   if (!confirm(`Statistik/Trade-Log für ${currentSymbol} zurücksetzen? (nur möglich wenn flach)`)) return;
   const res = await fetch(`/api/reset?symbol=${currentSymbol}`, { method:'POST' });
@@ -3200,7 +3319,7 @@ document.getElementById('btn-wa-sweep').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      statusEl.innerText = `[Modus: ${({zone:'Zone 1', level:'Level', cross:'Kreuzung zu Kreuzung (ohne Zone/Level)'})[data.entry_mode] || data.entry_mode}] ${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
       window.waSweepResultsData = data.results || [];
       window.waSweepWorstData = data.worst_results || [];
       renderWaSweepResults();
@@ -4612,6 +4731,22 @@ async def handle_close_position(request):
         return web.json_response({"error": "kein aktueller Preis bekannt"}, status=400)
     await execute_exit(symbol, st["last_price"], "MANUAL")
     return web.json_response({"success": True})
+
+
+async def handle_reverse_position(request):
+    """Manueller Reverse: laufende Position mit EINER Order in die Gegenrichtung drehen (gleiche Groesse)."""
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    st = BOTS[symbol]["state"]
+    if st["position"] is None:
+        return web.json_response({"error": "keine offene Position zum Umkehren"}, status=400)
+    if st["last_price"] is None:
+        return web.json_response({"error": "kein aktueller Preis bekannt"}, status=400)
+    ok = await execute_reverse(symbol, st["last_price"], "MANUAL-REVERSE")
+    if not ok:
+        return web.json_response({"error": "Reverse fehlgeschlagen - siehe Log"}, status=500)
+    return web.json_response({"success": True, "position": st["position"]})
 
 
 async def handle_reset(request):

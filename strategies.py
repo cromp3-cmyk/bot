@@ -16,7 +16,7 @@ from collections import deque, OrderedDict
 
 from bot_core import (
     debug_log, WS_URL, SYMBOLS, MARKET_INDICES, MARKET_INDEX_TO_SYMBOL,
-    BOTS, execute_entry, execute_exit, execute_partial_exit, compute_step_abs, compute_step_abs_g2, GLOBAL_SETTINGS,
+    BOTS, execute_entry, execute_exit, execute_reverse, execute_partial_exit, compute_step_abs, compute_step_abs_g2, GLOBAL_SETTINGS,
     get_redis, REDIS_TIMEOUT_SECONDS,
 )
 import binance_ws  # WebSocket-Kerzen-Cache - reduziert REST-Traffic gegen Binance drastisch,
@@ -5916,13 +5916,15 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price, cross_up=Fals
                 debug_log(f"⏭️ [{symbol}] Wellenanker Gegensignal ignoriert: {pos.upper()} liegt im Minus (Ø {round(avg_entry, 6)}, jetzt {price}) - kein Verlust-Wechsel")
                 return
             debug_log(f"🔄 [{symbol}] Wellenanker Gegentrade: {pos.upper()} -> {target.upper()} @ {price}")
-            await execute_exit(symbol, price, "TP-GEGENTRADE")
-            if st["position"] is not None:
-                return  # Exit fehlgeschlagen (z.B. Order-Fehler) - keine neue Position eroeffnen
-            _wa_reset_state(st)
-            await execute_entry(symbol, target, price, is_add_on=False)
-            if st["position"] is not None:
-                _wa_update_sl_tp(st, cfg)
+            # Schneller Wechsel mit EINER Order (Reverse) statt Exit + Entry hintereinander
+            if await execute_reverse(symbol, price, "TP-GEGENTRADE", size_multiplier=1.0):
+                _wa_reset_state(st)
+                if st["position"] is not None:
+                    _wa_update_sl_tp(st, cfg)
+                return
+            if st["position"] != pos:
+                return  # Position hat sich trotzdem veraendert - nichts weiter tun
+            debug_log(f"⚠️ [{symbol}] Reverse fehlgeschlagen - Position bleibt {pos.upper()}")
             return
         if tp_mode == "kreuzung" and (cross_dn if is_long else cross_up):
             # TP bei entgegengesetzter Kreuzung der beiden Linien - egal wo sie sich kreuzen
@@ -5943,10 +5945,16 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price, cross_up=Fals
                 if st["position"] is None:
                     _wa_reset_state(st)
                 return
+        min_pct = float(cfg.get("wa_nachkauf_min_pct", 0) or 0)
+        ref = st.get("last_entry_price") or st.get("avg_entry_price")
+        cross_mode = _wa_entry_mode(cfg) == "cross"
+        if cross_mode:
+            # Kreuzung zu Kreuzung: es gibt kein Signal in dieselbe Richtung - nachgekauft wird, wenn der Kurs mindestens
+            # wa_nachkauf_min_pct % GEGEN die Position vom letzten Einstieg weggelaufen ist (Durchschnitt senken). 0 % = aus.
+            adverse = ((ref - price) if is_long else (price - ref)) / ref * 100 if ref else 0.0
+            same_signal = min_pct > 0 and adverse >= min_pct
         if same_signal and max_nachkauf > 0 and st.get("entry_count", 0) < 1 + max_nachkauf:
-            min_pct = float(cfg.get("wa_nachkauf_min_pct", 0) or 0)
-            ref = st.get("last_entry_price") or st.get("avg_entry_price")
-            if min_pct > 0 and ref:
+            if not cross_mode and min_pct > 0 and ref:
                 dist_pct = abs(price - ref) / ref * 100
                 if dist_pct < min_pct:
                     debug_log(f"⏭️ [{symbol}] Wellenanker Nachkauf übersprungen: Abstand zum letzten Einstieg {dist_pct:.3f}% < {min_pct}%")
@@ -6128,6 +6136,11 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
                 same_dir_signal = (pdir == "long" and long_raw) or (pdir == "short" and short_raw)
                 last_fill = position.get("last_entry") or position["entry"]
                 far_enough = nachkauf_min_pct <= 0 or abs(price - last_fill) / last_fill * 100 >= nachkauf_min_pct
+                if entry_mode == "cross":
+                    # siehe check_wa_candle: Nachkauf, wenn der Kurs >= nachkauf_min_pct % gegen die Position vom letzten Einstieg weggelaufen ist
+                    adverse = ((last_fill - price) if pdir == "long" else (price - last_fill)) / last_fill * 100
+                    same_dir_signal = nachkauf_min_pct > 0 and adverse >= nachkauf_min_pct
+                    far_enough = True
                 if same_dir_signal and far_enough:
                     position["last_entry"] = price
                     add_size = (margin * leverage) / price
