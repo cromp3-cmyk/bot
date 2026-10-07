@@ -577,6 +577,8 @@ async def _run_auto_w2(sym, a, ev, cfg):
     if pos and (ev["cross_dn"] if pos == "long" else ev["cross_up"]):
         if cfg["w2_profit"] and in_loss():
             _log(sym, f"{a['tf']} Gegenkreuzung ignoriert – {pos} liegt im Minus (nicht im Minus schließen)")
+        elif ev["kind"] and ev["kind"] != pos and a[ev["kind"]]:
+            pass  # Gegensignal da -> unten per _place als schneller Reverse (1 Order) statt Schliessen + Neueroeffnen
         else:
             ok, err = await _close(sym, "SCALP-W2-KREUZUNG")
             _log(sym, f"{a['tf']} Gegenkreuzung → Position geschlossen" if ok else f"{a['tf']} Gegenkreuzung → FEHLER: {err}", "tp" if ok else "err")
