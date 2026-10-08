@@ -1360,6 +1360,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"><title>Grid-Bot Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
     --bg: #060a18;
@@ -1439,6 +1440,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   button.danger { background:linear-gradient(135deg,#ef4444,#b91c1c); }
   button.neutral { background:linear-gradient(135deg,#475569,#334155); }
   table { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
+  #wac-price canvas, #wac-wt canvas { background:transparent; border:0; border-radius:0; padding:0; box-shadow:none; }
+  #wac-price table, #wac-wt table { width:auto; margin:0; font-size:inherit; }
+  #wac-price td, #wac-wt td, #wac-price tr:hover td, #wac-wt tr:hover td { padding:0; border:0; background:transparent; }
   th.sortable { cursor:pointer; user-select:none; }
   th.sortable:hover { color:var(--accent); }
   th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--panel-border); }
@@ -2330,6 +2334,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div style="font-size:12px; color:var(--text-dim); margin-top:8px;" id="abs-distances"></div>
 </div>
 
+<div data-mode-section="wellenanker" style="display:none;">
+<h2 class="section-title">🌊 Wellenanker Chart (Live &amp; Backtest)</h2>
+<div class="panel-card">
+  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+    <button type="button" id="wac-tab-live" style="padding:8px 16px;">🔴 Live</button>
+    <button type="button" id="wac-tab-bt" style="padding:8px 16px; opacity:.6;">📊 Backtest-Trades</button>
+    <span id="wac-info" style="font-size:13px; color:var(--text-dim);"></span>
+  </div>
+  <div id="wac-price" style="height:420px;"></div>
+  <div style="font-size:12px; color:var(--text-dim); margin:8px 0 4px;">WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels</div>
+  <div id="wac-wt" style="height:180px;"></div>
+  <div style="font-size:12px; color:var(--text-dim); margin-top:6px;" id="wac-legend">Live: Pfeile = Signale (laufende Kerze zählt sofort). Backtest: ▲/▼ Einstieg, ● Ausstieg mit PnL – Klick auf eine Trade-Zeile springt zum Trade.</div>
+</div>
+</div>
+
 <div id="backtest-zone">
 <h2 class="section-title">📊 Backtest (mit den oben gespeicherten Einstellungen)</h2>
 <div class="panel-card">
@@ -2967,6 +2986,7 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
       document.getElementById('bt-short-avg').innerText = `${data.stats_short.avg_win_usd} / ${data.stats_short.avg_loss_usd}`;
       window.btTradesData = [...(data.trades || [])].reverse();  // neueste zuerst
       renderBtTrades();
+      if (data.chart) { WAC.bt = data; wacShowBacktest(); } else { WAC.bt = null; }
       resultsEl.style.display = 'block';
     }
   } catch (e) {
@@ -2974,6 +2994,113 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
     statusEl.innerText = `❌ Fehler: ${e}`;
   }
   if (btSymbol === currentSymbol) btn.disabled = false;
+});
+
+// ===== Wellenanker Chart (Live + Backtest) =====
+const WAC = {mode: 'live', price: null, wt: null, cs: null, l1: null, l2: null, lines: [], timer: null, bt: null, inited: false, sym: null, fitted: false};
+function wacInit() {
+  if (WAC.inited || !window.LightweightCharts) return;
+  const LW = window.LightweightCharts;
+  const opt = {layout: {background: {color: 'transparent'}, textColor: '#9aa4bf'}, grid: {vertLines: {color: '#141c33'}, horzLines: {color: '#141c33'}},
+               rightPriceScale: {borderColor: '#1c2542'}, timeScale: {borderColor: '#1c2542', timeVisible: true, secondsVisible: true}, crosshair: {mode: 0}};
+  WAC.price = LW.createChart(document.getElementById('wac-price'), Object.assign({autoSize: true}, opt));
+  WAC.wt = LW.createChart(document.getElementById('wac-wt'), Object.assign({autoSize: true}, opt));
+  WAC.cs = WAC.price.addCandlestickSeries({upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444'});
+  WAC.l1 = WAC.wt.addLineSeries({color: '#3b82f6', lineWidth: 2, priceLineVisible: false});
+  WAC.l2 = WAC.wt.addLineSeries({color: '#eab308', lineWidth: 1, priceLineVisible: false});
+  let busy = false;
+  const sync = (from, to) => from.timeScale().subscribeVisibleTimeRangeChange(r => { if (busy || !r) return; busy = true; try { to.timeScale().setVisibleRange(r); } catch (e) {} busy = false; });
+  sync(WAC.price, WAC.wt); sync(WAC.wt, WAC.price);
+  WAC.inited = true;
+}
+function wacSetLevels(levels) {
+  WAC.lines.forEach(x => WAC.l1.removePriceLine(x)); WAC.lines = [];
+  (levels || []).concat([0]).forEach(v => WAC.lines.push(WAC.l1.createPriceLine({price: v, color: v === 0 ? '#3a4466' : '#6b7280', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: String(v)})));
+}
+let wacPosLines = [];
+function wacSetPosition(p) {
+  wacPosLines.forEach(x => WAC.cs.removePriceLine(x)); wacPosLines = [];
+  if (!p) return;
+  wacPosLines.push(WAC.cs.createPriceLine({price: p.avg, color: p.dir === 'long' ? '#22c55e' : '#ef4444', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: p.dir.toUpperCase() + ' Ø'}));
+  wacPosLines.push(WAC.cs.createPriceLine({price: p.sl, color: '#f97316', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL'}));
+}
+function wacRender(d, markers, keepRange) {
+  WAC.cs.setData(d.candles); WAC.l1.setData(d.wt1); WAC.l2.setData(d.wt2);
+  WAC.cs.setMarkers(markers);
+  wacSetLevels(d.levels);
+}
+function wacSigMarkers(d) {
+  return (d.markers || []).map(m => m.kind === 'long'
+    ? {time: m.time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: ''}
+    : {time: m.time, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: ''});
+}
+async function wacPollLive() {
+  if (WAC.mode !== 'live') return;
+  const sec = document.querySelector('#wac-price');
+  if (!sec || sec.offsetParent === null) return;   // nicht sichtbar (anderer Modus) -> nichts abfragen
+  wacInit(); if (!WAC.inited) return;
+  const sym = currentSymbol;
+  try {
+    const r = await fetch(`/api/wa/live_chart?symbol=${sym}`);
+    const d = await r.json();
+    if (WAC.mode !== 'live' || sym !== currentSymbol) return;
+    const info = document.getElementById('wac-info');
+    if (!d.ok) { info.innerText = d.reason || 'keine Daten'; return; }
+    const first = WAC.sym !== sym || !WAC.fitted;
+    wacRender(d, wacSigMarkers(d));
+    wacSetPosition(d.position);
+    if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 120, to: d.candles.length + 5}); WAC.fitted = true; WAC.sym = sym; }
+    const p = d.position;
+    info.innerText = `${sym} ${d.resolution} · Kurs ${d.price ?? '-'} · WT1 ${d.wt1v} / WT2 ${d.wt2v}` + (p ? ` · ${p.dir.toUpperCase()} Ø ${p.avg.toFixed(2)} PnL ${p.pnl.toFixed(2)} $` : ' · flat') + (d.active ? '' : ' · Bot nicht aktiv (nur Anzeige)');
+  } catch (e) { /* naechster Versuch */ }
+}
+function wacBtMarkers(trades) {
+  const out = [];
+  (trades || []).forEach(t => {
+    const long = t.dir === 'long';
+    if (t.exit === null || t.exit === undefined) {
+      const ts = t.row_ts || t.entry_ts;
+      if (ts) out.push({time: Math.floor(ts / 1000), position: long ? 'belowBar' : 'aboveBar', color: long ? '#22c55e' : '#ef4444', shape: long ? 'arrowUp' : 'arrowDown', text: t.reason && t.reason.startsWith('NACHKAUF') ? '+' : ''});
+    } else if (t.exit_ts) {
+      const win = t.pnl >= 0;
+      out.push({time: Math.floor(t.exit_ts / 1000), position: long ? 'aboveBar' : 'belowBar', color: win ? '#22c55e' : '#ef4444', shape: 'circle', text: (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(1)});
+    }
+  });
+  out.sort((a, b) => a.time - b.time);
+  return out;
+}
+function wacShowBacktest() {
+  WAC.mode = 'bt';
+  document.getElementById('wac-tab-bt').style.opacity = 1; document.getElementById('wac-tab-live').style.opacity = .6;
+  wacInit(); if (!WAC.inited) return;
+  wacSetPosition(null);
+  const b = WAC.bt, info = document.getElementById('wac-info');
+  if (!b) { info.innerText = 'Noch kein Backtest – unten „Backtest starten“ klicken.'; return; }
+  wacRender(b.chart, wacBtMarkers(b.trades));
+  WAC.price.timeScale().fitContent();
+  const n = (b.trades || []).filter(t => t.pnl !== null && t.pnl !== undefined).length;
+  info.innerText = `Backtest ${b.symbol} ${b.resolution}: ${n} Trades im Chart (letzte ${b.chart.candles.length} Kerzen)`;
+}
+function wacShowLive() {
+  WAC.mode = 'live'; WAC.fitted = false;
+  document.getElementById('wac-tab-live').style.opacity = 1; document.getElementById('wac-tab-bt').style.opacity = .6;
+  wacPollLive();
+}
+function wacZoomTrade(t) {
+  if (!WAC.inited || WAC.mode !== 'bt' || !t) return;
+  const a = Math.floor((t.entry_ts || t.row_ts) / 1000), z = Math.floor((t.exit_ts || t.row_ts || t.entry_ts) / 1000);
+  const cc = (WAC.bt && WAC.bt.chart.candles) || [], bar = cc.length > 1 ? cc[1].time - cc[0].time : 60;
+  const pad = Math.max(bar * 20, (z - a) * 0.6);
+  WAC.price.timeScale().setVisibleRange({from: a - pad, to: z + pad});
+  document.getElementById('wac-price').scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+document.getElementById('wac-tab-live').addEventListener('click', wacShowLive);
+document.getElementById('wac-tab-bt').addEventListener('click', wacShowBacktest);
+setInterval(wacPollLive, 2000);
+document.getElementById('bt-trades-table').addEventListener('click', ev => {
+  const tr = ev.target.closest('tbody tr'); if (!tr) return;
+  const i = Array.from(tr.parentNode.children).indexOf(tr);
+  if (window.btTradesShown && window.btTradesShown[i]) { if (WAC.mode !== 'bt') wacShowBacktest(); wacZoomTrade(window.btTradesShown[i]); }
 });
 
 function makeSortableTable(tableId, getData, rowHtml) {
@@ -3030,7 +3157,7 @@ function computeBtColorMap(rows) {
   return map;
 }
 const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTradesData, (r, i, allRows) => {
-  if (i === 0) btColorMap = computeBtColorMap(allRows);
+  if (i === 0) { btColorMap = computeBtColorMap(allRows); window.btTradesShown = allRows; }
   const groupColor = btColorMap[String(r.entry_ts)];
   // Ersteinstiegs-/Nachkauf-Zeilen (siehe _bt_record_addon) sind noch offen - kein Exit/PnL
   // bis die Position tatsaechlich schliesst (eigene Zeile aus _bt_close_trade).
@@ -3044,7 +3171,7 @@ const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTrade
   // sehen alle Stufen einer Position faelschlich nach demselben Zeitpunkt aus.
   const startTs = isOpenRow ? r.row_ts : r.entry_ts;
   return `
-  <tr style="${rowStyle}">
+  <tr style="${rowStyle}; cursor:pointer;" title="Klick: im Chart anzeigen">
     <td>${fmtTs(startTs)}</td>
     <td>${r.dir === 'long' ? '🟢 Long' : '🔴 Short'}</td>
     <td>${r.entry}</td>
@@ -4478,6 +4605,36 @@ async def handle_control(request):
 
 BACKTEST_TIMEOUT_SECONDS = 90  # siehe Kommentar in handle_backtest - verhindert unbegrenzt
 # haengende Backtest-Tasks, die den globalen Binance-Throttle fuer alle Live-Coins blockieren
+
+
+async def handle_wa_live_chart(request):
+    """Live-Chart fuer Wellenanker im Dashboard: Kerzen (inkl. laufender Kerze), Wellenlinien, Signale, Position."""
+    from strategies import fetch_candles_binance_multi, wa_chart_payload
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    cfg = BOTS[symbol]["config"]
+    st = BOTS[symbol]["state"]
+    n1, n2, sl = int(cfg.get("wa_n1", 10)), int(cfg.get("wa_n2", 21)), int(cfg.get("wa_sig_len", 4))
+    bars = max(300, (n1 + n2 + sl + 20) * 3)
+    data = await fetch_candles_binance_multi(symbol, cfg.get("wa_timeframe", "15m"), count_back=min(1000, bars), market_type=cfg.get("binance_market_type", "spot"))
+    if not data:
+        return web.json_response({"ok": False, "reason": "lädt noch … (keine Kerzen erhalten)"})
+    ts, o, h, l, c = data
+    if len(c) < n1 + n2 + sl + 21:
+        return web.json_response({"ok": False, "reason": "lädt noch … (zu wenig Kerzen)"})
+    payload = await asyncio.to_thread(wa_chart_payload, ts, o, h, l, c, cfg, 1000)
+    pos = None
+    if st.get("position") and st.get("avg_entry_price"):
+        size = st.get("total_coin_size") or 0
+        avg = st["avg_entry_price"]
+        sl_usd = float(cfg.get("wa_sl_usd", 5.0))
+        d = (sl_usd / size) if size else 0
+        pos = {"dir": st["position"], "avg": avg, "size": size, "pnl": ((st.get("last_price") or avg) - avg) * size * (1 if st["position"] == "long" else -1),
+               "sl": (avg - d) if st["position"] == "long" else (avg + d)}
+    payload.update({"ok": True, "price": st.get("last_price"), "position": pos, "resolution": cfg.get("wa_timeframe", "15m"),
+                    "active": bool(cfg.get("bot_active")) and cfg.get("entry_mode") == "wellenanker"})
+    return web.json_response(payload)
 
 
 async def handle_backtest(request):

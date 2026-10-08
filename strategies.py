@@ -2221,6 +2221,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "candles_processed": n_candles, "candle_cap": max_candles, "cache_used": False,
             "stats": stats, "stats_long": stats_long, "stats_short": stats_short,
             "trades": trades,  # keine Begrenzung mehr - Nutzer-Vorgabe: alle Trades anzeigen
+            "chart": wa_chart_payload(candles[0], candles[1], candles[2], candles[3], candles[4], cfg),
         }
 
     return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
@@ -6045,6 +6046,44 @@ async def wa_poll_loop(symbol):
             debug_log(f"⚠️ [{symbol}] Wellenanker-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
 
         await asyncio.sleep(1)
+
+
+def wa_chart_payload(ts, o, h, l, c, cfg, max_bars=6000):
+    """Chart-Daten fuer das Bot-Dashboard (Live + Backtest): Kerzen, Wellenlinien, Signal-Marker (steigende Flanke
+    der Roh-Signale) und Level-Linien - mit denselben Einstellungen/Funktionen wie Live-Loop und Backtest."""
+    n1 = int(cfg.get("wa_n1", 10)); n2 = int(cfg.get("wa_n2", 21)); sig_len = int(cfg.get("wa_sig_len", 4))
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
+    emode = _wa_entry_mode(cfg)
+    z1 = float(cfg.get("wa_level", 10.0)) if emode == "level" else float(cfg.get("wa_zone1", 53.0))
+    line = cfg.get("wa_level_line", "signal")
+    n = len(c)
+    min_needed = n1 + n2 + sig_len + 20
+    off = max(0, n - max_bars)
+    candles, w1, w2, markers = [], [], [], []
+    prev = (False, False)
+    for i in range(max(0, off - 1), n):
+        if i < min_needed:
+            continue
+        lr, sr, cu, cd = _wa_raw_signals(wt1, wt2, i, z1, emode, line)
+        if i >= off:
+            if lr and not prev[0]:
+                markers.append({"time": ts[i] // 1000, "kind": "long", "price": c[i]})
+            if sr and not prev[1]:
+                markers.append({"time": ts[i] // 1000, "kind": "short", "price": c[i]})
+        prev = (bool(lr), bool(sr))
+    for i in range(off, n):
+        t = ts[i] // 1000
+        candles.append({"time": t, "open": o[i], "high": h[i], "low": l[i], "close": c[i]})
+        if i >= min_needed - 20:
+            w1.append({"time": t, "value": round(wt1[i], 2)})
+            w2.append({"time": t, "value": round(wt2[i], 2)})
+    levels = []
+    if emode in ("zone", "level"):
+        levels += [z1, -z1]
+    if cfg.get("wa_tp_mode") == "ueberlauf":
+        u = float(cfg.get("wa_ueberlauf_level", 45.0)); levels += [u, -u]
+    return {"candles": candles, "wt1": w1, "wt2": w2, "markers": markers, "levels": levels, "entry_mode": emode,
+            "wt1v": round(wt1[-1], 2), "wt2v": round(wt2[-1], 2), "bars": n}
 
 
 def backtest_wellenanker(candles, cfg):
