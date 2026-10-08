@@ -275,6 +275,9 @@ def default_config():
         "wa_zone1": float(os.getenv("WA_ZONE1", "53.0")),  # Zone: Long-Punkt wenn wt2 < -zone1, Short wenn wt2 > zone1
         "wa_entry_mode": os.getenv("WA_ENTRY_MODE", "zone"),  # "zone" = Kreuzung ausserhalb der Zone, "level" = Durchbruch durch +-wa_level
         "wa_level": float(os.getenv("WA_LEVEL", "10")),  # Level-Modus: Long beim Durchbruch von -X nach oben, Short bei +X nach unten (0-30)
+        "wa_trend_mode": os.getenv("WA_TREND_MODE", "off"),   # Trendfilter: off / intern / swing (Marktstruktur BOS/CHoCH)
+        "wa_trend_tf": os.getenv("WA_TREND_TF", "1h"),        # Zeitebene des Trends
+        "wa_trend_ilen": 4, "wa_trend_slen": 50,              # Pivot-Laengen (intern / swing)
         "wa_level_line": os.getenv("WA_LEVEL_LINE", "signal"),  # Level-Modus: signal / wave / both
         "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 20)
         "wa_reverse_only_profit": os.getenv("WA_REVERSE_ONLY_PROFIT", "false").lower() == "true",  # Gegentrade/Wechsel nur, wenn die laufende Position im Plus liegt (nie mit Verlust drehen)
@@ -2135,6 +2138,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="ueberlauf"><label>Überlauflinie (±)</label><input type="number" step="1" min="1" max="100" id="wa_ueberlauf_level"></div>
   <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="fester_betrag"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="wa_tp_usd"></div>
   <div data-mode="wellenanker"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="wa_sl_usd"></div>
+  <div data-mode="wellenanker"><label>🧭 Trendfilter (Marktstruktur: nur Trades in Trendrichtung)</label>
+    <select class="cfg" id="wa_trend_mode">
+      <option value="off">Aus</option>
+      <option value="intern">Intern (kurze Pivots)</option>
+      <option value="swing">Swing (lange Pivots)</option>
+    </select></div>
+  <div data-mode="wellenanker"><label>Trend-Zeitebene</label>
+    <select class="cfg" id="wa_trend_tf">
+      <option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option>
+      <option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option><option value="1w">1w</option>
+    </select></div>
+  <div data-mode="wellenanker"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="wa_trend_ilen"></div>
+  <div data-mode="wellenanker"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="wa_trend_slen"></div>
 
 
 
@@ -2345,6 +2361,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div id="wac-price" style="height:420px;"></div>
   <div style="font-size:12px; color:var(--text-dim); margin:8px 0 4px;">WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels</div>
   <div id="wac-wt" style="height:180px;"></div>
+  <div id="wac-trend" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; font-size:12px;"></div>
   <div style="font-size:12px; color:var(--text-dim); margin-top:6px;" id="wac-legend">Live: Pfeile = Signale (laufende Kerze zählt sofort). Backtest: ▲/▼ Einstieg, ● Ausstieg mit PnL – Klick auf eine Trade-Zeile springt zum Trade.</div>
 </div>
 </div>
@@ -3096,7 +3113,22 @@ function wacZoomTrade(t) {
 }
 document.getElementById('wac-tab-live').addEventListener('click', wacShowLive);
 document.getElementById('wac-tab-bt').addEventListener('click', wacShowBacktest);
+async function wacPollTrend() {
+  const box = document.getElementById('wac-trend');
+  if (!box || box.offsetParent === null) return;
+  try {
+    const r = await fetch(`/api/wa/trend?symbol=${currentSymbol}`);
+    const d = await r.json();
+    if (!d.rows) return;
+    const cell = (v) => v === 1 ? '<b style="color:#22c55e">▲ BULLISH</b>' : v === -1 ? '<b style="color:#ef4444">▼ BEARISH</b>' : '<span style="color:#6b7280">–</span>';
+    const pick = d.mode === 'swing' ? 'swing' : 'intern';
+    box.innerHTML = '<span style="color:var(--text-dim)">🧭 Trend (Marktstruktur):</span>' + d.rows.map(x =>
+      `<span style="padding:4px 8px; border:1px solid ${d.mode !== 'off' && x.tf === d.tf ? '#3b82f6' : 'var(--panel-border)'}; border-radius:8px;">${x.tf} · intern ${cell(x.intern)} · swing ${cell(x.swing)}</span>`).join('') +
+      `<span style="color:var(--text-dim)">${d.mode === 'off' ? 'Filter aus' : 'Filter: ' + d.mode + ' ' + d.tf + ' → ' + (d.active === 1 ? 'nur Long' : d.active === -1 ? 'nur Short' : 'beide')}</span>`;
+  } catch (e) {}
+}
 setInterval(wacPollLive, 2000);
+setInterval(wacPollTrend, 30000); setTimeout(wacPollTrend, 3000);
 document.getElementById('bt-trades-table').addEventListener('click', ev => {
   const tr = ev.target.closest('tbody tr'); if (!tr) return;
   const i = Array.from(tr.parentNode.children).indexOf(tr);
@@ -3971,6 +4003,10 @@ async function refresh() {
     document.getElementById('wa_ueberlauf_level').value = data.config.wa_ueberlauf_level;
     document.getElementById('wa_tp_usd').value = data.config.wa_tp_usd;
     document.getElementById('wa_sl_usd').value = data.config.wa_sl_usd;
+    document.getElementById('wa_trend_mode').value = data.config.wa_trend_mode || 'off';
+    document.getElementById('wa_trend_tf').value = data.config.wa_trend_tf || '1h';
+    document.getElementById('wa_trend_ilen').value = data.config.wa_trend_ilen ?? 4;
+    document.getElementById('wa_trend_slen').value = data.config.wa_trend_slen ?? 50;
     document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
     setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
     document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
@@ -4330,6 +4366,10 @@ function buildConfigPayload() {
     wa_ueberlauf_level: parseFloat(document.getElementById('wa_ueberlauf_level').value),
     wa_tp_usd: parseFloat(document.getElementById('wa_tp_usd').value),
     wa_sl_usd: parseFloat(document.getElementById('wa_sl_usd').value),
+    wa_trend_mode: document.getElementById('wa_trend_mode').value,
+    wa_trend_tf: document.getElementById('wa_trend_tf').value,
+    wa_trend_ilen: parseInt(document.getElementById('wa_trend_ilen').value) || 4,
+    wa_trend_slen: parseInt(document.getElementById('wa_trend_slen').value) || 50,
     ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
     ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
     ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
@@ -4574,7 +4614,8 @@ async def handle_config_update(request):
                 "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
                 "liq_max_nachkauf", "liq_nachkauf_progress_pct",
                 "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_entry_mode", "wa_level", "wa_level_line", "wa_max_nachkauf", "wa_nachkauf_min_pct", "wa_reverse_only_profit",
-                "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd"]:
+                "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd",
+                "wa_trend_mode", "wa_trend_tf", "wa_trend_ilen", "wa_trend_slen"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -4605,6 +4646,26 @@ async def handle_control(request):
 
 BACKTEST_TIMEOUT_SECONDS = 90  # siehe Kommentar in handle_backtest - verhindert unbegrenzt
 # haengende Backtest-Tasks, die den globalen Binance-Throttle fuer alle Live-Coins blockieren
+
+
+async def handle_wa_trend(request):
+    """Trend (Marktstruktur BOS/CHoCH) aller Zeitebenen fuers Dashboard - 60 s gecacht."""
+    from strategies import wa_trend_table, _wa_trend_cfg
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    cfg = BOTS[symbol]["config"]
+    ent = _wa_trend_ui_cache.get(symbol)
+    if ent and time.time() - ent[0] < 60 and ent[2] == (cfg.get("wa_trend_ilen"), cfg.get("wa_trend_slen")):
+        rows = ent[1]
+    else:
+        rows = await wa_trend_table(symbol, cfg)
+        _wa_trend_ui_cache[symbol] = (time.time(), rows, (cfg.get("wa_trend_ilen"), cfg.get("wa_trend_slen")))
+    mode, tf, _i, _s = _wa_trend_cfg(cfg)
+    return web.json_response({"rows": rows, "mode": mode, "tf": tf, "active": BOTS[symbol]["state"].get("wa_trend", 0)})
+
+
+_wa_trend_ui_cache = {}
 
 
 async def handle_wa_live_chart(request):
