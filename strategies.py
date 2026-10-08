@@ -5889,7 +5889,7 @@ async def check_wa_sl(symbol, price):
             _wa_reset_state(st)
 
 
-async def check_wa_candle(symbol, long_raw, short_raw, wt2, price, cross_up=False, cross_dn=False, trend=0):
+async def check_wa_candle(symbol, long_raw, short_raw, wt2, price, cross_up=False, cross_dn=False, trend=0, open_long_ok=True, open_short_ok=True):
     """Bei JEDER neu geschlossenen Kerze: TP-Gegentrade/Ueberlauf einer offenen Position pruefen,
     sonst Nachkauf bei erneutem Punkt in dieselbe Richtung, sonst (keine Position) Neueinstieg."""
     b = BOTS[symbol]
@@ -5907,6 +5907,10 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price, cross_up=Fals
         # Trendfilter (Marktstruktur der gewaehlten Zeitebene): Long nur bei bullish, Short nur bei bearish; 0 = aus/unbekannt
         return (direction == "long" and trend < 0) or (direction == "short" and trend > 0)
 
+    def no_open(direction):
+        # Trendfilter ODER "nur jedes N-te Signal oeffnet" -> darf in diese Richtung NEU geoeffnet werden?
+        return blocked(direction) or not (open_long_ok if direction == "long" else open_short_ok)
+
     if pos in ("long", "short"):
         is_long = pos == "long"
         opposite_signal = short_raw if is_long else long_raw
@@ -5921,8 +5925,8 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price, cross_up=Fals
                 # das Gegensignal wird ignoriert, SL/TP-Logik laeuft weiter wie sonst.
                 debug_log(f"⏭️ [{symbol}] Wellenanker Gegensignal ignoriert: {pos.upper()} liegt im Minus (Ø {round(avg_entry, 6)}, jetzt {price}) - kein Verlust-Wechsel")
                 return
-            if blocked(target):
-                debug_log(f"🧭 [{symbol}] Trendfilter: {target.upper()} gegen den Trend - {pos.upper()} wird nur geschlossen @ {price}")
+            if no_open(target):
+                debug_log(f"🧭 [{symbol}] {target.upper()} wird nicht eröffnet (Trendfilter oder „nur jedes N-te Signal“) - {pos.upper()} wird nur geschlossen @ {price}")
                 await execute_exit(symbol, price, "TP-GEGENTRADE")
                 if st["position"] is None:
                     _wa_reset_state(st)
@@ -5981,13 +5985,13 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price, cross_up=Fals
         return
 
     # Keine Position offen: Neueinstieg
-    if long_raw and not blocked("long"):
+    if long_raw and not no_open("long"):
         target = "long"
-    elif short_raw and not blocked("short"):
+    elif short_raw and not no_open("short"):
         target = "short"
     else:
         if long_raw or short_raw:
-            debug_log(f"🧭 [{symbol}] Trendfilter: Signal {'LONG' if long_raw else 'SHORT'} gegen den Trend ignoriert")
+            debug_log(f"🧭 [{symbol}] Signal {'LONG' if long_raw else 'SHORT'} nicht gehandelt (Trendfilter oder „nur jedes N-te Signal“)")
         return
     debug_log(f"📡 [{symbol}] Wellenanker Punkt: {target.upper()} @ {price}")
     await execute_entry(symbol, target, price, is_add_on=False)
@@ -6047,10 +6051,24 @@ async def wa_poll_loop(symbol):
                         if last_processed_ts is None:
                             last_processed_ts = sig_key   # Basislinie nach (Neu)Start: vorhandene Signale zaehlen nicht
                         elif sig_key != last_processed_ts:
+                            prev_l, prev_s = bool(last_processed_ts[1]), bool(last_processed_ts[2])
                             last_processed_ts = sig_key
+                            # "Nur jedes N-te Signal oeffnet": je Richtung Signale (steigende Flanke, je Kerze nur 1x) zaehlen
+                            n_open = max(1, int(cfg.get("wa_open_every", 1) or 1))
+                            cnt = st.setdefault("wa_cnt", {"long": 0, "short": 0, "lts": None, "sts": None})
+                            edge_l = bool(long_raw) and not prev_l
+                            edge_s = bool(short_raw) and not prev_s
+                            if edge_l and cnt["lts"] != timestamps[-1]:
+                                cnt["long"] += 1; cnt["lts"] = timestamps[-1]
+                            if edge_s and cnt["sts"] != timestamps[-1]:
+                                cnt["short"] += 1; cnt["sts"] = timestamps[-1]
+                            ok_l = n_open <= 1 or (edge_l and cnt["long"] % n_open == 0)
+                            ok_s = n_open <= 1 or (edge_s and cnt["short"] % n_open == 0)
+                            if n_open > 1 and (edge_l or edge_s):
+                                debug_log(f"🔢 [{symbol}] Wellenanker Signal-Zähler: Long {cnt['long']}, Short {cnt['short']} (öffnet bei jedem {n_open}.)")
                             trend_now = await wa_trend_now(symbol, cfg)
                             st["wa_trend"] = trend_now
-                            await check_wa_candle(symbol, long_raw, short_raw, wt2_arr[-1], closes[-1], cross_up, cross_dn, trend_now)
+                            await check_wa_candle(symbol, long_raw, short_raw, wt2_arr[-1], closes[-1], cross_up, cross_dn, trend_now, ok_l, ok_s)
                         if due_heartbeat:
                             last_heartbeat = now
                             debug_log(f"💓 [{symbol}] Wellenanker aktiv: wt2={round(st.get('wa_wt2_last') or 0, 1)}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}, bot_active={cfg['bot_active']}")
@@ -6263,12 +6281,13 @@ def backtest_wellenanker(candles, cfg, trend_arr=None):
     return _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
                                 sl_usd, max_nachkauf, margin, leverage, min_needed,
                                 bool(cfg.get("wa_reverse_only_profit")), float(cfg.get("wa_nachkauf_min_pct", 0) or 0),
-                                entry_mode, cfg.get("wa_level_line", "signal"), trend_arr)
+                                entry_mode, cfg.get("wa_level_line", "signal"), trend_arr,
+                                int(cfg.get("wa_open_every", 1) or 1))
 
 
 def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
                          sl_usd, max_nachkauf, margin, leverage, min_needed, reverse_only_profit=False,
-                         nachkauf_min_pct=0.0, entry_mode="zone", level_line="signal", trend_arr=None):
+                         nachkauf_min_pct=0.0, entry_mode="zone", level_line="signal", trend_arr=None, open_every=1):
     """Die eigentliche Handelssimulation fuer Wellenanker, getrennt von der (teuren) WaveTrend-
     Berechnung (compute_wavetrend_series) - siehe backtest_wellenanker/run_wa_sweep."""
     n = len(c)
@@ -6293,9 +6312,24 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
         tr = trend_arr[i]
         return (direction == "long" and tr < 0) or (direction == "short" and tr > 0)
 
+    open_every = max(1, int(open_every or 1))
+    sig_cnt = {"long": 0, "short": 0}
+    sig_edge = {"long": False, "short": False}
+    prev_raw = [False, False]
+
+    def can_open(direction):
+        # "Nur jedes N-te Signal zum Oeffnen": je Richtung werden die Signale (steigende Flanke) gezaehlt, geoeffnet wird beim N-ten.
+        # Schliessen laeuft weiter beim ersten Gegensignal.
+        return open_every <= 1 or (sig_edge[direction] and sig_cnt[direction] % open_every == 0)
+
     for i in range(min_needed, n):
         price = c[i]
         long_raw, short_raw, cross_up, cross_dn = _wa_raw_signals(wt1_arr, wt2_arr, i, z1, entry_mode, level_line)
+        sig_edge["long"] = bool(long_raw) and not prev_raw[0]
+        sig_edge["short"] = bool(short_raw) and not prev_raw[1]
+        sig_cnt["long"] += sig_edge["long"]
+        sig_cnt["short"] += sig_edge["short"]
+        prev_raw = [bool(long_raw), bool(short_raw)]
 
         if position is not None:
             pdir, entry = position["dir"], position["entry"]
@@ -6318,8 +6352,8 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
                 # "Gegentrade" = direkter Flip in die Gegenrichtung, siehe check_wa_candle
                 _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP-GEGENTRADE", ts=ts)
                 target = "short" if pdir == "long" else "long"
-                if blocked(target, i):
-                    position = None   # Trendfilter: Position schliessen, aber NICHT gegen den Trend neu eroeffnen
+                if blocked(target, i) or not can_open(target):
+                    position = None   # Trendfilter / "nur jedes N-te Signal oeffnet": Position schliessen, aber NICHT gegen den Trend neu eroeffnen
                     continue
                 size = (margin * leverage) / price
                 position = {"dir": target, "entry": price, "size": size, "entry_i": i, "entries": 1}
@@ -6357,9 +6391,9 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
                     _bt_record_addon(trades, pdir, price, i, position["entry_i"], position["entries"], ts=ts, is_add_on=True)
             continue
 
-        if long_raw and not blocked("long", i):
+        if long_raw and not blocked("long", i) and can_open("long"):
             target = "long"
-        elif short_raw and not blocked("short", i):
+        elif short_raw and not blocked("short", i) and can_open("short"):
             target = "short"
         else:
             continue
@@ -6377,7 +6411,7 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
 
 def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list, tp_mode,
                        ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n,
-                       reverse_only_profit=False, nachkauf_min_pct=0.0, entry_mode="zone", lines=("signal",), trend_arr=None):
+                       reverse_only_profit=False, nachkauf_min_pct=0.0, entry_mode="zone", lines=("signal",), trend_arr=None, open_every=1):
     """Rechenteil des Wellenanker-'Monte-Carlo'-Sweeps (Zone 1 x Max. Nachkäufe x Stop-Loss $),
     reine CPU-Arbeit im Thread. wt1_arr/wt2_arr (die WaveTrend-Welle/Signallinie) haengen nur von
     n1/n2/sig_len/Quelle/Wellen-Skalierung ab und werden darum NUR EINMAL vor dem Sweep berechnet
@@ -6391,7 +6425,7 @@ def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_l
                 for sl_usd in sl_list:
                     trades = _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level,
                                                   tp_usd, sl_usd, max_nachkauf, margin, leverage, min_needed,
-                                                  reverse_only_profit, nachkauf_min_pct, entry_mode, line, trend_arr)
+                                                  reverse_only_profit, nachkauf_min_pct, entry_mode, line, trend_arr, open_every)
                     closed_trades = [t for t in trades if t["pnl"] is not None]
                     stats = summarize_backtest_trades(closed_trades, exclude_top_n)
                     results.append({"wa_zone1": z1, "wa_level_line": line if entry_mode == "level" else "-",
@@ -6466,7 +6500,7 @@ async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_
         None, _wa_sweep_compute, (ts, o, h, l, c), wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list,
         tp_mode, ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n,
         bool(cfg.get("wa_reverse_only_profit")), float(cfg.get("wa_nachkauf_min_pct", 0) or 0),
-        entry_mode, tuple(lines), trend_arr)
+        entry_mode, tuple(lines), trend_arr, int(cfg.get("wa_open_every", 1) or 1))
 
     rank_key = lambda r: (r["trades"] >= AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
     best_sorted = sorted(results, key=rank_key, reverse=True)

@@ -275,6 +275,7 @@ def default_config():
         "wa_zone1": float(os.getenv("WA_ZONE1", "53.0")),  # Zone: Long-Punkt wenn wt2 < -zone1, Short wenn wt2 > zone1
         "wa_entry_mode": os.getenv("WA_ENTRY_MODE", "zone"),  # "zone" = Kreuzung ausserhalb der Zone, "level" = Durchbruch durch +-wa_level
         "wa_level": float(os.getenv("WA_LEVEL", "10")),  # Level-Modus: Long beim Durchbruch von -X nach oben, Short bei +X nach unten (0-30)
+        "wa_open_every": 1,                                   # nur jedes N-te Signal (je Richtung) oeffnet eine Position; Schliessen bleibt beim ersten Gegensignal
         "wa_trend_mode": os.getenv("WA_TREND_MODE", "off"),   # Trendfilter: off / intern / swing (Marktstruktur BOS/CHoCH)
         "wa_trend_tf": os.getenv("WA_TREND_TF", "1h"),        # Zeitebene des Trends
         "wa_trend_ilen": 4, "wa_trend_slen": 50,              # Pivot-Laengen (intern / swing)
@@ -2138,6 +2139,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="ueberlauf"><label>Überlauflinie (±)</label><input type="number" step="1" min="1" max="100" id="wa_ueberlauf_level"></div>
   <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="fester_betrag"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="wa_tp_usd"></div>
   <div data-mode="wellenanker"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="wa_sl_usd"></div>
+  <div data-mode="wellenanker"><label>🔢 Nur jedes N-te Signal öffnet (1 = jedes; Schließen bleibt beim ersten Gegensignal; Long und Short werden getrennt gezählt)</label><input type="number" step="1" min="1" max="10" id="wa_open_every"></div>
   <div data-mode="wellenanker"><label>🧭 Trendfilter (Marktstruktur: nur Trades in Trendrichtung)</label>
     <select class="cfg" id="wa_trend_mode">
       <option value="off">Aus</option>
@@ -4003,6 +4005,7 @@ async function refresh() {
     document.getElementById('wa_ueberlauf_level').value = data.config.wa_ueberlauf_level;
     document.getElementById('wa_tp_usd').value = data.config.wa_tp_usd;
     document.getElementById('wa_sl_usd').value = data.config.wa_sl_usd;
+    document.getElementById('wa_open_every').value = data.config.wa_open_every ?? 1;
     document.getElementById('wa_trend_mode').value = data.config.wa_trend_mode || 'off';
     document.getElementById('wa_trend_tf').value = data.config.wa_trend_tf || '1h';
     document.getElementById('wa_trend_ilen').value = data.config.wa_trend_ilen ?? 4;
@@ -4366,6 +4369,7 @@ function buildConfigPayload() {
     wa_ueberlauf_level: parseFloat(document.getElementById('wa_ueberlauf_level').value),
     wa_tp_usd: parseFloat(document.getElementById('wa_tp_usd').value),
     wa_sl_usd: parseFloat(document.getElementById('wa_sl_usd').value),
+    wa_open_every: Math.max(1, parseInt(document.getElementById('wa_open_every').value) || 1),
     wa_trend_mode: document.getElementById('wa_trend_mode').value,
     wa_trend_tf: document.getElementById('wa_trend_tf').value,
     wa_trend_ilen: parseInt(document.getElementById('wa_trend_ilen').value) || 4,
@@ -4615,7 +4619,7 @@ async def handle_config_update(request):
                 "liq_max_nachkauf", "liq_nachkauf_progress_pct",
                 "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_entry_mode", "wa_level", "wa_level_line", "wa_max_nachkauf", "wa_nachkauf_min_pct", "wa_reverse_only_profit",
                 "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd",
-                "wa_trend_mode", "wa_trend_tf", "wa_trend_ilen", "wa_trend_slen"]:
+                "wa_open_every", "wa_trend_mode", "wa_trend_tf", "wa_trend_ilen", "wa_trend_slen"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
