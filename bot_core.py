@@ -2922,13 +2922,14 @@ async function gcPoll() {
     if (document.getElementById('entry_mode').value !== 'grid_classic') return;
     const r = await fetch(`/api/status?symbol=${currentSymbol}`); const d = await r.json(); const v = d.gc_view;
     const k = document.getElementById('gc-kpis'), inf = document.getElementById('gc-info');
-    if (!v) { inf.textContent = 'Bot gestoppt oder noch kein Gitter. Start drücken.'; k.innerHTML=''; return; }
+    if (!v) { const ga0 = d.grid_account; inf.textContent = 'Bot gestoppt oder noch kein Gitter. Start drücken.' + (ga0 ? (ga0.sub ? ` · 🟢 Unterkonto ${ga0.index}` : ` · Hauptkonto ${ga0.index}`) : ''); k.innerHTML=''; return; }
     const c = (x) => x >= 0 ? 'var(--green,#1fcf6e)' : 'var(--red,#f0354b)';
     const box = (t, val, col) => `<div style="background:rgba(255,255,255,.04);border-radius:12px;padding:8px 10px;"><div style="font-size:11px;opacity:.6">${t}</div><div style="font-size:16px;font-weight:700;${col?'color:'+col:''}">${val}</div></div>`;
     k.innerHTML = box('Stufengewinn (realisiert)', '$'+v.realized.toFixed(2), c(v.realized)) + box('Stufen', v.cycles) +
       box('Offene Position (unreal.)', '$'+v.upnl.toFixed(2), c(v.upnl)) + box('Lots', v.lots.length+' / '+v.max_lots) +
       box('Gewinn je Stufe', '≈ $'+v.step_profit.toFixed(3));
-    inf.textContent = `${v.dir.toUpperCase()}-Gitter ${v.lower.toPrecision(6)} … ${v.upper.toPrecision(6)}, ${v.n} Stufen, ${v.orders.length} Orders im Buch` + (v.stopped ? ' · ⛔ ' + v.stopped : '');
+    const ga = d.grid_account; const acc = ga ? (ga.sub ? ` · 🟢 Unterkonto ${ga.index}` : ` · Hauptkonto ${ga.index}`) : '';
+    inf.textContent = `${v.dir.toUpperCase()}-Gitter ${v.lower.toPrecision(6)} … ${v.upper.toPrecision(6)}, ${v.n} Stufen, ${v.orders.length} Orders im Buch` + acc + (v.stopped ? ' · ⛔ ' + v.stopped : '');
   } catch (e) {}
 }
 setInterval(gcPoll, 3000);
@@ -4634,7 +4635,7 @@ async def handle_status(request):
     payload = {
         "symbol": symbol, "last_price": st["last_price"], "anchor_price": st["anchor_price"],
         "session_started": bool(st.get("session_started")),
-        "gc_view": st.get("gc_view"),
+        "gc_view": st.get("gc_view"), "grid_account": st.get("gs_account"),
         "position": st["position"], "avg_entry_price": round(st["avg_entry_price"], 2) if st["avg_entry_price"] else None,
         "total_coin_size": st["total_coin_size"],
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),

@@ -1027,6 +1027,7 @@ async def grid_scalp_poll_loop(symbol):
                 if client is None:
                     await asyncio.sleep(10)
                     continue
+                BOTS[symbol]["state"]["gs_account"] = {"index": client.account_index, "sub": bool(os.getenv("GRID_ACCOUNT_INDEX") and os.getenv("GRID_PRIVATE_KEY"))}
                 debug_log(f"🔌 [{symbol}] Grid-Bot: Client verbunden (Konto {client.account_index}{' = Unterkonto' if os.getenv('GRID_ACCOUNT_INDEX') else ''})")
             await grid_scalp_tick(client, symbol)
         except Exception as e:
