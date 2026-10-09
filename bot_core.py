@@ -728,12 +728,18 @@ async def state_persist_loop():
 
 
 # ========== LIGHTER CLIENT ==========
-def get_lighter_client():
+def get_lighter_client(role=None):
+    """role="grid": Grid-Bot-Loop (grid_scalp/maker_scalp/grid_classic) laeuft auf einem Unterkonto, wenn
+    GRID_ACCOUNT_INDEX + GRID_PRIVATE_KEY (+ GRID_API_KEY_INDEX) gesetzt sind. Sonst Hauptkonto wie bisher."""
     try:
         import lighter
         API_KEY_INDEX = int(os.getenv("API_KEY_INDEX", "5"))
         PRIVATE_KEY = os.getenv("PRIVATE_KEY")
         ACCOUNT_INDEX = int(os.getenv("ACCOUNT_INDEX", "50960"))
+        if role == "grid" and os.getenv("GRID_ACCOUNT_INDEX") and os.getenv("GRID_PRIVATE_KEY"):
+            ACCOUNT_INDEX = int(os.getenv("GRID_ACCOUNT_INDEX"))
+            PRIVATE_KEY = os.getenv("GRID_PRIVATE_KEY")
+            API_KEY_INDEX = int(os.getenv("GRID_API_KEY_INDEX", str(API_KEY_INDEX)))
         return lighter.SignerClient(
             url=BASE_URL,
             api_private_keys={API_KEY_INDEX: PRIVATE_KEY},
@@ -1452,6 +1458,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   button.danger { background:transparent; color:var(--red); border:1px solid var(--red); }
   button.neutral { background:#1d2128; }
   .chart-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .ov-box { margin:0 0 8px; font-size:12px; color:var(--text-dim); }
+  .ov-box summary { cursor:pointer; padding:4px 0; }
+  #ov-list { display:flex; flex-wrap:wrap; gap:8px 14px; padding:8px 0; }
+  #ov-list label { display:flex; align-items:center; gap:6px; margin:0; text-transform:none; letter-spacing:0; font-size:12px; color:var(--text); }
+  #ov-list input[type=color] { width:28px; height:22px; padding:0; border:0; background:none; }
+  #ov-list input[type=checkbox] { width:auto; }
   .chart-info { font-size:12px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
   button.pill { padding:0 14px; min-height:36px; border-radius:20px; background:#0d1015; color:var(--text-dim); border:1px solid #2a303a; font-size:12px; }
   button.pill.on { background:rgba(31,207,110,.12); border-color:var(--green); color:#fff; }
@@ -1497,6 +1509,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <span id="wac-info" class="chart-info"></span>
   </div>
+  <details id="ov-box" class="ov-box"><summary>📐 Linien &amp; Farben</summary><div id="ov-list"></div></details>
   <div id="wac-price" style="height:420px;"></div>
   <div id="wac-wtbox" style="display:none;">
     <div style="font-size:12px; color:var(--text-dim); margin:8px 0 4px;">WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels</div>
@@ -3074,6 +3087,40 @@ function wacSetLevels(levels) {
   WAC.lines.forEach(x => WAC.l1.removePriceLine(x)); WAC.lines = [];
   (levels || []).concat([0]).forEach(v => WAC.lines.push(WAC.l1.createPriceLine({price: v, color: v === 0 ? '#3a4466' : '#6b7280', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: String(v)})));
 }
+
+// ===== Chart-Linien (VWAP / EMA / Swing) - Farben + Sichtbarkeit pro Browser gespeichert =====
+const OV_DEF = [
+  ['vwap_d','VWAP Day','#f5b83d',true], ['vwap_w','VWAP Week','#3b82f6',true], ['vwap_m','VWAP Month','#a855f7',true],
+  ['ema21','21 EMA','#22d3ee',true], ['ema50','50 EMA','#f97316',true],
+  ['swing_h','Swing High','#f0354b',true], ['swing_l','Swing Low','#1fcf6e',true]];
+let OV = {};
+try { OV = JSON.parse(localStorage.getItem('ov_cfg') || '{}') || {}; } catch (e) { OV = {}; }
+OV_DEF.forEach(([k,,col,on]) => { if (!OV[k]) OV[k] = {c: col, on: on}; });
+function ovSave() { try { localStorage.setItem('ov_cfg', JSON.stringify(OV)); } catch (e) {} }
+(function ovBuild() {
+  const box = document.getElementById('ov-list'); if (!box) return;
+  box.innerHTML = OV_DEF.map(([k, name]) => `<label><input type="checkbox" data-k="${k}" ${OV[k].on ? 'checked' : ''}><input type="color" data-c="${k}" value="${OV[k].c}">${name}</label>`).join('');
+  box.addEventListener('input', ev => {
+    const t = ev.target;
+    if (t.dataset.k) OV[t.dataset.k].on = t.checked;
+    if (t.dataset.c) OV[t.dataset.c].c = t.value;
+    ovSave(); WAC.lastOv && wacSetOverlays(WAC.lastOv);
+  });
+})();
+const wacOvSeries = {};
+function wacSetOverlays(list) {
+  WAC.lastOv = list;
+  const seen = {};
+  (list || []).forEach(o => {
+    const cfg = OV[o.key]; if (!cfg) return;
+    seen[o.key] = 1;
+    let s = wacOvSeries[o.key];
+    if (!s) { s = wacOvSeries[o.key] = WAC.price.addLineSeries({lineWidth: o.key.startsWith('swing') ? 1 : 2, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, lineStyle: o.key.startsWith('swing') ? 2 : 0}); }
+    s.applyOptions({color: cfg.c, visible: cfg.on, title: o.label});
+    s.setData(o.data);
+  });
+  Object.keys(wacOvSeries).forEach(k => { if (!seen[k]) wacOvSeries[k].setData([]); });
+}
 let wacPosLines = [], wacGridLines = [];
 function wacSetPosition(p) {
   wacPosLines.forEach(x => WAC.cs.removePriceLine(x)); wacPosLines = [];
@@ -3119,6 +3166,7 @@ async function wacPollLive() {
     wacRender(d, wacSigMarkers(d));
     wacSetPosition(d.position);
     wacSetGrid(d.grid);
+    wacSetOverlays(d.overlays);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 120, to: d.candles.length + 5}); WAC.fitted = true; WAC.sym = sym; }
     const wtTxt = isWa ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : '';
     const p = d.position;
@@ -3144,7 +3192,7 @@ function wacShowBacktest() {
   WAC.mode = 'bt';
   document.getElementById('wac-tab-bt').classList.add('on'); document.getElementById('wac-tab-live').classList.remove('on');
   wacInit(); if (!WAC.inited) return;
-  wacSetPosition(null);
+  wacSetPosition(null); wacSetOverlays([]); wacSetGrid(null);
   const b = WAC.bt, info = document.getElementById('wac-info');
   if (!b) { info.innerText = 'Noch kein Backtest – unten „Backtest starten“ klicken.'; return; }
   wacRender(b.chart, wacBtMarkers(b.trades));
@@ -4742,7 +4790,7 @@ async def handle_wa_live_chart(request):
     tf = request.query.get("tf", "")
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
         tf = cfg.get("wa_timeframe", "15m") if is_wa else "5m"
-    data = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, bars), market_type=cfg.get("binance_market_type", "spot"))
+    data = await fetch_candles_binance_multi(symbol, tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
     if not data:
         return web.json_response({"ok": False, "reason": "lädt noch … (keine Kerzen erhalten)"})
     ts, o, h, l, c = data
@@ -4759,7 +4807,17 @@ async def handle_wa_live_chart(request):
                "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else None}
     gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
     grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
-    payload.update({"ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid,
+    overlays = []
+    try:
+        from strategies import fetch_candles_binance_vol, chart_overlays
+        vd, h1 = await asyncio.gather(fetch_candles_binance_vol(symbol, tf, count_back=1000), fetch_candles_binance_vol(symbol, "1h", count_back=1000))
+        if vd:
+            vmap = dict(zip(vd[0], vd[5]))
+            vol = [vmap.get(t, 0.0) for t in ts]
+            overlays = await asyncio.to_thread(chart_overlays, ts, h, l, c, vol, h1)
+    except Exception as e:
+        debug_log(f"⚠️ Chart-Overlays fehlgeschlagen: {e}")
+    payload.update({"ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid, "overlays": overlays,
                     "active": bool(cfg.get("bot_active"))})
     return web.json_response(payload)
 

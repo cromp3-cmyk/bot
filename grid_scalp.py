@@ -19,6 +19,7 @@ damit Dashboard/PnL/Trade-Log weiter stimmen.
 """
 
 import asyncio
+import os
 import time
 import traceback
 
@@ -1022,11 +1023,11 @@ async def grid_scalp_poll_loop(symbol):
             if client is None:
                 # Persistenter Client - get_lighter_client() baut sonst pro Order einen
                 # neuen auf, was bei einem Maker-Loop mit ~30 Orders/Minute nicht geht
-                client = get_lighter_client()
+                client = get_lighter_client("grid")
                 if client is None:
                     await asyncio.sleep(10)
                     continue
-                debug_log(f"🔌 [{symbol}] Grid-Scalp: Client verbunden")
+                debug_log(f"🔌 [{symbol}] Grid-Bot: Client verbunden (Konto {client.account_index}{' = Unterkonto' if os.getenv('GRID_ACCOUNT_INDEX') else ''})")
             await grid_scalp_tick(client, symbol)
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Grid-Scalp Tick-Fehler",
@@ -1581,7 +1582,7 @@ async def handle_gc_reset(request):
 async def probe_grid_scalp(symbol):
     """Prueft die Feldnamen der API-Antworten und misst den echten Spread.
     Ueber die Konsole aufrufen oder einmalig in main() einhaengen."""
-    client = get_lighter_client()
+    client = get_lighter_client("grid")
     market_index = MARKET_INDICES[symbol]
     print(f"=== {symbol} (market_index={market_index}) ===")
     pos = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
