@@ -6256,6 +6256,63 @@ def wa_chart_payload(ts, o, h, l, c, cfg, max_bars=6000):
             "wt1v": round(wt1[-1], 2), "wt2v": round(wt2[-1], 2), "bars": n}
 
 
+def chart_overlays(ts, h, l, c, v, h1, piv=10):
+    """Chart-Linien fuers Dashboard: VWAP Tag/Woche/Monat (UTC-Anker, hlc3, Seed aus 1h-Kerzen vor dem Chartfenster),
+    EMA 21/50, letztes Swing-High/-Low (Pivot ueber 'piv' Kerzen je Seite). Rueckgabe: Liste {key,label,data}."""
+    from datetime import datetime, timezone, timedelta
+    n = len(c)
+    if n < 5:
+        return []
+
+    def anchor(t_ms, kind):
+        d = datetime.fromtimestamp(t_ms / 1000, timezone.utc)
+        if kind == "d":
+            return d.date()
+        if kind == "w":
+            return d.date() - timedelta(days=d.weekday())
+        return (d.year, d.month)
+
+    out = []
+    first = ts[0]
+    for kind, label in (("d", "Day"), ("w", "Week"), ("m", "Month")):
+        pv = vv = 0.0
+        a0 = anchor(first, kind)
+        if h1:
+            t1, _o1, hh1, ll1, cc1, vv1 = h1
+            for i in range(len(t1)):
+                if t1[i] + 3600000 <= first and anchor(t1[i], kind) == a0:
+                    pv += (hh1[i] + ll1[i] + cc1[i]) / 3.0 * vv1[i]
+                    vv += vv1[i]
+        cur = a0
+        data = []
+        for i in range(n):
+            a = anchor(ts[i], kind)
+            if a != cur:
+                cur, pv, vv = a, 0.0, 0.0
+            vol = v[i] if v[i] is not None else 0.0
+            pv += (h[i] + l[i] + c[i]) / 3.0 * vol
+            vv += vol
+            if vv > 0:
+                data.append({"time": ts[i] // 1000, "value": round(pv / vv, 8)})
+        out.append({"key": "vwap_" + kind, "label": label, "data": data})
+    for ln in (21, 50):
+        e = _ema_series(c, ln)
+        out.append({"key": f"ema{ln}", "label": f"{ln} EMA", "data": [{"time": ts[i] // 1000, "value": round(e[i], 8)} for i in range(ln, n)]})
+    ph = pl = None
+    for i in range(n - 1 - piv, piv - 1, -1):
+        if ph is None and h[i] == max(h[i - piv:i + piv + 1]):
+            ph = i
+        if pl is None and l[i] == min(l[i - piv:i + piv + 1]):
+            pl = i
+        if ph is not None and pl is not None:
+            break
+    if ph is not None:
+        out.append({"key": "swing_h", "label": "Swing High", "data": [{"time": ts[ph] // 1000, "value": h[ph]}, {"time": ts[-1] // 1000, "value": h[ph]}]})
+    if pl is not None:
+        out.append({"key": "swing_l", "label": "Swing Low", "data": [{"time": ts[pl] // 1000, "value": l[pl]}, {"time": ts[-1] // 1000, "value": l[pl]}]})
+    return out
+
+
 def backtest_wellenanker(candles, cfg, trend_arr=None):
     """Backtest fuer Wellenanker - simuliert dieselben Regeln wie check_wa_candle/check_wa_sl.
     'candles' ist das uebliche 6er-Tupel MIT Volumen (ts,o,h,l,c,v) - Volumen wird hier nicht

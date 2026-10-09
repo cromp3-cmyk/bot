@@ -1038,7 +1038,16 @@ async def grid_scalp_poll_loop(symbol):
             except Exception:
                 pass
             client = None
-            await asyncio.sleep(5)
+            # Lighter-WAF ("Human Verification", HTTP 405) = zu viele Anfragen von dieser IP: laenger pausieren,
+            # sonst bleibt die Sperre bestehen. Zufaellige Streuung, damit nicht alle Coins gleichzeitig wiederkommen.
+            _err = str(e)
+            if "405" in _err or "Human Verification" in _err or "awswaf" in _err:
+                import random
+                _w = 45 + random.random() * 30
+                debug_log(f"🚦 [{symbol}] Lighter-Anfragelimit (WAF) - pausiere {_w:.0f}s. Poll-Intervall im Grid-Bot auf 5+ Sekunden stellen!")
+                await asyncio.sleep(_w)
+            else:
+                await asyncio.sleep(5)
 
         _c = BOTS[symbol]["config"]
         await asyncio.sleep(float(_c.get("gc_poll_seconds", 2.0) if _c.get("entry_mode") == "grid_classic" else _c.get("gs_poll_seconds", 2.0)))

@@ -210,7 +210,7 @@ def default_config():
         # ===== Klassischer Grid-Bot (entry_mode "grid_classic") =====
         "gc_direction": "long", "gc_lower": 0.0, "gc_upper": 0.0, "gc_auto_pct": 5.0, "gc_levels": 20,
         "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6,
-        "gc_stop_pct": 0.0, "gc_poll_seconds": 2.0,
+        "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0,
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
         # Grid/AB-Breakout/RSI/MVWAP) - kein eigenes scalp_position_size_usd noetig.
