@@ -207,6 +207,10 @@ def default_config():
         "gs_requote_ticks": int(os.getenv("GS_REQUOTE_TICKS", "2")),
         "gs_max_open_orders": int(os.getenv("GS_MAX_OPEN_ORDERS", "8")),
         "gs_poll_seconds": float(os.getenv("GS_POLL_SECONDS", "2.0")),
+        # ===== Klassischer Grid-Bot (entry_mode "grid_classic") =====
+        "gc_direction": "long", "gc_lower": 0.0, "gc_upper": 0.0, "gc_auto_pct": 5.0, "gc_levels": 20,
+        "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6,
+        "gc_stop_pct": 0.0, "gc_poll_seconds": 2.0,
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
         # Grid/AB-Breakout/RSI/MVWAP) - kein eigenes scalp_position_size_usd noetig.
@@ -484,6 +488,7 @@ def default_state():
         "last_entry_price": None,
         "gs_anchor": None, "gs_cooldown_until": 0.0, "gs_tag_map": {},
         "gs_last_error": None, "gs_open_orders": 0,
+        "gc_lots": [], "gc_prev": {}, "gc_range": None, "gc_sig": None, "gc_realized": 0.0, "gc_cycles": 0, "gc_stopped": None, "gc_view": None,
         "grid_sl_cooldown_until": 0.0,
         "binance_1s_buffer": [],
         "local_1s_bucket_start": None, "local_1s_candle_open": None,
@@ -664,7 +669,8 @@ PERSISTED_STATE_KEYS = [
     "current_position_entries",
     # gs_tag_map MUSS persistiert werden: sonst weiss der Bot nach einem Redeploy nicht
     # mehr, welche offenen Orders im Buch seine eigenen sind, und cancelt sie als fremd.
-    "gs_anchor", "gs_cooldown_until", "gs_tag_map", "grid_sl_cooldown_until",
+    "gs_anchor", "gs_cooldown_until", "gs_tag_map",
+    "gc_lots", "gc_prev", "gc_range", "gc_sig", "gc_realized", "gc_cycles", "gc_stopped", "gc_sim", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
@@ -1363,54 +1369,56 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="UTF-8"><title>Grid-Bot Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
-    --bg: #060a18;
-    --panel: #0e1526;
-    --panel-border: rgba(96, 165, 250, 0.14);
+    --bg: #07080b;
+    --panel: #14171d;
+    --panel-border: #242932;
     --accent: #3b82f6;
-    --accent2: #8b5cf6;
-    --text: #e8ecf5;
-    --text-dim: #7c8aa8;
-    --green: #22c55e;
-    --red: #f0526b;
+    --accent2: #3b82f6;
+    --text: #e9ecf1;
+    --text-dim: #7d8696;
+    --green: #1fcf6e;
+    --red: #f0354b;
+    --yellow: #f5b83d;
   }
   * { box-sizing: border-box; }
   body {
-    font-family: -apple-system, "Segoe UI", sans-serif;
-    background:
-      radial-gradient(ellipse 800px 500px at 90% -5%, rgba(59,130,246,0.16), transparent 60%),
-      radial-gradient(ellipse 700px 500px at -5% 15%, rgba(139,92,246,0.12), transparent 60%),
-      var(--bg);
+    font-family: 'Inter', -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
     color: var(--text);
     margin: 0;
     padding: 0 0 40px 0;
     min-height: 100vh;
   }
+  .value, td, input, .mono { font-variant-numeric: tabular-nums; }
+  .value, input[type=number] { font-family: 'JetBrains Mono', monospace; }
   .topbar {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 16px 28px; background: rgba(10,14,28,0.85); backdrop-filter: blur(8px);
+    padding: 14px 24px; background: rgba(7,8,11,0.9); backdrop-filter: blur(8px);
     border-bottom: 1px solid var(--panel-border); margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
   }
   .brand { display:flex; align-items:center; gap:10px; font-size:19px; font-weight:700; color:#fff; }
-  .brand .dot { width:10px; height:10px; border-radius:50%; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 0 12px var(--accent); }
+  .brand .dot { width:10px; height:10px; border-radius:50%; background:var(--green); box-shadow:0 0 12px rgba(31,207,110,.6); }
   .topbar-right { display:flex; align-items:center; gap:10px; flex-wrap: wrap; }
   select#symbol-select {
     font-size:14px; font-weight:600; padding:8px 16px; background:var(--panel); color:var(--text);
     border:1px solid var(--panel-border); border-radius:10px; cursor:pointer;
   }
-  .container { padding: 0 28px; }
-  h2.section-title { font-size: 13px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 28px 0 12px; font-weight: 600; }
+  .container { padding: 0 24px; max-width:1600px; margin:0 auto; }
+  h2.section-title { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.1em; margin: 28px 0 12px; font-weight: 600; }
   .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap:14px; margin-bottom:18px; }
   .card {
-    background: var(--panel); border: 1px solid var(--panel-border); border-radius: 18px;
-    padding: 18px 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    background: linear-gradient(180deg,#171a21,#12151b); border: 1px solid var(--panel-border); border-radius: 16px;
+    padding: 16px;
   }
   .card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
   .card .value { font-size: 22px; font-weight: 700; margin-top: 6px; color: #fff; }
-  .green { color: var(--green) !important; } .red { color: var(--red) !important; } .yellow { color: #fbbf24 !important; }
+  .green { color: var(--green) !important; } .red { color: var(--red) !important; } .yellow { color: var(--yellow) !important; }
   .badge { display:inline-block; padding:4px 14px; border-radius:20px; font-size:12px; font-weight:700; letter-spacing:0.03em; }
   .badge.dry { background:rgba(99,102,241,0.18); color:#a5b4fc; border:1px solid rgba(99,102,241,0.35); }
   .badge.live { background:rgba(240,82,107,0.15); color:#fca5b1; border:1px solid rgba(240,82,107,0.4); }
@@ -1420,7 +1428,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   @keyframes pendingPulse { 0%,100% { box-shadow:0 0 0 0 rgba(240,82,107,0.45); } 50% { box-shadow:0 0 0 6px rgba(240,82,107,0); } }
   .start-banner { flex:1 1 100%; background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.5); color:#fecdd3; border-radius:12px; padding:10px 16px; font-size:13px; line-height:1.5; }
   .coin-pill.pending { border-color:rgba(240,82,107,0.6); }
-  .panel-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 20px; padding: 22px; margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
+  .panel-card { background: linear-gradient(180deg,#171a21,#12151b); border: 1px solid var(--panel-border); border-radius: 16px; padding: 16px; margin-bottom: 16px; }
   .grid-stack-item-content { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
   .widget-drag-handle { cursor: move; padding: 8px 12px; font-size: 12px; font-weight: 700; color: var(--text-dim); background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--panel-border); user-select: none; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .widget-drag-handle::before { content: "⠿"; opacity: 0.5; }
@@ -1430,19 +1438,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   form { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap:14px; align-items:end; }
   label { display:block; font-size:11px; color: var(--text-dim); text-transform:uppercase; letter-spacing:0.03em; margin-bottom:6px; }
   input, select.cfg {
-    width:100%; padding:9px 10px; background:#080d1c; border:1px solid var(--panel-border);
-    border-radius:8px; color:var(--text); box-sizing:border-box; font-size:13px;
+    width:100%; padding:9px 10px; background:#0d1015; border:1px solid var(--panel-border);
+    border-radius:10px; color:var(--text); box-sizing:border-box; font-size:13px; color-scheme:dark;
   }
   input:focus, select.cfg:focus { outline:none; border-color: var(--accent); }
   button {
-    padding:10px 20px; background:linear-gradient(135deg,var(--accent),#2563eb); color:white; border:none;
-    border-radius:10px; cursor:pointer; font-weight:700; font-size:13px; transition: transform 0.1s;
+    padding:10px 18px; background:#1d2128; color:#e9ecf1; border:1px solid #2a303a; font-family:inherit;
+    border-radius:12px; cursor:pointer; font-weight:700; font-size:13px; transition: transform 0.1s; min-height:40px;
   }
   button:hover { transform: translateY(-1px); filter: brightness(1.1); }
-  button.stop { background:linear-gradient(135deg,#f0526b,#dc2626); }
-  button.start { background:linear-gradient(135deg,#22c55e,#15803d); }
-  button.danger { background:linear-gradient(135deg,#ef4444,#b91c1c); }
-  button.neutral { background:linear-gradient(135deg,#475569,#334155); }
+  button.stop { background:linear-gradient(180deg,#f2475b,#c42a40); color:#fff; border:0; }
+  button.start { background:linear-gradient(180deg,#22d27a,#16a85a); color:#07080b; border:0; }
+  button.danger { background:transparent; color:var(--red); border:1px solid var(--red); }
+  button.neutral { background:#1d2128; }
+  .chart-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .chart-info { font-size:12px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+  button.pill { padding:0 14px; min-height:36px; border-radius:20px; background:#0d1015; color:var(--text-dim); border:1px solid #2a303a; font-size:12px; }
+  button.pill.on { background:rgba(31,207,110,.12); border-color:var(--green); color:#fff; }
+  select.pill-select { width:auto; min-height:36px; padding:0 12px; border-radius:20px; background:#0d1015; color:var(--text); border:1px solid #2a303a; font-size:12px; font-weight:600; }
   table { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
   #wac-price canvas, #wac-wt canvas { background:transparent; border:0; border-radius:0; padding:0; box-shadow:none; }
   #wac-price table, #wac-wt table { width:auto; margin:0; font-size:inherit; }
@@ -1451,14 +1464,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   th.sortable:hover { color:var(--accent); }
   th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--panel-border); }
   th { color: var(--text-dim); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.03em; }
-  tr:hover td { background: rgba(59,130,246,0.05); }
+  tr:hover td { background: rgba(255,255,255,0.03); }
   .warn { background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.35); color:#fca5b1; padding:10px 14px; border-radius:10px; font-size:13px; margin-top:10px; display:none; }
-  canvas { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 18px; padding: 14px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
-  #priceChart { max-height: 420px; }
+  canvas { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 16px; padding: 14px; }
   .coin-overview { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
   .coin-pill { background: var(--panel); border:1px solid var(--panel-border); border-radius:20px; padding:6px 16px; font-size:13px; cursor:pointer; transition: border-color 0.15s; }
   .coin-pill:hover { border-color: rgba(96,165,250,0.4); }
-  .coin-pill.selected { border-color: var(--accent); background: rgba(59,130,246,0.12); }
+  .coin-pill.selected { border-color: var(--green); background: rgba(31,207,110,0.1); }
+  @media (max-width:760px){ .container{padding:0 12px;} .topbar{padding:10px 12px;} .panel-card{padding:12px;border-radius:14px;} #wac-price{height:320px !important;} form{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));} }
 </style>
 </head>
 <body>
@@ -1475,26 +1488,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="coin-overview" id="coin-overview"></div>
 
-<div class="panel-card" style="margin-top:8px;">
-<h2 class="section-title">⚡ Manuelles Trading</h2>
-<div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; font-size:11px;">
-  <div><div class="label">Margin</div><div class="value" id="pocket-margin" style="font-size:14px;">-</div></div>
-  <div><div class="label">Position</div><div class="value" id="pocket-position" style="font-size:14px;">-</div></div>
-  <div><div class="label">Ø-Einstieg</div><div class="value" id="pocket-entry" style="font-size:14px;">-</div></div>
-  <div><div class="label">Unrealisiert $</div><div class="value" id="pocket-pnl" style="font-size:14px;">-</div></div>
-</div>
-<div style="display:flex; gap:8px; margin-bottom:12px;">
-  <button id="btn-manual-buy" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#16a34a; color:white; border:none; border-radius:10px; cursor:pointer;">⬆️ BUY</button>
-  <button id="btn-manual-sell" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#dc2626; color:white; border:none; border-radius:10px; cursor:pointer;">⬇️ SELL</button>
-  <button id="btn-manual-tp" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#2563eb; color:white; border:none; border-radius:10px; cursor:pointer;">✅ TP</button>
-</div>
-<div class="label" style="margin-bottom:4px; font-size:10px;">Letzte 10 Kerzen</div>
-<div id="mini-candles" style="display:flex; gap:3px; align-items:center; height:60px;"></div>
-</div>
-
-<div id="generic-chart-wrap">
-  <h2 class="section-title">Kursverlauf</h2>
-  <div style="position:relative; height:400px;"><canvas id="priceChart"></canvas></div>
+<div class="panel-card" id="main-chart-card" style="margin-top:8px;">
+  <div class="chart-head">
+    <button type="button" id="wac-tab-live" class="pill on">🔴 Live</button>
+    <button type="button" id="wac-tab-bt" class="pill">📊 Backtest-Trades</button>
+    <select id="wac-tf" class="pill-select" title="Zeitrahmen">
+      <option value="">TF: Strategie</option><option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+    </select>
+    <span id="wac-info" class="chart-info"></span>
+  </div>
+  <div id="wac-price" style="height:420px;"></div>
+  <div id="wac-wtbox" style="display:none;">
+    <div style="font-size:12px; color:var(--text-dim); margin:8px 0 4px;">WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels</div>
+    <div id="wac-wt" style="height:180px;"></div>
+  </div>
+  <div id="wac-trend" style="display:none; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; font-size:12px;"></div>
+  <div style="font-size:12px; color:var(--text-dim); margin-top:6px;" id="wac-legend">Pfeile = Signale · Linien = Position / SL / Grid-Level · Backtest: ▲/▼ Einstieg, ● Ausstieg mit PnL – Klick auf Trade in der Tabelle zoomt hin.</div>
 </div>
 
 <details id="zone-settings" open style="margin-top:8px;">
@@ -1504,7 +1513,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <button id="btn-start" class="start">▶️ Start</button>
   <button id="btn-stop" class="stop">⏸️ Stop</button>
   <button id="btn-close" class="danger">✖️ Position jetzt schließen</button>
-  <button id="btn-reverse" class="danger" style="background:#7c3aed;" title="Position mit einer einzigen Order in die Gegenrichtung drehen (gleiche Größe)">⇄ Reverse (Long ↔ Short)</button>
+  <button id="btn-reverse" class="neutral" style="border-color:#3b82f6;color:#9db8ff;" title="Position mit einer einzigen Order in die Gegenrichtung drehen (gleiche Größe)">⇄ Reverse (Long ↔ Short)</button>
   <button id="btn-reset" class="neutral">🔄 Reset (Statistik)</button>
 </div>
 
@@ -1522,6 +1531,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
+      <option value="grid_classic">Grid-Bot (klassisch: festes Preisgitter, Stufengewinn, läuft nach Deploy weiter)</option>
       <option value="scalp_vwap_obv_rsi">Scalp VWAP OBV RSI (Mean-Reversion, VWAP-Bänder + OBV RSI, TP1/TP2)</option>
       <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
       <option value="wellenanker">Wellenanker (WaveTrend-Punkte, Nachkauf, TP Gegentrade/Überlauf/Fest, $-SL)</option>
@@ -2205,6 +2215,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_scalp"><label>Requote-Drift (Ticks)</label><input type="number" step="1" id="gs_requote_ticks"></div>
   <div data-mode="grid_scalp"><label>Max. offene Orders</label><input type="number" step="1" id="gs_max_open_orders"></div>
   <div data-mode="grid_scalp"><label>Poll-Intervall (Sek.)</label><input type="number" step="any" id="gs_poll_seconds"></div>
+  <div data-mode="grid_classic"><label>Richtung</label><select class="cfg" id="gc_direction"><option value="long">Long-Grid (kauft Dips, verkauft 1 Stufe höher)</option><option value="short">Short-Grid</option></select></div>
+  <div data-mode="grid_classic"><label>Untere Grenze (0 = auto)</label><input type="number" step="any" id="gc_lower"></div>
+  <div data-mode="grid_classic"><label>Obere Grenze (0 = auto)</label><input type="number" step="any" id="gc_upper"></div>
+  <div data-mode="grid_classic"><label>Auto-Spanne &plusmn; % um Startkurs</label><input type="number" step="any" id="gc_auto_pct"></div>
+  <div data-mode="grid_classic"><label>Anzahl Stufen</label><input type="number" step="1" id="gc_levels"></div>
+  <div data-mode="grid_classic"><label>Abstand</label><select class="cfg" id="gc_spacing"><option value="arith">gleiche Abstände ($)</option><option value="geo">gleiche Prozent</option></select></div>
+  <div data-mode="grid_classic"><label>Notional je Stufe ($)</label><input type="number" step="any" id="gc_size_usd"></div>
+  <div data-mode="grid_classic"><label>Max. gleichzeitige Lots</label><input type="number" step="1" id="gc_max_lots"></div>
+  <div data-mode="grid_classic"><label>Einstiegs-Orders im Buch</label><input type="number" step="1" id="gc_open_each_side"></div>
+  <div data-mode="grid_classic"><label>Notbremse: % außerhalb (0 = aus)</label><input type="number" step="any" id="gc_stop_pct"></div>
+  <div data-mode="grid_classic"><label>Poll (Sek.)</label><input type="number" step="any" id="gc_poll_seconds"></div>
   <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
     <select class="cfg" id="grid_sl_enabled">
       <option value="false">Aus (Standard)</option>
@@ -2352,22 +2373,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div style="font-size:12px; color:var(--text-dim); margin-top:8px;" id="abs-distances"></div>
 </div>
 
-<div data-mode-section="wellenanker" style="display:none;">
-<h2 class="section-title">🌊 Wellenanker Chart (Live &amp; Backtest)</h2>
+<div data-mode-section="grid_classic" style="display:none;">
+<h2 class="section-title">🧱 Grid-Bot</h2>
 <div class="panel-card">
-  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
-    <button type="button" id="wac-tab-live" style="padding:8px 16px;">🔴 Live</button>
-    <button type="button" id="wac-tab-bt" style="padding:8px 16px; opacity:.6;">📊 Backtest-Trades</button>
-    <span id="wac-info" style="font-size:13px; color:var(--text-dim);"></span>
+  <div id="gc-kpis" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-bottom:10px;"></div>
+  <div id="gc-info" style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Warte auf Daten…</div>
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+    <button type="button" id="gc-bt">📊 Backtest (14 Tage)</button>
+    <button type="button" id="gc-reset">♻️ Gitter &amp; Lots zurücksetzen</button>
   </div>
-  <div id="wac-price" style="height:420px;"></div>
-  <div style="font-size:12px; color:var(--text-dim); margin:8px 0 4px;">WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels</div>
-  <div id="wac-wt" style="height:180px;"></div>
-  <div id="wac-trend" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; font-size:12px;"></div>
-  <div style="font-size:12px; color:var(--text-dim); margin-top:6px;" id="wac-legend">Live: Pfeile = Signale (laufende Kerze zählt sofort). Backtest: ▲/▼ Einstieg, ● Ausstieg mit PnL – Klick auf eine Trade-Zeile springt zum Trade.</div>
+  <div id="gc-bt-out" style="font-size:12px; white-space:pre-wrap;"></div>
 </div>
 </div>
-
 <div id="backtest-zone">
 <h2 class="section-title">📊 Backtest (mit den oben gespeicherten Einstellungen)</h2>
 <div class="panel-card">
@@ -2777,15 +2794,6 @@ let quadStochChart;
 // Manuelles Trading (BUY/SELL/TP) - fest im Dashboard, nicht mehr Teil eines verschiebbaren
 // Kacheln-Systems (das frueher hier alle Diagnose-Widgets fuer OBI-Momentum-Scalp/Scalp-Board
 // enthielt - mit deren Entfernung ist das jetzt ein einfaches statisches Panel).
-document.getElementById('btn-manual-buy').addEventListener('click', () => manualTrade('long'));
-document.getElementById('btn-manual-sell').addEventListener('click', () => manualTrade('short'));
-document.getElementById('btn-manual-tp').addEventListener('click', async () => {
-  const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method: 'POST' });
-  const data = await res.json();
-  if (data.error) alert(data.error);
-  refresh();
-});
-
 let allSymbols = [];
 
 function computeEMA(values, period) {
@@ -2893,6 +2901,36 @@ async function loadSymbols() {
     refresh();
   });
 }
+
+
+// ===== Grid-Bot Anzeige =====
+async function gcPoll() {
+  try {
+    if (document.getElementById('entry_mode').value !== 'grid_classic') return;
+    const r = await fetch(`/api/status?symbol=${currentSymbol}`); const d = await r.json(); const v = d.gc_view;
+    const k = document.getElementById('gc-kpis'), inf = document.getElementById('gc-info');
+    if (!v) { inf.textContent = 'Bot gestoppt oder noch kein Gitter. Start drücken.'; k.innerHTML=''; return; }
+    const c = (x) => x >= 0 ? 'var(--green,#1fcf6e)' : 'var(--red,#f0354b)';
+    const box = (t, val, col) => `<div style="background:rgba(255,255,255,.04);border-radius:12px;padding:8px 10px;"><div style="font-size:11px;opacity:.6">${t}</div><div style="font-size:16px;font-weight:700;${col?'color:'+col:''}">${val}</div></div>`;
+    k.innerHTML = box('Stufengewinn (realisiert)', '$'+v.realized.toFixed(2), c(v.realized)) + box('Stufen', v.cycles) +
+      box('Offene Position (unreal.)', '$'+v.upnl.toFixed(2), c(v.upnl)) + box('Lots', v.lots.length+' / '+v.max_lots) +
+      box('Gewinn je Stufe', '≈ $'+v.step_profit.toFixed(3));
+    inf.textContent = `${v.dir.toUpperCase()}-Gitter ${v.lower.toPrecision(6)} … ${v.upper.toPrecision(6)}, ${v.n} Stufen, ${v.orders.length} Orders im Buch` + (v.stopped ? ' · ⛔ ' + v.stopped : '');
+  } catch (e) {}
+}
+setInterval(gcPoll, 3000);
+document.getElementById('gc-bt').addEventListener('click', async () => {
+  const o = document.getElementById('gc-bt-out'); o.textContent = 'Läuft…';
+  const res = await fetch(`/api/gc/backtest?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({days:14, config: buildConfigPayload()})});
+  const d = await res.json();
+  if (d.error) { o.textContent = '❌ ' + d.error; return; }
+  o.textContent = `${d.direction}-Grid ${d.lower.toPrecision(6)}…${d.upper.toPrecision(6)} · ${d.n} Stufen · ${d.days} Tage\\nStufen: ${d.cycles} → realisiert $${d.realized} ($${d.per_day}/Tag)\\nOffen am Ende: ${d.open_lots} Lots, $${d.open_float}\\nGesamt: $${d.total} · max. Lots ${d.max_lots} (Notional ${d.margin_peak_notional}$) · schlimmster Buchverlust $${d.worst_float}` + (d.stopped_at ? '\\n⛔ Notbremse ausgelöst' : '');
+});
+document.getElementById('gc-reset').addEventListener('click', async () => {
+  if (!confirm('Gitter und Lot-Buch zurücksetzen? (Bot muss gestoppt sein. Offene Börsen-Position bleibt bestehen und wird NICHT geschlossen.)')) return;
+  const res = await fetch(`/api/gc/reset?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  const d = await res.json(); showToast(d.error ? '❌ ' + d.error : '✅ Zurückgesetzt');
+});
 
 document.getElementById('btn-start').addEventListener('click', async () => {
   // Erst die aktuellen Formular-Einstellungen speichern (Backtest speichert NICHT dauerhaft,
@@ -3020,11 +3058,11 @@ const WAC = {mode: 'live', price: null, wt: null, cs: null, l1: null, l2: null, 
 function wacInit() {
   if (WAC.inited || !window.LightweightCharts) return;
   const LW = window.LightweightCharts;
-  const opt = {layout: {background: {color: 'transparent'}, textColor: '#9aa4bf'}, grid: {vertLines: {color: '#141c33'}, horzLines: {color: '#141c33'}},
-               rightPriceScale: {borderColor: '#1c2542'}, timeScale: {borderColor: '#1c2542', timeVisible: true, secondsVisible: true}, crosshair: {mode: 0}};
+  const opt = {layout: {background: {color: 'transparent'}, textColor: '#9aa4bf'}, grid: {vertLines: {color: '#171b22'}, horzLines: {color: '#171b22'}},
+               rightPriceScale: {borderColor: '#242932'}, timeScale: {borderColor: '#242932', timeVisible: true, secondsVisible: true}, crosshair: {mode: 0}};
   WAC.price = LW.createChart(document.getElementById('wac-price'), Object.assign({autoSize: true}, opt));
   WAC.wt = LW.createChart(document.getElementById('wac-wt'), Object.assign({autoSize: true}, opt));
-  WAC.cs = WAC.price.addCandlestickSeries({upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444'});
+  WAC.cs = WAC.price.addCandlestickSeries({upColor: '#1fcf6e', downColor: '#f0354b', borderVisible: false, wickUpColor: '#1fcf6e', wickDownColor: '#f0354b'});
   WAC.l1 = WAC.wt.addLineSeries({color: '#3b82f6', lineWidth: 2, priceLineVisible: false});
   WAC.l2 = WAC.wt.addLineSeries({color: '#eab308', lineWidth: 1, priceLineVisible: false});
   let busy = false;
@@ -3036,15 +3074,23 @@ function wacSetLevels(levels) {
   WAC.lines.forEach(x => WAC.l1.removePriceLine(x)); WAC.lines = [];
   (levels || []).concat([0]).forEach(v => WAC.lines.push(WAC.l1.createPriceLine({price: v, color: v === 0 ? '#3a4466' : '#6b7280', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: String(v)})));
 }
-let wacPosLines = [];
+let wacPosLines = [], wacGridLines = [];
 function wacSetPosition(p) {
   wacPosLines.forEach(x => WAC.cs.removePriceLine(x)); wacPosLines = [];
   if (!p) return;
   wacPosLines.push(WAC.cs.createPriceLine({price: p.avg, color: p.dir === 'long' ? '#22c55e' : '#ef4444', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: p.dir.toUpperCase() + ' Ø'}));
-  wacPosLines.push(WAC.cs.createPriceLine({price: p.sl, color: '#f97316', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL'}));
+  if (p.sl) wacPosLines.push(WAC.cs.createPriceLine({price: p.sl, color: '#f97316', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL'}));
+}
+function wacSetGrid(g) {
+  wacGridLines.forEach(x => WAC.cs.removePriceLine(x)); wacGridLines = [];
+  if (!g) return;
+  const ord = {}; (g.orders || []).forEach(o => { ord[o.tag] = o; });
+  (g.levels || []).forEach((v, i) => wacGridLines.push(WAC.cs.createPriceLine({price: v, color: '#2a3140', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: ''})));
+  (g.orders || []).forEach(o => wacGridLines.push(WAC.cs.createPriceLine({price: o.price, color: o.is_ask ? '#f0354b' : '#1fcf6e', lineWidth: 1, lineStyle: 0, axisLabelVisible: true, title: o.is_ask ? 'Verkauf' : 'Kauf'})));
+  (g.lots || []).forEach(l => wacGridLines.push(WAC.cs.createPriceLine({price: l.px, color: '#f5c542', lineWidth: 2, lineStyle: 3, axisLabelVisible: false, title: 'Lot'})));
 }
 function wacRender(d, markers, keepRange) {
-  WAC.cs.setData(d.candles); WAC.l1.setData(d.wt1); WAC.l2.setData(d.wt2);
+  WAC.cs.setData(d.candles); WAC.l1.setData(d.wt1 || []); WAC.l2.setData(d.wt2 || []);
   WAC.cs.setMarkers(markers);
   wacSetLevels(d.levels);
 }
@@ -3056,21 +3102,27 @@ function wacSigMarkers(d) {
 async function wacPollLive() {
   if (WAC.mode !== 'live') return;
   const sec = document.querySelector('#wac-price');
-  if (!sec || sec.offsetParent === null) return;   // nicht sichtbar (anderer Modus) -> nichts abfragen
+  if (!sec || sec.offsetParent === null) return;   // nicht sichtbar -> nichts abfragen
+  const isWa = document.getElementById('entry_mode').value === 'wellenanker';
+  document.getElementById('wac-wtbox').style.display = isWa ? '' : 'none';
+  document.getElementById('wac-tab-bt').style.display = isWa ? '' : 'none';
   wacInit(); if (!WAC.inited) return;
-  const sym = currentSymbol;
+  const sym = currentSymbol, tf = document.getElementById('wac-tf').value;
   try {
-    const r = await fetch(`/api/wa/live_chart?symbol=${sym}`);
+    const r = await fetch(`/api/wa/live_chart?symbol=${sym}` + (tf ? `&tf=${tf}` : ''));
     const d = await r.json();
     if (WAC.mode !== 'live' || sym !== currentSymbol) return;
     const info = document.getElementById('wac-info');
     if (!d.ok) { info.innerText = d.reason || 'keine Daten'; return; }
-    const first = WAC.sym !== sym || !WAC.fitted;
+    const first = WAC.sym !== sym || !WAC.fitted || WAC.tf !== d.resolution;
+    WAC.tf = d.resolution;
     wacRender(d, wacSigMarkers(d));
     wacSetPosition(d.position);
+    wacSetGrid(d.grid);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 120, to: d.candles.length + 5}); WAC.fitted = true; WAC.sym = sym; }
+    const wtTxt = isWa ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : '';
     const p = d.position;
-    info.innerText = `${sym} ${d.resolution} · Kurs ${d.price ?? '-'} · WT1 ${d.wt1v} / WT2 ${d.wt2v}` + (p ? ` · ${p.dir.toUpperCase()} Ø ${p.avg.toFixed(2)} PnL ${p.pnl.toFixed(2)} $` : ' · flat') + (d.active ? '' : ' · Bot nicht aktiv (nur Anzeige)');
+    info.innerText = `${sym} ${d.resolution} · Kurs ${d.price ?? '-'}` + wtTxt + (p ? ` · ${p.dir.toUpperCase()} Ø ${p.avg.toFixed(2)} PnL ${p.pnl.toFixed(2)} $` : ' · flat') + (d.active ? '' : ' · Bot nicht aktiv (nur Anzeige)');
   } catch (e) { /* naechster Versuch */ }
 }
 function wacBtMarkers(trades) {
@@ -3090,7 +3142,7 @@ function wacBtMarkers(trades) {
 }
 function wacShowBacktest() {
   WAC.mode = 'bt';
-  document.getElementById('wac-tab-bt').style.opacity = 1; document.getElementById('wac-tab-live').style.opacity = .6;
+  document.getElementById('wac-tab-bt').classList.add('on'); document.getElementById('wac-tab-live').classList.remove('on');
   wacInit(); if (!WAC.inited) return;
   wacSetPosition(null);
   const b = WAC.bt, info = document.getElementById('wac-info');
@@ -3102,7 +3154,7 @@ function wacShowBacktest() {
 }
 function wacShowLive() {
   WAC.mode = 'live'; WAC.fitted = false;
-  document.getElementById('wac-tab-live').style.opacity = 1; document.getElementById('wac-tab-bt').style.opacity = .6;
+  document.getElementById('wac-tab-live').classList.add('on'); document.getElementById('wac-tab-bt').classList.remove('on');
   wacPollLive();
 }
 function wacZoomTrade(t) {
@@ -3114,10 +3166,13 @@ function wacZoomTrade(t) {
   document.getElementById('wac-price').scrollIntoView({behavior: 'smooth', block: 'center'});
 }
 document.getElementById('wac-tab-live').addEventListener('click', wacShowLive);
+document.getElementById('wac-tf').addEventListener('change', () => { WAC.fitted = false; wacPollLive(); });
 document.getElementById('wac-tab-bt').addEventListener('click', wacShowBacktest);
 async function wacPollTrend() {
   const box = document.getElementById('wac-trend');
-  if (!box || box.offsetParent === null) return;
+  const isWa = document.getElementById('entry_mode').value === 'wellenanker';
+  if (box) box.style.display = isWa ? 'flex' : 'none';
+  if (!box || !isWa) return;
   try {
     const r = await fetch(`/api/wa/trend?symbol=${currentSymbol}`);
     const d = await r.json();
@@ -4039,6 +4094,18 @@ async function refresh() {
     document.getElementById('gs_requote_ticks').value = data.config.gs_requote_ticks;
     document.getElementById('gs_max_open_orders').value = data.config.gs_max_open_orders;
     document.getElementById('gs_poll_seconds').value = data.config.gs_poll_seconds;
+    { const e=document.getElementById('gc_lower'); if(e && data.config.gc_lower!==undefined) e.value = data.config.gc_lower; }
+    { const e=document.getElementById('gc_upper'); if(e && data.config.gc_upper!==undefined) e.value = data.config.gc_upper; }
+    { const e=document.getElementById('gc_auto_pct'); if(e && data.config.gc_auto_pct!==undefined) e.value = data.config.gc_auto_pct; }
+    { const e=document.getElementById('gc_levels'); if(e && data.config.gc_levels!==undefined) e.value = data.config.gc_levels; }
+    { const e=document.getElementById('gc_size_usd'); if(e && data.config.gc_size_usd!==undefined) e.value = data.config.gc_size_usd; }
+    { const e=document.getElementById('gc_max_lots'); if(e && data.config.gc_max_lots!==undefined) e.value = data.config.gc_max_lots; }
+    { const e=document.getElementById('gc_open_each_side'); if(e && data.config.gc_open_each_side!==undefined) e.value = data.config.gc_open_each_side; }
+    { const e=document.getElementById('gc_stop_pct'); if(e && data.config.gc_stop_pct!==undefined) e.value = data.config.gc_stop_pct; }
+    { const e=document.getElementById('gc_poll_seconds'); if(e && data.config.gc_poll_seconds!==undefined) e.value = data.config.gc_poll_seconds; }
+    { const e=document.getElementById('gc_direction'); if(e && data.config.gc_direction!==undefined) e.value = data.config.gc_direction; }
+    { const e=document.getElementById('gc_spacing'); if(e && data.config.gc_spacing!==undefined) e.value = data.config.gc_spacing; }
+
     document.getElementById('grid_anchor_follow_pct').value = data.config.grid_anchor_follow_pct;
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('binance_market_type').value = data.config.binance_market_type;
@@ -4123,19 +4190,6 @@ async function refresh() {
     datasets.push({ label:'Einstiege', data: entryArr, borderColor:'#60a5fa', backgroundColor:'#facc15', pointRadius:6, pointStyle:'triangle', showLine:false });
   }
 
-  if (!priceChart) {
-    priceChart = new Chart(document.getElementById('priceChart'), {
-      type: 'line',
-      data: { labels, datasets },
-      options: { responsive:true, maintainAspectRatio:false, animation:false, scales:{ x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } }, plugins:{legend:{labels:{color:'#e5e7eb'}}} }
-    });
-  } else {
-    priceChart.data.labels = labels;
-    priceChart.data.datasets = datasets;
-    priceChart.update('none');
-  }
-
-
   try {
     const resSelect = document.getElementById('quad-stoch-resolution-select');
     if (resSelect && document.activeElement !== resSelect) {
@@ -4174,18 +4228,6 @@ async function refresh() {
     }
   } catch (e) {
     console.error('Quad-Stochastic-Chart-Fehler:', e);
-  }
-
-  try {
-    document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
-    document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
-    document.getElementById('pocket-entry').innerText = data.avg_entry_price ?? '-';
-    const pnlEl = document.getElementById('pocket-pnl');
-    pnlEl.innerText = data.unrealized_pnl_usd ?? '-';
-    pnlEl.className = (data.unrealized_pnl_usd ?? 0) >= 0 ? 'value green' : 'value red';
-    renderMiniCandles(hist);
-  } catch (e) {
-    console.error('Pocket-Trading-Fehler:', e);
   }
 
   try {
@@ -4403,6 +4445,17 @@ function buildConfigPayload() {
     gs_requote_ticks: parseInt(document.getElementById('gs_requote_ticks').value),
     gs_max_open_orders: parseInt(document.getElementById('gs_max_open_orders').value),
     gs_poll_seconds: parseFloat(document.getElementById('gs_poll_seconds').value),
+    gc_lower: parseFloat(document.getElementById('gc_lower').value),
+    gc_upper: parseFloat(document.getElementById('gc_upper').value),
+    gc_auto_pct: parseFloat(document.getElementById('gc_auto_pct').value),
+    gc_levels: parseInt(document.getElementById('gc_levels').value),
+    gc_size_usd: parseFloat(document.getElementById('gc_size_usd').value),
+    gc_max_lots: parseInt(document.getElementById('gc_max_lots').value),
+    gc_open_each_side: parseInt(document.getElementById('gc_open_each_side').value),
+    gc_stop_pct: parseFloat(document.getElementById('gc_stop_pct').value),
+    gc_poll_seconds: parseFloat(document.getElementById('gc_poll_seconds').value),
+    gc_direction: document.getElementById('gc_direction').value,
+    gc_spacing: document.getElementById('gc_spacing').value,
     grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
@@ -4533,6 +4586,7 @@ async def handle_status(request):
     payload = {
         "symbol": symbol, "last_price": st["last_price"], "anchor_price": st["anchor_price"],
         "session_started": bool(st.get("session_started")),
+        "gc_view": st.get("gc_view"),
         "position": st["position"], "avg_entry_price": round(st["avg_entry_price"], 2) if st["avg_entry_price"] else None,
         "total_coin_size": st["total_coin_size"],
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),
@@ -4584,6 +4638,8 @@ async def handle_config_update(request):
                 "gs_step_notional_usd", "gs_max_levels", "gs_step_pct", "gs_tp_usd",
                 "gs_flatten_usd", "gs_cooldown_min", "gs_anchor_follow_pct",
                 "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
+                "gc_direction", "gc_lower", "gc_upper", "gc_auto_pct", "gc_levels", "gc_spacing", "gc_size_usd",
+                "gc_max_lots", "gc_open_each_side", "gc_stop_pct", "gc_poll_seconds",
                 "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",
@@ -4682,7 +4738,11 @@ async def handle_wa_live_chart(request):
     st = BOTS[symbol]["state"]
     n1, n2, sl = int(cfg.get("wa_n1", 10)), int(cfg.get("wa_n2", 21)), int(cfg.get("wa_sig_len", 4))
     bars = max(300, (n1 + n2 + sl + 20) * 3)
-    data = await fetch_candles_binance_multi(symbol, cfg.get("wa_timeframe", "15m"), count_back=min(1000, bars), market_type=cfg.get("binance_market_type", "spot"))
+    is_wa = cfg.get("entry_mode") == "wellenanker"
+    tf = request.query.get("tf", "")
+    if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
+        tf = cfg.get("wa_timeframe", "15m") if is_wa else "5m"
+    data = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, bars), market_type=cfg.get("binance_market_type", "spot"))
     if not data:
         return web.json_response({"ok": False, "reason": "lädt noch … (keine Kerzen erhalten)"})
     ts, o, h, l, c = data
@@ -4696,9 +4756,11 @@ async def handle_wa_live_chart(request):
         sl_usd = float(cfg.get("wa_sl_usd", 5.0))
         d = (sl_usd / size) if size else 0
         pos = {"dir": st["position"], "avg": avg, "size": size, "pnl": ((st.get("last_price") or avg) - avg) * size * (1 if st["position"] == "long" else -1),
-               "sl": (avg - d) if st["position"] == "long" else (avg + d)}
-    payload.update({"ok": True, "price": st.get("last_price"), "position": pos, "resolution": cfg.get("wa_timeframe", "15m"),
-                    "active": bool(cfg.get("bot_active")) and cfg.get("entry_mode") == "wellenanker"})
+               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else None}
+    gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
+    grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
+    payload.update({"ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid,
+                    "active": bool(cfg.get("bot_active"))})
     return web.json_response(payload)
 
 

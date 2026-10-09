@@ -28,7 +28,7 @@ from copytrade import (
     handle_ct_set_coin_setting, handle_ct_remove_coin_setting, handle_ct_set_trader_defaults,
 )
 from binance_ws import binance_ws_cache_loop
-from grid_scalp import grid_scalp_poll_loop
+from grid_scalp import grid_scalp_poll_loop, handle_gc_backtest, handle_gc_reset
 from screener import screener_loop, handle_screener_index, handle_screener_api
 from lighter_candles import lighter_candles_loop
 from scalp import (
@@ -51,6 +51,8 @@ async def start_web_server():
     app.router.add_post("/api/backtest", handle_backtest)
     app.router.add_get("/api/wa/live_chart", handle_wa_live_chart)
     app.router.add_get("/api/wa/trend", handle_wa_trend)
+    app.router.add_post("/api/gc/backtest", handle_gc_backtest)
+    app.router.add_post("/api/gc/reset", handle_gc_reset)
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
     app.router.add_post("/api/ab_signal_sweep", handle_ab_signal_sweep)
     app.router.add_post("/api/liq_sweep", handle_liq_sweep)
