@@ -3073,7 +3073,11 @@ function wacInit() {
   if (WAC.inited || !window.LightweightCharts) return;
   const LW = window.LightweightCharts;
   const opt = {layout: {background: {color: 'transparent'}, textColor: '#9aa4bf'}, grid: {vertLines: {color: '#171b22'}, horzLines: {color: '#171b22'}},
-               rightPriceScale: {borderColor: '#242932'}, timeScale: {borderColor: '#242932', timeVisible: true, secondsVisible: true}, crosshair: {mode: 0}};
+               rightPriceScale: {borderColor: '#242932'},
+               localization: {timeFormatter: t => new Date(t * 1000).toLocaleString('de-DE', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false})},
+               timeScale: {borderColor: '#242932', timeVisible: true, secondsVisible: false,
+                 tickMarkFormatter: (t, type) => { const d = new Date(t * 1000); return type <= 1 ? d.toLocaleDateString('de-DE', {month: '2-digit', year: '2-digit'}) : type === 2 ? d.toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'}) : d.toLocaleTimeString('de-DE', {hour: '2-digit', minute: '2-digit', hour12: false}); }},
+               crosshair: {mode: 0}};
   WAC.price = LW.createChart(document.getElementById('wac-price'), Object.assign({autoSize: true}, opt));
   WAC.wt = LW.createChart(document.getElementById('wac-wt'), Object.assign({autoSize: true}, opt));
   WAC.cs = WAC.price.addCandlestickSeries({upColor: '#1fcf6e', downColor: '#f0354b', borderVisible: false, wickUpColor: '#1fcf6e', wickDownColor: '#f0354b'});
