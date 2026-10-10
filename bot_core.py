@@ -1507,6 +1507,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select id="wac-tf" class="pill-select" title="Zeitrahmen">
       <option value="">TF: Strategie</option><option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
     </select>
+    <button type="button" id="wac-center" class="pill" title="Aktuelle Kerze in die Mitte des Charts setzen">🎯 Mitte</button>
+    <button type="button" id="wac-fit" class="pill" title="Gesamten Verlauf einpassen">⤢ Alles</button>
     <span id="wac-info" class="chart-info"></span>
   </div>
   <details id="ov-box" class="ov-box"><summary>📐 Linien &amp; Farben</summary><div id="ov-list"></div></details>
@@ -3075,16 +3077,18 @@ function wacInit() {
   const opt = {layout: {background: {color: 'transparent'}, textColor: '#9aa4bf'}, grid: {vertLines: {color: '#171b22'}, horzLines: {color: '#171b22'}},
                rightPriceScale: {borderColor: '#242932'},
                localization: {timeFormatter: t => new Date(t * 1000).toLocaleString('de-DE', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false})},
-               timeScale: {borderColor: '#242932', timeVisible: true, secondsVisible: false,
+               timeScale: {borderColor: '#242932', timeVisible: true, secondsVisible: false, rightOffset: 25,
                  tickMarkFormatter: (t, type) => { const d = new Date(t * 1000); return type <= 1 ? d.toLocaleDateString('de-DE', {month: '2-digit', year: '2-digit'}) : type === 2 ? d.toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'}) : d.toLocaleTimeString('de-DE', {hour: '2-digit', minute: '2-digit', hour12: false}); }},
-               crosshair: {mode: 0}};
+               crosshair: {mode: 0},
+               handleScroll: {mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true},
+               handleScale: {mouseWheel: true, pinch: true, axisPressedMouseMove: true, axisDoubleClickReset: true}};
   WAC.price = LW.createChart(document.getElementById('wac-price'), Object.assign({autoSize: true}, opt));
   WAC.wt = LW.createChart(document.getElementById('wac-wt'), Object.assign({autoSize: true}, opt));
   WAC.cs = WAC.price.addCandlestickSeries({upColor: '#1fcf6e', downColor: '#f0354b', borderVisible: false, wickUpColor: '#1fcf6e', wickDownColor: '#f0354b'});
   WAC.l1 = WAC.wt.addLineSeries({color: '#3b82f6', lineWidth: 2, priceLineVisible: false});
   WAC.l2 = WAC.wt.addLineSeries({color: '#eab308', lineWidth: 1, priceLineVisible: false});
   let busy = false;
-  const sync = (from, to) => from.timeScale().subscribeVisibleTimeRangeChange(r => { if (busy || !r) return; busy = true; try { to.timeScale().setVisibleRange(r); } catch (e) {} busy = false; });
+  const sync = (from, to) => from.timeScale().subscribeVisibleLogicalRangeChange(r => { if (busy || !r) return; busy = true; try { to.timeScale().setVisibleLogicalRange(r); } catch (e) {} busy = false; });
   sync(WAC.price, WAC.wt); sync(WAC.wt, WAC.price);
   WAC.inited = true;
 }
@@ -3142,7 +3146,10 @@ function wacSetGrid(g) {
   (g.lots || []).forEach(l => wacGridLines.push(WAC.cs.createPriceLine({price: l.px, color: '#f5c542', lineWidth: 2, lineStyle: 3, axisLabelVisible: false, title: 'Lot'})));
 }
 function wacRender(d, markers, keepRange) {
-  WAC.cs.setData(d.candles); WAC.l1.setData(d.wt1 || []); WAC.l2.setData(d.wt2 || []);
+  WAC.cs.setData(d.candles); WAC.lastN = d.candles.length;
+  // WT-Reihen auf dieselben Kerzen auffuellen (leere Punkte vorne) -> gleiche Indizes = beide Fenster lassen sich frei (auch nach rechts) verschieben
+  const padWt = arr => { const m = {}; (arr || []).forEach(p => { m[p.time] = p.value; }); return d.candles.map(c => (m[c.time] === undefined ? {time: c.time} : {time: c.time, value: m[c.time]})); };
+  WAC.l1.setData(padWt(d.wt1)); WAC.l2.setData(padWt(d.wt2));
   WAC.cs.setMarkers(markers);
   wacSetLevels(d.levels);
 }
@@ -3172,7 +3179,7 @@ async function wacPollLive() {
     wacSetPosition(d.position);
     wacSetGrid(d.grid);
     wacSetOverlays(d.overlays);
-    if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 120, to: d.candles.length + 5}); WAC.fitted = true; WAC.sym = sym; }
+    if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
     const wtTxt = isWa ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : '';
     const p = d.position;
     info.innerText = `${sym} ${d.resolution} · Kurs ${d.price ?? '-'}` + wtTxt + (p ? ` · ${p.dir.toUpperCase()} Ø ${p.avg.toFixed(2)} PnL ${p.pnl.toFixed(2)} $` : ' · flat') + (d.active ? '' : ' · Bot nicht aktiv (nur Anzeige)');
@@ -3219,6 +3226,15 @@ function wacZoomTrade(t) {
   document.getElementById('wac-price').scrollIntoView({behavior: 'smooth', block: 'center'});
 }
 document.getElementById('wac-tab-live').addEventListener('click', wacShowLive);
+function wacCenter() {
+  if (!WAC.inited) return;
+  const n = (WAC.cs.data ? WAC.cs.data().length : 0) || (WAC.lastN || 0); if (!n) return;
+  const r = WAC.price.timeScale().getVisibleLogicalRange(); const w = r ? Math.max(20, r.to - r.from) : 120;
+  WAC.price.timeScale().setVisibleLogicalRange({from: n - 1 - w / 2, to: n - 1 + w / 2});
+  try { WAC.price.priceScale('right').applyOptions({autoScale: true}); } catch (e) {}
+}
+document.getElementById('wac-center').addEventListener('click', wacCenter);
+document.getElementById('wac-fit').addEventListener('click', () => { if (WAC.inited) { WAC.price.timeScale().fitContent(); try { WAC.price.priceScale('right').applyOptions({autoScale: true}); } catch (e) {} } });
 document.getElementById('wac-tf').addEventListener('change', () => { WAC.fitted = false; wacPollLive(); });
 document.getElementById('wac-tab-bt').addEventListener('click', wacShowBacktest);
 async function wacPollTrend() {
