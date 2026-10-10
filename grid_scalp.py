@@ -1287,7 +1287,10 @@ async def grid_classic_tick(client, symbol):
         st["gc_range"], st["gc_sig"] = rng, sig
         st["gc_stopped"] = None
         debug_log(f"🧱 [{symbol}] Grid-Bot: Gitter {rng['dir']} {lo:.6g} … {hi:.6g}, {rng['n']} Stufen ({rng['spacing']})")
-    elif sig != st.get("gc_sig"):
+    elif sig != st.get("gc_sig") or (cfg_dir != rng.get("dir") and not lots):
+        # 2. Bedingung: Richtung im Formular != Richtung des laufenden Gitters, aber keine Lots offen -> umstellen.
+        # (Frueher wurde gc_sig auch dann aktualisiert, wenn der Wechsel wegen offener Lots verweigert wurde - danach
+        # fiel der Unterschied nie mehr auf und der Bot blieb dauerhaft in der alten Richtung.)
         lo, hi = float(_gcv(cfg, "gc_lower")), float(_gcv(cfg, "gc_upper"))
         if lo <= 0 or hi <= lo:
             lo, hi = rng["lower"], rng["upper"]       # Auto-Spanne bleibt, wie sie beim Start festgelegt wurde
@@ -1306,6 +1309,10 @@ async def grid_classic_tick(client, symbol):
             l["px"] = new_levels[l["k"]]
         st["gc_range"], st["gc_sig"] = rng, sig
         debug_log(f"🧱 [{symbol}] Grid-Bot: Gitter geändert → {lo:.6g} … {hi:.6g}, {rng['n']} Stufen ({len(lots)} Lots neu zugeordnet)")
+    if lots and cfg_dir != rng["dir"] and time.time() - float(st.get("gc_dir_warn") or 0) > 300:
+        st["gc_dir_warn"] = time.time()
+        debug_log(f"⚠️ [{symbol}] Grid-Bot: Formular steht auf {cfg_dir}, das Gitter läuft aber noch {rng['dir']} ({len(lots)} Lots offen). "
+                  f"Zum Wechsel: Stop, Position schließen, 'Gitter & Lots zurücksetzen', dann neu starten.")
     levels = _gc_levels(rng)
     n = len(levels) - 1
     d = 1 if rng["dir"] == "long" else -1
