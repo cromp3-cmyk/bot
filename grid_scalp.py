@@ -76,7 +76,28 @@ MAKER_DEFAULTS = {
     "ms_ema_slow": 50,
     "ms_flat_band_bps": 1.0,      # EMA-Abstand darunter = "flat" (beide Seiten quoten)
 }
-MODES = ("grid_scalp", "maker_scalp", "grid_classic")
+TICK_DEFAULTS = {
+    "ts_notional_usd": 300.0,     # Notional je Order (eine Position gleichzeitig)
+    "ts_direction": "both",       # long / short / both
+    "ts_imb_min": 0.15,           # Orderbuch-Ungleichgewicht (-1..+1), ab dem eingestiegen wird (0 = aus)
+    "ts_min_spread_ticks": 1,     # nur quoten, wenn der Spread mindestens so viele Ticks hat
+    "ts_tp_ticks": 3,             # Take-Profit in Ticks ab Einstieg (Post-only, reduce-only)
+    "ts_sl_ticks": 15,            # harter Stopp in Ticks gegen die Position (0 = aus)
+    "ts_max_hold_s": 60,          # Zeitlimit: nach so vielen Sekunden zum Marktpreis raus (0 = aus)
+    "ts_entry_ttl_s": 20,         # unbefuellte Einstiegsorder nach so vielen Sekunden neu setzen
+    "ts_max_losses_row": 4,       # Verluste in Folge -> Pause
+    "ts_pause_s": 300,
+    "ts_daily_loss_usd": 10.0,    # Tagesverlust-Limit (0 = aus), Pause bis Tageswechsel (UTC)
+    "ts_max_orders_min": 40,      # Order-Budget (posten+stornieren) pro Minute, nur live
+    "ts_poll_seconds": 1.0,       # live wird intern auf mind. 4 s begrenzt (REST fuer Position/Orders)
+    "ts_book_max_age_s": 5.0,     # aelter -> WS-Buch gilt als veraltet, REST-Fallback
+}
+MODES = ("grid_scalp", "maker_scalp", "grid_classic", "tick_scalp")
+
+
+def _ts(cfg, key):
+    v = cfg.get(key)
+    return TICK_DEFAULTS[key] if v is None else v
 
 
 def _ms(cfg, key):
@@ -88,10 +109,21 @@ def _ms(cfg, key):
 # Order-Schicht (neu - existierte im Bot bisher nicht)
 # ============================================================================
 
+_order_calls = []   # Zeitstempel aller posten/stornieren-Aufrufe (Order-Budget des Tick-Scalpers)
+
+
+def _orders_last_min():
+    now = time.time()
+    while _order_calls and now - _order_calls[0] > 60:
+        _order_calls.pop(0)
+    return len(_order_calls)
+
+
 async def place_post_only_order(client, market_index, symbol, is_ask, base_amount,
                                 price, coi, reduce_only=False):
     """Post-Only-Limit. Wuerde die Order das Buch kreuzen, verwirft die Boerse sie -
     das ist KEIN Fehler, sondern der Sinn von Post-Only. Naechster Tick setzt neu."""
+    _order_calls.append(time.time())
     price_decimals = get_price_decimals(symbol)
     price_scaled = int(round(price * (10 ** price_decimals)))
     # Timeout wie bei place_market_order in bot_core.py: grid_scalp_poll_loop(symbol) laeuft zwar
@@ -117,6 +149,7 @@ async def place_post_only_order(client, market_index, symbol, is_ask, base_amoun
 
 
 async def cancel_order(client, market_index, coi):
+    _order_calls.append(time.time())
     return await asyncio.wait_for(client.cancel_order(market_index=market_index, order_index=coi), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
 
 
@@ -221,6 +254,146 @@ async def read_best_bid_ask(client, market_index):
     if not ob.bids or not ob.asks:
         return None, None
     return float(ob.bids[0].price), float(ob.asks[0].price)
+
+
+# ============================================================================
+# Lighter-Orderbuch per WebSocket (fuer tick_scalp) - ersetzt das REST-Polling von order_book_orders.
+# Eine Verbindung fuer alle Maerkte, Snapshot + Deltas (size 0 = Level entfernt). Ist das Buch aelter als
+# ts_book_max_age_s oder gekreuzt (verpasstes Delta), faellt get_top() auf REST zurueck (max. alle 5 s)
+# und abonniert den Markt neu.
+# ============================================================================
+
+_book = {}            # market_index -> {"bids": {preis: groesse}, "asks": {...}, "t": letzte Aenderung}
+_book_want = set()
+_book_resub = set()
+_book_task = None
+_book_info = {"connected": False, "msgs": 0, "reconnects": 0, "last_error": None}
+_rest_top = {}        # market_index -> (t, bid, ask)
+
+
+def _book_apply(mi, ob, snapshot):
+    b = _book.setdefault(mi, {"bids": {}, "asks": {}, "t": 0.0})
+    if snapshot:
+        b["bids"].clear()
+        b["asks"].clear()
+    for side in ("bids", "asks"):
+        for lv in (ob.get(side) or []):
+            try:
+                p = float(lv["price"])
+                sz = float(lv["size"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if sz <= 0:
+                b[side].pop(p, None)
+            else:
+                b[side][p] = sz
+    b["t"] = time.time()
+
+
+def _book_handle(msg):
+    """Verarbeitet eine WS-Nachricht (dict). Gibt 'pong' zurueck, wenn geantwortet werden muss."""
+    typ = str(msg.get("type", ""))
+    if typ == "ping":
+        return "pong"
+    if typ in ("subscribed/order_book", "update/order_book"):
+        ch = str(msg.get("channel", ""))
+        try:
+            mi = int(ch.replace("order_book:", "").replace("order_book/", ""))
+        except ValueError:
+            return None
+        _book_apply(mi, msg.get("order_book") or {}, typ.startswith("subscribed"))
+        _book_info["msgs"] += 1
+    return None
+
+
+async def _book_ws_loop():
+    import json
+    import websockets
+    from bot_core import WS_URL
+    wait = 2.0
+    while True:
+        subscribed = set()
+        sub_task = None
+        try:
+            async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
+                _book_info["connected"] = True
+                wait = 2.0
+
+                async def _subscriber():
+                    while True:
+                        for mi in list(_book_resub):
+                            _book_resub.discard(mi)
+                            subscribed.discard(mi)
+                            await ws.send(json.dumps({"type": "unsubscribe", "channel": f"order_book/{mi}"}))
+                        for mi in list(_book_want - subscribed):
+                            await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{mi}"}))
+                            subscribed.add(mi)
+                        await asyncio.sleep(1.0)
+
+                sub_task = asyncio.create_task(_subscriber())
+                async for raw in ws:
+                    try:
+                        msg = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if _book_handle(msg) == "pong":
+                        await ws.send(json.dumps({"type": "pong"}))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _book_info["last_error"] = str(e)[:200]
+            debug_log(f"\u26a0\ufe0f Lighter-Orderbuch-WS getrennt: {str(e)[:200]} - neu in {wait:.0f}s")
+        finally:
+            _book_info["connected"] = False
+            _book_info["reconnects"] += 1
+            for b in _book.values():
+                b["t"] = 0.0
+            if sub_task:
+                sub_task.cancel()
+        await asyncio.sleep(wait)
+        wait = min(30.0, wait * 2)
+
+
+def _ensure_book_task():
+    global _book_task
+    if _book_task is None or _book_task.done():
+        _book_task = asyncio.create_task(_book_ws_loop())
+
+
+def _top_from_book(b, depth=5):
+    """(bid, ask, imbalance) aus dem lokalen Buch oder None, wenn leer/gekreuzt."""
+    if not b or not b["bids"] or not b["asks"]:
+        return None
+    bids = sorted(b["bids"], reverse=True)[:depth]
+    asks = sorted(b["asks"])[:depth]
+    if bids[0] >= asks[0]:
+        return None
+    bsz = sum(b["bids"][p] for p in bids)
+    asz = sum(b["asks"][p] for p in asks)
+    imb = (bsz - asz) / (bsz + asz) if (bsz + asz) > 0 else 0.0
+    return bids[0], asks[0], imb
+
+
+async def get_top(client, market_index, max_age=5.0):
+    """-> (bid, ask, imbalance, quelle 'ws'|'rest', alter_s)."""
+    _book_want.add(market_index)
+    _ensure_book_task()
+    b = _book.get(market_index)
+    age = time.time() - b["t"] if b else None
+    if b and age is not None and age <= max_age:
+        top = _top_from_book(b)
+        if top:
+            return top[0], top[1], top[2], "ws", age
+        b["bids"].clear()
+        b["asks"].clear()
+        b["t"] = 0.0
+        _book_resub.add(market_index)
+    c = _rest_top.get(market_index)
+    if c and time.time() - c[0] < 5.0:
+        return c[1], c[2], 0.0, "rest", time.time() - c[0]
+    bid, ask = await read_best_bid_ask(client, market_index)
+    _rest_top[market_index] = (time.time(), bid, ask)
+    return bid, ask, 0.0, "rest", 0.0
 
 
 # ============================================================================
@@ -470,6 +643,111 @@ def _desired_maker(symbol, cfg, pos_size, avg_entry, best_bid, best_ask, trend, 
 
 
 # ============================================================================
+# tick_scalp: schneller Maker-Scalper (eine Position, Tick-TP, Zeitlimit, Orderbuch-Ungleichgewicht)
+# ============================================================================
+
+def _desired_tick(symbol, cfg, pos_size, avg_entry, best_bid, best_ask, imb, entries_ok):
+    mid = (best_bid + best_ask) / 2.0
+    tick = _tick_size(symbol)
+    dec = get_price_decimals(symbol)
+    out = []
+    if pos_size != 0 and avg_entry:
+        n = max(1, int(_ts(cfg, "ts_tp_ticks")))
+        if pos_size > 0:
+            out.append({"tag": "tp", "is_ask": True, "price": max(avg_entry + n * tick, best_ask),
+                        "size": abs(pos_size), "reduce_only": True})
+        else:
+            out.append({"tag": "tp", "is_ask": False, "price": min(avg_entry - n * tick, best_bid),
+                        "size": abs(pos_size), "reduce_only": True})
+    elif entries_ok:
+        spread = best_ask - best_bid
+        if spread >= float(_ts(cfg, "ts_min_spread_ticks")) * tick - 1e-12:
+            d = str(_ts(cfg, "ts_direction"))
+            need = float(_ts(cfg, "ts_imb_min"))
+            if need <= 0:
+                long_ok, short_ok = d in ("long", "both"), d in ("short", "both")
+            else:
+                long_ok = d in ("long", "both") and imb >= need
+                short_ok = d in ("short", "both") and imb <= -need
+            base = float(_ts(cfg, "ts_notional_usd")) / mid
+            if long_ok:
+                out.append({"tag": "buy_0", "is_ask": False, "price": best_bid, "size": base, "reduce_only": False})
+            if short_ok:
+                out.append({"tag": "sell_0", "is_ask": True, "price": best_ask, "size": base, "reduce_only": False})
+    for o in out:
+        o["price"] = round(round(o["price"] / tick) * tick, dec)
+    return out
+
+
+def _ts_track(symbol, st, cfg, pos_size, avg_entry, mid):
+    """Erkennt abgeschlossene Trades (Position von !=0 auf 0), pflegt Serie/Tagesverlust und setzt Pausen."""
+    stats = st.setdefault("ts_stats", {"trades": 0, "wins": 0, "pnl": 0.0, "streak": 0, "day": None, "day_pnl": 0.0})
+    now = time.time()
+    day = int(now // 86400)
+    if stats.get("day") != day:
+        stats["day"], stats["day_pnl"], stats["streak"] = day, 0.0, 0
+    prev = float(st.get("ts_prev_pos") or 0.0)
+    if st.get("ts_pnl_snap") is None:
+        st["ts_pnl_snap"] = _sim_stats(st)["pnl"]
+    if prev != 0 and pos_size == 0:
+        if cfg["dry_run"]:
+            pnl = _sim_stats(st)["pnl"] - float(st.get("ts_pnl_snap") or 0.0)
+        else:
+            pa = st.get("ts_prev_avg")
+            pnl = (mid - pa) * prev if pa else 0.0      # live nur geschaetzt (Fill-Preis unbekannt)
+        stats["trades"] += 1
+        stats["pnl"] = round(stats["pnl"] + pnl, 4)
+        stats["day_pnl"] = round(stats["day_pnl"] + pnl, 4)
+        if pnl > 0:
+            stats["wins"] += 1
+            stats["streak"] = 0
+        else:
+            stats["streak"] += 1
+        held = now - float(st.get("ts_pos_since") or now)
+        st["ts_last_trade"] = f"{'+' if pnl >= 0 else ''}{round(pnl, 4)}$ nach {round(held)}s"
+        lim_n = int(_ts(cfg, "ts_max_losses_row"))
+        lim_d = float(_ts(cfg, "ts_daily_loss_usd"))
+        if lim_d > 0 and stats["day_pnl"] <= -lim_d:
+            until = (day + 1) * 86400
+            st["gs_cooldown_until"] = max(float(st.get("gs_cooldown_until") or 0), until)
+            st["ts_pause_reason"] = f"Tagesverlust {stats['day_pnl']}$ <= -{lim_d}$ - Pause bis Tageswechsel (UTC)"
+            debug_log(f"\u26d4 [{symbol}] Tick-Scalp: {st['ts_pause_reason']}")
+        elif lim_n > 0 and stats["streak"] >= lim_n:
+            st["gs_cooldown_until"] = max(float(st.get("gs_cooldown_until") or 0), now + float(_ts(cfg, "ts_pause_s")))
+            st["ts_pause_reason"] = f"{stats['streak']} Verluste in Folge - Pause {int(_ts(cfg, 'ts_pause_s'))}s"
+            stats["streak"] = 0
+            debug_log(f"\u23f8\ufe0f [{symbol}] Tick-Scalp: {st['ts_pause_reason']}")
+        st["ts_pnl_snap"] = _sim_stats(st)["pnl"]
+        st["ts_pos_since"] = None
+    elif pos_size != 0 and prev == 0:
+        st["ts_pos_since"] = now
+    st["ts_prev_pos"] = pos_size
+    st["ts_prev_avg"] = avg_entry
+    return stats
+
+
+def _ts_publish(symbol, st, cfg, src, age, imb, bid, ask, pos_size, avg_entry, desired):
+    tick = _tick_size(symbol)
+    stats = st.get("ts_stats") or {}
+    n = stats.get("trades", 0)
+    held = (time.time() - float(st["ts_pos_since"])) if st.get("ts_pos_since") and pos_size else None
+    cd = float(st.get("gs_cooldown_until") or 0) - time.time()
+    st["ts_view"] = {
+        "src": src, "book_age": None if age is None else round(age, 2), "imb": round(imb, 3),
+        "bid": bid, "ask": ask, "spread_ticks": round((ask - bid) / tick, 1),
+        "pos": round(pos_size, 6), "avg": avg_entry, "held_s": None if held is None else round(held, 1),
+        "trades": n, "wins": stats.get("wins", 0), "pnl": stats.get("pnl", 0.0),
+        "day_pnl": stats.get("day_pnl", 0.0), "streak": stats.get("streak", 0),
+        "last_trade": st.get("ts_last_trade"), "pause": (round(cd) if cd > 0 else 0),
+        "pause_reason": st.get("ts_pause_reason") if cd > 0 else None,
+        "orders_min": _orders_last_min(), "markout": _markout_summary(st),
+        "dry": bool(cfg["dry_run"]), "ws": dict(_book_info),
+        "wants": [{"side": "SELL" if d["is_ask"] else "BUY", "tag": d["tag"], "price": d["price"]} for d in desired],
+        "upnl": round((((bid + ask) / 2 - avg_entry) * pos_size), 4) if (pos_size and avg_entry) else 0.0,
+    }
+
+
+# ============================================================================
 # Dry-Run-Fill-Simulation
 #
 # WARUM DAS OPTIMISTISCH IST - bitte lesen, bevor du den Zahlen glaubst:
@@ -533,7 +811,7 @@ def _dash_reset_cycle(st):
     st["last_entry_price"] = None
 
 
-def _publish_levels(st, cfg, mode, desired, pos_size, avg_entry):
+def _publish_levels(st, cfg, mode, desired, pos_size, avg_entry, symbol=None):
     """Linien fuer Chart/Anzeige: TP, SL, naechster Nachkauf bzw. Einstiegs-Level."""
     lv = {"tp_price": None, "sl_price": None, "next_nachkauf_price": None,
           "next_entry_long": None, "next_entry_short": None}
@@ -548,6 +826,8 @@ def _publish_levels(st, cfg, mode, desired, pos_size, avg_entry):
     if pos_size != 0 and avg_entry:
         if mode == "maker_scalp":
             dist = avg_entry * float(_ms(cfg, "ms_sl_bps")) / 1e4
+        elif mode == "tick_scalp":
+            dist = float(_ts(cfg, "ts_sl_ticks")) * (_tick_size(symbol) if symbol else 0.0)
         else:
             dist = abs(float(cfg.get("gs_flatten_usd", 25.0))) / max(abs(pos_size), 1e-12)
         lv["sl_price"] = round(avg_entry - dist if pos_size > 0 else avg_entry + dist, 6)
@@ -791,13 +1071,17 @@ async def grid_scalp_tick(client, symbol):
     if cfg.get("entry_mode") == "grid_classic":
         return await grid_classic_tick(client, symbol)
 
-    best_bid, best_ask = await read_best_bid_ask(client, market_index)
+    mode = cfg.get("entry_mode")
+    t_imb, t_src, t_age = 0.0, "rest", None
+    if mode == "tick_scalp":
+        best_bid, best_ask, t_imb, t_src, t_age = await get_top(client, market_index, float(_ts(cfg, "ts_book_max_age_s")))
+    else:
+        best_bid, best_ask = await read_best_bid_ask(client, market_index)
     if best_bid is None:
         return
     mid = (best_bid + best_ask) / 2.0
     st["last_price"] = mid
     st["last_bid"], st["last_ask"] = best_bid, best_ask
-    mode = cfg.get("entry_mode")
 
     if cfg["dry_run"]:
         # Dry-Run: simulierte Position/Orders statt Boersen-Zustand (vorher lief die Simulation nie)
@@ -807,7 +1091,25 @@ async def grid_scalp_tick(client, symbol):
         pos_size, avg_entry = await _sync_position(client, symbol, market_index)
 
     # 1) Notausstieg ZUERST - vor allem, was neue Orders posten koennte
-    if mode == "maker_scalp" and pos_size != 0 and avg_entry:
+    if mode == "tick_scalp":
+        _ts_track(symbol, st, cfg, pos_size, avg_entry, mid)
+        _ts_publish(symbol, st, cfg, t_src, t_age, t_imb, best_bid, best_ask, pos_size, avg_entry, [])
+        if pos_size != 0 and avg_entry:
+            tk = _tick_size(symbol)
+            px = best_bid if pos_size > 0 else best_ask
+            adverse = ((avg_entry - px) if pos_size > 0 else (px - avg_entry)) / tk
+            held = time.time() - float(st.get("ts_pos_since") or time.time())
+            sl_t, max_h = float(_ts(cfg, "ts_sl_ticks")), float(_ts(cfg, "ts_max_hold_s"))
+            why = None
+            if sl_t > 0 and adverse >= sl_t:
+                why = f"tick-stopp ({round(adverse, 1)} Ticks)"
+            elif max_h > 0 and held >= max_h:
+                why = f"zeitlimit ({round(held)}s)"
+            if why:
+                debug_log(f"\U0001f6d1 [{symbol}] Tick-Scalp Ausstieg: {why}")
+                await _flatten_market(client, symbol, market_index, pos_size, why, cooldown_s=0)
+                return
+    elif mode == "maker_scalp" and pos_size != 0 and avg_entry:
         px = best_bid if pos_size > 0 else best_ask
         pnl_bps = (px - avg_entry) / avg_entry * 1e4 * (1 if pos_size > 0 else -1)
         if pnl_bps <= -float(_ms(cfg, "ms_sl_bps")):
@@ -824,7 +1126,7 @@ async def grid_scalp_tick(client, symbol):
                 pause = float(_ms(cfg, "ms_sl_pause_s"))
             await _flatten_market(client, symbol, market_index, pos_size, "maker-stopp", cooldown_s=pause)
             return
-    elif mode != "maker_scalp" and pos_size != 0 and avg_entry:
+    elif mode not in ("maker_scalp", "tick_scalp") and pos_size != 0 and avg_entry:
         upnl = (mid - avg_entry) * pos_size
         limit = -abs(float(cfg.get("gs_flatten_usd", 25.0)))
         if upnl <= limit:
@@ -837,7 +1139,9 @@ async def grid_scalp_tick(client, symbol):
     if time.time() < float(st.get("gs_cooldown_until") or 0.0):
         if pos_size == 0:
             rest_min = (float(st["gs_cooldown_until"]) - time.time()) / 60
-            debug_log(f"\u23f8\ufe0f [{symbol}] Grid-Scalp pausiert (Cooldown), noch {round(rest_min,1)} Min.")
+            if time.time() - float(st.get("gs_pause_log") or 0) >= 30:
+                st["gs_pause_log"] = time.time()
+                debug_log(f"\u23f8\ufe0f [{symbol}] Grid-Scalp pausiert (Cooldown), noch {round(rest_min,1)} Min.")
             if cfg["dry_run"]:
                 st["gs_sim_orders"] = []
             else:
@@ -893,10 +1197,27 @@ async def grid_scalp_tick(client, symbol):
         else:
             st["ms_ctx"] = f"ok [{ctx.get('quelle')}] (EMA-Abstand {ctx.get('ema_bps')} bps)"
         desired = _desired_maker(symbol, cfg, pos_size, avg_entry, best_bid, best_ask, trend, entries_ok)
+    elif mode == "tick_scalp":
+        now_ = time.time()
+        # unbefuellte Einstiegsorder nach ts_entry_ttl_s neu setzen (eine Sekunde Luecke -> Cancel + frischer Preis)
+        if pos_size == 0:
+            if st.get("ts_entry_since") is None:
+                st["ts_entry_since"] = now_
+            ttl = float(_ts(cfg, "ts_entry_ttl_s"))
+            if ttl > 0 and now_ - st["ts_entry_since"] >= ttl:
+                st["ts_entry_since"] = None
+                st["ts_skip_until"] = now_ + 1.0
+        else:
+            st["ts_entry_since"] = None
+        if now_ < float(st.get("ts_skip_until") or 0):
+            desired = []
+        else:
+            desired = _desired_tick(symbol, cfg, pos_size, avg_entry, best_bid, best_ask, t_imb, True)
+        _ts_publish(symbol, st, cfg, t_src, t_age, t_imb, best_bid, best_ask, pos_size, avg_entry, desired)
     else:
         desired = _desired_orders(symbol, cfg, st, pos_size, avg_entry, best_bid, best_ask)
 
-    _publish_levels(st, cfg, mode, desired, pos_size, avg_entry)
+    _publish_levels(st, cfg, mode, desired, pos_size, avg_entry, symbol)
 
     if cfg["dry_run"]:
         _sim_reconcile(symbol, st, cfg, desired)
@@ -912,6 +1233,12 @@ async def grid_scalp_tick(client, symbol):
                 "sim_pnl_usd": stt["pnl"],
                 "sim_upnl_usd": round((mid - avg_entry) * pos_size, 3) if (pos_size and avg_entry) else 0.0,
                 "markout": _markout_summary(st)})
+        return
+
+    if mode == "tick_scalp" and _orders_last_min() >= int(_ts(cfg, "ts_max_orders_min")):
+        if time.time() - float(st.get("ts_budget_log") or 0) >= 30:
+            st["ts_budget_log"] = time.time()
+            debug_log(f"\U0001f6a6 [{symbol}] Tick-Scalp: Order-Budget ({_ts(cfg, 'ts_max_orders_min')}/Min) erreicht - warte")
         return
 
     live = await read_open_orders(client, market_index)
@@ -1050,7 +1377,12 @@ async def grid_scalp_poll_loop(symbol):
                 await asyncio.sleep(5)
 
         _c = BOTS[symbol]["config"]
-        await asyncio.sleep(float(_c.get("gc_poll_seconds", 2.0) if _c.get("entry_mode") == "grid_classic" else _c.get("gs_poll_seconds", 2.0)))
+        if _c.get("entry_mode") == "tick_scalp":
+            _p = float(_ts(_c, "ts_poll_seconds"))
+            # live braucht pro Tick REST fuer Position + offene Orders -> Untergrenze gegen die Lighter-WAF-Sperre
+            await asyncio.sleep(max(0.25, _p) if _c.get("dry_run") else max(4.0, _p))
+        else:
+            await asyncio.sleep(float(_c.get("gc_poll_seconds", 2.0) if _c.get("entry_mode") == "grid_classic" else _c.get("gs_poll_seconds", 2.0)))
 
 
 # ============================================================================

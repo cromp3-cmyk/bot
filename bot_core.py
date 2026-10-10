@@ -211,6 +211,11 @@ def default_config():
         "gc_direction": "long", "gc_lower": 0.0, "gc_upper": 0.0, "gc_auto_pct": 5.0, "gc_levels": 20,
         "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6,
         "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0,
+        # ===== Tick-Scalp (schneller Maker-Scalper, entry_mode "tick_scalp") =====
+        "ts_notional_usd": 300.0, "ts_direction": "both", "ts_imb_min": 0.15, "ts_min_spread_ticks": 1,
+        "ts_tp_ticks": 3, "ts_sl_ticks": 15, "ts_max_hold_s": 60, "ts_entry_ttl_s": 20,
+        "ts_max_losses_row": 4, "ts_pause_s": 300, "ts_daily_loss_usd": 10.0, "ts_max_orders_min": 40,
+        "ts_poll_seconds": 1.0, "ts_book_max_age_s": 5.0,
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
         # Grid/AB-Breakout/RSI/MVWAP) - kein eigenes scalp_position_size_usd noetig.
@@ -488,7 +493,7 @@ def default_state():
         "last_entry_price": None,
         "gs_anchor": None, "gs_cooldown_until": 0.0, "gs_tag_map": {},
         "gs_last_error": None, "gs_open_orders": 0,
-        "gc_lots": [], "gc_prev": {}, "gc_range": None, "gc_sig": None, "gc_realized": 0.0, "gc_cycles": 0, "gc_stopped": None, "gc_view": None,
+        "ts_view": None, "gc_lots": [], "gc_prev": {}, "gc_range": None, "gc_sig": None, "gc_realized": 0.0, "gc_cycles": 0, "gc_stopped": None, "gc_view": None,
         "grid_sl_cooldown_until": 0.0,
         "binance_1s_buffer": [],
         "local_1s_bucket_start": None, "local_1s_candle_open": None,
@@ -1547,6 +1552,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
       <option value="grid_classic">Grid-Bot (klassisch: festes Preisgitter, Stufengewinn, läuft nach Deploy weiter)</option>
+      <option value="tick_scalp">Tick-Scalp (schnell: Post-only rein/raus, Orderbuch per WebSocket, Tick-TP)</option>
       <option value="scalp_vwap_obv_rsi">Scalp VWAP OBV RSI (Mean-Reversion, VWAP-Bänder + OBV RSI, TP1/TP2)</option>
       <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
       <option value="wellenanker">Wellenanker (WaveTrend-Punkte, Nachkauf, TP Gegentrade/Überlauf/Fest, $-SL)</option>
@@ -2241,6 +2247,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_classic"><label>Einstiegs-Orders im Buch</label><input type="number" step="1" id="gc_open_each_side"></div>
   <div data-mode="grid_classic"><label>Notbremse: % außerhalb (0 = aus)</label><input type="number" step="any" id="gc_stop_pct"></div>
   <div data-mode="grid_classic"><label>Poll (Sek.)</label><input type="number" step="any" id="gc_poll_seconds"></div>
+  <div data-mode="tick_scalp"><label>Notional je Trade ($)</label><input type="number" step="any" id="ts_notional_usd"></div>
+  <div data-mode="tick_scalp"><label>Richtung</label><select class="cfg" id="ts_direction"><option value="both">Long + Short</option><option value="long">nur Long</option><option value="short">nur Short</option></select></div>
+  <div data-mode="tick_scalp"><label>Einstieg ab Orderbuch-Ungleichgewicht (0 = aus, 0.15 = 15 %)</label><input type="number" step="any" id="ts_imb_min"></div>
+  <div data-mode="tick_scalp"><label>Mindest-Spread (Ticks)</label><input type="number" step="any" id="ts_min_spread_ticks"></div>
+  <div data-mode="tick_scalp"><label>Take-Profit (Ticks)</label><input type="number" step="1" id="ts_tp_ticks"></div>
+  <div data-mode="tick_scalp"><label>Stopp (Ticks, 0 = aus)</label><input type="number" step="1" id="ts_sl_ticks"></div>
+  <div data-mode="tick_scalp"><label>Zeitlimit je Trade (Sek., 0 = aus)</label><input type="number" step="1" id="ts_max_hold_s"></div>
+  <div data-mode="tick_scalp"><label>Einstiegsorder neu setzen nach (Sek.)</label><input type="number" step="1" id="ts_entry_ttl_s"></div>
+  <div data-mode="tick_scalp"><label>Pause nach Verlusten in Folge (Anzahl)</label><input type="number" step="1" id="ts_max_losses_row"></div>
+  <div data-mode="tick_scalp"><label>Dauer dieser Pause (Sek.)</label><input type="number" step="1" id="ts_pause_s"></div>
+  <div data-mode="tick_scalp"><label>Tagesverlust-Limit ($, 0 = aus)</label><input type="number" step="any" id="ts_daily_loss_usd"></div>
+  <div data-mode="tick_scalp"><label>Order-Budget pro Minute (live)</label><input type="number" step="1" id="ts_max_orders_min"></div>
+  <div data-mode="tick_scalp"><label>Takt (Sek.; live mind. 4)</label><input type="number" step="any" id="ts_poll_seconds"></div>
   <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
     <select class="cfg" id="grid_sl_enabled">
       <option value="false">Aus (Standard)</option>
@@ -2398,6 +2417,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <button type="button" id="gc-reset">♻️ Gitter &amp; Lots zurücksetzen</button>
   </div>
   <div id="gc-bt-out" style="font-size:12px; white-space:pre-wrap;"></div>
+</div>
+</div>
+<div data-mode-section="tick_scalp" style="display:none;">
+<h2 class="section-title">⚡ Tick-Scalp</h2>
+<div class="panel-card">
+  <div id="ts-kpis" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-bottom:10px;"></div>
+  <div id="ts-info" style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Warte auf Daten…</div>
+  <div style="font-size:12px; color:var(--text-dim);">
+    Simulation (Dry-Run): ein Fill zählt nur, wenn der Kurs komplett durch dein Limit läuft – bewusst pessimistisch.
+    Live: Position und offene Orders kommen noch per REST, deshalb läuft der Takt live mindestens alle 4 Sekunden.
+  </div>
 </div>
 </div>
 <div id="backtest-zone">
@@ -2935,6 +2965,27 @@ async function gcPoll() {
   } catch (e) {}
 }
 setInterval(gcPoll, 3000);
+async function tsPoll() {
+  try {
+    if (document.getElementById('entry_mode').value !== 'tick_scalp') return;
+    const r = await fetch(`/api/status?symbol=${currentSymbol}`); const d = await r.json(); const v = d.ts_view;
+    const k = document.getElementById('ts-kpis'), inf = document.getElementById('ts-info');
+    if (!v) { inf.textContent = 'Noch keine Daten. Bot starten (am besten zuerst im Dry-Run).'; k.innerHTML=''; return; }
+    const c = (x) => x >= 0 ? 'var(--green,#1fcf6e)' : 'var(--red,#f0354b)';
+    const box = (t, val, col) => `<div style="background:rgba(255,255,255,.04);border-radius:12px;padding:8px 10px;"><div style="font-size:11px;opacity:.6">${t}</div><div style="font-size:16px;font-weight:700;${col?'color:'+col:''}">${val}</div></div>`;
+    const wr = v.trades ? Math.round(v.wins / v.trades * 100) + ' %' : '–';
+    k.innerHTML = box(v.dry ? 'Ergebnis (Simulation)' : 'Ergebnis (geschätzt)', '$'+v.pnl.toFixed(2), c(v.pnl)) + box('Heute', '$'+v.day_pnl.toFixed(2), c(v.day_pnl)) +
+      box('Trades / Trefferquote', v.trades + ' / ' + wr) + box('Verluste in Folge', v.streak) +
+      box('Offen (unreal.)', v.pos ? '$'+v.upnl.toFixed(3) : 'flat', v.pos ? c(v.upnl) : '') + box('Orderbuch', v.src === 'ws' ? 'WebSocket ' + (v.book_age ?? '') + 's' : 'REST (Fallback)', v.src === 'ws' ? '' : 'var(--red,#f0354b)') +
+      box('Ungleichgewicht', (v.imb >= 0 ? '+' : '') + (v.imb * 100).toFixed(0) + ' %') + box('Spread', v.spread_ticks + ' Ticks') +
+      box('Orders/Min', v.orders_min);
+    inf.textContent = `Bid ${v.bid} / Ask ${v.ask}` + (v.pos ? ` · Position ${v.pos} @ ${v.avg}` + (v.held_s != null ? ` seit ${v.held_s}s` : '') : ' · flat') +
+      (v.wants && v.wants.length ? ' · Soll: ' + v.wants.map(w => w.side + ' ' + w.price).join(', ') : '') +
+      (v.last_trade ? ' · letzter Trade: ' + v.last_trade : '') + (v.pause ? ` · ⏸ Pause ${v.pause}s (${v.pause_reason || ''})` : '') +
+      ' · Markout 5/30/60s: ' + v.markout + (v.ws && !v.ws.connected ? ' · ⚠️ WS getrennt' : '');
+  } catch (e) {}
+}
+setInterval(tsPoll, 1500);
 document.getElementById('gc-bt').addEventListener('click', async () => {
   const o = document.getElementById('gc-bt-out'); o.textContent = 'Läuft…';
   const res = await fetch(`/api/gc/backtest?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({days:14, config: buildConfigPayload()})});
@@ -4174,6 +4225,19 @@ async function refresh() {
     { const e=document.getElementById('gc_poll_seconds'); if(e && data.config.gc_poll_seconds!==undefined) e.value = data.config.gc_poll_seconds; }
     { const e=document.getElementById('gc_direction'); if(e && data.config.gc_direction!==undefined) e.value = data.config.gc_direction; }
     { const e=document.getElementById('gc_spacing'); if(e && data.config.gc_spacing!==undefined) e.value = data.config.gc_spacing; }
+    { const e=document.getElementById('ts_notional_usd'); if(e && data.config.ts_notional_usd!==undefined) e.value = data.config.ts_notional_usd; }
+    { const e=document.getElementById('ts_direction'); if(e && data.config.ts_direction!==undefined) e.value = data.config.ts_direction; }
+    { const e=document.getElementById('ts_imb_min'); if(e && data.config.ts_imb_min!==undefined) e.value = data.config.ts_imb_min; }
+    { const e=document.getElementById('ts_min_spread_ticks'); if(e && data.config.ts_min_spread_ticks!==undefined) e.value = data.config.ts_min_spread_ticks; }
+    { const e=document.getElementById('ts_tp_ticks'); if(e && data.config.ts_tp_ticks!==undefined) e.value = data.config.ts_tp_ticks; }
+    { const e=document.getElementById('ts_sl_ticks'); if(e && data.config.ts_sl_ticks!==undefined) e.value = data.config.ts_sl_ticks; }
+    { const e=document.getElementById('ts_max_hold_s'); if(e && data.config.ts_max_hold_s!==undefined) e.value = data.config.ts_max_hold_s; }
+    { const e=document.getElementById('ts_entry_ttl_s'); if(e && data.config.ts_entry_ttl_s!==undefined) e.value = data.config.ts_entry_ttl_s; }
+    { const e=document.getElementById('ts_max_losses_row'); if(e && data.config.ts_max_losses_row!==undefined) e.value = data.config.ts_max_losses_row; }
+    { const e=document.getElementById('ts_pause_s'); if(e && data.config.ts_pause_s!==undefined) e.value = data.config.ts_pause_s; }
+    { const e=document.getElementById('ts_daily_loss_usd'); if(e && data.config.ts_daily_loss_usd!==undefined) e.value = data.config.ts_daily_loss_usd; }
+    { const e=document.getElementById('ts_max_orders_min'); if(e && data.config.ts_max_orders_min!==undefined) e.value = data.config.ts_max_orders_min; }
+    { const e=document.getElementById('ts_poll_seconds'); if(e && data.config.ts_poll_seconds!==undefined) e.value = data.config.ts_poll_seconds; }
 
     document.getElementById('grid_anchor_follow_pct').value = data.config.grid_anchor_follow_pct;
     document.getElementById('dry_run').value = String(data.config.dry_run);
@@ -4525,6 +4589,19 @@ function buildConfigPayload() {
     gc_poll_seconds: parseFloat(document.getElementById('gc_poll_seconds').value),
     gc_direction: document.getElementById('gc_direction').value,
     gc_spacing: document.getElementById('gc_spacing').value,
+    ts_notional_usd: parseFloat(document.getElementById('ts_notional_usd').value),
+    ts_direction: document.getElementById('ts_direction').value,
+    ts_imb_min: parseFloat(document.getElementById('ts_imb_min').value),
+    ts_min_spread_ticks: parseInt(document.getElementById('ts_min_spread_ticks').value),
+    ts_tp_ticks: parseInt(document.getElementById('ts_tp_ticks').value),
+    ts_sl_ticks: parseInt(document.getElementById('ts_sl_ticks').value),
+    ts_max_hold_s: parseInt(document.getElementById('ts_max_hold_s').value),
+    ts_entry_ttl_s: parseInt(document.getElementById('ts_entry_ttl_s').value),
+    ts_max_losses_row: parseInt(document.getElementById('ts_max_losses_row').value),
+    ts_pause_s: parseInt(document.getElementById('ts_pause_s').value),
+    ts_daily_loss_usd: parseFloat(document.getElementById('ts_daily_loss_usd').value),
+    ts_max_orders_min: parseInt(document.getElementById('ts_max_orders_min').value),
+    ts_poll_seconds: parseFloat(document.getElementById('ts_poll_seconds').value),
     grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
@@ -4655,7 +4732,7 @@ async def handle_status(request):
     payload = {
         "symbol": symbol, "last_price": st["last_price"], "anchor_price": st["anchor_price"],
         "session_started": bool(st.get("session_started")),
-        "gc_view": st.get("gc_view"), "grid_account": st.get("gs_account"),
+        "gc_view": st.get("gc_view"), "ts_view": st.get("ts_view") if cfg.get("entry_mode") == "tick_scalp" else None, "grid_account": st.get("gs_account"),
         "position": st["position"], "avg_entry_price": round(st["avg_entry_price"], 2) if st["avg_entry_price"] else None,
         "total_coin_size": st["total_coin_size"],
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),
@@ -4709,6 +4786,7 @@ async def handle_config_update(request):
                 "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
                 "gc_direction", "gc_lower", "gc_upper", "gc_auto_pct", "gc_levels", "gc_spacing", "gc_size_usd",
                 "gc_max_lots", "gc_open_each_side", "gc_stop_pct", "gc_poll_seconds",
+                "ts_notional_usd", "ts_direction", "ts_imb_min", "ts_min_spread_ticks", "ts_tp_ticks", "ts_sl_ticks", "ts_max_hold_s", "ts_entry_ttl_s", "ts_max_losses_row", "ts_pause_s", "ts_daily_loss_usd", "ts_max_orders_min", "ts_poll_seconds",
                 "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",
