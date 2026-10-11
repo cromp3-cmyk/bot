@@ -211,11 +211,6 @@ def default_config():
         "gc_direction": "long", "gc_lower": 0.0, "gc_upper": 0.0, "gc_auto_pct": 5.0, "gc_levels": 20,
         "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6,
         "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0,
-        # ===== Tick-Scalp (schneller Maker-Scalper, entry_mode "tick_scalp") =====
-        "ts_notional_usd": 300.0, "ts_direction": "both", "ts_imb_min": 0.15, "ts_min_spread_ticks": 1,
-        "ts_tp_ticks": 3, "ts_sl_ticks": 15, "ts_max_hold_s": 60, "ts_entry_ttl_s": 20,
-        "ts_max_losses_row": 4, "ts_pause_s": 300, "ts_daily_loss_usd": 10.0, "ts_max_orders_min": 40,
-        "ts_poll_seconds": 1.0, "ts_book_max_age_s": 5.0,
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
         # Grid/AB-Breakout/RSI/MVWAP) - kein eigenes scalp_position_size_usd noetig.
@@ -344,6 +339,30 @@ def default_config():
         # normalen Kerzen berechnen - wie bei Diamond Algo/UT Bot/Candle DNA. Ein-/Ausstieg loest
         # weiterhin am ECHTEN Marktpreis aus.
         "ab_use_heikin_ashi": os.getenv("AB_USE_HEIKIN_ASHI", "false").lower() == "true",
+
+        # ================= EMA + RSI (Smart Money Zone Tracker, portiert aus Pine v6) =================
+        # Long: Schluss > EMA und RSI > Mittellinie (Short umgekehrt), Trigger nur auf der Flanke,
+        # auf geschlossenen Kerzen. SL = Tief/Hoch der letzten N Kerzen VOR der Signal-Kerze.
+        # TP1/2/3 = 1x/2x/3x Schritt (fester Preisabstand oder ATR-Vielfaches). Ausstieg "plan"
+        # (SL + Teilverkaeufe) oder "flip" (Gegen-Signal dreht, SL bleibt). Immer nur eine Position je Coin.
+        "er_resolution": os.getenv("ER_RESOLUTION", "1m"),
+        "er_ema_len": int(os.getenv("ER_EMA_LEN", "9")),
+        "er_rsi_len": int(os.getenv("ER_RSI_LEN", "14")),
+        "er_rsi_mid": float(os.getenv("ER_RSI_MID", "50")),
+        "er_invert": os.getenv("ER_INVERT", "false").lower() == "true",
+        "er_direction_mode": os.getenv("ER_DIRECTION_MODE", "both"),
+        "er_exit_mode": os.getenv("ER_EXIT_MODE", "plan"),
+        "er_sl_lookback": int(os.getenv("ER_SL_LOOKBACK", "4")),
+        "er_sl_buffer_pct": float(os.getenv("ER_SL_BUFFER_PCT", "0.0")),
+        "er_tp_mode": os.getenv("ER_TP_MODE", "atr"),  # "atr" (ATR-Vielfaches) oder "fixed" (fester Preisabstand)
+        "er_tp_step_usd": float(os.getenv("ER_TP_STEP_USD", "10.0")),
+        "er_tp_step_atr_mult": float(os.getenv("ER_TP_STEP_ATR_MULT", "1.0")),
+        "er_atr_len": int(os.getenv("ER_ATR_LEN", "14")),
+        "er_tp1_close_pct": float(os.getenv("ER_TP1_CLOSE_PCT", "33")),
+        "er_tp2_close_pct": float(os.getenv("ER_TP2_CLOSE_PCT", "50")),
+        "er_sl_to_breakeven_on_tp1": os.getenv("ER_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
+        "er_sl_to_tp1_on_tp2": os.getenv("ER_SL_TO_TP1_ON_TP2", "true").lower() == "true",
+        "er_sl_cooldown_seconds": float(os.getenv("ER_SL_COOLDOWN_SECONDS", "30")),
 
         # ================= RSI Signal =================
         # Reine Handelsidee: RSI < oversold -> long, RSI > overbought -> short. Ausstieg identisch
@@ -493,7 +512,7 @@ def default_state():
         "last_entry_price": None,
         "gs_anchor": None, "gs_cooldown_until": 0.0, "gs_tag_map": {},
         "gs_last_error": None, "gs_open_orders": 0,
-        "ts_view": None, "gc_lots": [], "gc_prev": {}, "gc_range": None, "gc_sig": None, "gc_realized": 0.0, "gc_cycles": 0, "gc_stopped": None, "gc_view": None,
+        "gc_lots": [], "gc_prev": {}, "gc_range": None, "gc_sig": None, "gc_realized": 0.0, "gc_cycles": 0, "gc_stopped": None, "gc_view": None,
         "grid_sl_cooldown_until": 0.0,
         "binance_1s_buffer": [],
         "local_1s_bucket_start": None, "local_1s_candle_open": None,
@@ -677,6 +696,7 @@ PERSISTED_STATE_KEYS = [
     "gs_anchor", "gs_cooldown_until", "gs_tag_map",
     "gc_lots", "gc_prev", "gc_range", "gc_sig", "gc_realized", "gc_cycles", "gc_stopped", "gc_sim", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
+    "er_sl_price", "er_tp1_price", "er_tp2_price", "er_tp3_price", "er_tp1_done", "er_tp2_done", "er_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
     # Scalp VWAP OBV RSI: fehlte hier komplett (anders als bei allen anderen Strategien oben) -
@@ -1552,11 +1572,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
       <option value="grid_classic">Grid-Bot (klassisch: festes Preisgitter, Stufengewinn, läuft nach Deploy weiter)</option>
-      <option value="tick_scalp">Tick-Scalp (schnell: Post-only rein/raus, Orderbuch per WebSocket, Tick-TP)</option>
       <option value="scalp_vwap_obv_rsi">Scalp VWAP OBV RSI (Mean-Reversion, VWAP-Bänder + OBV RSI, TP1/TP2)</option>
       <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
       <option value="wellenanker">Wellenanker (WaveTrend-Punkte, Nachkauf, TP Gegentrade/Überlauf/Fest, $-SL)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
+      <option value="ema_rsi">EMA + RSI (Smart Money Zone Tracker: Schluss über/unter EMA + RSI über/unter Mittellinie, Swing-SL, TP1/TP2/TP3 mit Teilverkäufen)</option>
       <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
       <option value="mvwap_mf_signal">Multi-VWAP Money-Flow Signal (VWAP+MFI/CMF-Oszillator dreht Richtung, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
     </select>
@@ -1707,6 +1727,74 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
     🎭 Eigener Average-Sentiment-Oscillator-Filter (aus deinem Pine-Script): Long-Einstiege nur, wenn ASOBulls&gt;ASOBears auf derselben Zeiteinheit, Short nur umgekehrt. Bestätigungs-Kerzen &gt;1 verlangt, dass mehrere Kerzen hintereinander in dieselbe Richtung zeigen, bevor der Filter kippt.
   </div>
+
+  <div data-mode="ema_rsi" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📡 <b>Signal</b>: Long, sobald der Kerzenschluss über der EMA liegt UND der RSI über der Mittellinie (Short umgekehrt) - nur auf der Flanke (Bedingung jetzt erfüllt, auf der Kerze davor nicht), nur auf geschlossenen Kerzen. <b>SL</b> = Tief (Long) bzw. Hoch (Short) der letzten N Kerzen vor der Signal-Kerze. <b>TP1/TP2/TP3</b> = Einstieg ± 1×/2×/3× Schritt. Es läuft immer nur <b>eine</b> Position je Coin; die Order-Block-/FVG-Zonen des Original-Indikators sind reine Dekoration und nicht enthalten.
+  </div>
+  <div data-mode="ema_rsi"><label>Zeitrahmen</label>
+    <select class="cfg" id="er_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="er_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="ema_rsi"><label>EMA-Länge</label><input type="number" step="1" min="1" id="er_ema_len"></div>
+  <div data-mode="ema_rsi"><label>RSI-Länge</label><input type="number" step="1" min="2" id="er_rsi_len"></div>
+  <div data-mode="ema_rsi"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="er_rsi_mid"></div>
+  <div data-mode="ema_rsi"><label>Signale umkehren (Long &lt;-&gt; Short)</label>
+    <select class="cfg" id="er_invert">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi"><label>Richtung</label>
+    <select class="cfg" id="er_direction_mode">
+      <option value="both">Beide</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi"><label>Ausstieg</label>
+    <select class="cfg" id="er_exit_mode">
+      <option value="plan">Plan (SL + TP1/TP2/TP3 mit Teilverkäufen, Gegen-Signal ignoriert)</option>
+      <option value="flip">Wechsel (Gegen-Signal dreht die Position, Swing-SL bleibt aktiv, keine TPs)</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi"><label>SL: Kerzen zurück (Tief/Hoch der letzten N vor dem Signal)</label><input type="number" step="1" min="1" id="er_sl_lookback"></div>
+  <div data-mode="ema_rsi"><label>SL-Puffer (% vom Extrem)</label><input type="number" step="0.01" min="0" id="er_sl_buffer_pct"></div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>TP-Schritt</label>
+    <select class="cfg" id="er_tp_mode">
+      <option value="atr">ATR-Vielfaches (passt sich dem Coin an)</option>
+      <option value="fixed">Fester Preisabstand ($ je Coin-Kurs)</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi" data-requires="er_tp_mode" data-requires-value="fixed" data-requires-also="er_exit_mode=plan"><label>Schritt: fester Preisabstand (z.B. 10 = Kurs ± 10 $)</label><input type="number" step="any" min="0" id="er_tp_step_usd"></div>
+  <div data-mode="ema_rsi" data-requires="er_tp_mode" data-requires-value="atr" data-requires-also="er_exit_mode=plan"><label>Schritt: ATR-Multiplikator</label><input type="number" step="0.1" min="0.1" id="er_tp_step_atr_mult"></div>
+  <div data-mode="ema_rsi" data-requires="er_tp_mode" data-requires-value="atr" data-requires-also="er_exit_mode=plan"><label>ATR-Periode</label><input type="number" step="1" min="1" id="er_atr_len"></div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="er_tp1_close_pct"></div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="er_tp2_close_pct"></div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>SL auf Break-Even bei TP1</label>
+    <select class="cfg" id="er_sl_to_breakeven_on_tp1">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>SL auf TP1 bei TP2</label>
+    <select class="cfg" id="er_sl_to_tp1_on_tp2">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="er_sl_cooldown_seconds"></div>
 
   <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📶 <b>RSI Signal</b>: Long, sobald der RSI unter die Überverkauft-Schwelle fällt, Short sobald er über die Überkauft-Schwelle steigt. Ausstieg wie bei Al-Shatris Wechsel-Modus - der erste Long bleibt offen, bis das Gegen-Signal kommt, das dreht dann direkt. Optional ein fester Dollar-SL und "SL auf Einstieg bei Gewinn". Darunter drei unabhängig zuschaltbare Filter aus dem gemeinsamen Filter-Baukasten (auch für künftige Strategien wiederverwendbar).
@@ -2247,19 +2335,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_classic"><label>Einstiegs-Orders im Buch</label><input type="number" step="1" id="gc_open_each_side"></div>
   <div data-mode="grid_classic"><label>Notbremse: % außerhalb (0 = aus)</label><input type="number" step="any" id="gc_stop_pct"></div>
   <div data-mode="grid_classic"><label>Poll (Sek.)</label><input type="number" step="any" id="gc_poll_seconds"></div>
-  <div data-mode="tick_scalp"><label>Notional je Trade ($)</label><input type="number" step="any" id="ts_notional_usd"></div>
-  <div data-mode="tick_scalp"><label>Richtung</label><select class="cfg" id="ts_direction"><option value="both">Long + Short</option><option value="long">nur Long</option><option value="short">nur Short</option></select></div>
-  <div data-mode="tick_scalp"><label>Einstieg ab Orderbuch-Ungleichgewicht (0 = aus, 0.15 = 15 %)</label><input type="number" step="any" id="ts_imb_min"></div>
-  <div data-mode="tick_scalp"><label>Mindest-Spread (Ticks)</label><input type="number" step="any" id="ts_min_spread_ticks"></div>
-  <div data-mode="tick_scalp"><label>Take-Profit (Ticks)</label><input type="number" step="1" id="ts_tp_ticks"></div>
-  <div data-mode="tick_scalp"><label>Stopp (Ticks, 0 = aus)</label><input type="number" step="1" id="ts_sl_ticks"></div>
-  <div data-mode="tick_scalp"><label>Zeitlimit je Trade (Sek., 0 = aus)</label><input type="number" step="1" id="ts_max_hold_s"></div>
-  <div data-mode="tick_scalp"><label>Einstiegsorder neu setzen nach (Sek.)</label><input type="number" step="1" id="ts_entry_ttl_s"></div>
-  <div data-mode="tick_scalp"><label>Pause nach Verlusten in Folge (Anzahl)</label><input type="number" step="1" id="ts_max_losses_row"></div>
-  <div data-mode="tick_scalp"><label>Dauer dieser Pause (Sek.)</label><input type="number" step="1" id="ts_pause_s"></div>
-  <div data-mode="tick_scalp"><label>Tagesverlust-Limit ($, 0 = aus)</label><input type="number" step="any" id="ts_daily_loss_usd"></div>
-  <div data-mode="tick_scalp"><label>Order-Budget pro Minute (live)</label><input type="number" step="1" id="ts_max_orders_min"></div>
-  <div data-mode="tick_scalp"><label>Takt (Sek.; live mind. 4)</label><input type="number" step="any" id="ts_poll_seconds"></div>
   <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
     <select class="cfg" id="grid_sl_enabled">
       <option value="false">Aus (Standard)</option>
@@ -2417,17 +2492,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <button type="button" id="gc-reset">♻️ Gitter &amp; Lots zurücksetzen</button>
   </div>
   <div id="gc-bt-out" style="font-size:12px; white-space:pre-wrap;"></div>
-</div>
-</div>
-<div data-mode-section="tick_scalp" style="display:none;">
-<h2 class="section-title">⚡ Tick-Scalp</h2>
-<div class="panel-card">
-  <div id="ts-kpis" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-bottom:10px;"></div>
-  <div id="ts-info" style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Warte auf Daten…</div>
-  <div style="font-size:12px; color:var(--text-dim);">
-    Simulation (Dry-Run): ein Fill zählt nur, wenn der Kurs komplett durch dein Limit läuft – bewusst pessimistisch.
-    Live: Position und offene Orders kommen noch per REST, deshalb läuft der Takt live mindestens alle 4 Sekunden.
-  </div>
 </div>
 </div>
 <div id="backtest-zone">
@@ -2670,6 +2734,61 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="ab_lookback">Breakout-Range ⇅</th>
       <th class="sortable" data-key="ab_fast_len">Schnelle EMA ⇅</th>
       <th class="sortable" data-key="ab_slow_len">Langsame EMA ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<div data-mode-section="ema_rsi" style="display:none;">
+<h2 class="section-title">🎲 EMA + RSI Sweep (EMA-Länge × RSI-Länge)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet EMA-Länge und RSI-Länge gegeneinander. Mittellinie, SL-Kerzen, TP-Schritt, Ausstiegs-Modus und Richtung kommen aus den Einstellungen oben. SL und TP in derselben Kerze: der SL gewinnt.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="er-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="er-sweep-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>EMA von</label><input type="number" step="1" min="1" id="er-sweep-ema-min" value="5" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="1" id="er-sweep-ema-max" value="50" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="er-sweep-ema-step" value="5" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>RSI von</label><input type="number" step="1" min="2" id="er-sweep-rsi-min" value="7" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="2" id="er-sweep-rsi-max" value="28" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="er-sweep-rsi-step" value="7" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-er-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="er-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="er-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="er-sweep-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="er_ema_len">EMA-Länge ⇅</th>
+      <th class="sortable" data-key="er_rsi_len">RSI-Länge ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="er-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="er-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="er_ema_len">EMA-Länge ⇅</th>
+      <th class="sortable" data-key="er_rsi_len">RSI-Länge ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -2965,27 +3084,6 @@ async function gcPoll() {
   } catch (e) {}
 }
 setInterval(gcPoll, 3000);
-async function tsPoll() {
-  try {
-    if (document.getElementById('entry_mode').value !== 'tick_scalp') return;
-    const r = await fetch(`/api/status?symbol=${currentSymbol}`); const d = await r.json(); const v = d.ts_view;
-    const k = document.getElementById('ts-kpis'), inf = document.getElementById('ts-info');
-    if (!v) { inf.textContent = 'Noch keine Daten. Bot starten (am besten zuerst im Dry-Run).'; k.innerHTML=''; return; }
-    const c = (x) => x >= 0 ? 'var(--green,#1fcf6e)' : 'var(--red,#f0354b)';
-    const box = (t, val, col) => `<div style="background:rgba(255,255,255,.04);border-radius:12px;padding:8px 10px;"><div style="font-size:11px;opacity:.6">${t}</div><div style="font-size:16px;font-weight:700;${col?'color:'+col:''}">${val}</div></div>`;
-    const wr = v.trades ? Math.round(v.wins / v.trades * 100) + ' %' : '–';
-    k.innerHTML = box(v.dry ? 'Ergebnis (Simulation)' : 'Ergebnis (geschätzt)', '$'+v.pnl.toFixed(2), c(v.pnl)) + box('Heute', '$'+v.day_pnl.toFixed(2), c(v.day_pnl)) +
-      box('Trades / Trefferquote', v.trades + ' / ' + wr) + box('Verluste in Folge', v.streak) +
-      box('Offen (unreal.)', v.pos ? '$'+v.upnl.toFixed(3) : 'flat', v.pos ? c(v.upnl) : '') + box('Orderbuch', v.src === 'ws' ? 'WebSocket ' + (v.book_age ?? '') + 's' : 'REST (Fallback)', v.src === 'ws' ? '' : 'var(--red,#f0354b)') +
-      box('Ungleichgewicht', (v.imb >= 0 ? '+' : '') + (v.imb * 100).toFixed(0) + ' %') + box('Spread', v.spread_ticks + ' Ticks') +
-      box('Orders/Min', v.orders_min);
-    inf.textContent = `Bid ${v.bid} / Ask ${v.ask}` + (v.pos ? ` · Position ${v.pos} @ ${v.avg}` + (v.held_s != null ? ` seit ${v.held_s}s` : '') : ' · flat') +
-      (v.wants && v.wants.length ? ' · Soll: ' + v.wants.map(w => w.side + ' ' + w.price).join(', ') : '') +
-      (v.last_trade ? ' · letzter Trade: ' + v.last_trade : '') + (v.pause ? ` · ⏸ Pause ${v.pause}s (${v.pause_reason || ''})` : '') +
-      ' · Markout 5/30/60s: ' + v.markout + (v.ws && !v.ws.connected ? ' · ⚠️ WS getrennt' : '');
-  } catch (e) {}
-}
-setInterval(tsPoll, 1500);
 document.getElementById('gc-bt').addEventListener('click', async () => {
   const o = document.getElementById('gc-bt-out'); o.textContent = 'Läuft…';
   const res = await fetch(`/api/gc/backtest?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({days:14, config: buildConfigPayload()})});
@@ -3425,7 +3523,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3557,6 +3655,67 @@ const abSigSweepRowHtml = (r) => `
   </tr>`;
 const renderAbSigSweepResults = makeSortableTable('ab-sig-sweep-results-table', () => window.abSigSweepResultsData, abSigSweepRowHtml);
 const renderAbSigSweepWorst = makeSortableTable('ab-sig-sweep-worst-table', () => window.abSigSweepWorstData, abSigSweepRowHtml);
+
+document.getElementById('btn-er-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-er-sweep');
+  const statusEl = document.getElementById('er-sweep-status');
+  const tables = {top: document.getElementById('er-sweep-results-table'), worst: document.getElementById('er-sweep-worst-table')};
+  const titles = {top: document.getElementById('er-sweep-top-title'), worst: document.getElementById('er-sweep-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('er-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('er-sweep-exclude-top-n').value) || 0,
+    ema_min: parseInt(document.getElementById('er-sweep-ema-min').value),
+    ema_max: parseInt(document.getElementById('er-sweep-ema-max').value),
+    ema_step: parseInt(document.getElementById('er-sweep-ema-step').value),
+    rsi_min: parseInt(document.getElementById('er-sweep-rsi-min').value),
+    rsi_max: parseInt(document.getElementById('er-sweep-rsi-max').value),
+    rsi_step: parseInt(document.getElementById('er-sweep-rsi-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen...`;
+  try {
+    const res = await fetch(`/api/er_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}), Ausstieg: ${data.exit_mode === 'plan' ? 'Plan (SL + TP1/2/3)' : 'Wechsel'} - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unzuverlässig.`;
+      window.erSweepResultsData = data.results || [];
+      window.erSweepWorstData = data.worst_results || [];
+      renderErSweepResults();
+      renderErSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.erSweepResultsData = [];
+window.erSweepWorstData = [];
+const erSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.er_ema_len}</td>
+    <td>${r.er_rsi_len}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderErSweepResults = makeSortableTable('er-sweep-results-table', () => window.erSweepResultsData, erSweepRowHtml);
+const renderErSweepWorst = makeSortableTable('er-sweep-worst-table', () => window.erSweepWorstData, erSweepRowHtml);
 
 document.getElementById('btn-liq-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-liq-sweep');
@@ -4059,6 +4218,25 @@ async function refresh() {
     document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
     document.getElementById('ab_use_heikin_ashi').value = String(data.config.ab_use_heikin_ashi);
 
+    setResolutionField('er_resolution', data.config.er_resolution);
+    document.getElementById('er_ema_len').value = data.config.er_ema_len;
+    document.getElementById('er_rsi_len').value = data.config.er_rsi_len;
+    document.getElementById('er_rsi_mid').value = data.config.er_rsi_mid;
+    document.getElementById('er_invert').value = String(data.config.er_invert);
+    document.getElementById('er_direction_mode').value = data.config.er_direction_mode;
+    document.getElementById('er_exit_mode').value = data.config.er_exit_mode || 'plan';
+    document.getElementById('er_sl_lookback').value = data.config.er_sl_lookback;
+    document.getElementById('er_sl_buffer_pct').value = data.config.er_sl_buffer_pct;
+    document.getElementById('er_tp_mode').value = data.config.er_tp_mode || 'atr';
+    document.getElementById('er_tp_step_usd').value = data.config.er_tp_step_usd;
+    document.getElementById('er_tp_step_atr_mult').value = data.config.er_tp_step_atr_mult;
+    document.getElementById('er_atr_len').value = data.config.er_atr_len;
+    document.getElementById('er_tp1_close_pct').value = data.config.er_tp1_close_pct;
+    document.getElementById('er_tp2_close_pct').value = data.config.er_tp2_close_pct;
+    document.getElementById('er_sl_to_breakeven_on_tp1').value = String(data.config.er_sl_to_breakeven_on_tp1);
+    document.getElementById('er_sl_to_tp1_on_tp2').value = String(data.config.er_sl_to_tp1_on_tp2);
+    document.getElementById('er_sl_cooldown_seconds').value = data.config.er_sl_cooldown_seconds;
+
     setResolutionField('rsi_resolution', data.config.rsi_resolution);
     document.getElementById('rsi_length').value = data.config.rsi_length;
     document.getElementById('rsi_oversold').value = data.config.rsi_oversold;
@@ -4225,19 +4403,6 @@ async function refresh() {
     { const e=document.getElementById('gc_poll_seconds'); if(e && data.config.gc_poll_seconds!==undefined) e.value = data.config.gc_poll_seconds; }
     { const e=document.getElementById('gc_direction'); if(e && data.config.gc_direction!==undefined) e.value = data.config.gc_direction; }
     { const e=document.getElementById('gc_spacing'); if(e && data.config.gc_spacing!==undefined) e.value = data.config.gc_spacing; }
-    { const e=document.getElementById('ts_notional_usd'); if(e && data.config.ts_notional_usd!==undefined) e.value = data.config.ts_notional_usd; }
-    { const e=document.getElementById('ts_direction'); if(e && data.config.ts_direction!==undefined) e.value = data.config.ts_direction; }
-    { const e=document.getElementById('ts_imb_min'); if(e && data.config.ts_imb_min!==undefined) e.value = data.config.ts_imb_min; }
-    { const e=document.getElementById('ts_min_spread_ticks'); if(e && data.config.ts_min_spread_ticks!==undefined) e.value = data.config.ts_min_spread_ticks; }
-    { const e=document.getElementById('ts_tp_ticks'); if(e && data.config.ts_tp_ticks!==undefined) e.value = data.config.ts_tp_ticks; }
-    { const e=document.getElementById('ts_sl_ticks'); if(e && data.config.ts_sl_ticks!==undefined) e.value = data.config.ts_sl_ticks; }
-    { const e=document.getElementById('ts_max_hold_s'); if(e && data.config.ts_max_hold_s!==undefined) e.value = data.config.ts_max_hold_s; }
-    { const e=document.getElementById('ts_entry_ttl_s'); if(e && data.config.ts_entry_ttl_s!==undefined) e.value = data.config.ts_entry_ttl_s; }
-    { const e=document.getElementById('ts_max_losses_row'); if(e && data.config.ts_max_losses_row!==undefined) e.value = data.config.ts_max_losses_row; }
-    { const e=document.getElementById('ts_pause_s'); if(e && data.config.ts_pause_s!==undefined) e.value = data.config.ts_pause_s; }
-    { const e=document.getElementById('ts_daily_loss_usd'); if(e && data.config.ts_daily_loss_usd!==undefined) e.value = data.config.ts_daily_loss_usd; }
-    { const e=document.getElementById('ts_max_orders_min'); if(e && data.config.ts_max_orders_min!==undefined) e.value = data.config.ts_max_orders_min; }
-    { const e=document.getElementById('ts_poll_seconds'); if(e && data.config.ts_poll_seconds!==undefined) e.value = data.config.ts_poll_seconds; }
 
     document.getElementById('grid_anchor_follow_pct').value = data.config.grid_anchor_follow_pct;
     document.getElementById('dry_run').value = String(data.config.dry_run);
@@ -4422,6 +4587,24 @@ function buildConfigPayload() {
     ab_sl_manual_usd: parseFloat(document.getElementById('ab_sl_manual_usd').value),
     ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
     ab_use_heikin_ashi: document.getElementById('ab_use_heikin_ashi').value === 'true',
+    er_resolution: getResolutionField('er_resolution'),
+    er_ema_len: parseInt(document.getElementById('er_ema_len').value),
+    er_rsi_len: parseInt(document.getElementById('er_rsi_len').value),
+    er_rsi_mid: parseFloat(document.getElementById('er_rsi_mid').value),
+    er_invert: document.getElementById('er_invert').value === 'true',
+    er_direction_mode: document.getElementById('er_direction_mode').value,
+    er_exit_mode: document.getElementById('er_exit_mode').value,
+    er_sl_lookback: parseInt(document.getElementById('er_sl_lookback').value),
+    er_sl_buffer_pct: parseFloat(document.getElementById('er_sl_buffer_pct').value),
+    er_tp_mode: document.getElementById('er_tp_mode').value,
+    er_tp_step_usd: parseFloat(document.getElementById('er_tp_step_usd').value),
+    er_tp_step_atr_mult: parseFloat(document.getElementById('er_tp_step_atr_mult').value),
+    er_atr_len: parseInt(document.getElementById('er_atr_len').value),
+    er_tp1_close_pct: parseFloat(document.getElementById('er_tp1_close_pct').value),
+    er_tp2_close_pct: parseFloat(document.getElementById('er_tp2_close_pct').value),
+    er_sl_to_breakeven_on_tp1: document.getElementById('er_sl_to_breakeven_on_tp1').value === 'true',
+    er_sl_to_tp1_on_tp2: document.getElementById('er_sl_to_tp1_on_tp2').value === 'true',
+    er_sl_cooldown_seconds: parseFloat(document.getElementById('er_sl_cooldown_seconds').value),
 
     rsi_resolution: getResolutionField('rsi_resolution'),
     rsi_length: parseInt(document.getElementById('rsi_length').value),
@@ -4589,19 +4772,6 @@ function buildConfigPayload() {
     gc_poll_seconds: parseFloat(document.getElementById('gc_poll_seconds').value),
     gc_direction: document.getElementById('gc_direction').value,
     gc_spacing: document.getElementById('gc_spacing').value,
-    ts_notional_usd: parseFloat(document.getElementById('ts_notional_usd').value),
-    ts_direction: document.getElementById('ts_direction').value,
-    ts_imb_min: parseFloat(document.getElementById('ts_imb_min').value),
-    ts_min_spread_ticks: parseInt(document.getElementById('ts_min_spread_ticks').value),
-    ts_tp_ticks: parseInt(document.getElementById('ts_tp_ticks').value),
-    ts_sl_ticks: parseInt(document.getElementById('ts_sl_ticks').value),
-    ts_max_hold_s: parseInt(document.getElementById('ts_max_hold_s').value),
-    ts_entry_ttl_s: parseInt(document.getElementById('ts_entry_ttl_s').value),
-    ts_max_losses_row: parseInt(document.getElementById('ts_max_losses_row').value),
-    ts_pause_s: parseInt(document.getElementById('ts_pause_s').value),
-    ts_daily_loss_usd: parseFloat(document.getElementById('ts_daily_loss_usd').value),
-    ts_max_orders_min: parseInt(document.getElementById('ts_max_orders_min').value),
-    ts_poll_seconds: parseFloat(document.getElementById('ts_poll_seconds').value),
     grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
@@ -4732,7 +4902,7 @@ async def handle_status(request):
     payload = {
         "symbol": symbol, "last_price": st["last_price"], "anchor_price": st["anchor_price"],
         "session_started": bool(st.get("session_started")),
-        "gc_view": st.get("gc_view"), "ts_view": st.get("ts_view") if cfg.get("entry_mode") == "tick_scalp" else None, "grid_account": st.get("gs_account"),
+        "gc_view": st.get("gc_view"), "grid_account": st.get("gs_account"),
         "position": st["position"], "avg_entry_price": round(st["avg_entry_price"], 2) if st["avg_entry_price"] else None,
         "total_coin_size": st["total_coin_size"],
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),
@@ -4786,7 +4956,6 @@ async def handle_config_update(request):
                 "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
                 "gc_direction", "gc_lower", "gc_upper", "gc_auto_pct", "gc_levels", "gc_spacing", "gc_size_usd",
                 "gc_max_lots", "gc_open_each_side", "gc_stop_pct", "gc_poll_seconds",
-                "ts_notional_usd", "ts_direction", "ts_imb_min", "ts_min_spread_ticks", "ts_tp_ticks", "ts_sl_ticks", "ts_max_hold_s", "ts_entry_ttl_s", "ts_max_losses_row", "ts_pause_s", "ts_daily_loss_usd", "ts_max_orders_min", "ts_poll_seconds",
                 "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",
@@ -4797,6 +4966,9 @@ async def handle_config_update(request):
                 "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
                 "ab_exit_mode", "ab_sl_enabled", "ab_sl_manual_usd", "ab_be_enabled", "ab_be_trigger_usd", "ab_tp1_close_pct", "ab_tp2_close_pct",
                 "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds", "ab_use_heikin_ashi",
+                "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
+                "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
+                "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
                 "rsi_resolution", "rsi_length", "rsi_oversold", "rsi_overbought", "rsi_direction_mode",
@@ -5010,6 +5182,39 @@ async def handle_ab_signal_sweep(request):
 
     result = await run_ab_signal_sweep(symbol, cfg, days, lookback_min, lookback_max, lookback_step,
                                         fast_min, fast_max, fast_step, slow_min, slow_max, slow_step, exclude_top_n)
+    return web.json_response(result)
+
+
+async def handle_er_sweep(request):
+    """Sweep EMA-Laenge x RSI-Laenge fuer die Strategie EMA + RSI, siehe run_er_sweep."""
+    from strategies import run_er_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        ema_min = max(1, int(body.get("ema_min", 5)))
+        ema_max = max(ema_min, int(body.get("ema_max", 50)))
+        ema_step = max(1, int(body.get("ema_step", 5)))
+        rsi_min = max(2, int(body.get("rsi_min", 7)))
+        rsi_max = max(rsi_min, int(body.get("rsi_max", 28)))
+        rsi_step = max(1, int(body.get("rsi_step", 7)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await run_er_sweep(symbol, cfg, days, ema_min, ema_max, ema_step, rsi_min, rsi_max, rsi_step, exclude_top_n)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] EMA+RSI-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
 

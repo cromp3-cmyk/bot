@@ -1977,6 +1977,8 @@ def _simulate_cp_trades(candles, cfg, bull, bear, risk_atr, warmup):
 
 
 async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
+    if entry_mode == "ema_rsi":
+        return await run_er_backtest(symbol, cfg, days, exclude_top_n)
     if entry_mode == "ab_breakout":
         max_candles = BACKTEST_MAX_CANDLES.get("ab_breakout", 100_000)
         resolution = cfg.get("ab_resolution", "15s")
@@ -2225,7 +2227,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "chart": wa_chart_payload(candles[0], candles[1], candles[2], candles[3], candles[4], cfg),
         }
 
-    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, ema_rsi, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 AB_SWEEP_MAX_COMBOS = 600
 AB_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -2506,6 +2508,7 @@ BACKTEST_MAX_CANDLES = {
     "st_rsi_signal": 100_000,
     "hvd_signal": 100_000,
     "ab_breakout": 100_000,
+    "ema_rsi": 100_000,
     "scalp_vwap_obv_rsi": 100_000,
     "liquidity_waves": 100_000,
     "wellenanker": 100_000,
@@ -6570,4 +6573,432 @@ async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_
         "min_reliable_trades": AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES,
         "combos_tested": len(results), "entry_mode": entry_mode, "lines_tested": lines, "zone1_tested": zone1_list, "nachkauf_tested": nachkauf_list, "sl_tested": sl_list,
         "results": best_sorted[:30], "worst_results": worst_sorted[:20],
+    }
+
+
+# ============================================================
+# EMA + RSI Smart Money Zone Tracker (portiert aus dem Pine-v6-Indikator "EMA RSI Smart Money Zone
+# Tracker" / EMA+RSI SMC Pro) - entry_mode "ema_rsi", Config-Praefix er_*.
+# Signal: Long, wenn Schlusskurs > EMA UND RSI > Mittellinie (Short umgekehrt); Trigger ist nur die
+# FLANKE (Bedingung jetzt erfuellt, auf der Kerze davor nicht), ausgewertet auf geschlossenen Kerzen.
+# SL = tiefstes Tief (Long) / hoechstes Hoch (Short) der N Kerzen VOR der Signal-Kerze (+/- Puffer).
+# TP1/TP2/TP3 = Einstieg +/- 1x/2x/3x "Schritt"; Schritt = fester Preisabstand ODER ATR-Vielfaches.
+# Order-Block-/FVG-Zonen und Telegram-Tabellen des Originals sind reine Dekoration und nicht portiert.
+# Ausstieg: "plan" (SL + TP1/TP2/TP3 mit Teilverkaeufen, SL-Nachzug) oder "flip" (Gegen-Signal dreht,
+# Swing-SL bleibt aktiv). Gleichzeitig immer nur EINE Position je Coin ("one at a time").
+# ============================================================
+
+ER_SWEEP_MAX_COMBOS = 600
+ER_SWEEP_MIN_RELIABLE_TRADES = 5
+
+
+def _er_params(cfg):
+    return {
+        "ema_len": max(1, int(cfg.get("er_ema_len", 9))),
+        "rsi_len": max(2, int(cfg.get("er_rsi_len", 14))),
+        "rsi_mid": float(cfg.get("er_rsi_mid", 50)),
+        "invert": bool(cfg.get("er_invert", False)),
+        "sl_lookback": max(1, int(cfg.get("er_sl_lookback", 4))),
+        "sl_buffer_pct": max(0.0, float(cfg.get("er_sl_buffer_pct", 0.0))),
+        "tp_mode": cfg.get("er_tp_mode", "atr"),
+        "tp_step_usd": float(cfg.get("er_tp_step_usd", 10.0)),
+        "tp_step_atr_mult": float(cfg.get("er_tp_step_atr_mult", 1.0)),
+        "atr_len": max(1, int(cfg.get("er_atr_len", 14))),
+    }
+
+
+def _er_warmup(p):
+    return max(p["ema_len"], p["rsi_len"], p["sl_lookback"], p["atr_len"]) + 5
+
+
+def compute_er_signals(highs, lows, closes, params):
+    """Liefert (long_setup[], short_setup[], sl_long[], sl_short[], atr[]). long/short_setup sind die ROHEN
+    Zustands-Bedingungen (noch ohne Flanke). sl_long[i]/sl_short[i] = Tief/Hoch der N Kerzen VOR Kerze i
+    (Pine: ta.lowest(low, N)[1], die Signal-Kerze selbst zaehlt NICHT mit), inkl. Puffer."""
+    n = len(closes)
+    ema = _ema_series(closes, params["ema_len"])
+    rsi = compute_rsi(closes, params["rsi_len"])
+    atr = compute_atr(highs, lows, closes, params["atr_len"]) or [0.0] * n
+    lows_min, _ = _rolling_min_max(lows, params["sl_lookback"]) if n else ([], [])
+    _, highs_max = _rolling_min_max(highs, params["sl_lookback"]) if n else ([], [])
+    buf = params["sl_buffer_pct"] / 100.0
+    mid = params["rsi_mid"]
+    warm = _er_warmup(params)
+    long_setup = [False] * n
+    short_setup = [False] * n
+    sl_long = [None] * n
+    sl_short = [None] * n
+    for i in range(n):
+        if i >= 1:
+            sl_long[i] = lows_min[i - 1] * (1 - buf)
+            sl_short[i] = highs_max[i - 1] * (1 + buf)
+        if i < warm or rsi[i] is None:
+            continue
+        up = closes[i] > ema[i] and rsi[i] > mid
+        down = closes[i] < ema[i] and rsi[i] < mid
+        if params["invert"]:
+            up, down = down, up
+        long_setup[i] = up
+        short_setup[i] = down
+    return long_setup, short_setup, sl_long, sl_short, atr
+
+
+def _er_plan_levels(direction, entry, sl_base, atr_now, params, need_tp=True):
+    """Gibt (sl, tp1, tp2, tp3) oder None, wenn SL/Schritt ungueltig sind (SL auf der falschen Seite,
+    Schritt <= 0) - dann wird das Signal uebersprungen statt eine Order mit Unsinns-Levels zu setzen."""
+    if sl_base is None:
+        return None
+    if not need_tp:  # Flip-Modus: nur der Swing-SL zaehlt, TP-Schritt irrelevant
+        if (direction == "long" and sl_base >= entry) or (direction == "short" and sl_base <= entry):
+            return None
+        return sl_base, None, None, None
+    if params["tp_mode"] == "fixed":
+        step = params["tp_step_usd"]
+    else:
+        step = (atr_now or 0) * params["tp_step_atr_mult"]
+    if not step or step <= 0:
+        return None
+    if direction == "long":
+        if sl_base >= entry:
+            return None
+        return sl_base, entry + step, entry + 2 * step, entry + 3 * step
+    if sl_base <= entry:
+        return None
+    return sl_base, entry - step, entry - 2 * step, entry - 3 * step
+
+
+def _er_reset_state(st):
+    st["er_sl_price"] = None
+    st["er_tp1_price"] = None
+    st["er_tp2_price"] = None
+    st["er_tp3_price"] = None
+    st["er_tp1_done"] = False
+    st["er_tp2_done"] = False
+
+
+async def check_er_sl_tp(symbol, price):
+    """Laufende Pruefung gegen den Live-Preis (unabhaengig vom Kerzenabruf). SL zuerst; im Plan-Modus
+    danach TP1 (Teilverkauf + optional SL->Break-Even), TP2 (Teilverkauf + optional SL->TP1), TP3 (Rest).
+    Im Flip-Modus gibt es nur den Swing-SL."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    sl_price = st.get("er_sl_price")
+    if sl_price is not None:
+        if (pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price):
+            reason = "SL-AUF-TP1" if st.get("er_tp2_done") else ("BREAKEVEN" if st.get("er_tp1_done") else "SL")
+            debug_log(f"🚪 [{symbol}] EMA+RSI {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+            await execute_exit(symbol, price, reason)
+            if st["position"] is None:
+                st["er_sl_cooldown_until"] = time.time() + cfg.get("er_sl_cooldown_seconds", 30)
+                _er_reset_state(st)
+            return
+    if cfg.get("er_exit_mode", "plan") != "plan":
+        return
+
+    if not st.get("er_tp1_done") and st.get("er_tp1_price") is not None:
+        tp1 = st["er_tp1_price"]
+        if (pos == "long" and price >= tp1) or (pos == "short" and price <= tp1):
+            ok = await execute_partial_exit(symbol, price, cfg.get("er_tp1_close_pct", 33) / 100, "TP1")
+            if not ok:
+                return
+            st["er_tp1_done"] = True
+            if cfg.get("er_sl_to_breakeven_on_tp1", True) and st.get("avg_entry_price"):
+                st["er_sl_price"] = st["avg_entry_price"]
+                debug_log(f"📡 [{symbol}] EMA+RSI TP1 erreicht - SL auf Break-Even ({round(st['avg_entry_price'], 4)})")
+        else:
+            return
+    if not st.get("er_tp2_done") and st.get("er_tp2_price") is not None:
+        tp2 = st["er_tp2_price"]
+        if (pos == "long" and price >= tp2) or (pos == "short" and price <= tp2):
+            ok = await execute_partial_exit(symbol, price, cfg.get("er_tp2_close_pct", 50) / 100, "TP2")
+            if not ok:
+                return
+            st["er_tp2_done"] = True
+            if cfg.get("er_sl_to_tp1_on_tp2", True) and st.get("er_tp1_price") is not None:
+                st["er_sl_price"] = st["er_tp1_price"]
+                debug_log(f"📡 [{symbol}] EMA+RSI TP2 erreicht - SL auf TP1 ({round(st['er_tp1_price'], 4)})")
+        else:
+            return
+    tp3 = st.get("er_tp3_price")
+    if tp3 is not None and ((pos == "long" and price >= tp3) or (pos == "short" and price <= tp3)):
+        debug_log(f"🚪 [{symbol}] EMA+RSI TP3 (Rest): {pos.upper()} @ {price}")
+        await execute_exit(symbol, price, "TP3")
+        if st["position"] is None:
+            _er_reset_state(st)
+
+
+async def check_er_entry(symbol, buy_signal, sell_signal, price, sl_long, sl_short, atr_now):
+    """Einstieg auf der Signal-Flanke. Plan: nur wenn flach (one at a time, Gegen-Signal schliesst nichts).
+    Flip: Gegen-Signal schliesst die Position und dreht; gleichgerichtetes Signal wird ignoriert."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    mode = cfg.get("er_direction_mode", "both")
+    if mode == "long_only":
+        sell_signal = False
+    elif mode == "short_only":
+        buy_signal = False
+    if buy_signal and sell_signal:
+        return
+    if not (buy_signal or sell_signal):
+        return
+    target = "long" if buy_signal else "short"
+    pos = st["position"]
+    flip = cfg.get("er_exit_mode", "plan") == "flip"
+    if pos is not None:
+        if not flip or pos == target:
+            return
+    elif time.time() < st.get("er_sl_cooldown_until", 0.0):
+        return
+    params = _er_params(cfg)
+    levels = _er_plan_levels(target, price, sl_long if target == "long" else sl_short, atr_now, params, need_tp=not flip)
+    if levels is None:
+        debug_log(f"⚠️ [{symbol}] EMA+RSI Signal {target.upper()} @ {price} übersprungen: SL/TP-Abstand ungültig")
+        return
+    if pos is not None:
+        debug_log(f"🔄 [{symbol}] EMA+RSI Wechsel: {pos.upper()} -> {target.upper()} @ {price}")
+        await execute_exit(symbol, price, "ER-FLIP")
+        if st["position"] is not None:
+            return  # Exit fehlgeschlagen - keine Gegenposition obendrauf
+        _er_reset_state(st)
+    debug_log(f"📡 [{symbol}] EMA+RSI Signal: {target.upper()} @ {price}")
+    await execute_entry(symbol, target, price, is_add_on=False)
+    if st["position"] is None:
+        return
+    _er_reset_state(st)
+    sl, tp1, tp2, tp3 = levels
+    st["er_sl_price"] = sl
+    if not flip:
+        st["er_tp1_price"], st["er_tp2_price"], st["er_tp3_price"] = tp1, tp2, tp3
+
+
+async def er_poll_loop(symbol):
+    """EMA+RSI - Einstieg bei Kerzenschluss (Flanke), SL/TP laufend gegen den Live-Preis."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+    while True:
+        try:
+            cfg = b["config"]
+            # session_started: wie bei allen Kerzen-Strategien - nach Deploy erst manueller Start im Panel
+            if cfg["entry_mode"] == "ema_rsi" and cfg["bot_active"] and b["state"].get("session_started"):
+                resolution = cfg.get("er_resolution", "1m")
+                params = _er_params(cfg)
+                min_needed = _er_warmup(params) + 2
+                needed_bars = min(1000, max(min_needed * 3, 200))
+                st = b["state"]
+                closed_ts = None
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                    if data:
+                        timestamps, opens, highs, lows, closes = data[:5]
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+                if st["position"] is not None and st["last_price"] is not None:
+                    await check_er_sl_tp(symbol, st["last_price"])
+
+                if closed_ts and len(closed_c) > min_needed:
+                    age = (now * 1000 - closed_ts[-1]) / 1000
+                    if age > 300:
+                        debug_log(f"⚠️ [{symbol}] EMA+RSI: letzte Kerze wirkt veraltet ({round(age)}s alt, Auflösung {resolution}) - überspringe Durchlauf.")
+                        closed_ts = None
+                    elif st["last_price"] is not None and closed_c[-1] and abs(closed_c[-1] - st["last_price"]) / st["last_price"] * 100 > 2.0:
+                        debug_log(f"⚠️ [{symbol}] EMA+RSI: Kerzendaten unplausibel (Kerze {closed_c[-1]} vs. Live {st['last_price']}) - überspringe Durchlauf.")
+                        closed_ts = None
+
+                if closed_ts and len(closed_c) > min_needed:
+                    long_setup, short_setup, sl_long, sl_short, atr = compute_er_signals(closed_h, closed_l, closed_c, params)
+                    st["er_atr_last"] = atr[-1]
+                    if due_heartbeat:
+                        last_heartbeat = now
+                        debug_log(f"💓 [{symbol}] EMA+RSI aktiv: EMA={params['ema_len']}, RSI={params['rsi_len']}/{params['rsi_mid']}, "
+                                  f"Ausstieg={cfg.get('er_exit_mode', 'plan')}, Preis={closed_c[-1]}, Kerzen={len(closed_c)}")
+                    if last_processed_ts is None:
+                        new_indices = [len(closed_ts) - 1]
+                    else:
+                        new_indices = [i for i in range(len(closed_ts)) if closed_ts[i] > last_processed_ts]
+                    for idx in new_indices:
+                        if idx < 1:
+                            continue
+                        buy_signal = long_setup[idx] and not long_setup[idx - 1]
+                        sell_signal = short_setup[idx] and not short_setup[idx - 1]
+                        price_i = st["last_price"] if (idx == len(closed_ts) - 1 and st["last_price"] is not None) else closed_c[idx]
+                        last_processed_ts = closed_ts[idx]
+                        await check_er_entry(symbol, buy_signal, sell_signal, price_i, sl_long[idx], sl_short[idx], atr[idx])
+                elif due_heartbeat:
+                    last_heartbeat = now
+                    debug_log(f"⏳ [{symbol}] EMA+RSI wartet: {'keine Kerzen erhalten' if not closed_ts else 'zu wenig Kerzen'} (Auflösung {resolution})")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] EMA+RSI-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        await asyncio.sleep(5)
+
+
+def _simulate_er_trades(candles, cfg, long_setup, short_setup, sl_long, sl_short, atr, warmup, params=None):
+    """Backtest-Gegenstueck zu check_er_entry/check_er_sl_tp. Einstieg zum Schlusskurs der Signal-Kerze,
+    SL/TP werden erst ab der NAECHSTEN Kerze ueber Hoch/Tief geprueft (intrabar). Liegen SL und ein TP in
+    derselben Kerze, gewinnt der SL (wie im Original und konservativ). Am Ende: END-OF-BACKTEST."""
+    ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
+    n = len(c)
+    params = params or _er_params(cfg)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    plan = cfg.get("er_exit_mode", "plan") == "plan"
+    tp1_frac = cfg.get("er_tp1_close_pct", 33) / 100
+    tp2_frac = cfg.get("er_tp2_close_pct", 50) / 100
+    be_on_tp1 = cfg.get("er_sl_to_breakeven_on_tp1", True)
+    tp1_on_tp2 = cfg.get("er_sl_to_tp1_on_tp2", True)
+    cooldown_ms = cfg.get("er_sl_cooldown_seconds", 30) * 1000
+    mode = cfg.get("er_direction_mode", "both")
+    position = None
+    trades = []
+    cool_until = None
+
+    for i in range(max(warmup, 1), n):
+        if position is not None:
+            pdir, entry = position["dir"], position["entry"]
+            sl = position["sl"]
+            if (pdir == "long" and l[i] <= sl) or (pdir == "short" and h[i] >= sl):
+                reason = "SL-AUF-TP1" if position["tp2_done"] else ("BREAKEVEN" if position["tp1_done"] else "SL")
+                _bt_close_trade(trades, pdir, entry, sl, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+                cool_until = ts[i] + cooldown_ms
+            elif plan:
+                def _hit(p):
+                    return (pdir == "long" and h[i] >= p) or (pdir == "short" and l[i] <= p)
+                if not position["tp1_done"] and _hit(position["tp1"]):
+                    cs = position["size"] * tp1_frac
+                    _bt_close_trade(trades, pdir, entry, position["tp1"], cs, i, position["entry_i"], "TP1", ts=ts)
+                    position["size"] -= cs
+                    position["tp1_done"] = True
+                    if be_on_tp1:
+                        position["sl"] = entry
+                if position["tp1_done"] and not position["tp2_done"] and _hit(position["tp2"]):
+                    cs = position["size"] * tp2_frac
+                    _bt_close_trade(trades, pdir, entry, position["tp2"], cs, i, position["entry_i"], "TP2", ts=ts)
+                    position["size"] -= cs
+                    position["tp2_done"] = True
+                    if tp1_on_tp2:
+                        position["sl"] = position["tp1"]
+                if position["tp1_done"] and position["tp2_done"] and _hit(position["tp3"]):
+                    _bt_close_trade(trades, pdir, entry, position["tp3"], position["size"], i, position["entry_i"], "TP3", ts=ts)
+                    position = None
+
+        buy = long_setup[i] and not long_setup[i - 1]
+        sell = short_setup[i] and not short_setup[i - 1]
+        if mode == "long_only":
+            sell = False
+        elif mode == "short_only":
+            buy = False
+        if buy == sell:
+            continue
+        target = "long" if buy else "short"
+        if position is not None and (plan or position["dir"] == target):
+            continue
+        price = c[i]
+        levels = _er_plan_levels(target, price, sl_long[i] if target == "long" else sl_short[i], atr[i], params, need_tp=plan)
+        if levels is None:
+            continue
+        if position is not None:
+            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "ER-FLIP", ts=ts)
+            position = None
+        elif cool_until is not None and ts[i] < cool_until:
+            continue
+        sl, tp1, tp2, tp3 = levels
+        position = {"dir": target, "entry": price, "size": (margin * leverage) / price, "entry_i": i,
+                    "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp1_done": False, "tp2_done": False}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+    return trades
+
+
+def backtest_ema_rsi(candles, cfg):
+    params = _er_params(cfg)
+    h, l, c = candles[2], candles[3], candles[4]
+    long_setup, short_setup, sl_long, sl_short, atr = compute_er_signals(h, l, c, params)
+    return _simulate_er_trades(candles, cfg, long_setup, short_setup, sl_long, sl_short, atr, _er_warmup(params), params)
+
+
+async def _er_load_candles(symbol, cfg, days):
+    max_candles = BACKTEST_MAX_CANDLES.get("ema_rsi", 100_000)
+    resolution = cfg.get("er_resolution", "1m")
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    return candles, err, resolution, max_candles
+
+
+async def run_er_backtest(symbol, cfg, days, exclude_top_n=1):
+    candles, err, resolution, max_candles = await _er_load_candles(symbol, cfg, days)
+    if err:
+        return {"error": err}
+    params = _er_params(cfg)
+    min_needed = _er_warmup(params) + 10
+    if not candles or len(candles[4]) < min_needed:
+        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+    trades = backtest_ema_rsi(candles, cfg)
+    stats = summarize_backtest_trades(trades, exclude_top_n)
+    actual_days = (candles[0][-1] - candles[0][0]) / (24 * 60 * 60 * 1000)
+    return {
+        "symbol": symbol, "entry_mode": "ema_rsi", "resolution": resolution,
+        "requested_days": days, "actual_days_covered": round(actual_days, 1),
+        "candles_processed": len(candles[4]), "candle_cap": max_candles, "cache_used": False,
+        "stats": stats,
+        "stats_long": summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n),
+        "stats_short": summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n),
+        "trades": trades,
+    }
+
+
+def _er_sweep_compute(candles, cfg, combos, exclude_top_n):
+    h, l, c = candles[2], candles[3], candles[4]
+    results = []
+    for ema_len, rsi_len in combos:
+        params = dict(_er_params(cfg), ema_len=ema_len, rsi_len=rsi_len)
+        long_setup, short_setup, sl_long, sl_short, atr = compute_er_signals(h, l, c, params)
+        trades = _simulate_er_trades(candles, cfg, long_setup, short_setup, sl_long, sl_short, atr, _er_warmup(params), params)
+        results.append({"er_ema_len": ema_len, "er_rsi_len": rsi_len, **summarize_backtest_trades(trades, exclude_top_n)})
+    return results
+
+
+async def run_er_sweep(symbol, cfg, days, ema_min=5, ema_max=50, ema_step=5, rsi_min=7, rsi_max=28, rsi_step=7, exclude_top_n=1):
+    """Sweep EMA-Laenge x RSI-Laenge. Alles andere (Mittellinie, SL-Lookback, TP-Schritt, Ausstieg ...) kommt
+    unveraendert aus der aktuellen Config."""
+    candles, err, resolution, _mc = await _er_load_candles(symbol, cfg, days)
+    if err:
+        return {"error": err}
+
+    def _rng(lo, hi, step, floor):
+        lo, hi, step = int(lo), int(hi), max(1, int(step))
+        return sorted(set(v for v in range(lo, hi + 1, step) if v >= floor))
+
+    emas, rsis = _rng(ema_min, ema_max, ema_step, 1), _rng(rsi_min, rsi_max, rsi_step, 2)
+    if not emas or not rsis:
+        return {"error": "Die eingestellten Bereiche für EMA/RSI ergeben keine gültigen Werte."}
+    combos = [(e, r) for e in emas for r in rsis]
+    if len(combos) > ER_SWEEP_MAX_COMBOS:
+        return {"error": f"Zu viele Kombinationen ({len(combos)}, Limit {ER_SWEEP_MAX_COMBOS}) - Bereiche verkleinern oder Schrittweiten vergrößern."}
+    need = max(max(emas), max(rsis), _er_params(cfg)["atr_len"]) + 15
+    if not candles or len(candles[4]) < need:
+        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Sweep erhalten (mind. ~{need} nötig)."}
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, _er_sweep_compute, candles, cfg, combos, exclude_top_n)
+    rank_key = lambda r: (r["trades"] >= ER_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
+    ts = candles[0]
+    return {
+        "symbol": symbol, "entry_mode": "ema_rsi", "resolution": resolution, "requested_days": days,
+        "actual_days_covered": round((ts[-1] - ts[0]) / 86400000, 1), "candles_processed": len(ts),
+        "min_reliable_trades": ER_SWEEP_MIN_RELIABLE_TRADES, "combos_tested": len(results),
+        "emas_tested": emas, "rsis_tested": rsis, "exit_mode": cfg.get("er_exit_mode", "plan"),
+        "results": sorted(results, key=rank_key, reverse=True)[:30],
+        "worst_results": sorted(results, key=lambda r: r["total_pnl_usd"])[:20],
     }

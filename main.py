@@ -13,11 +13,11 @@ from bot_core import (
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reverse_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_ab_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
+    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
-    trading_loop, binance_1s_poll_loop, ab_poll_loop, rsi_poll_loop, mvwap_poll_loop, scalp_poll_loop,
+    trading_loop, binance_1s_poll_loop, ab_poll_loop, er_poll_loop, rsi_poll_loop, mvwap_poll_loop, scalp_poll_loop,
     liq_poll_loop, wa_poll_loop, load_binance_ban_state,
 )
 from copytrade import (
@@ -54,6 +54,7 @@ async def start_web_server():
     app.router.add_post("/api/gc/backtest", handle_gc_backtest)
     app.router.add_post("/api/gc/reset", handle_gc_reset)
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
+    app.router.add_post("/api/er_sweep", handle_er_sweep)
     app.router.add_post("/api/ab_signal_sweep", handle_ab_signal_sweep)
     app.router.add_post("/api/liq_sweep", handle_liq_sweep)
     app.router.add_post("/api/wa_sweep", handle_wa_sweep)
@@ -130,6 +131,7 @@ async def main():
         trading_loop(),
         *[binance_1s_poll_loop(s) for s in SYMBOLS],
         *[ab_poll_loop(s) for s in SYMBOLS],
+        *[er_poll_loop(s) for s in SYMBOLS],
         *[rsi_poll_loop(s) for s in SYMBOLS],
         *[mvwap_poll_loop(s) for s in SYMBOLS],
         *[grid_scalp_poll_loop(s) for s in SYMBOLS],
