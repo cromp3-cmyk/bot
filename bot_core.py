@@ -209,7 +209,7 @@ def default_config():
         "gs_poll_seconds": float(os.getenv("GS_POLL_SECONDS", "2.0")),
         # ===== Klassischer Grid-Bot (entry_mode "grid_classic") =====
         "gc_direction": "long", "gc_lower": 0.0, "gc_upper": 0.0, "gc_auto_pct": 5.0, "gc_levels": 20,
-        "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6,
+        "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6, "gc_exit_orders": 15,
         "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0,
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
@@ -2333,6 +2333,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_classic"><label>Notional je Stufe ($)</label><input type="number" step="any" id="gc_size_usd"></div>
   <div data-mode="grid_classic"><label>Max. gleichzeitige Lots</label><input type="number" step="1" id="gc_max_lots"></div>
   <div data-mode="grid_classic"><label>Einstiegs-Orders im Buch</label><input type="number" step="1" id="gc_open_each_side"></div>
+  <div data-mode="grid_classic"><label>Gegen-Orders im Buch (nur die nächsten Lots, 0 = alle)</label><input type="number" step="1" min="0" id="gc_exit_orders"></div>
   <div data-mode="grid_classic"><label>Notbremse: % außerhalb (0 = aus)</label><input type="number" step="any" id="gc_stop_pct"></div>
   <div data-mode="grid_classic"><label>Poll (Sek.)</label><input type="number" step="any" id="gc_poll_seconds"></div>
   <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
@@ -4399,6 +4400,7 @@ async function refresh() {
     { const e=document.getElementById('gc_size_usd'); if(e && data.config.gc_size_usd!==undefined) e.value = data.config.gc_size_usd; }
     { const e=document.getElementById('gc_max_lots'); if(e && data.config.gc_max_lots!==undefined) e.value = data.config.gc_max_lots; }
     { const e=document.getElementById('gc_open_each_side'); if(e && data.config.gc_open_each_side!==undefined) e.value = data.config.gc_open_each_side; }
+    { const e=document.getElementById('gc_exit_orders'); if(e && data.config.gc_exit_orders!==undefined) e.value = data.config.gc_exit_orders; }
     { const e=document.getElementById('gc_stop_pct'); if(e && data.config.gc_stop_pct!==undefined) e.value = data.config.gc_stop_pct; }
     { const e=document.getElementById('gc_poll_seconds'); if(e && data.config.gc_poll_seconds!==undefined) e.value = data.config.gc_poll_seconds; }
     { const e=document.getElementById('gc_direction'); if(e && data.config.gc_direction!==undefined) e.value = data.config.gc_direction; }
@@ -4768,6 +4770,7 @@ function buildConfigPayload() {
     gc_size_usd: parseFloat(document.getElementById('gc_size_usd').value),
     gc_max_lots: parseInt(document.getElementById('gc_max_lots').value),
     gc_open_each_side: parseInt(document.getElementById('gc_open_each_side').value),
+    gc_exit_orders: parseInt(document.getElementById('gc_exit_orders').value),
     gc_stop_pct: parseFloat(document.getElementById('gc_stop_pct').value),
     gc_poll_seconds: parseFloat(document.getElementById('gc_poll_seconds').value),
     gc_direction: document.getElementById('gc_direction').value,
@@ -4955,7 +4958,7 @@ async def handle_config_update(request):
                 "gs_flatten_usd", "gs_cooldown_min", "gs_anchor_follow_pct",
                 "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
                 "gc_direction", "gc_lower", "gc_upper", "gc_auto_pct", "gc_levels", "gc_spacing", "gc_size_usd",
-                "gc_max_lots", "gc_open_each_side", "gc_stop_pct", "gc_poll_seconds",
+                "gc_max_lots", "gc_open_each_side", "gc_exit_orders", "gc_stop_pct", "gc_poll_seconds",
                 "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",
