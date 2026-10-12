@@ -32,7 +32,7 @@ import binance_ws
 import lighter_candles
 from strategies import (
     BINANCE_SYMBOL_MAP, BINANCE_FUTURES_ONLY_SYMBOLS,
-    compute_rsi, compute_wavetrend_series, _wa_raw_signals,
+    compute_rsi, compute_wavetrend_series, _wa_raw_signals, ms_trend_series,
 )
 from screener import (
     _resample_1s, _wave_moneyflow, _market_for, _r, SCREENER_STATE,
@@ -184,6 +184,29 @@ def _validate_wa(d, base):
 _locks = {}
 _tfstate_cache = {}   # sym -> (ts, {tf: state})
 _chipsig_cache = {}   # tf -> (ts, {sym: state})
+_trend_cache = {}     # sym -> (ts, {tf: [intern, swing]})
+TREND_TTL = 5.0
+TREND_ILEN, TREND_SLEN = 4, 50
+
+
+def _trend_states(sym):
+    """Marktstruktur-Trend (BOS/CHoCH) je Zeitebene: {tf: [intern, swing]} mit 1 / -1 / 0 / None. Laeuft im Thread."""
+    out = {}
+    for t in TFS:
+        try:
+            raw, _ = _raw_candles(sym, t)
+            cs = _prepare(raw, t, 2 * TREND_ILEN + 8)
+            if cs is None:
+                out[t] = [None, None]
+                continue
+            h = [x["h"] for x in cs]
+            l = [x["l"] for x in cs]
+            c = [x["c"] for x in cs]
+            itr, swt, _ev = ms_trend_series(h, l, c, TREND_ILEN, TREND_SLEN)
+            out[t] = [itr[-1], swt[-1] if len(c) >= 2 * TREND_SLEN + 8 else None]
+        except Exception:
+            out[t] = [None, None]
+    return out
 _last_err_log = {}
 
 
@@ -662,7 +685,11 @@ async def handle_scalp_chart(request):
         states = dict(cached[1], **states)
     if data is None:
         return web.json_response({"ok": False, "reason": "lädt noch … (Kerzen werden aufgebaut)", "tfstates": states})
-    data.update({"ok": True, "tfstates": states, "tf": tf, "coin": sym, "wa": dict(_cfg(sym), z3=_z3(_cfg(sym)), own=sym in COIN_CFG)})
+    tc = _trend_cache.get(sym)
+    if tc is None or time.time() - tc[0] > TREND_TTL:
+        tc = (time.time(), await asyncio.to_thread(_trend_states, sym))
+        _trend_cache[sym] = tc
+    data.update({"ok": True, "trend": tc[1], "tfstates": states, "tf": tf, "coin": sym, "wa": dict(_cfg(sym), z3=_z3(_cfg(sym)), own=sym in COIN_CFG)})
     return web.json_response(data)
 
 
@@ -1062,6 +1089,7 @@ button{font-family:inherit;cursor:pointer}
     <div class="small">Eingabe und Linien im Chart gehören zusammen. Beim Erreichen schließt der Bot per Market-Order. Leeres Feld = entfernen.</div>
    </div>
    <div class="card"><b style="font-size:13px">Wellenanker je Zeitebene</b><div class="tfs" id="tfs"></div></div>
+   <div class="card"><b style="font-size:13px">Trend (Marktstruktur) je Zeitebene</b><div class="small" style="margin:4px 0 8px">oben intern · unten swing</div><div class="tfs" id="trendbox"></div></div>
    <div class="card"><b style="font-size:13px">Letzte Signale</b><div id="feed" style="display:flex;flex-direction:column;gap:8px"></div></div>
   </div>
  </div>
@@ -1138,7 +1166,7 @@ document.querySelectorAll('.q button[data-k]').forEach(b=>b.addEventListener('cl
 /* ---------- Chart-Daten ---------- */
 function shift(arr){return arr.map(x=>Object.assign({},x,{time:x.time+tzoff}))}
 function applyChart(d,key){
- renderTfStates(d.tfstates||{});
+ renderTfStates(d.tfstates||{});renderTrend(d.trend||{});
  if(d.wa){
   const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.candles+'|'+d.wa.w2_level+'|'+d.wa.w2_line+'|'+d.wa.w2_profit;
   if(k!==waKey){if(waKey!=='')loadedKey=null;waKey=k;applyMode(d.wa.strat);if(d.wa.strat==='w2')setZones(d.wa.w2_level,d.wa.w2_level,true);else setZones(d.wa.z1,d.wa.z3);if(!waBusy())fillWa(d.wa)}
@@ -1171,6 +1199,11 @@ function applyChart(d,key){
 function renderTfStates(s){
  $('tfs').innerHTML=TFS.map(t=>{const v=s[t];const txt=v===undefined||v===null?'…':v===1?'LONG':v===-1?'SHORT':'ABWARTEN';const c=v===1?G:v===-1?R:'#7d8696';
   return '<div><span style="letter-spacing:.08em;color:var(--mut)">'+t+'</span><span style="color:'+c+'">'+txt+'</span></div>'}).join('');
+}
+function renderTrend(s){
+ const cell=v=>v===1?'<span style="color:'+G+'">▲ BULL</span>':v===-1?'<span style="color:'+R+'">▼ BEAR</span>':'<span style="color:#7d8696">–</span>';
+ $('trendbox').innerHTML=TFS.map(t=>{const v=s[t]||[null,null];
+  return '<div><span style="letter-spacing:.08em;color:var(--mut)">'+t+'</span>'+cell(v[0])+cell(v[1])+'</div>'}).join('');
 }
 async function loadChart(){
  if(!coin)return;const key=coin+'|'+tf;
