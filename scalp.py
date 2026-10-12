@@ -355,6 +355,31 @@ def _tf_state(cs, cfg):
     return 1 if (b < -z1 and a > b) else -1 if (b > z1 and a < b) else 0
 
 
+WVF_PD, WVF_BBL, WVF_MULT, WVF_LB, WVF_PH = 22, 20, 2.0, 50, 0.85   # Standard-Werte von CM_Williams_Vix_Fix
+
+
+def _wvf_series(cs):
+    """Williams Vix Fix wie im Pine-Skript: (wvf[], hot[]). hot = wvf >= oberes Bollinger-Band ODER >= rangeHigh (Perzentil)."""
+    n = len(cs)
+    c = [x["c"] for x in cs]
+    lo = [x["l"] for x in cs]
+    wvf = [0.0] * n
+    for i in range(n):
+        hh = max(c[max(0, i - WVF_PD + 1):i + 1])
+        wvf[i] = ((hh - lo[i]) / hh) * 100 if hh else 0.0
+    hot = [False] * n
+    for i in range(n):
+        w = wvf[max(0, i - WVF_BBL + 1):i + 1]
+        if len(w) < WVF_BBL:
+            continue
+        mid = sum(w) / len(w)
+        sd = (sum((v - mid) ** 2 for v in w) / len(w)) ** 0.5
+        upper = mid + WVF_MULT * sd
+        range_high = max(wvf[max(0, i - WVF_LB + 1):i + 1]) * WVF_PH
+        hot[i] = wvf[i] >= upper or wvf[i] >= range_high
+    return wvf, hot
+
+
 def _compute_chart(main_raw, tf, other_raws, cfg):
     """Laeuft im Thread. other_raws: {tf: raw} nur fuer die Zeitebenen-Uebersicht (kann leer sein)."""
     cs = _prepare(main_raw, tf, MIN_CHART_BARS)
@@ -382,6 +407,8 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
         # (der Wellenanker-Chart folgt dem Preis-Chart ueber den Index)
         w1.append({"time": t, "value": a} if a is not None else {"time": t})
         w2.append({"time": t, "value": b} if b is not None else {"time": t})
+    wvf, wvf_hot = _wvf_series(cs)
+    vix = [{"time": cs[i]["ts"] // 1000, "value": _r(wvf[i], 3), "hot": bool(wvf_hot[i])} for i in range(off, n)]
     if cfg["strat"] == "ha":
         events = _ha_series(cs)[2]   # Marker/Signale = HA-Farbwechsel, die Welle bleibt nur als Anzeige
     elif cfg["strat"] in ("w2", "wx"):
@@ -393,7 +420,7 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
             markers.append({"time": x["ts"] // 1000, "kind": e["kind"], "strong": bool(e["strong"]),
                             "ext": bool(e["ext"]), "price": x["c"], "live": e["idx"] == n - 1})
     a, b = wt1[-1], wt2[-1]
-    return {"candles": candles, "wt1": w1, "wt2": w2, "markers": markers, "warm": n >= MIN_BARS, "bars": n,
+    return {"candles": candles, "wt1": w1, "wt2": w2, "vix": vix, "markers": markers, "warm": n >= MIN_BARS, "bars": n,
             "wt1v": _r(a, 1), "wt2v": _r(b, 1), "diff": _r(a - b, 1),
             "strat": cfg["strat"]}, states
 
@@ -932,7 +959,7 @@ button{font-family:inherit;cursor:pointer}
 .tfbar{display:flex;gap:4px;padding:4px;background:#0d1015;border:1px solid #1f242c;border-radius:12px}
 .tfbar button{min-width:44px;min-height:36px;padding:0 12px;border:0;border-radius:9px;background:transparent;color:var(--mut);font-size:12px;font-weight:600}
 .tfbar button.on{background:#2a303a;color:#fff}
-#chart{height:440px;position:relative}#wachart{height:170px}
+#chart{height:440px;position:relative}#wachart{height:170px}#vixchart{height:130px}
 .cwrap{position:relative;border-top:1px solid #1f242c;border-bottom:1px solid #1f242c}
 #cmsg{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:20px;color:var(--mut);font-size:13px;background:rgba(18,21,27,.85);z-index:5}
 .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
@@ -990,7 +1017,7 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
  .main{gap:10px}
  .left,.right{flex:1 1 100%;max-width:100%}
  .card{padding:12px;border-radius:14px;gap:10px}
- #chart{height:min(46vh,380px)}#wachart{height:130px}
+ #chart{height:min(46vh,380px)}#wachart{height:130px}#vixchart{height:100px}
  .tfbar{width:100%;overflow-x:auto}.tfbar button{flex:1 0 auto;min-width:44px;min-height:40px;padding:0 10px}
  .inp,.wafld .inp,select.inp{font-size:16px;min-height:44px}
  .wafld{flex:1 1 44%!important;min-width:0}
@@ -1045,6 +1072,11 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
     <div class="row mono" style="gap:14px;font-size:12px;font-weight:700"><span id="wt1v" style="color:#7FB5F0">WT1 –</span><span id="wt2v" style="color:#2F7BFF">WT2 –</span><span id="wdv" style="color:#aab2c0">Δ –</span></div>
    </div>
    <div class="cwrap"><div id="wachart"></div></div>
+   <div class="row" style="justify-content:space-between;padding-top:6px">
+    <div class="row" style="gap:10px;align-items:baseline"><b style="font-size:13px">Williams Vix Fix</b><span class="lab">grün = Panik-Extrem (Bollinger oben / 85%-Perzentil)</span></div>
+    <span id="vixv" class="mono" style="font-size:12px;font-weight:700;color:#aab2c0">–</span>
+   </div>
+   <div class="cwrap"><div id="vixchart"></div></div>
    <div class="row small" style="gap:16px"><span>▲▼ Long/Short-Signal</span><span id="leg1">◉ stark (RSI + Geldfluss)</span><span id="leg2">◆ extrem (±75)</span><span>TP/SL-Linie mit Finger/Maus ziehen</span></div>
    <div class="small">Chart = Binance-Kerzen (HYPE: Lighter-Kerzen). Orders, TP/SL und Kurs oben = Lighter. TP/SL überwacht der Bot (Kurs-Check jede Sekunde) – es liegen keine Stop-Orders auf der Börse.</div>
   </div>
@@ -1145,10 +1177,11 @@ const LW=window.LightweightCharts;
 const base={layout:{background:{type:'solid',color:'#12151b'},textColor:'#7d8696',fontFamily:"'JetBrains Mono',monospace",fontSize:10},
  grid:{vertLines:{color:'rgba(255,255,255,0.04)'},horzLines:{color:'rgba(255,255,255,0.045)'}},
  rightPriceScale:{borderColor:'#1f242c',minimumWidth:76},timeScale:{borderColor:'#1f242c',timeVisible:true,secondsVisible:true,rightOffset:6},autoSize:true};
-const pc=LW.createChart($('chart'),base),wc=LW.createChart($('wachart'),Object.assign({},base,{handleScroll:false,handleScale:false}));
+const pc=LW.createChart($('chart'),base),wc=LW.createChart($('wachart'),Object.assign({},base,{handleScroll:false,handleScale:false})),vc=LW.createChart($('vixchart'),Object.assign({},base,{handleScroll:false,handleScale:false}));
 const candle=pc.addCandlestickSeries({upColor:G,downColor:R,borderVisible:false,wickUpColor:G,wickDownColor:R,lastValueVisible:true,priceLineVisible:true});
 const wt1s=wc.addLineSeries({color:'#7FB5F0',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
 const wt2s=wc.addLineSeries({color:'#2F7BFF',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
+const vixs=vc.addHistogramSeries({priceLineVisible:false,lastValueVisible:false,priceFormat:{type:'price',precision:2,minMove:0.01}});
 let zoneLines=[];
 function setZones(z1,z3,lvl){
  zoneLines.forEach(l=>wt2s.removePriceLine(l));zoneLines=[];
@@ -1157,7 +1190,7 @@ function setZones(z1,z3,lvl){
  $('wazones').textContent='WaveTrend · Zonen ±'+z1+' / ±'+z3;
 }
 setZones(36,75);
-pc.timeScale().subscribeVisibleLogicalRangeChange(r=>{if(r)try{wc.timeScale().setVisibleLogicalRange(r)}catch(e){}});
+pc.timeScale().subscribeVisibleLogicalRangeChange(r=>{if(r)try{wc.timeScale().setVisibleLogicalRange(r);vc.timeScale().setVisibleLogicalRange(r)}catch(e){}});
 
 /* ---------- Linien (Einstieg / TP / SL) + Ziehen ---------- */
 const lines={entry:null,tp:null,sl:null},vals={tp:null,sl:null};let drag=null;
@@ -1207,18 +1240,19 @@ function applyChart(d,key){
  const msg=$('cmsg');
  if(!d.ok){msg.textContent=d.reason||'keine Daten';msg.style.display='flex';return}
  msg.style.display='none';
- const cd=shift(d.candles),w1=shift(d.wt1),w2=shift(d.wt2);
+ const cd=shift(d.candles),w1=shift(d.wt1),w2=shift(d.wt2),vx=shift(d.vix||[]).map(p=>({time:p.time,value:p.value,color:p.hot?'#1fcf6e':'#59606d'}));
+ if(vx.length){const l=d.vix[d.vix.length-1];$('vixv').textContent=l.value.toFixed(2)+(l.hot?' · PANIK':'');$('vixv').style.color=l.hot?G:'#aab2c0'}
  if(loadedKey!==key){
   const p=cd.length?cd[cd.length-1].close:1,dg=digits(p);
   candle.applyOptions({priceFormat:{type:'price',precision:dg,minMove:Math.pow(10,-dg)}});
-  candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);;
+  candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);vixs.setData(vx);
   const n=cd.length;pc.timeScale().setVisibleLogicalRange({from:Math.max(0,n-110),to:n+6});
   loadedKey=key;lastT=cd.length?cd[cd.length-1].time:0;
  }else if(cd.length){
   /* nur die letzte Kerze aktualisieren bzw. neue anhaengen (aeltere Zeiten wuerde die Bibliothek ablehnen) */
   const upd=(s,arr)=>{for(const p of arr){if(p.time>=lastT)s.update(p)}};
-  try{upd(candle,cd);upd(wt1s,w1);upd(wt2s,w2)}
-  catch(e){candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);}
+  try{upd(candle,cd);upd(wt1s,w1);upd(wt2s,w2);upd(vixs,vx)}
+  catch(e){candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);vixs.setData(vx);}
   lastT=cd[cd.length-1].time;
  }
  const ms=d.markers.map(m=>({time:m.time+tzoff,pos:m.kind==='long'?'belowBar':'aboveBar',color:m.kind==='long'?G:R,shape:m.kind==='long'?'arrowUp':'arrowDown',text:m.ext?'◆':m.strong?'◉':''}));
