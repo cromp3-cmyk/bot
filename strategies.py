@@ -7194,10 +7194,18 @@ def _mt_resample_ms(data, bucket_ms):
     return out_ts, out_o, out_h, out_l, out_c
 
 
-def _mt_use_15m_source(tf):
-    """45m u.a. gibt es bei Binance nicht -> aus 15m-Kerzen zusammensetzen (Minuten-Vielfache von 15, die nicht nativ sind)."""
+def _mt_source(tf):
+    """Zeitebenen, die der Bot nicht nativ kennt (nativ: 1m,3m,5m,15m,30m,1h,4h), werden zusammengesetzt:
+    Vielfache von 1h (2h, 6h, 8h, 12h, 1d ...) aus 1h-Kerzen, Vielfache von 15m (45m, 75m ...) aus 15m-Kerzen.
+    -> (Quell-Zeitebene, Faktor) oder None (nativ bzw. andere Minutenwerte, die der Bot selbst aus 1m baut)."""
+    if tf in BINANCE_INTERVAL_MS:
+        return None
     ms = _tf_ms(tf)
-    return tf not in ("15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d") and ms % 900_000 == 0 and ms > 900_000
+    if ms % 3_600_000 == 0 and ms > 3_600_000:
+        return "1h", ms // 3_600_000
+    if ms % 900_000 == 0 and ms > 900_000:
+        return "15m", ms // 900_000
+    return None
 
 
 def _mt_align(base_ts, base_ms, htf_ts, htf_ms, vals):
@@ -7297,10 +7305,11 @@ async def _mt_load_htf_backtest(symbol, cfg, base_ts, p):
     htf = {}
     for tf in _mt_all_tfs(p):
         warm_bars = 3 * (p["n1"] + p["n2"] + p["sig"]) + 20
-        if _mt_use_15m_source(tf):
-            factor = _tf_ms(tf) // 900_000
+        src = _mt_source(tf)
+        if src:
+            src_tf, factor = src
             period = -(-(warm_bars * factor - 20) // 5)
-            data, err = await _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, "15m", period)
+            data, err = await _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, src_tf, period)
             if err:
                 return None, err.replace("SuperTrend-Trendfilter-Zeiteinheit", "MTF-Spread-Zeiteinheit")
             htf[tf] = _mt_resample_ms(data, _tf_ms(tf))
@@ -7318,8 +7327,9 @@ async def _mt_load_htf_live(symbol, cfg, p):
     now_ms = time.time() * 1000
     for tf in _mt_all_tfs(p):
         try:
-            if _mt_use_15m_source(tf):
-                d = await fetch_candles_binance_multi(symbol, "15m", count_back=min(1000, 3 * (_tf_ms(tf) // 900_000) * 60 + 60), market_type=cfg.get("binance_market_type", "spot"))
+            src = _mt_source(tf)
+            if src:
+                d = await fetch_candles_binance_multi(symbol, src[0], count_back=min(1000, src[1] * 130), market_type=cfg.get("binance_market_type", "spot"))
                 d = _mt_resample_ms(d[:5], _tf_ms(tf)) if d else None
             else:
                 d = await fetch_candles_binance_multi(symbol, tf, count_back=300, market_type=cfg.get("binance_market_type", "spot"))

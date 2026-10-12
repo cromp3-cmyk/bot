@@ -184,6 +184,7 @@ def _validate_wa(d, base):
 _locks = {}
 _tfstate_cache = {}   # sym -> (ts, {tf: state})
 _chipsig_cache = {}   # tf -> (ts, {sym: state})
+_mtf_cache = {}       # sym -> (ts, {...})
 _trend_cache = {}     # sym -> (ts, {tf: [intern, swing]})
 TREND_TTL = 5.0
 TREND_ILEN, TREND_SLEN = 4, 50
@@ -378,6 +379,51 @@ def _wvf_series(cs):
         range_high = max(wvf[max(0, i - WVF_LB + 1):i + 1]) * WVF_PH
         hot[i] = wvf[i] >= upper or wvf[i] >= range_high
     return wvf, hot
+
+
+MTF_TFS = ["1m", "3m", "5m", "15m", "30m", "45m", "1h", "2h", "4h"]
+MTF_BLOCKS = [("Micro", ["1m", "3m", "5m"]), ("Medium", ["15m", "30m", "45m"]), ("Macro", ["1h", "2h", "4h"])]   # wie im Pine-Skript
+MTF_SPREAD_FULL = 15.0   # Spread in Punkten = 100 %
+MTF_N1, MTF_N2, MTF_SIG, MTF_SCALE = 10, 21, 4, 1.35
+
+
+def _mtf_states(sym):
+    """Wellenanker MTF Spread Trend (Pine-Skript): Spread% = (WT1-WT2)/15*100, begrenzt auf +-100, je Zeitebene; Block-Mittel; TREND %.
+    Laeuft im Thread. Zeitebenen ohne Daten (z.B. 30m/1h/2h/4h bei reinen Lighter-Coins) -> None."""
+    spreads = {}
+    for tf in MTF_TFS:
+        try:
+            if tf in ("45m", "2h"):   # kein Binance-Intervall -> aus 15m- bzw. 1h-Kerzen zusammensetzen (Buckets ab 00:00 UTC wie TradingView)
+                src_tf, bms = ("15m", 2_700_000) if tf == "45m" else ("1h", 7_200_000)
+                raw_src, _ = _raw_candles(sym, src_tf)
+                raw = None
+                if raw_src:
+                    raw, bk = [], None
+                    for x in raw_src:
+                        b = x["ts"] // bms
+                        if b != bk:
+                            raw.append(dict(x, ts=b * bms)); bk = b
+                        else:
+                            y = raw[-1]; y["h"] = max(y["h"], x["h"]); y["l"] = min(y["l"], x["l"]); y["c"] = x["c"]; y["v"] = y.get("v", 0) + x.get("v", 0)
+            else:
+                raw, _ = _raw_candles(sym, tf)
+            cs = _prepare(raw, tf, 60) if raw and len(raw) >= 60 else None   # 2h braucht ~120 1h-Kerzen im Cache
+            if cs is None:
+                spreads[tf] = None
+                continue
+            cfg = _cfg(sym)
+            wt1, wt2 = compute_wavetrend_series([x["o"] for x in cs], [x["h"] for x in cs], [x["l"] for x in cs], [x["c"] for x in cs],
+                                                MTF_N1, MTF_N2, MTF_SIG, cfg.get("src", "close"), MTF_SCALE)
+            v = (wt1[-1] - wt2[-1]) / MTF_SPREAD_FULL * 100
+            spreads[tf] = _r(max(-100.0, min(100.0, v)), 1)
+        except Exception:
+            spreads[tf] = None
+    blocks = []
+    for name, tfs in MTF_BLOCKS:
+        vals = [spreads.get(t) for t in tfs]
+        blocks.append({"name": name, "tfs": tfs, "avg": _r(sum(vals) / 3, 1) if all(v is not None for v in vals) else None})
+    avgs = [b["avg"] for b in blocks if b["avg"] is not None]
+    return {"spreads": spreads, "blocks": blocks, "trend": _r(sum(avgs) / len(avgs), 1) if avgs else None}
 
 
 def _compute_chart(main_raw, tf, other_raws, cfg):
@@ -712,11 +758,15 @@ async def handle_scalp_chart(request):
         states = dict(cached[1], **states)
     if data is None:
         return web.json_response({"ok": False, "reason": "lädt noch … (Kerzen werden aufgebaut)", "tfstates": states})
+    mc = _mtf_cache.get(sym)
+    if mc is None or time.time() - mc[0] > TREND_TTL:
+        mc = (time.time(), await asyncio.to_thread(_mtf_states, sym))
+        _mtf_cache[sym] = mc
     tc = _trend_cache.get(sym)
     if tc is None or time.time() - tc[0] > TREND_TTL:
         tc = (time.time(), await asyncio.to_thread(_trend_states, sym))
         _trend_cache[sym] = tc
-    data.update({"ok": True, "trend": tc[1], "tfstates": states, "tf": tf, "coin": sym, "wa": dict(_cfg(sym), z3=_z3(_cfg(sym)), own=sym in COIN_CFG)})
+    data.update({"ok": True, "mtf": mc[1], "trend": tc[1], "tfstates": states, "tf": tf, "coin": sym, "wa": dict(_cfg(sym), z3=_z3(_cfg(sym)), own=sym in COIN_CFG)})
     return web.json_response(data)
 
 
@@ -1127,6 +1177,7 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
    </div>
    <div class="card"><b style="font-size:13px">Wellenanker je Zeitebene</b><div class="tfs" id="tfs"></div></div>
    <div class="card"><b style="font-size:13px">Trend (Marktstruktur) je Zeitebene</b><div class="small" style="margin:4px 0 8px">oben intern · unten swing</div><div class="tfs" id="trendbox"></div></div>
+   <div class="card"><b style="font-size:13px">Wellenanker MTF Spread Trend</b><div class="small" style="margin:4px 0 8px">Spread % je Zeitebene (WT1−WT2, 15 Punkte = 100 %) · wie im TradingView-Indikator</div><div id="mtfbox" style="display:flex;flex-direction:column;gap:6px"></div></div>
    <div class="card"><b style="font-size:13px">Letzte Signale</b><div id="feed" style="display:flex;flex-direction:column;gap:8px"></div></div>
   </div>
  </div>
@@ -1232,7 +1283,7 @@ document.querySelectorAll('.q button[data-k]').forEach(b=>b.addEventListener('cl
 /* ---------- Chart-Daten ---------- */
 function shift(arr){return arr.map(x=>Object.assign({},x,{time:x.time+tzoff}))}
 function applyChart(d,key){
- renderTfStates(d.tfstates||{});renderTrend(d.trend||{});
+ renderTfStates(d.tfstates||{});renderTrend(d.trend||{});renderMtf(d.mtf);
  if(d.wa){
   const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.candles+'|'+d.wa.w2_level+'|'+d.wa.w2_line+'|'+d.wa.w2_profit;
   if(k!==waKey){if(waKey!=='')loadedKey=null;waKey=k;applyMode(d.wa.strat);if(d.wa.strat==='w2')setZones(d.wa.w2_level,d.wa.w2_level,true);else setZones(d.wa.z1,d.wa.z3);if(!waBusy())fillWa(d.wa)}
@@ -1266,6 +1317,17 @@ function applyChart(d,key){
 function renderTfStates(s){
  $('tfs').innerHTML=TFS.map(t=>{const v=s[t];const txt=v===undefined||v===null?'…':v===1?'LONG':v===-1?'SHORT':'ABWARTEN';const c=v===1?G:v===-1?R:'#7d8696';
   return '<div><span style="letter-spacing:.08em;color:var(--mut)">'+t+'</span><span style="color:'+c+'">'+txt+'</span></div>'}).join('');
+}
+function renderMtf(m){
+ if(!m){$('mtfbox').innerHTML='';return}
+ const col=v=>v==null?'#7d8696':v>0?G:R,fm=v=>v==null?'–':(v>0?'+':'')+v.toFixed(v%1?1:0)+'%';
+ const row=(a,b,c,bg)=>'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 10px;background:'+(bg||'#0d1015')+';border-radius:8px;font-size:11px;font-weight:700"><span style="color:var(--mut)">'+a+'</span>'+b+c+'</div>';
+ let h='';
+ (m.blocks||[]).forEach(b=>{
+  b.tfs.forEach(t=>{const v=(m.spreads||{})[t];h+=row(t,'<span class="mono" style="color:'+col(v)+'">'+fm(v)+'</span>','')});
+  h+=row(b.name+' Ø','<span class="mono" style="color:'+col(b.avg)+'">'+fm(b.avg)+'</span>','','#171c24')});
+ h+=row('TREND % (Ø der Blöcke)','<span class="mono" style="color:'+col(m.trend)+';font-size:13px">'+fm(m.trend)+'</span>','','#1d2430');
+ $('mtfbox').innerHTML=h;
 }
 function renderTrend(s){
  const cell=v=>v===1?'<span style="color:'+G+'">▲ BULL</span>':v===-1?'<span style="color:'+R+'">▼ BEAR</span>':'<span style="color:#7d8696">–</span>';
