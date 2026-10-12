@@ -6287,6 +6287,28 @@ async def scalp_ms_trend_live(symbol, st, cfg):
     return val
 
 
+async def scalp_trend_table(symbol, st, cfg):
+    """Trend (intern + swing, inkl. laufender Kerze) fuer 10s/30s/1m/... - nur zur ANZEIGE im Scalp-Dashboard."""
+    ilen = max(2, int(cfg.get("scalp_ms_trend_ilen", 4) or 4))
+    slen = max(2, int(cfg.get("scalp_ms_trend_slen", 50) or 50))
+    need = 2 * slen + 80
+    rows = []
+    for tf in SCALP_MS_TFS:
+        try:
+            if tf in SUB_MINUTE_RESOLUTIONS:
+                d = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf], min(need, 1500))
+            else:
+                d = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, need), market_type=cfg.get("binance_market_type", "spot"))
+            if not d or len(d[4]) < 2 * ilen + 6:
+                rows.append({"tf": tf, "intern": None, "swing": None}); continue
+            _ts, _o, h, l, c = d
+            itr, swt, _ev = await asyncio.to_thread(ms_trend_series, h, l, c, ilen, slen)
+            rows.append({"tf": tf, "intern": itr[-1], "swing": swt[-1] if len(c) >= 2 * slen + 6 else None})
+        except Exception:
+            rows.append({"tf": tf, "intern": None, "swing": None})
+    return rows
+
+
 async def scalp_ms_trend_backtest(symbol, cfg, base_ts):
     """Backtest: (long_ok[], short_ok[], fehler). Nur HTF-Kerzen, die zum Ende der Handels-Kerze geschlossen sind.
     Trend 0 (unbekannt) blockiert beide Richtungen."""

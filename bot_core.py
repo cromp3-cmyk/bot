@@ -1550,6 +1550,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="font-size:12px; color:var(--text-dim); margin-top:6px;" id="wac-legend">Pfeile = Signale · Linien = Position / SL / Grid-Level · Backtest: ▲/▼ Einstieg, ● Ausstieg mit PnL – Klick auf Trade in der Tabelle zoomt hin.</div>
 </div>
 
+<div id="scalp-trend" style="display:none; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0; font-size:12px;"></div>
+
 <details id="zone-settings" open style="margin-top:8px;">
 <summary style="cursor:pointer; font-size:18px; font-weight:700; padding:10px 0; color:var(--text);">⚙️ Steuerung &amp; Einstellungen (aufklappen/einklappen)</summary>
 
@@ -3421,6 +3423,22 @@ async function wacPollTrend() {
       `<span style="color:var(--text-dim)">${d.mode === 'off' ? 'Filter aus' : 'Filter: ' + d.mode + ' ' + d.tf + ' → ' + (d.active === 1 ? 'nur Long' : d.active === -1 ? 'nur Short' : 'beide')}</span>`;
   } catch (e) {}
 }
+async function scalpPollTrend() {
+  const box = document.getElementById('scalp-trend');
+  const isSc = document.getElementById('entry_mode').value === 'scalp_vwap_obv_rsi';
+  if (box) box.style.display = isSc ? 'flex' : 'none';
+  if (!box || !isSc) return;
+  try {
+    const r = await fetch(`/api/scalp/trend?symbol=${currentSymbol}`);
+    const d = await r.json();
+    if (!d.rows) return;
+    const cell = (v) => v === 1 ? '<b style="color:#22c55e">▲</b>' : v === -1 ? '<b style="color:#ef4444">▼</b>' : '<span style="color:#6b7280">–</span>';
+    box.innerHTML = '<span style="color:var(--text-dim)">🧭 Trend (Marktstruktur):</span>' + d.rows.map(x =>
+      `<span style="padding:4px 8px; border:1px solid ${d.mode !== 'off' && x.tf === d.tf ? '#3b82f6' : 'var(--panel-border)'}; border-radius:8px;">${x.tf} · intern ${cell(x.intern)} · swing ${cell(x.swing)}</span>`).join('') +
+      `<span style="color:var(--text-dim)">${d.mode === 'off' ? 'Filter aus' : 'Filter: ' + d.mode + ' ' + d.tf}</span>`;
+  } catch (e) {}
+}
+setInterval(scalpPollTrend, 10000); setTimeout(scalpPollTrend, 3000);
 setInterval(wacPollLive, 2000);
 setInterval(wacPollTrend, 30000); setTimeout(wacPollTrend, 3000);
 document.getElementById('bt-trades-table').addEventListener('click', ev => {
@@ -5075,6 +5093,24 @@ async def handle_wa_trend(request):
 
 
 _wa_trend_ui_cache = {}
+_scalp_trend_ui_cache = {}
+
+
+async def handle_scalp_trend(request):
+    """Marktstruktur-Trend (10s/30s/1m/5m/...) fuers Scalp-Dashboard - 10 s gecacht."""
+    from strategies import scalp_trend_table
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    cfg = BOTS[symbol]["config"]
+    ent = _scalp_trend_ui_cache.get(symbol)
+    sig = (cfg.get("scalp_ms_trend_ilen"), cfg.get("scalp_ms_trend_slen"))
+    if ent and time.time() - ent[0] < 10 and ent[2] == sig:
+        rows = ent[1]
+    else:
+        rows = await scalp_trend_table(symbol, BOTS[symbol]["state"], cfg)
+        _scalp_trend_ui_cache[symbol] = (time.time(), rows, sig)
+    return web.json_response({"rows": rows, "mode": cfg.get("scalp_ms_trend_mode", "off"), "tf": cfg.get("scalp_ms_trend_tf", "5m")})
 
 
 async def handle_wa_live_chart(request):
