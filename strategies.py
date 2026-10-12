@@ -7149,6 +7149,8 @@ def _mt_params(cfg):
         "sig": max(1, int(cfg.get("mt_sig", 4))), "scale": float(cfg.get("mt_scale", 1.35)),
         "src": cfg.get("mt_src", "close") if cfg.get("mt_src", "close") in ("close", "hlc3", "ohlc4", "hl2") else "close",
         "full": max(0.1, float(cfg.get("mt_spread_full", 15.0))),
+        "signal_mode": cfg.get("mt_signal_mode", "zone") if cfg.get("mt_signal_mode", "zone") in ("zone", "cross") else "zone",
+        "red_below": float(cfg.get("mt_red_below", -20.0)), "green_above": float(cfg.get("mt_green_above", 20.0)),
         "buy_level": float(cfg.get("mt_buy_level", -40.0)), "sell_level": float(cfg.get("mt_sell_level", 40.0)),
         "lookback": max(1, int(cfg.get("mt_lookback", 2))),
         "use_limit": False,   # Limit-Filter entfernt (ueberschnitt sich mit dem Buy-/Sell-Level)
@@ -7244,6 +7246,23 @@ def compute_mt_signals(trend, p):
     n = len(trend)
     buy, sell = [False] * n, [False] * n
     last_dir = "NONE"
+    if p["signal_mode"] == "zone":
+        # Zonen wie der Hintergrund im Pine-Indikator: Trend % < red_below = ROT (Short), > green_above = GRUEN (Long), sonst neutral.
+        # Signal = Wechsel IN die Zone (rot hat Vorrang, wie bei bgcolor). Der erste Wert nach Start/Luecke loest nichts aus.
+        prev = None
+        for i in range(n):
+            tv = trend[i]
+            if tv is None:
+                prev = None
+                continue
+            z = -1 if tv < p["red_below"] else (1 if tv > p["green_above"] else 0)
+            if prev is not None and z != prev:
+                if z == 1 and not (p["force_change"] and last_dir == "BUY"):
+                    buy[i] = True; last_dir = "BUY"
+                elif z == -1 and not (p["force_change"] and last_dir == "SELL"):
+                    sell[i] = True; last_dir = "SELL"
+            prev = z
+        return buy, sell
     lb = p["lookback"]
     for i in range(n):
         t = trend[i]
@@ -7647,5 +7666,5 @@ async def mt_chart_payload(symbol, ts, o, h, l, c, cfg, max_bars=1000):
         if sell[i]:
             markers.append({"time": t, "kind": "short", "price": c[i]})
     last = next((x for x in reversed(trend) if x is not None), 0.0)
-    return {"candles": candles, "wt1": w1, "wt2": [], "markers": markers, "levels": [p["buy_level"], p["sell_level"]],
+    return {"candles": candles, "wt1": w1, "wt2": [], "markers": markers, "levels": ([p["red_below"], p["green_above"]] if p["signal_mode"] == "zone" else [p["buy_level"], p["sell_level"]]),
             "entry_mode": "mtf", "wt1v": round(last, 2), "wt2v": 0, "bars": n}
