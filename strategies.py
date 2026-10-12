@@ -1977,6 +1977,9 @@ def _simulate_cp_trades(candles, cfg, bull, bear, risk_atr, warmup):
 
 
 async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
+    if entry_mode == "mtf_spread":
+        return await run_mt_backtest(symbol, cfg, days, exclude_top_n)
+
     if entry_mode == "ema_rsi":
         return await run_er_backtest(symbol, cfg, days, exclude_top_n)
     if entry_mode == "ab_breakout":
@@ -2233,7 +2236,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "chart": wa_chart_payload(candles[0], candles[1], candles[2], candles[3], candles[4], cfg),
         }
 
-    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, ema_rsi, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, ema_rsi, mtf_spread, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 AB_SWEEP_MAX_COMBOS = 600
 AB_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -2515,6 +2518,7 @@ BACKTEST_MAX_CANDLES = {
     "hvd_signal": 100_000,
     "ab_breakout": 100_000,
     "ema_rsi": 100_000,
+    "mtf_spread": 100_000,
     "scalp_vwap_obv_rsi": 100_000,
     "liquidity_waves": 100_000,
     "wellenanker": 100_000,
@@ -7113,4 +7117,491 @@ async def run_er_sweep(symbol, cfg, days, ema_min=5, ema_max=50, ema_step=5, rsi
         "emas_tested": emas, "rsis_tested": rsis, "exit_mode": cfg.get("er_exit_mode", "plan"),
         "results": sorted(results, key=rank_key, reverse=True)[:30],
         "worst_results": sorted(results, key=lambda r: r["total_pnl_usd"])[:20],
+    }
+
+
+# ============================================================
+# Wellenanker MTF Spread Trend (portiert aus dem Pine-Indikator "Wellenanker MTF Spread Trend") -
+# entry_mode "mtf_spread", Config-Praefix mt_*.
+# Je Zeitebene: Spread % = (WT1 - WT2) / "Spread = 100 %" * 100, begrenzt auf +-100. Je Block der Mittelwert
+# seiner Zeitebenen, TREND % = Mittelwert der aktiven Bloecke. Signal (auf geschlossener Basis-Kerze):
+#   BUY : tiefster Trend % der letzten N Kerzen <= Buy-Level UND Trend % jetzt > Buy-Level   (SELL spiegelbildlich)
+#   + optional Limit-Filter (BUY nur wenn Trend % > Long-Limit, SELL nur wenn < Short-Limit)
+#   + optional Acceleration (2. Ableitung des Trend % > / < +-Staerke)
+#   + optional "Richtungswechsel erzwingen" (nach BUY erst wieder SELL).
+# Hoehere Zeitebenen zaehlen nur mit GESCHLOSSENEN Kerzen (kein Look-Ahead, wie live).
+# Ausstieg: "flip" (Gegen-Signal dreht, optionaler ATR-SL) oder "plan" (ATR-SL + TP1/TP2/TP3 mit Teilverkaeufen).
+# ============================================================
+MT_TF_RE = re.compile(r"^\d+[mhd]$")
+MT_DEFAULT_BLOCKS = (("mt_block1", "1m,3m,5m", "mt_use_b1"), ("mt_block2", "15m,30m,45m", "mt_use_b2"), ("mt_block3", "1h,2h,4h", "mt_use_b3"))
+
+
+def _mt_params(cfg):
+    blocks = []
+    for key, default, use_key in MT_DEFAULT_BLOCKS:
+        if not cfg.get(use_key, True):
+            continue
+        tfs = [x.strip().lower() for x in str(cfg.get(key) or default).split(",") if MT_TF_RE.match(x.strip().lower())]
+        blocks.append(tfs[:6] if tfs else default.split(","))
+    return {
+        "blocks": blocks,
+        "n1": max(2, int(cfg.get("mt_n1", 10))), "n2": max(2, int(cfg.get("mt_n2", 21))),
+        "sig": max(1, int(cfg.get("mt_sig", 4))), "scale": float(cfg.get("mt_scale", 1.35)),
+        "src": cfg.get("mt_src", "close") if cfg.get("mt_src", "close") in ("close", "hlc3", "ohlc4", "hl2") else "close",
+        "full": max(0.1, float(cfg.get("mt_spread_full", 15.0))),
+        "buy_level": float(cfg.get("mt_buy_level", -40.0)), "sell_level": float(cfg.get("mt_sell_level", 40.0)),
+        "lookback": max(1, int(cfg.get("mt_lookback", 2))),
+        "use_limit": bool(cfg.get("mt_use_limit_filter", True)),
+        "long_limit": float(cfg.get("mt_long_limit", -20.0)), "short_limit": float(cfg.get("mt_short_limit", 20.0)),
+        "use_accel": bool(cfg.get("mt_use_accel", True)), "accel": float(cfg.get("mt_accel", 0.5)),
+        "force_change": bool(cfg.get("mt_force_change", True)),
+        "atr_len": max(1, int(cfg.get("mt_atr_len", 14))),
+        "sl_atr_mult": max(0.0, float(cfg.get("mt_sl_atr_mult", 2.0))),
+        "tp_mode": cfg.get("mt_tp_mode", "atr"), "tp_step_usd": float(cfg.get("mt_tp_step_usd", 10.0)),
+        "tp_step_atr_mult": float(cfg.get("mt_tp_step_atr_mult", 1.0)),
+    }
+
+
+def _mt_all_tfs(p):
+    seen, out = set(), []
+    for blk in p["blocks"]:
+        for t in blk:
+            if t not in seen:
+                seen.add(t); out.append(t)
+    return out
+
+
+def _mt_warmup(p):
+    return max(p["atr_len"], p["lookback"] + 2) + 5
+
+
+def _mt_spread_values(o, h, l, c, p):
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, p["n1"], p["n2"], p["sig"], p["src"], p["scale"])
+    return [None if (a is None or b is None) else max(-100.0, min(100.0, (a - b) / p["full"] * 100.0)) for a, b in zip(wt1, wt2)]
+
+
+def _mt_resample_ms(data, bucket_ms):
+    ts, o, h, l, c = data[:5]
+    out_ts, out_o, out_h, out_l, out_c = [], [], [], [], []
+    bk = None
+    for i in range(len(c)):
+        b = ts[i] // bucket_ms
+        if b != bk:
+            bk = b
+            out_ts.append(b * bucket_ms); out_o.append(o[i]); out_h.append(h[i]); out_l.append(l[i]); out_c.append(c[i])
+        else:
+            out_h[-1] = max(out_h[-1], h[i]); out_l[-1] = min(out_l[-1], l[i]); out_c[-1] = c[i]
+    return out_ts, out_o, out_h, out_l, out_c
+
+
+def _mt_use_15m_source(tf):
+    """45m u.a. gibt es bei Binance nicht -> aus 15m-Kerzen zusammensetzen (Minuten-Vielfache von 15, die nicht nativ sind)."""
+    ms = _tf_ms(tf)
+    return tf not in ("15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d") and ms % 900_000 == 0 and ms > 900_000
+
+
+def _mt_align(base_ts, base_ms, htf_ts, htf_ms, vals):
+    out, k = [None] * len(base_ts), -1
+    for i, t in enumerate(base_ts):
+        end = t + base_ms
+        while k + 1 < len(htf_ts) and htf_ts[k + 1] + htf_ms <= end:
+            k += 1
+        out[i] = vals[k] if k >= 0 else None
+    return out
+
+
+def _mt_trend_series(base_ts, base_ms, htf, p):
+    """htf: {tf: (ts,o,h,l,c)} -> TREND % je Basis-Kerze (None solange nicht alle aktiven Bloecke einen Wert haben)."""
+    n = len(base_ts)
+    aligned = {}
+    for tf, d in htf.items():
+        vals = _mt_spread_values(d[1], d[2], d[3], d[4], p)
+        aligned[tf] = _mt_align(base_ts, base_ms, d[0], _tf_ms(tf), vals)
+    out = [None] * n
+    for i in range(n):
+        avgs = []
+        for blk in p["blocks"]:
+            v = [aligned[t][i] if t in aligned else None for t in blk]
+            if any(x is None for x in v):
+                avgs = None
+                break
+            avgs.append(sum(v) / len(v))
+        if avgs:
+            out[i] = sum(avgs) / len(avgs)
+    return out
+
+
+def compute_mt_signals(trend, p):
+    """-> (buy[], sell[]) je Basis-Kerze, exakt die Pine-Logik inkl. 'Richtungswechsel erzwingen'."""
+    n = len(trend)
+    buy, sell = [False] * n, [False] * n
+    last_dir = "NONE"
+    lb = p["lookback"]
+    for i in range(n):
+        t = trend[i]
+        if t is None or i < lb + 1 or trend[i - 1] is None or trend[i - 2] is None:
+            continue
+        win = trend[max(0, i - lb + 1):i + 1]
+        if any(x is None for x in win):
+            continue
+        mom = t - trend[i - 1]
+        mom_prev = trend[i - 1] - trend[i - 2]
+        accel = mom - mom_prev
+        buy_ok = min(win) <= p["buy_level"] and t > p["buy_level"]
+        sell_ok = max(win) >= p["sell_level"] and t < p["sell_level"]
+        if p["use_limit"]:
+            buy_ok = buy_ok and t > p["long_limit"]
+            sell_ok = sell_ok and t < p["short_limit"]
+        if p["use_accel"]:
+            buy_ok = buy_ok and accel > p["accel"]
+            sell_ok = sell_ok and accel < -p["accel"]
+        if p["force_change"]:
+            buy_ok = buy_ok and last_dir != "BUY"
+            sell_ok = sell_ok and last_dir != "SELL"
+        if buy_ok:
+            buy[i] = True; last_dir = "BUY"
+        if sell_ok:
+            sell[i] = True; last_dir = "SELL"
+    return buy, sell
+
+
+def _mt_plan_levels(direction, entry, atr_now, p, need_tp):
+    """-> (sl|None, tp1, tp2, tp3) oder None bei ungueltigem Abstand."""
+    sl = None
+    if p["sl_atr_mult"] > 0:
+        dist = (atr_now or 0) * p["sl_atr_mult"]
+        if dist <= 0:
+            return None
+        sl = entry - dist if direction == "long" else entry + dist
+    if not need_tp:
+        return sl, None, None, None
+    if sl is None:
+        return None   # Plan-Modus braucht einen SL (sonst kein Schutz)
+    step = p["tp_step_usd"] if p["tp_mode"] == "fixed" else (atr_now or 0) * p["tp_step_atr_mult"]
+    if not step or step <= 0:
+        return None
+    sgn = 1 if direction == "long" else -1
+    return sl, entry + sgn * step, entry + sgn * 2 * step, entry + sgn * 3 * step
+
+
+def _mt_reset_state(st):
+    st["mt_sl_price"] = None
+    st["mt_tp1_price"] = None
+    st["mt_tp2_price"] = None
+    st["mt_tp3_price"] = None
+    st["mt_tp1_done"] = False
+    st["mt_tp2_done"] = False
+
+
+async def _mt_load_htf_backtest(symbol, cfg, base_ts, p):
+    htf = {}
+    for tf in _mt_all_tfs(p):
+        warm_bars = 3 * (p["n1"] + p["n2"] + p["sig"]) + 20
+        if _mt_use_15m_source(tf):
+            factor = _tf_ms(tf) // 900_000
+            period = -(-(warm_bars * factor - 20) // 5)
+            data, err = await _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, "15m", period)
+            if err:
+                return None, err.replace("SuperTrend-Trendfilter-Zeiteinheit", "MTF-Spread-Zeiteinheit")
+            htf[tf] = _mt_resample_ms(data, _tf_ms(tf))
+        else:
+            period = -(-(warm_bars - 20) // 5)
+            data, err = await _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, tf, period)
+            if err:
+                return None, err.replace("SuperTrend-Trendfilter-Zeiteinheit", "MTF-Spread-Zeiteinheit")
+            htf[tf] = tuple(data[:5])
+    return htf, None
+
+
+async def _mt_load_htf_live(symbol, cfg, p):
+    htf = {}
+    now_ms = time.time() * 1000
+    for tf in _mt_all_tfs(p):
+        try:
+            if _mt_use_15m_source(tf):
+                d = await fetch_candles_binance_multi(symbol, "15m", count_back=min(1000, 3 * (_tf_ms(tf) // 900_000) * 60 + 60), market_type=cfg.get("binance_market_type", "spot"))
+                d = _mt_resample_ms(d[:5], _tf_ms(tf)) if d else None
+            else:
+                d = await fetch_candles_binance_multi(symbol, tf, count_back=300, market_type=cfg.get("binance_market_type", "spot"))
+                d = tuple(d[:5]) if d else None
+        except Exception:
+            d = None
+        if not d or len(d[4]) < 5:
+            return None
+        ms = _tf_ms(tf)
+        keep = [i for i in range(len(d[0])) if d[0][i] + ms <= now_ms]   # nur geschlossene HTF-Kerzen
+        if len(keep) < 5:
+            return None
+        htf[tf] = tuple([x[i] for i in keep] for x in d)
+    return htf
+
+
+async def check_mt_sl_tp(symbol, price):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if st["position"] is None or price is None:
+        return
+    pos = st["position"]
+    sl_price = st.get("mt_sl_price")
+    if sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)):
+        reason = "SL-AUF-TP1" if st.get("mt_tp2_done") else ("BREAKEVEN" if st.get("mt_tp1_done") else "SL")
+        debug_log(f"🚪 [{symbol}] MTF-Spread {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, reason)
+        if st["position"] is None:
+            st["mt_sl_cooldown_until"] = time.time() + cfg.get("mt_sl_cooldown_seconds", 30)
+            _mt_reset_state(st)
+        return
+    if cfg.get("mt_exit_mode", "flip") != "plan":
+        return
+    if not st.get("mt_tp1_done") and st.get("mt_tp1_price") is not None:
+        tp1 = st["mt_tp1_price"]
+        if (pos == "long" and price >= tp1) or (pos == "short" and price <= tp1):
+            if not await execute_partial_exit(symbol, price, cfg.get("mt_tp1_close_pct", 33) / 100, "TP1"):
+                return
+            st["mt_tp1_done"] = True
+            if cfg.get("mt_sl_to_breakeven_on_tp1", True) and st.get("avg_entry_price"):
+                st["mt_sl_price"] = st["avg_entry_price"]
+                debug_log(f"📡 [{symbol}] MTF-Spread TP1 erreicht - SL auf Break-Even")
+        else:
+            return
+    if not st.get("mt_tp2_done") and st.get("mt_tp2_price") is not None:
+        tp2 = st["mt_tp2_price"]
+        if (pos == "long" and price >= tp2) or (pos == "short" and price <= tp2):
+            if not await execute_partial_exit(symbol, price, cfg.get("mt_tp2_close_pct", 50) / 100, "TP2"):
+                return
+            st["mt_tp2_done"] = True
+            if cfg.get("mt_sl_to_tp1_on_tp2", True) and st.get("mt_tp1_price") is not None:
+                st["mt_sl_price"] = st["mt_tp1_price"]
+                debug_log(f"📡 [{symbol}] MTF-Spread TP2 erreicht - SL auf TP1")
+        else:
+            return
+    tp3 = st.get("mt_tp3_price")
+    if tp3 is not None and ((pos == "long" and price >= tp3) or (pos == "short" and price <= tp3)):
+        debug_log(f"🚪 [{symbol}] MTF-Spread TP3 (Rest): {pos.upper()} @ {price}")
+        await execute_exit(symbol, price, "TP3")
+        if st["position"] is None:
+            _mt_reset_state(st)
+
+
+async def check_mt_entry(symbol, buy_signal, sell_signal, price, atr_now):
+    """Einstieg auf der Signal-Kerze. Plan: nur wenn flach. Flip: Gegen-Signal schliesst und dreht."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if not cfg["bot_active"] or price is None:
+        return
+    mode = cfg.get("mt_direction_mode", "both")
+    if mode == "long_only":
+        sell_signal = False
+    elif mode == "short_only":
+        buy_signal = False
+    if buy_signal == sell_signal:
+        return
+    target = "long" if buy_signal else "short"
+    pos = st["position"]
+    flip = cfg.get("mt_exit_mode", "flip") == "flip"
+    if pos is not None:
+        if not flip or pos == target:
+            return
+    elif time.time() < st.get("mt_sl_cooldown_until", 0.0):
+        return
+    p = _mt_params(cfg)
+    levels = _mt_plan_levels(target, price, atr_now, p, need_tp=not flip)
+    if levels is None:
+        debug_log(f"⚠️ [{symbol}] MTF-Spread Signal {target.upper()} @ {price} übersprungen: SL/TP-Abstand ungültig (ATR=0 oder Plan ohne SL)")
+        return
+    if pos is not None:
+        debug_log(f"🔄 [{symbol}] MTF-Spread Wechsel: {pos.upper()} -> {target.upper()} @ {price}")
+        await execute_exit(symbol, price, "MT-FLIP")
+        if st["position"] is not None:
+            return
+        _mt_reset_state(st)
+    debug_log(f"📡 [{symbol}] MTF-Spread Signal: {target.upper()} @ {price}")
+    await execute_entry(symbol, target, price, is_add_on=False)
+    if st["position"] is None:
+        return
+    _mt_reset_state(st)
+    sl, tp1, tp2, tp3 = levels
+    st["mt_sl_price"] = sl
+    if not flip:
+        st["mt_tp1_price"], st["mt_tp2_price"], st["mt_tp3_price"] = tp1, tp2, tp3
+
+
+async def mt_poll_loop(symbol):
+    """MTF-Spread - Einstieg bei Kerzenschluss der Basis-Zeitebene, SL/TP laufend gegen den Live-Preis."""
+    b = BOTS[symbol]
+    last_processed_ts = None
+    last_heartbeat = 0.0
+    while True:
+        try:
+            cfg = b["config"]
+            if cfg["entry_mode"] == "mtf_spread" and cfg["bot_active"] and b["state"].get("session_started"):
+                resolution = cfg.get("mt_resolution", "5m")
+                p = _mt_params(cfg)
+                min_needed = _mt_warmup(p) + 2
+                needed_bars = min(1000, 300)
+                st = b["state"]
+                closed_ts = None
+                if resolution in SUB_MINUTE_RESOLUTIONS:
+                    local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
+                    if local:
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                else:
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                    if data:
+                        timestamps, opens, highs, lows, closes = data[:5]
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+
+                now = time.time()
+                due_heartbeat = now - last_heartbeat > 300
+                if st["position"] is not None and st["last_price"] is not None:
+                    await check_mt_sl_tp(symbol, st["last_price"])
+
+                if closed_ts and len(closed_c) > min_needed:
+                    age = (now * 1000 - closed_ts[-1]) / 1000
+                    if age > 300:
+                        debug_log(f"⚠️ [{symbol}] MTF-Spread: letzte Kerze wirkt veraltet ({round(age)}s alt, Auflösung {resolution}) - überspringe Durchlauf.")
+                        closed_ts = None
+                    elif st["last_price"] is not None and closed_c[-1] and abs(closed_c[-1] - st["last_price"]) / st["last_price"] * 100 > 2.0:
+                        debug_log(f"⚠️ [{symbol}] MTF-Spread: Kerzendaten unplausibel (Kerze {closed_c[-1]} vs. Live {st['last_price']}) - überspringe Durchlauf.")
+                        closed_ts = None
+
+                if closed_ts and len(closed_c) > min_needed and (last_processed_ts is None or closed_ts[-1] > last_processed_ts):
+                    htf = await _mt_load_htf_live(symbol, cfg, p)
+                    if htf is None:
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            debug_log(f"⏳ [{symbol}] MTF-Spread wartet: Daten der höheren Zeitebenen fehlen (Coin nicht auf Binance?)")
+                    else:
+                        base_ms = closed_ts[-1] - closed_ts[-2] if len(closed_ts) > 1 else _tf_ms(resolution)
+                        trend = _mt_trend_series(closed_ts, base_ms, htf, p)
+                        buy, sell = compute_mt_signals(trend, p)
+                        atr = compute_atr(closed_h, closed_l, closed_c, p["atr_len"]) or [0.0] * len(closed_c)
+                        st["mt_trend"] = trend[-1]
+                        if due_heartbeat:
+                            last_heartbeat = now
+                            debug_log(f"💓 [{symbol}] MTF-Spread aktiv: Trend %={None if trend[-1] is None else round(trend[-1], 1)}, "
+                                      f"Level {p['buy_level']}/{p['sell_level']}, Ausstieg={cfg.get('mt_exit_mode', 'flip')}, Preis={closed_c[-1]}")
+                        if last_processed_ts is None:
+                            new_indices = [len(closed_ts) - 1]
+                        else:
+                            new_indices = [i for i in range(len(closed_ts)) if closed_ts[i] > last_processed_ts]
+                        for idx in new_indices:
+                            price_i = st["last_price"] if (idx == len(closed_ts) - 1 and st["last_price"] is not None) else closed_c[idx]
+                            last_processed_ts = closed_ts[idx]
+                            await check_mt_entry(symbol, buy[idx], sell[idx], price_i, atr[idx])
+                elif due_heartbeat and not closed_ts:
+                    last_heartbeat = now
+                    debug_log(f"⏳ [{symbol}] MTF-Spread wartet: keine Kerzen erhalten (Auflösung {resolution})")
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] MTF-Spread-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        await asyncio.sleep(5)
+
+
+def _simulate_mt_trades(candles, cfg, buy_sig, sell_sig, atr, warmup, p):
+    """Backtest-Gegenstueck zu check_mt_entry/check_mt_sl_tp (Einstieg zum Schlusskurs der Signal-Kerze, SL/TP ab der
+    naechsten Kerze ueber Hoch/Tief, SL gewinnt bei Gleichzeitigkeit)."""
+    ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    plan = cfg.get("mt_exit_mode", "flip") == "plan"
+    tp1_frac = cfg.get("mt_tp1_close_pct", 33) / 100
+    tp2_frac = cfg.get("mt_tp2_close_pct", 50) / 100
+    be_on_tp1 = cfg.get("mt_sl_to_breakeven_on_tp1", True)
+    tp1_on_tp2 = cfg.get("mt_sl_to_tp1_on_tp2", True)
+    cooldown_ms = cfg.get("mt_sl_cooldown_seconds", 30) * 1000
+    mode = cfg.get("mt_direction_mode", "both")
+    position, trades, cool_until = None, [], None
+
+    for i in range(max(warmup, 1), n):
+        if position is not None:
+            pdir, entry, sl = position["dir"], position["entry"], position["sl"]
+            if sl is not None and ((pdir == "long" and l[i] <= sl) or (pdir == "short" and h[i] >= sl)):
+                reason = "SL-AUF-TP1" if position["tp2_done"] else ("BREAKEVEN" if position["tp1_done"] else "SL")
+                _bt_close_trade(trades, pdir, entry, sl, position["size"], i, position["entry_i"], reason, ts=ts)
+                position = None
+                cool_until = ts[i] + cooldown_ms
+            elif plan:
+                def _hit(pr):
+                    return (pdir == "long" and h[i] >= pr) or (pdir == "short" and l[i] <= pr)
+                if not position["tp1_done"] and _hit(position["tp1"]):
+                    cs = position["size"] * tp1_frac
+                    _bt_close_trade(trades, pdir, entry, position["tp1"], cs, i, position["entry_i"], "TP1", ts=ts)
+                    position["size"] -= cs
+                    position["tp1_done"] = True
+                    if be_on_tp1:
+                        position["sl"] = entry
+                if position["tp1_done"] and not position["tp2_done"] and _hit(position["tp2"]):
+                    cs = position["size"] * tp2_frac
+                    _bt_close_trade(trades, pdir, entry, position["tp2"], cs, i, position["entry_i"], "TP2", ts=ts)
+                    position["size"] -= cs
+                    position["tp2_done"] = True
+                    if tp1_on_tp2:
+                        position["sl"] = position["tp1"]
+                if position["tp1_done"] and position["tp2_done"] and _hit(position["tp3"]):
+                    _bt_close_trade(trades, pdir, entry, position["tp3"], position["size"], i, position["entry_i"], "TP3", ts=ts)
+                    position = None
+
+        buy, sell = buy_sig[i], sell_sig[i]
+        if mode == "long_only":
+            sell = False
+        elif mode == "short_only":
+            buy = False
+        if buy == sell:
+            continue
+        target = "long" if buy else "short"
+        if position is not None and (plan or position["dir"] == target):
+            continue
+        price = c[i]
+        levels = _mt_plan_levels(target, price, atr[i], p, need_tp=plan)
+        if levels is None:
+            continue
+        if position is not None:
+            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "MT-FLIP", ts=ts)
+            position = None
+        elif cool_until is not None and ts[i] < cool_until:
+            continue
+        sl, tp1, tp2, tp3 = levels
+        position = {"dir": target, "entry": price, "size": (margin * leverage) / price, "entry_i": i,
+                    "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp1_done": False, "tp2_done": False}
+
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+    return trades
+
+
+async def run_mt_backtest(symbol, cfg, days, exclude_top_n=1):
+    max_candles = BACKTEST_MAX_CANDLES.get("mtf_spread", 100_000)
+    resolution = cfg.get("mt_resolution", "5m")
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    p = _mt_params(cfg)
+    if not p["blocks"]:
+        return {"error": "Kein Block aktiv - mindestens einen Block einschalten."}
+    min_needed = _mt_warmup(p) + 10
+    if not candles or len(candles[4]) < min_needed:
+        return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
+    base_ts = candles[0]
+    htf, err = await _mt_load_htf_backtest(symbol, cfg, base_ts, p)
+    if err:
+        return {"error": err}
+    base_ms = base_ts[1] - base_ts[0]
+    trend = await asyncio.to_thread(_mt_trend_series, base_ts, base_ms, htf, p)
+    buy, sell = compute_mt_signals(trend, p)
+    atr = compute_atr(candles[2], candles[3], candles[4], p["atr_len"]) or [0.0] * len(base_ts)
+    trades = _simulate_mt_trades(candles, cfg, buy, sell, atr, _mt_warmup(p), p)
+    stats = summarize_backtest_trades(trades, exclude_top_n)
+    actual_days = (base_ts[-1] - base_ts[0]) / 86_400_000
+    valid = sum(1 for x in trend if x is not None)
+    return {
+        "symbol": symbol, "entry_mode": "mtf_spread", "resolution": resolution,
+        "requested_days": days, "actual_days_covered": round(actual_days, 1),
+        "candles_processed": len(base_ts), "candle_cap": max_candles, "cache_used": False,
+        "trend_candles_valid": valid, "signals_buy": sum(buy), "signals_sell": sum(sell),
+        "stats": stats,
+        "stats_long": summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n),
+        "stats_short": summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n),
+        "trades": trades,
     }

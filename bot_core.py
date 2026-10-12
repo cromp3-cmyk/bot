@@ -367,6 +367,41 @@ def default_config():
         "er_sl_to_breakeven_on_tp1": os.getenv("ER_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
         "er_sl_to_tp1_on_tp2": os.getenv("ER_SL_TO_TP1_ON_TP2", "true").lower() == "true",
         "er_sl_cooldown_seconds": float(os.getenv("ER_SL_COOLDOWN_SECONDS", "30")),
+        # ===== Wellenanker MTF Spread Trend (entry_mode mtf_spread) =====
+        "mt_resolution": os.getenv("MT_RESOLUTION", "5m"),
+        "mt_use_b1": os.getenv("MT_USE_B1", "true").lower() == "true",
+        "mt_block1": os.getenv("MT_BLOCK1", "1m,3m,5m"),
+        "mt_use_b2": os.getenv("MT_USE_B2", "true").lower() == "true",
+        "mt_block2": os.getenv("MT_BLOCK2", "15m,30m,45m"),
+        "mt_use_b3": os.getenv("MT_USE_B3", "true").lower() == "true",
+        "mt_block3": os.getenv("MT_BLOCK3", "1h,2h,4h"),
+        "mt_n1": int(os.getenv("MT_N1", "10")),
+        "mt_n2": int(os.getenv("MT_N2", "21")),
+        "mt_sig": int(os.getenv("MT_SIG", "4")),
+        "mt_scale": float(os.getenv("MT_SCALE", "1.35")),
+        "mt_src": os.getenv("MT_SRC", "close"),
+        "mt_spread_full": float(os.getenv("MT_SPREAD_FULL", "15.0")),
+        "mt_buy_level": float(os.getenv("MT_BUY_LEVEL", "-40.0")),
+        "mt_sell_level": float(os.getenv("MT_SELL_LEVEL", "40.0")),
+        "mt_lookback": int(os.getenv("MT_LOOKBACK", "2")),
+        "mt_use_limit_filter": os.getenv("MT_USE_LIMIT_FILTER", "true").lower() == "true",
+        "mt_long_limit": float(os.getenv("MT_LONG_LIMIT", "-20.0")),
+        "mt_short_limit": float(os.getenv("MT_SHORT_LIMIT", "20.0")),
+        "mt_use_accel": os.getenv("MT_USE_ACCEL", "true").lower() == "true",
+        "mt_accel": float(os.getenv("MT_ACCEL", "0.5")),
+        "mt_force_change": os.getenv("MT_FORCE_CHANGE", "true").lower() == "true",
+        "mt_direction_mode": os.getenv("MT_DIRECTION_MODE", "both"),
+        "mt_exit_mode": os.getenv("MT_EXIT_MODE", "flip"),
+        "mt_atr_len": int(os.getenv("MT_ATR_LEN", "14")),
+        "mt_sl_atr_mult": float(os.getenv("MT_SL_ATR_MULT", "2.0")),
+        "mt_tp_mode": os.getenv("MT_TP_MODE", "atr"),
+        "mt_tp_step_atr_mult": float(os.getenv("MT_TP_STEP_ATR_MULT", "1.0")),
+        "mt_tp_step_usd": float(os.getenv("MT_TP_STEP_USD", "10.0")),
+        "mt_tp1_close_pct": float(os.getenv("MT_TP1_CLOSE_PCT", "33.0")),
+        "mt_tp2_close_pct": float(os.getenv("MT_TP2_CLOSE_PCT", "50.0")),
+        "mt_sl_to_breakeven_on_tp1": os.getenv("MT_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
+        "mt_sl_to_tp1_on_tp2": os.getenv("MT_SL_TO_TP1_ON_TP2", "true").lower() == "true",
+        "mt_sl_cooldown_seconds": float(os.getenv("MT_SL_COOLDOWN_SECONDS", "30.0")),
 
         # ================= RSI Signal =================
         # Reine Handelsidee: RSI < oversold -> long, RSI > overbought -> short. Ausstieg identisch
@@ -701,6 +736,7 @@ PERSISTED_STATE_KEYS = [
     "gc_lots", "gc_prev", "gc_range", "gc_sig", "gc_realized", "gc_cycles", "gc_stopped", "gc_sim", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
     "er_sl_price", "er_tp1_price", "er_tp2_price", "er_tp3_price", "er_tp1_done", "er_tp2_done", "er_sl_cooldown_until",
+    "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
     # Scalp VWAP OBV RSI: fehlte hier komplett (anders als bei allen anderen Strategien oben) -
@@ -1582,6 +1618,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
       <option value="wellenanker">Wellenanker (WaveTrend-Punkte, Nachkauf, TP Gegentrade/Überlauf/Fest, $-SL)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
+      <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + ATR-SL/TP)</option>
       <option value="ema_rsi">EMA + RSI (Smart Money Zone Tracker: Schluss über/unter EMA + RSI über/unter Mittellinie, Swing-SL, TP1/TP2/TP3 mit Teilverkäufen)</option>
       <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
       <option value="mvwap_mf_signal">Multi-VWAP Money-Flow Signal (VWAP+MFI/CMF-Oszillator dreht Richtung, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
@@ -1801,6 +1838,83 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <div data-mode="ema_rsi"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="er_sl_cooldown_seconds"></div>
+
+  <div data-mode="mtf_spread" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌊 <b>Wellenanker MTF Spread Trend</b>: Je Zeitebene Spread % = (WT1−WT2)/„Spread = 100 %“, begrenzt auf ±100; je Block der Mittelwert, TREND % = Mittel der Blöcke (nur geschlossene Kerzen höherer Zeitebenen). <b>Long</b>, wenn der Trend % in den letzten N Kerzen ≤ Buy-Level war und jetzt wieder darüber liegt (Short spiegelbildlich); dazu Limit-/Acceleration-Filter und Richtungswechsel wie im Pine-Skript. Ausstieg: Gegen-Signal dreht (optional ATR-SL) oder Plan mit TP1/TP2/TP3.
+  </div>
+  <div data-mode="mtf_spread"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="mt_resolution">
+      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="45s">45 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="mt_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="mtf_spread"><label>Block 1 (Micro) aktiv</label>
+    <select class="cfg" id="mt_use_b1"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Block 1 Zeitebenen (kommagetrennt, z.B. 1m,3m,5m)</label><input type="text" id="mt_block1"></div>
+  <div data-mode="mtf_spread"><label>Block 2 (Medium) aktiv</label>
+    <select class="cfg" id="mt_use_b2"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Block 2 Zeitebenen</label><input type="text" id="mt_block2"></div>
+  <div data-mode="mtf_spread"><label>Block 3 (Macro) aktiv</label>
+    <select class="cfg" id="mt_use_b3"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Block 3 Zeitebenen</label><input type="text" id="mt_block3"></div>
+  <div data-mode="mtf_spread"><label>Kanal-Länge</label><input type="number" step="1" min="2" id="mt_n1"></div>
+  <div data-mode="mtf_spread"><label>Durchschnitt-Länge</label><input type="number" step="1" min="2" id="mt_n2"></div>
+  <div data-mode="mtf_spread"><label>Signallinie (SMA von WT1)</label><input type="number" step="1" min="1" id="mt_sig"></div>
+  <div data-mode="mtf_spread"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" id="mt_scale"></div>
+  <div data-mode="mtf_spread"><label>Quelle der Welle</label>
+    <select class="cfg" id="mt_src"><option value="close">close</option><option value="hlc3">hlc3</option><option value="ohlc4">ohlc4</option><option value="hl2">hl2</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Spread in Punkten = 100 %</label><input type="number" step="0.5" min="0.1" id="mt_spread_full"></div>
+  <div data-mode="mtf_spread"><label>Buy-Level (Trend % dreht von darunter nach oben)</label><input type="number" step="1" id="mt_buy_level"></div>
+  <div data-mode="mtf_spread"><label>Sell-Level (Trend % dreht von darüber nach unten)</label><input type="number" step="1" id="mt_sell_level"></div>
+  <div data-mode="mtf_spread"><label>Lookback-Kerzen</label><input type="number" step="1" min="1" id="mt_lookback"></div>
+  <div data-mode="mtf_spread"><label>Long/Short-Limit-Filter aktiv</label>
+    <select class="cfg" id="mt_use_limit_filter"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Long-Limit (Long nur wenn Trend % darüber)</label><input type="number" step="1" id="mt_long_limit"></div>
+  <div data-mode="mtf_spread"><label>Short-Limit (Short nur wenn Trend % darunter)</label><input type="number" step="1" id="mt_short_limit"></div>
+  <div data-mode="mtf_spread"><label>Acceleration-Filter aktiv</label>
+    <select class="cfg" id="mt_use_accel"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Min. Acceleration-Stärke</label><input type="number" step="0.1" id="mt_accel"></div>
+  <div data-mode="mtf_spread"><label>Richtungswechsel erzwingen (erst BUY, dann SELL)</label>
+    <select class="cfg" id="mt_force_change"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Richtung</label>
+    <select class="cfg" id="mt_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Ausstieg</label>
+    <select class="cfg" id="mt_exit_mode"><option value="flip">Wechsel (Gegen-Signal dreht die Position, optionaler ATR-SL)</option><option value="plan">Plan (ATR-SL + TP1/TP2/TP3 mit Teilverkäufen, Gegen-Signal ignoriert)</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>ATR-Periode</label><input type="number" step="1" min="1" id="mt_atr_len"></div>
+  <div data-mode="mtf_spread"><label>SL: ATR-Multiplikator (0 = kein SL, nur im Wechsel-Modus erlaubt)</label><input type="number" step="0.1" min="0" id="mt_sl_atr_mult"></div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>TP-Schritt</label>
+    <select class="cfg" id="mt_tp_mode"><option value="atr">ATR-Vielfaches</option><option value="fixed">Fester Preisabstand</option></select>
+  </div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>Schritt: ATR-Multiplikator</label><input type="number" step="0.1" min="0.1" id="mt_tp_step_atr_mult"></div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>Schritt: fester Preisabstand ($)</label><input type="number" step="any" min="0" id="mt_tp_step_usd"></div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="mt_tp1_close_pct"></div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="mt_tp2_close_pct"></div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>SL auf Break-Even bei TP1</label>
+    <select class="cfg" id="mt_sl_to_breakeven_on_tp1"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>SL auf TP1 bei TP2</label>
+    <select class="cfg" id="mt_sl_to_tp1_on_tp2"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mt_sl_cooldown_seconds"></div>
 
   <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📶 <b>RSI Signal</b>: Long, sobald der RSI unter die Überverkauft-Schwelle fällt, Short sobald er über die Überkauft-Schwelle steigt. Ausstieg wie bei Al-Shatris Wechsel-Modus - der erste Long bleibt offen, bis das Gegen-Signal kommt, das dreht dann direkt. Optional ein fester Dollar-SL und "SL auf Einstieg bei Gewinn". Darunter drei unabhängig zuschaltbare Filter aus dem gemeinsamen Filter-Baukasten (auch für künftige Strategien wiederverwendbar).
@@ -3560,7 +3674,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -4273,6 +4387,40 @@ async function refresh() {
     document.getElementById('er_sl_to_breakeven_on_tp1').value = String(data.config.er_sl_to_breakeven_on_tp1);
     document.getElementById('er_sl_to_tp1_on_tp2').value = String(data.config.er_sl_to_tp1_on_tp2);
     document.getElementById('er_sl_cooldown_seconds').value = data.config.er_sl_cooldown_seconds;
+    setResolutionField('mt_resolution', data.config.mt_resolution);
+    document.getElementById('mt_use_b1').value = String(data.config.mt_use_b1);
+    document.getElementById('mt_block1').value = data.config.mt_block1;
+    document.getElementById('mt_use_b2').value = String(data.config.mt_use_b2);
+    document.getElementById('mt_block2').value = data.config.mt_block2;
+    document.getElementById('mt_use_b3').value = String(data.config.mt_use_b3);
+    document.getElementById('mt_block3').value = data.config.mt_block3;
+    document.getElementById('mt_n1').value = data.config.mt_n1;
+    document.getElementById('mt_n2').value = data.config.mt_n2;
+    document.getElementById('mt_sig').value = data.config.mt_sig;
+    document.getElementById('mt_scale').value = data.config.mt_scale;
+    document.getElementById('mt_src').value = data.config.mt_src || 'close';
+    document.getElementById('mt_spread_full').value = data.config.mt_spread_full;
+    document.getElementById('mt_buy_level').value = data.config.mt_buy_level;
+    document.getElementById('mt_sell_level').value = data.config.mt_sell_level;
+    document.getElementById('mt_lookback').value = data.config.mt_lookback;
+    document.getElementById('mt_use_limit_filter').value = String(data.config.mt_use_limit_filter);
+    document.getElementById('mt_long_limit').value = data.config.mt_long_limit;
+    document.getElementById('mt_short_limit').value = data.config.mt_short_limit;
+    document.getElementById('mt_use_accel').value = String(data.config.mt_use_accel);
+    document.getElementById('mt_accel').value = data.config.mt_accel;
+    document.getElementById('mt_force_change').value = String(data.config.mt_force_change);
+    document.getElementById('mt_direction_mode').value = data.config.mt_direction_mode || 'both';
+    document.getElementById('mt_exit_mode').value = data.config.mt_exit_mode || 'flip';
+    document.getElementById('mt_atr_len').value = data.config.mt_atr_len;
+    document.getElementById('mt_sl_atr_mult').value = data.config.mt_sl_atr_mult;
+    document.getElementById('mt_tp_mode').value = data.config.mt_tp_mode || 'atr';
+    document.getElementById('mt_tp_step_atr_mult').value = data.config.mt_tp_step_atr_mult;
+    document.getElementById('mt_tp_step_usd').value = data.config.mt_tp_step_usd;
+    document.getElementById('mt_tp1_close_pct').value = data.config.mt_tp1_close_pct;
+    document.getElementById('mt_tp2_close_pct').value = data.config.mt_tp2_close_pct;
+    document.getElementById('mt_sl_to_breakeven_on_tp1').value = String(data.config.mt_sl_to_breakeven_on_tp1);
+    document.getElementById('mt_sl_to_tp1_on_tp2').value = String(data.config.mt_sl_to_tp1_on_tp2);
+    document.getElementById('mt_sl_cooldown_seconds').value = data.config.mt_sl_cooldown_seconds;
 
     setResolutionField('rsi_resolution', data.config.rsi_resolution);
     document.getElementById('rsi_length').value = data.config.rsi_length;
@@ -4647,6 +4795,40 @@ function buildConfigPayload() {
     er_sl_to_breakeven_on_tp1: document.getElementById('er_sl_to_breakeven_on_tp1').value === 'true',
     er_sl_to_tp1_on_tp2: document.getElementById('er_sl_to_tp1_on_tp2').value === 'true',
     er_sl_cooldown_seconds: parseFloat(document.getElementById('er_sl_cooldown_seconds').value),
+    mt_resolution: getResolutionField('mt_resolution'),
+    mt_use_b1: document.getElementById('mt_use_b1').value === 'true',
+    mt_block1: document.getElementById('mt_block1').value,
+    mt_use_b2: document.getElementById('mt_use_b2').value === 'true',
+    mt_block2: document.getElementById('mt_block2').value,
+    mt_use_b3: document.getElementById('mt_use_b3').value === 'true',
+    mt_block3: document.getElementById('mt_block3').value,
+    mt_n1: parseInt(document.getElementById('mt_n1').value),
+    mt_n2: parseInt(document.getElementById('mt_n2').value),
+    mt_sig: parseInt(document.getElementById('mt_sig').value),
+    mt_scale: parseFloat(document.getElementById('mt_scale').value),
+    mt_src: document.getElementById('mt_src').value,
+    mt_spread_full: parseFloat(document.getElementById('mt_spread_full').value),
+    mt_buy_level: parseFloat(document.getElementById('mt_buy_level').value),
+    mt_sell_level: parseFloat(document.getElementById('mt_sell_level').value),
+    mt_lookback: parseInt(document.getElementById('mt_lookback').value),
+    mt_use_limit_filter: document.getElementById('mt_use_limit_filter').value === 'true',
+    mt_long_limit: parseFloat(document.getElementById('mt_long_limit').value),
+    mt_short_limit: parseFloat(document.getElementById('mt_short_limit').value),
+    mt_use_accel: document.getElementById('mt_use_accel').value === 'true',
+    mt_accel: parseFloat(document.getElementById('mt_accel').value),
+    mt_force_change: document.getElementById('mt_force_change').value === 'true',
+    mt_direction_mode: document.getElementById('mt_direction_mode').value,
+    mt_exit_mode: document.getElementById('mt_exit_mode').value,
+    mt_atr_len: parseInt(document.getElementById('mt_atr_len').value),
+    mt_sl_atr_mult: parseFloat(document.getElementById('mt_sl_atr_mult').value),
+    mt_tp_mode: document.getElementById('mt_tp_mode').value,
+    mt_tp_step_atr_mult: parseFloat(document.getElementById('mt_tp_step_atr_mult').value),
+    mt_tp_step_usd: parseFloat(document.getElementById('mt_tp_step_usd').value),
+    mt_tp1_close_pct: parseFloat(document.getElementById('mt_tp1_close_pct').value),
+    mt_tp2_close_pct: parseFloat(document.getElementById('mt_tp2_close_pct').value),
+    mt_sl_to_breakeven_on_tp1: document.getElementById('mt_sl_to_breakeven_on_tp1').value === 'true',
+    mt_sl_to_tp1_on_tp2: document.getElementById('mt_sl_to_tp1_on_tp2').value === 'true',
+    mt_sl_cooldown_seconds: parseFloat(document.getElementById('mt_sl_cooldown_seconds').value),
 
     rsi_resolution: getResolutionField('rsi_resolution'),
     rsi_length: parseInt(document.getElementById('rsi_length').value),
@@ -5016,6 +5198,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
+                "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
                 "rsi_resolution", "rsi_length", "rsi_oversold", "rsi_overbought", "rsi_direction_mode",

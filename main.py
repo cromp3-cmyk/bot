@@ -17,7 +17,7 @@ from bot_core import (
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
-    trading_loop, binance_1s_poll_loop, ab_poll_loop, er_poll_loop, rsi_poll_loop, mvwap_poll_loop, scalp_poll_loop,
+    trading_loop, binance_1s_poll_loop, ab_poll_loop, er_poll_loop, mt_poll_loop, rsi_poll_loop, mvwap_poll_loop, scalp_poll_loop,
     liq_poll_loop, wa_poll_loop, load_binance_ban_state,
 )
 from copytrade import (
@@ -133,6 +133,7 @@ async def main():
         *[binance_1s_poll_loop(s) for s in SYMBOLS],
         *[ab_poll_loop(s) for s in SYMBOLS],
         *[er_poll_loop(s) for s in SYMBOLS],
+        *[mt_poll_loop(s) for s in SYMBOLS],
         *[rsi_poll_loop(s) for s in SYMBOLS],
         *[mvwap_poll_loop(s) for s in SYMBOLS],
         *[grid_scalp_poll_loop(s) for s in SYMBOLS],
