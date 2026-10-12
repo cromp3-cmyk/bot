@@ -971,6 +971,11 @@ button{font-family:inherit;cursor:pointer}
 .cfgbox[open] summary::after{content:"▴"}
 .cfgbox>.row{padding-bottom:10px}
 #mbar{display:none}
+.lay-h{display:none;align-items:center;justify-content:center;gap:6px;margin:-6px -6px 4px;padding:6px;border-radius:10px;background:#1d2430;color:#9fb3d1;font-size:11px;font-weight:700;cursor:grab;touch-action:none;user-select:none}
+body.laying .lay-h{display:flex}
+body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
+.right>.card.dragging{opacity:.55;outline:2px solid #3b82f6;position:relative;z-index:5}
+.main.flip{flex-direction:row-reverse}
 @media (max-width:760px){
  html{-webkit-text-size-adjust:100%}
  body{padding-bottom:calc(112px + env(safe-area-inset-bottom))}
@@ -1010,7 +1015,7 @@ button{font-family:inherit;cursor:pointer}
 <div class="wrap">
  <div class="row" style="justify-content:space-between">
   <div class="row"><h1 style="margin:0;font-size:18px">Scalp Dashboard</h1><span id="badge" class="pill n">…</span></div>
-  <nav class="row" style="gap:18px;font-size:13px"><a href="/">Bot-Dashboard</a><a href="/screener">Coin Screener</a><a href="/copytrading">Copy-Trading</a></nav>
+  <nav class="row" style="gap:18px;font-size:13px"><a href="#" id="layBtn">✥ Layout</a><a href="#" id="layFlip" style="display:none">⇄ Spalten tauschen</a><a href="#" id="layReset" style="display:none">↺ Zurücksetzen</a><a href="/">Bot-Dashboard</a><a href="/screener">Coin Screener</a><a href="/copytrading">Copy-Trading</a></nav>
  </div>
  <div class="chips" id="chips"></div>
  <div class="main">
@@ -1099,6 +1104,34 @@ button{font-family:inherit;cursor:pointer}
 const G='#1fcf6e',R='#f0354b',TFS=['10s','15s','30s','1m','5m','15m'];
 const $=id=>document.getElementById(id);
 function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
+
+/* ---------- Layout: Kacheln verschieben ---------- */
+(function(){
+ const right=document.querySelector('.right'),main=document.querySelector('.main');
+ if(!right||!main)return;
+ const cards=Array.from(right.children).filter(c=>c.classList.contains('card'));
+ cards.forEach((c,i)=>{c.dataset.k=i;const h=document.createElement('div');h.className='lay-h';h.textContent='⠿ zum Verschieben ziehen';c.insertBefore(h,c.firstChild)});
+ function applyOrder(){
+  let o=[];try{o=JSON.parse(ls('scalp_layout')||'[]')}catch(e){}
+  if(Array.isArray(o)){o.forEach(k=>{const c=cards.find(x=>x.dataset.k==k);if(c)right.appendChild(c)});
+   cards.filter(c=>!o.includes(+c.dataset.k)&&!o.includes(String(c.dataset.k))).forEach(c=>right.appendChild(c))}
+  main.classList.toggle('flip',ls('scalp_flip')==='1');
+ }
+ function save(){ls('scalp_layout',JSON.stringify(Array.from(right.children).filter(c=>c.dataset&&c.dataset.k!==undefined).map(c=>+c.dataset.k)))}
+ applyOrder();
+ $('layBtn').onclick=e=>{e.preventDefault();const on=document.body.classList.toggle('laying');$('layBtn').textContent=on?'✓ Fertig':'✥ Layout';$('layFlip').style.display=$('layReset').style.display=on?'':'none'};
+ $('layFlip').onclick=e=>{e.preventDefault();ls('scalp_flip',main.classList.toggle('flip')?'1':'0')};
+ $('layReset').onclick=e=>{e.preventDefault();ls('scalp_layout','[]');ls('scalp_flip','0');cards.forEach(c=>right.appendChild(c));main.classList.remove('flip')};
+ let drag=null;
+ right.addEventListener('pointerdown',e=>{const h=e.target.closest('.lay-h');if(!h||!document.body.classList.contains('laying'))return;
+  drag=h.parentElement;drag.classList.add('dragging');h.setPointerCapture(e.pointerId);e.preventDefault()});
+ right.addEventListener('pointermove',e=>{if(!drag)return;
+  const sibs=Array.from(right.children).filter(c=>c!==drag&&c.dataset&&c.dataset.k!==undefined);
+  for(const c of sibs){const r=c.getBoundingClientRect();
+   if(e.clientY>=r.top&&e.clientY<=r.bottom){if(e.clientY<r.top+r.height/2)right.insertBefore(drag,c);else right.insertBefore(drag,c.nextSibling);break}}});
+ const end=()=>{if(!drag)return;drag.classList.remove('dragging');drag=null;save()};
+ right.addEventListener('pointerup',end);right.addEventListener('pointercancel',end);
+})();
 let waKey='',lastT=0,coin=null,tf=TFS.includes(ls('scalp_tf'))?ls('scalp_tf'):'1m',ST=null,loadedKey=null,lastChart=null;
 const tzoff=-new Date().getTimezoneOffset()*60;
 function fmtP(p){if(p==null||isNaN(p))return '–';const d=p>=1000?1:p>=10?2:p>=1?3:5;return Number(p).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d})}
