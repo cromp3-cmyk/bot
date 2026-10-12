@@ -240,6 +240,10 @@ def default_config():
         "scalp_supertrend_filter_resolution": os.getenv("SCALP_SUPERTREND_FILTER_RESOLUTION", "15m"),
         "scalp_supertrend_filter_multiplier": float(os.getenv("SCALP_SUPERTREND_FILTER_MULTIPLIER", "3.0")),
         "scalp_supertrend_filter_atr_period": int(os.getenv("SCALP_SUPERTREND_FILTER_ATR_PERIOD", "10")),
+        "scalp_ms_trend_mode": os.getenv("SCALP_MS_TREND_MODE", "off"),   # Marktstruktur-Filter: off / intern / swing
+        "scalp_ms_trend_tf": os.getenv("SCALP_MS_TREND_TF", "5m"),        # 10s/30s/1m/5m/15m/30m/1h/4h
+        "scalp_ms_trend_ilen": int(os.getenv("SCALP_MS_TREND_ILEN", "4")),
+        "scalp_ms_trend_slen": int(os.getenv("SCALP_MS_TREND_SLEN", "50")),
         # ===== Liquidity Waves (Nachbau des gleichnamigen Pine-Script-Indikators) =====
         # Markiert Kerzen mit kleinem Koerper (relativ zur Kerzenspanne) als "Sweep"-Kerzen: eine
         # bearische Sweep-Kerze setzt ein Level am HOCH (Short/Sell-Level), eine bullische am TIEF
@@ -2147,6 +2151,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>SuperTrend-Multiplikator</label><input type="number" step="0.1" min="0.1" id="scalp_supertrend_filter_multiplier"></div>
   <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="scalp_supertrend_filter_atr_period"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>🧭 Marktstruktur-Trend (BOS/CHoCH): Long nur im Aufwärtstrend, Short nur im Abwärtstrend</label>
+    <select class="cfg" id="scalp_ms_trend_mode">
+      <option value="off">Aus</option>
+      <option value="intern">Intern (kurze Pivots)</option>
+      <option value="swing">Swing (lange Pivots)</option>
+    </select></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Trend-Zeitebene</label>
+    <select class="cfg" id="scalp_ms_trend_tf">
+      <option value="10s">10s</option><option value="30s">30s</option><option value="1m">1m</option>
+      <option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option>
+      <option value="1h">1h</option><option value="4h">4h</option>
+    </select></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="scalp_ms_trend_ilen"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="scalp_ms_trend_slen"></div>
 
   <div data-mode="liquidity_waves" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🌊 <b>Liquidity Waves</b>: Kerzen mit kleinem Körper (relativ zur Spanne) markieren "Sweep"-Level - Hoch bei bärischer, Tief bei bullischer Sweep-Kerze. Von den neuesten "Levels betrachten" zählen nur die noch gültigen (Short-Level über, Long-Level unter dem Kurs) als Buyers%/Sellers%. Long wenn Buyers% unter der Einstiegs-Schwelle fällt (Short spiegelbildlich mit Sellers%). TP1 (50%, SL → Einstieg) sobald der Wert wieder beim TP1-Schwellenwert steht, TP2 (Rest) beim TP2-Schwellenwert. SL ist ein fester $-Verlust ab Ø-Einstieg, kein Nachkauf.
@@ -4329,6 +4347,10 @@ async function refresh() {
     setResolutionField('scalp_supertrend_filter_resolution', data.config.scalp_supertrend_filter_resolution);
     document.getElementById('scalp_supertrend_filter_multiplier').value = data.config.scalp_supertrend_filter_multiplier;
     document.getElementById('scalp_supertrend_filter_atr_period').value = data.config.scalp_supertrend_filter_atr_period;
+    document.getElementById('scalp_ms_trend_mode').value = data.config.scalp_ms_trend_mode || 'off';
+    document.getElementById('scalp_ms_trend_tf').value = data.config.scalp_ms_trend_tf || '5m';
+    document.getElementById('scalp_ms_trend_ilen').value = data.config.scalp_ms_trend_ilen || 4;
+    document.getElementById('scalp_ms_trend_slen').value = data.config.scalp_ms_trend_slen || 50;
     setResolutionField('liq_timeframe', data.config.liq_timeframe);
     document.getElementById('liq_body_max_pct').value = data.config.liq_body_max_pct;
     document.getElementById('liq_max_levels').value = data.config.liq_max_levels;
@@ -4699,6 +4721,10 @@ function buildConfigPayload() {
     scalp_supertrend_filter_resolution: getResolutionField('scalp_supertrend_filter_resolution'),
     scalp_supertrend_filter_multiplier: parseFloat(document.getElementById('scalp_supertrend_filter_multiplier').value),
     scalp_supertrend_filter_atr_period: parseInt(document.getElementById('scalp_supertrend_filter_atr_period').value),
+    scalp_ms_trend_mode: document.getElementById('scalp_ms_trend_mode').value,
+    scalp_ms_trend_tf: document.getElementById('scalp_ms_trend_tf').value,
+    scalp_ms_trend_ilen: parseInt(document.getElementById('scalp_ms_trend_ilen').value) || 4,
+    scalp_ms_trend_slen: parseInt(document.getElementById('scalp_ms_trend_slen').value) || 50,
     liq_timeframe: getResolutionField('liq_timeframe'),
     liq_body_max_pct: parseFloat(document.getElementById('liq_body_max_pct').value),
     liq_max_levels: parseInt(document.getElementById('liq_max_levels').value),
@@ -4992,6 +5018,7 @@ async def handle_config_update(request):
                 "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
                 "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_nachkauf_require_reversal", "scalp_tp1_require_profit", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
                 "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period",
+                "scalp_ms_trend_mode", "scalp_ms_trend_tf", "scalp_ms_trend_ilen", "scalp_ms_trend_slen",
                 "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
                 "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
                 "liq_max_nachkauf", "liq_nachkauf_progress_pct",

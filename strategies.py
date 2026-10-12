@@ -2147,6 +2147,12 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
                 symbol, cfg, candles[0], tf_resolution, tf_multiplier, tf_atr_period)
             if tf_err:
                 return {"error": tf_err}
+        if cfg.get("scalp_ms_trend_mode", "off") in ("intern", "swing"):
+            ms_l, ms_s, ms_err = await scalp_ms_trend_backtest(symbol, cfg, candles[0])
+            if ms_err:
+                return {"error": ms_err}
+            trend_filter_long_ok = _and_lists(trend_filter_long_ok, ms_l)
+            trend_filter_short_ok = _and_lists(trend_filter_short_ok, ms_s)
 
         trades = backtest_scalp_vwap_obv_rsi(candles, cfg, trend_filter_long_ok=trend_filter_long_ok, trend_filter_short_ok=trend_filter_short_ok)
         # Wie bei MVWAP: 'trades' enthaelt zusaetzlich zur Ausstiegs-Zeile auch eine Zeile je
@@ -5079,6 +5085,12 @@ async def scalp_poll_loop(symbol):
                                 if lo is not None:
                                     long_signal = long_signal and lo[0]
                                     short_signal = short_signal and so[0]
+                            if cfg.get("scalp_ms_trend_mode", "off") in ("intern", "swing") and (long_signal or short_signal):
+                                ms_tr = await scalp_ms_trend_live(symbol, st, cfg)
+                                st["scalp_ms_trend"] = ms_tr
+                                if ms_tr is not None:
+                                    long_signal = long_signal and ms_tr == 1
+                                    short_signal = short_signal and ms_tr == -1
                             st["scalp_mean_price"] = mean
                             st["scalp_upper_band"] = upper_dev2
                             st["scalp_lower_band"] = lower_dev2
@@ -6219,6 +6231,84 @@ async def wa_trend_table(symbol, cfg):
         except Exception:
             rows.append({"tf": tf, "intern": None, "swing": None})
     return rows
+
+
+SCALP_MS_TFS = ["10s", "30s", "1m", "5m", "15m", "30m", "1h", "4h"]
+
+
+def _scalp_ms_cfg(cfg):
+    """-> (modus 'off'/'intern'/'swing', zeitebene, ilen, slen, L) fuer den Marktstruktur-Filter des Scalpers"""
+    mode = cfg.get("scalp_ms_trend_mode", "off")
+    if mode not in ("intern", "swing"):
+        mode = "off"
+    tf = cfg.get("scalp_ms_trend_tf", "5m")
+    if tf not in SCALP_MS_TFS:
+        tf = "5m"
+    ilen = max(2, int(cfg.get("scalp_ms_trend_ilen", 4) or 4))
+    slen = max(2, int(cfg.get("scalp_ms_trend_slen", 50) or 50))
+    return mode, tf, ilen, slen, (ilen if mode == "intern" else slen)
+
+
+_scalp_ms_cache = {}
+
+
+async def scalp_ms_trend_live(symbol, st, cfg):
+    """Live: Marktstruktur-Trend (nur GESCHLOSSENE Kerzen) -> 1 / -1 / 0 (noch unbekannt), None = Filter aus
+    oder noch nicht genug Daten (Aufrufer laesst dann durch, wie beim SuperTrend-Filter)."""
+    mode, tf, ilen, slen, L = _scalp_ms_cfg(cfg)
+    if mode == "off":
+        return None
+    need = 2 * L + 80
+    if tf in SUB_MINUTE_RESOLUTIONS:
+        d = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[tf], min(need, 1500))
+        if not d:
+            return None
+        ts, _o, h, l, c = d   # nur abgeschlossene Buckets
+    else:
+        d = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, need), market_type=cfg.get("binance_market_type", "spot"))
+        if not d:
+            return None
+        ts, _o, h, l, c = d
+        ts, h, l, c = ts[:-1], h[:-1], l[:-1], c[:-1]
+    if len(c) < 2 * L + 6:
+        key = ("warn", symbol, tf)
+        now = time.time()
+        if now - _trend_filter_warn_last.get(key, 0.0) > 300:
+            _trend_filter_warn_last[key] = now
+            debug_log(f"⚠️ [{symbol}] Marktstruktur-Trend ({tf}): erst {len(c)}/{2 * L + 6} Kerzen - Filter lässt Signale vorerst durch.")
+        return None
+    key = (symbol, mode, tf, ilen, slen)
+    cached = _scalp_ms_cache.get(key)
+    if cached and cached[0] == ts[-1]:
+        return cached[1]
+    itr, swt, _ev = await asyncio.to_thread(ms_trend_series, h, l, c, ilen, slen)
+    val = (itr if mode == "intern" else swt)[-1]
+    _scalp_ms_cache[key] = (ts[-1], val)
+    return val
+
+
+async def scalp_ms_trend_backtest(symbol, cfg, base_ts):
+    """Backtest: (long_ok[], short_ok[], fehler). Nur HTF-Kerzen, die zum Ende der Handels-Kerze geschlossen sind.
+    Trend 0 (unbekannt) blockiert beide Richtungen."""
+    mode, tf, ilen, slen, L = _scalp_ms_cfg(cfg)
+    if mode == "off" or len(base_ts) < 2:
+        return None, None, None
+    pseudo_period = -(-(2 * L + 40) // 5)   # _fetch_trend_filter_backtest_candles rechnet Vorlauf = period*5+20 Kerzen
+    candles, err = await _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, tf, pseudo_period)
+    if err:
+        return None, None, err.replace("SuperTrend-Trendfilter-Zeiteinheit", "Marktstruktur-Trend-Zeiteinheit")
+    hts, _o, hh, hl, hc = candles
+    itr, swt, _ev = ms_trend_series(hh, hl, hc, ilen, slen)
+    trend = _trend_align(base_ts, base_ts[1] - base_ts[0], hts, _tf_ms(tf), itr if mode == "intern" else swt)
+    return [t == 1 for t in trend], [t == -1 for t in trend], None
+
+
+def _and_lists(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return [x and y for x, y in zip(a, b)]
 
 
 def wa_chart_payload(ts, o, h, l, c, cfg, max_bars=6000):
