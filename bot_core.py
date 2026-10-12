@@ -1881,11 +1881,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="mtf_spread"><label>Buy-Level (Trend % dreht von darunter nach oben)</label><input type="number" step="1" id="mt_buy_level"></div>
   <div data-mode="mtf_spread"><label>Sell-Level (Trend % dreht von darüber nach unten)</label><input type="number" step="1" id="mt_sell_level"></div>
   <div data-mode="mtf_spread"><label>Lookback-Kerzen</label><input type="number" step="1" min="1" id="mt_lookback"></div>
-  <div data-mode="mtf_spread"><label>Long/Short-Limit-Filter aktiv</label>
-    <select class="cfg" id="mt_use_limit_filter"><option value="true">An</option><option value="false">Aus</option></select>
-  </div>
-  <div data-mode="mtf_spread"><label>Long-Limit (Long nur wenn Trend % darüber)</label><input type="number" step="1" id="mt_long_limit"></div>
-  <div data-mode="mtf_spread"><label>Short-Limit (Short nur wenn Trend % darunter)</label><input type="number" step="1" id="mt_short_limit"></div>
   <div data-mode="mtf_spread"><label>Acceleration-Filter aktiv</label>
     <select class="cfg" id="mt_use_accel"><option value="true">An</option><option value="false">Aus</option></select>
   </div>
@@ -3447,8 +3442,11 @@ async function wacPollLive() {
   const sec = document.querySelector('#wac-price');
   if (!sec || sec.offsetParent === null) return;   // nicht sichtbar -> nichts abfragen
   const isWa = document.getElementById('entry_mode').value === 'wellenanker';
-  document.getElementById('wac-wtbox').style.display = isWa ? '' : 'none';
+  const isMt = document.getElementById('entry_mode').value === 'mtf_spread';
+  document.getElementById('wac-wtbox').style.display = (isWa || isMt) ? '' : 'none';
   document.getElementById('wac-tab-bt').style.display = isWa ? '' : 'none';
+  const wtLab = document.querySelector('#wac-wtbox > div');
+  if (wtLab) wtLab.textContent = isMt ? 'TREND % (Ø der Blöcke, MTF Spread) – gestrichelt: Buy-/Sell-Level' : 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels';
   wacInit(); if (!WAC.inited) return;
   const sym = currentSymbol, tf = document.getElementById('wac-tf').value;
   try {
@@ -3464,7 +3462,7 @@ async function wacPollLive() {
     wacSetGrid(d.grid);
     wacSetOverlays(d.overlays);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
-    const wtTxt = isWa ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : '';
+    const wtTxt = isWa ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? ` · Trend % ${d.wt1v}` : '');
     const p = d.position;
     info.innerText = `${sym} ${d.resolution} · Kurs ${d.price ?? '-'}` + wtTxt + (p ? ` · ${p.dir.toUpperCase()} Ø ${p.avg.toFixed(2)} PnL ${p.pnl.toFixed(2)} $` : ' · flat') + (d.active ? '' : ' · Bot nicht aktiv (nur Anzeige)');
   } catch (e) { /* naechster Versuch */ }
@@ -4403,9 +4401,6 @@ async function refresh() {
     document.getElementById('mt_buy_level').value = data.config.mt_buy_level;
     document.getElementById('mt_sell_level').value = data.config.mt_sell_level;
     document.getElementById('mt_lookback').value = data.config.mt_lookback;
-    document.getElementById('mt_use_limit_filter').value = String(data.config.mt_use_limit_filter);
-    document.getElementById('mt_long_limit').value = data.config.mt_long_limit;
-    document.getElementById('mt_short_limit').value = data.config.mt_short_limit;
     document.getElementById('mt_use_accel').value = String(data.config.mt_use_accel);
     document.getElementById('mt_accel').value = data.config.mt_accel;
     document.getElementById('mt_force_change').value = String(data.config.mt_force_change);
@@ -4811,9 +4806,6 @@ function buildConfigPayload() {
     mt_buy_level: parseFloat(document.getElementById('mt_buy_level').value),
     mt_sell_level: parseFloat(document.getElementById('mt_sell_level').value),
     mt_lookback: parseInt(document.getElementById('mt_lookback').value),
-    mt_use_limit_filter: document.getElementById('mt_use_limit_filter').value === 'true',
-    mt_long_limit: parseFloat(document.getElementById('mt_long_limit').value),
-    mt_short_limit: parseFloat(document.getElementById('mt_short_limit').value),
     mt_use_accel: document.getElementById('mt_use_accel').value === 'true',
     mt_accel: parseFloat(document.getElementById('mt_accel').value),
     mt_force_change: document.getElementById('mt_force_change').value === 'true',
@@ -5298,7 +5290,7 @@ async def handle_scalp_trend(request):
 
 async def handle_wa_live_chart(request):
     """Live-Chart fuer Wellenanker im Dashboard: Kerzen (inkl. laufender Kerze), Wellenlinien, Signale, Position."""
-    from strategies import fetch_candles_binance_multi, wa_chart_payload
+    from strategies import fetch_candles_binance_multi, wa_chart_payload, mt_chart_payload
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()
     if symbol not in BOTS:
         return web.json_response({"error": "unknown symbol"}, status=404)
@@ -5307,16 +5299,25 @@ async def handle_wa_live_chart(request):
     n1, n2, sl = int(cfg.get("wa_n1", 10)), int(cfg.get("wa_n2", 21)), int(cfg.get("wa_sig_len", 4))
     bars = max(300, (n1 + n2 + sl + 20) * 3)
     is_wa = cfg.get("entry_mode") == "wellenanker"
+    is_mt = cfg.get("entry_mode") == "mtf_spread"
     tf = request.query.get("tf", "")
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
-        tf = cfg.get("wa_timeframe", "15m") if is_wa else "5m"
+        tf = cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else "5m")
+        if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
+            tf = "5m"
     data = await fetch_candles_binance_multi(symbol, tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
     if not data:
         return web.json_response({"ok": False, "reason": "lädt noch … (keine Kerzen erhalten)"})
     ts, o, h, l, c = data
     if len(c) < n1 + n2 + sl + 21:
         return web.json_response({"ok": False, "reason": "lädt noch … (zu wenig Kerzen)"})
-    payload = await asyncio.to_thread(wa_chart_payload, ts, o, h, l, c, cfg, 1000)
+    payload = None
+    if is_mt:
+        payload = await mt_chart_payload(symbol, ts, o, h, l, c, cfg, 1000)
+        if payload is None:
+            return web.json_response({"ok": False, "reason": "lädt noch … (Daten der Zeitebenen fehlen)"})
+    else:
+        payload = await asyncio.to_thread(wa_chart_payload, ts, o, h, l, c, cfg, 1000)
     pos = None
     if st.get("position") and st.get("avg_entry_price"):
         size = st.get("total_coin_size") or 0

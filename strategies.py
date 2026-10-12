@@ -7151,7 +7151,7 @@ def _mt_params(cfg):
         "full": max(0.1, float(cfg.get("mt_spread_full", 15.0))),
         "buy_level": float(cfg.get("mt_buy_level", -40.0)), "sell_level": float(cfg.get("mt_sell_level", 40.0)),
         "lookback": max(1, int(cfg.get("mt_lookback", 2))),
-        "use_limit": bool(cfg.get("mt_use_limit_filter", True)),
+        "use_limit": False,   # Limit-Filter entfernt (ueberschnitt sich mit dem Buy-/Sell-Level)
         "long_limit": float(cfg.get("mt_long_limit", -20.0)), "short_limit": float(cfg.get("mt_short_limit", 20.0)),
         "use_accel": bool(cfg.get("mt_use_accel", True)), "accel": float(cfg.get("mt_accel", 0.5)),
         "force_change": bool(cfg.get("mt_force_change", True)),
@@ -7615,3 +7615,37 @@ async def run_mt_backtest(symbol, cfg, days, exclude_top_n=1):
         "stats_short": summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n),
         "trades": trades,
     }
+
+
+async def mt_chart_payload(symbol, ts, o, h, l, c, cfg, max_bars=1000):
+    """Chart-Daten fuer das Bot-Dashboard im Modus mtf_spread: Kerzen, TREND % (statt der Wellenlinien), Buy-/Sell-Level
+    und die Signale der Strategie (gleiche Funktionen wie Live-Loop/Backtest). None, wenn Daten der Zeitebenen fehlen."""
+    p = _mt_params(cfg)
+    if not p["blocks"] or len(ts) < 3:
+        return None
+    htf = {}
+    for tf in _mt_all_tfs(p):
+        src = _mt_source(tf)
+        d = await fetch_candles_binance_multi(symbol, src[0] if src else tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
+        if not d:
+            return None
+        d = tuple(d[:5])
+        htf[tf] = _mt_resample_ms(d, _tf_ms(tf)) if src else d
+    base_ms = ts[1] - ts[0]
+    trend = await asyncio.to_thread(_mt_trend_series, ts, base_ms, htf, p)
+    buy, sell = compute_mt_signals(trend, p)
+    n = len(c)
+    off = max(0, n - max_bars)
+    candles, w1, markers = [], [], []
+    for i in range(off, n):
+        t = ts[i] // 1000
+        candles.append({"time": t, "open": o[i], "high": h[i], "low": l[i], "close": c[i]})
+        if trend[i] is not None:
+            w1.append({"time": t, "value": round(trend[i], 2)})
+        if buy[i]:
+            markers.append({"time": t, "kind": "long", "price": c[i]})
+        if sell[i]:
+            markers.append({"time": t, "kind": "short", "price": c[i]})
+    last = next((x for x in reversed(trend) if x is not None), 0.0)
+    return {"candles": candles, "wt1": w1, "wt2": [], "markers": markers, "levels": [p["buy_level"], p["sell_level"]],
+            "entry_mode": "mtf", "wt1v": round(last, 2), "wt2v": 0, "bars": n}
