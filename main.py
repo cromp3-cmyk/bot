@@ -20,6 +20,7 @@ from strategies import (
     trading_loop, binance_1s_poll_loop, ab_poll_loop, er_poll_loop, mt_poll_loop, rsi_poll_loop, mvwap_poll_loop, scalp_poll_loop,
     liq_poll_loop, wa_poll_loop, load_binance_ban_state,
 )
+from pure_momentum import pm_poll_loop
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
     handle_ct_index, handle_ct_status, handle_ct_watch, handle_ct_copy_toggle,
@@ -29,7 +30,7 @@ from copytrade import (
 )
 from binance_ws import binance_ws_cache_loop
 from grid_scalp import grid_scalp_poll_loop, handle_gc_backtest, handle_gc_reset
-from screener import screener_loop, handle_screener_index, handle_screener_api
+from screener import screener_loop, handle_screener_index, handle_screener_api, handle_screener_cfg_get, handle_screener_cfg_set, load_screener_cfg
 from lighter_candles import lighter_candles_loop
 from scalp import (
     scalp_loop, handle_scalp_index, handle_scalp_chart, handle_scalp_status,
@@ -64,6 +65,8 @@ async def start_web_server():
     app.router.add_post("/api/reset", handle_reset)
     app.router.add_get("/screener", handle_screener_index)
     app.router.add_get("/api/screener", handle_screener_api)
+    app.router.add_get("/api/screener/config", handle_screener_cfg_get)
+    app.router.add_post("/api/screener/config", handle_screener_cfg_set)
     app.router.add_get("/scalp", handle_scalp_index)
     app.router.add_get("/api/scalp/chart", handle_scalp_chart)
     app.router.add_get("/api/scalp/status", handle_scalp_status)
@@ -112,6 +115,7 @@ async def main():
     await load_bot_state()
     await load_global_settings()
     await load_ct_watched()
+    await load_screener_cfg()
     # MUSS vor allen Poll-Loops geladen werden: sonst "vergisst" der Bot bei jedem Neustart einen
     # noch laufenden Binance-Bann und alle Coins feuern sofort wieder frische Anfragen gegen einen
     # Server, der sie noch immer ablehnt - siehe Kommentar bei save_binance_ban_state() in strategies.py.
@@ -134,6 +138,7 @@ async def main():
         *[ab_poll_loop(s) for s in SYMBOLS],
         *[er_poll_loop(s) for s in SYMBOLS],
         *[mt_poll_loop(s) for s in SYMBOLS],
+        *[pm_poll_loop(s) for s in SYMBOLS],
         *[rsi_poll_loop(s) for s in SYMBOLS],
         *[mvwap_poll_loop(s) for s in SYMBOLS],
         *[grid_scalp_poll_loop(s) for s in SYMBOLS],

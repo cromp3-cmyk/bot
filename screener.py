@@ -15,6 +15,7 @@ die dazugehoerigen Parameter stehen als Konstanten direkt unten und lassen sich 
 """
 
 import asyncio
+import json
 import math
 import os
 import time
@@ -22,7 +23,7 @@ import traceback
 
 from aiohttp import web
 
-from bot_core import debug_log, SYMBOLS, BOTS
+from bot_core import debug_log, SYMBOLS, BOTS, get_redis
 import binance_ws
 from strategies import (
     BINANCE_SYMBOL_MAP, BINANCE_FUTURES_ONLY_SYMBOLS,
@@ -54,6 +55,11 @@ MF_WINDOW = 30
 # Wellenanker (Pine: "Wellenanker")
 WA_N1, WA_N2, WA_SIG, WA_SCALE = 10, 21, 4, 1.35   # Kanal-Laenge, Durchschnitt-Laenge, Signallinie, Wellen-Skalierung
 WA_Z1, WA_Z3 = 36.0, 75.0                           # Long-/Short-Zone 1 (±) und Extrem-Zone 3 (±)
+# Einstellbar auf der Seite (Zahnrad "Wellenanker-Einstellungen"); wird in Redis gespeichert. Die Zahlen oben sind nur die Startwerte.
+WA_CFG_DEFAULT = {"n1": WA_N1, "n2": WA_N2, "sig": WA_SIG, "scale": WA_SCALE, "src": "close",
+                  "z1": WA_Z1, "z3": WA_Z3, "mode": "zone", "lvl_long": -10.0, "lvl_short": 10.0, "lvl_src": "signal",
+                  "div": True, "piv": 2, "div_ob": 45.0, "div_os": -65.0, "div_max": 120}
+WA_CFG = dict(WA_CFG_DEFAULT)
 WA_RSI_LEN, WA_RSI_LONG_MAX, WA_RSI_SHORT_MIN = 14, 40.0, 60.0   # "starke Punkte": RSI muss mitziehen ...
 WA_MF_LEN, WA_MF_SCALE = 14, 1.2                    # ... und der Geldfluss (f_mf im Original) steigen/fallen
 
@@ -206,20 +212,39 @@ def _wave_moneyflow(h, l, c, v):
 
 
 def _wellenanker(o, h, l, c, v):
+    cf = WA_CFG
     n = len(c)
-    wt1, wt2 = compute_wavetrend_series(o, h, l, c, WA_N1, WA_N2, WA_SIG, "close", WA_SCALE)
+    z1, z3 = cf["z1"], cf["z3"]
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, cf["n1"], cf["n2"], cf["sig"], cf["src"], cf["scale"])
     rsi = compute_rsi(c, WA_RSI_LEN)
     mf = _wave_moneyflow(h, l, c, v)
     last_closed = n - 2  # letzte GESCHLOSSENE Kerze (die letzte im Cache laeuft noch)
+    level_mode = cf["mode"] == "level"
+    if cf["lvl_src"] == "wave":
+        lnL = lnS = wt1
+    elif cf["lvl_src"] == "both":
+        lnL = [min(a, b) for a, b in zip(wt1, wt2)]
+        lnS = [max(a, b) for a, b in zip(wt1, wt2)]
+    else:
+        lnL = lnS = wt2
     events = []
+    crosses = []  # JEDE Kreuzung Welle/Signallinie (auch ausserhalb der Zone) - im UI ausgegraut
     for i in range(max(1, n - 250), last_closed + 1):
-        cross_up = wt1[i] > wt2[i] and wt1[i - 1] <= wt2[i - 1]
-        cross_dn = wt1[i] < wt2[i] and wt1[i - 1] >= wt2[i - 1]
-        if cross_up and wt2[i] < -WA_Z1:
-            events.append({"kind": "long", "idx": i, "ext": wt2[i] < -WA_Z3,
+        if wt1[i] > wt2[i] and wt1[i - 1] <= wt2[i - 1]:
+            crosses.append({"kind": "up", "idx": i, "zone": wt2[i] < -z1})
+        elif wt1[i] < wt2[i] and wt1[i - 1] >= wt2[i - 1]:
+            crosses.append({"kind": "down", "idx": i, "zone": wt2[i] > z1})
+        if level_mode:
+            sig_long = lnL[i] > cf["lvl_long"] and lnL[i - 1] <= cf["lvl_long"]
+            sig_short = lnS[i] < cf["lvl_short"] and lnS[i - 1] >= cf["lvl_short"]
+        else:
+            sig_long = wt1[i] > wt2[i] and wt1[i - 1] <= wt2[i - 1] and wt2[i] < -z1
+            sig_short = wt1[i] < wt2[i] and wt1[i - 1] >= wt2[i - 1] and wt2[i] > z1
+        if sig_long:
+            events.append({"kind": "long", "idx": i, "ext": wt2[i] < -z3,
                            "strong": rsi[i] < WA_RSI_LONG_MAX and mf[i] > mf[i - 1]})
-        elif cross_dn and wt2[i] > WA_Z1:
-            events.append({"kind": "short", "idx": i, "ext": wt2[i] > WA_Z3,
+        elif sig_short:
+            events.append({"kind": "short", "idx": i, "ext": wt2[i] > z3,
                            "strong": rsi[i] > WA_RSI_SHORT_MIN and mf[i] < mf[i - 1]})
 
     def pack(e):
@@ -227,11 +252,36 @@ def _wellenanker(o, h, l, c, v):
             return None
         return {"kind": e["kind"], "strong": e["strong"], "ext": e["ext"], "ago": _event_age(e["idx"], last_closed)}
 
-    # Zustand wie f_state() im Panel: LONG/SHORT nur, solange die Welle in der Zone steht UND richtig herum liegt
+    # Divergenzen ueber Pivots der Signallinie (wie im Pine-Screener): Kurs macht tieferes Tief / hoeheres Hoch, Welle nicht
+    divs = []
+    if cf["div"]:
+        pl = cf["piv"]
+        pLowWt = pLowPx = pLowBar = pHighWt = pHighPx = pHighBar = None
+        for i in range(max(2 * pl, n - 250), last_closed + 1):
+            k = i - pl
+            win = wt2[k - pl:i + 1]
+            if wt2[k] == min(win) and win.count(wt2[k]) == 1 and wt2[k] <= cf["div_os"]:
+                if pLowPx is not None and l[k] < pLowPx and wt2[k] > pLowWt and k - pLowBar <= cf["div_max"]:
+                    divs.append({"kind": "long", "idx": i})
+                pLowWt, pLowPx, pLowBar = wt2[k], l[k], k
+            if wt2[k] == max(win) and win.count(wt2[k]) == 1 and wt2[k] >= cf["div_ob"]:
+                if pHighPx is not None and h[k] > pHighPx and wt2[k] < pHighWt and k - pHighBar <= cf["div_max"]:
+                    divs.append({"kind": "short", "idx": i})
+                pHighWt, pHighPx, pHighBar = wt2[k], h[k], k
+    ld = divs[-1] if divs else None
+
     a, b = wt1[-1], wt2[-1]
-    state = 1 if (b < -WA_Z1 and a > b) else -1 if (b > WA_Z1 and a < b) else 0
-    return {"wt1": _r(a, 1), "wt2": _r(b, 1), "diff": _r(a - b, 1), "z1": WA_Z1, "z3": WA_Z3, "state": state,
-            "last": pack(events[-1] if events else None), "prev": pack(events[-2] if len(events) > 1 else None)}
+    if level_mode:
+        # im Level-Modus gibt es keine Zone: Zustand = Richtung des letzten Punktes, solange er frisch (<=3 Kerzen) ist
+        le = pack(events[-1] if events else None)
+        state = (1 if le["kind"] == "long" else -1) if le and le["ago"] <= 3 else 0
+    else:
+        # Zustand wie f_state() im Panel: LONG/SHORT nur, solange die Welle in der Zone steht UND richtig herum liegt
+        state = 1 if (b < -z1 and a > b) else -1 if (b > z1 and a < b) else 0
+    return {"wt1": _r(a, 1), "wt2": _r(b, 1), "diff": _r(a - b, 1), "z1": z1, "z3": z3, "state": state, "mode": cf["mode"],
+            "last": pack(events[-1] if events else None), "prev": pack(events[-2] if len(events) > 1 else None),
+            "crosses": [{"kind": x["kind"], "zone": x["zone"], "ago": _event_age(x["idx"], last_closed)} for x in crosses[-6:]][::-1],
+            "div": {"kind": ld["kind"], "ago": _event_age(ld["idx"], last_closed)} if ld else None}
 
 
 # ============================================================================
@@ -492,6 +542,72 @@ async def handle_screener_api(request):
     return web.json_response({"updated": SCREENER_STATE["updated"], "timeframes": TIMEFRAMES, "coins": coins})
 
 
+def _wa_cfg_clean(body):
+    """Nimmt nur bekannte Felder, wandelt Typen um, begrenzt Werte. Gibt das bereinigte Dict zurueck."""
+    out = dict(WA_CFG)
+    ints = {"n1": (1, 200), "n2": (1, 200), "sig": (1, 100), "piv": (2, 20), "div_max": (5, 1000)}
+    floats = {"scale": (0.1, 10.0), "z1": (1, 200), "z3": (1, 300), "lvl_long": (-300, 300), "lvl_short": (-300, 300),
+              "div_ob": (-300, 300), "div_os": (-300, 300)}
+    for k, (lo, hi) in ints.items():
+        if k in body:
+            try:
+                out[k] = int(max(lo, min(hi, int(float(body[k])))))
+            except (TypeError, ValueError):
+                pass
+    for k, (lo, hi) in floats.items():
+        if k in body:
+            try:
+                out[k] = float(max(lo, min(hi, float(body[k]))))
+            except (TypeError, ValueError):
+                pass
+    if body.get("src") in ("close", "hlc3", "ohlc4", "hl2"):
+        out["src"] = body["src"]
+    if body.get("mode") in ("zone", "level"):
+        out["mode"] = body["mode"]
+    if body.get("lvl_src") in ("signal", "wave", "both"):
+        out["lvl_src"] = body["lvl_src"]
+    if "div" in body:
+        out["div"] = bool(body["div"])
+    return out
+
+
+async def load_screener_cfg():
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        raw = await asyncio.wait_for(r.get("gridbot:screener_wa_cfg"), timeout=5)
+        if raw:
+            WA_CFG.update(_wa_cfg_clean(json.loads(raw)))
+            debug_log("✅ Screener-Wellenanker-Einstellungen aus Redis geladen", WA_CFG)
+    except Exception as e:
+        debug_log("⚠️ Laden der Screener-Einstellungen fehlgeschlagen", {"error": str(e)})
+
+
+async def handle_screener_cfg_get(request):
+    return web.json_response({"cfg": WA_CFG, "default": WA_CFG_DEFAULT})
+
+
+async def handle_screener_cfg_set(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "kein JSON"}, status=400)
+    if body.get("reset"):
+        new = dict(WA_CFG_DEFAULT)
+    else:
+        new = _wa_cfg_clean(body)
+    WA_CFG.clear()
+    WA_CFG.update(new)
+    r = await get_redis()
+    if r is not None:
+        try:
+            await asyncio.wait_for(r.set("gridbot:screener_wa_cfg", json.dumps(WA_CFG)), timeout=5)
+        except Exception as e:
+            debug_log("⚠️ Speichern der Screener-Einstellungen fehlgeschlagen", {"error": str(e)})
+    return web.json_response({"ok": True, "cfg": WA_CFG})
+
+
 async def handle_screener_index(request):
     return web.Response(text=SCREENER_HTML, content_type="text/html")
 
@@ -563,6 +679,12 @@ header nav a:hover{color:#fff}
 .split{height:14px;border-radius:7px;background:#1d2128;display:flex;overflow:hidden;gap:2px;position:relative}
 .loading{padding:40px 0;text-align:center;color:#7d8696;font-size:13px}
 #modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto;z-index:10}
+#cfg label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:#7d8696}
+#cfg input,#cfg select{background:#0d1015;border:1px solid #2a303a;color:#e9ecf1;border-radius:8px;padding:7px 9px;font:500 13px Inter,system-ui,sans-serif;width:100%}
+#cfg .g{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px;margin:10px 0 18px}
+#cfg h3{margin:14px 0 0;font-size:13px;color:#fff}
+#cfg .btns{display:flex;gap:10px;align-items:center}
+#cfg .ok{color:#1fcf6e;font-size:12px}
 #modal .box{background:#12151b;border:1px solid #242932;border-radius:16px;padding:22px 24px;width:100%;max-width:880px}
 #modal table{width:100%;border-collapse:collapse;font-size:13px}
 #modal th,#modal td{padding:8px 10px;text-align:right;border-bottom:1px solid #1d2128}
@@ -575,10 +697,34 @@ header nav a:hover{color:#fff}
 </head>
 <body>
 <header>
-  <h1>Coin Screener <span id="status"></span><button class="hbtn" id="toggleAll">Alle aufklappen</button></h1>
+  <h1>Coin Screener <span id="status"></span><button class="hbtn" id="toggleAll">Alle aufklappen</button><button class="hbtn" id="cfgBtn">⚙ Wellenanker-Einstellungen</button></h1>
   <nav><a href="/">Bot-Dashboard</a><a href="/copytrading">Copy-Trading</a></nav>
 </header>
 <div id="grid"><div class="loading">Lade ...</div></div>
+<div id="cfg" style="position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto;z-index:11"><div class="box" style="background:#12151b;border:1px solid #242932;border-radius:16px;padding:22px 24px;width:100%;max-width:640px">
+<div class="row between center"><b style="font-size:16px">Wellenanker-Einstellungen</b><button class="x" id="cfgClose">✕</button></div>
+<div class="note" style="margin-top:6px">Gilt für alle Coins und Zeitrahmen im Screener. Wird gespeichert.</div>
+<h3>Signal</h3><div class="g">
+<label>Signal-Art<select id="c_mode"><option value="zone">Zone (Kreuzung außerhalb Zone)</option><option value="level">Level (Durchbruch)</option></select></label>
+<label>Zone ± (Long/Short)<input id="c_z1" type="number" step="1"></label>
+<label>Extrem-Zone ±<input id="c_z3" type="number" step="1"></label>
+<label>Level Long (Durchbruch ↑)<input id="c_lvl_long" type="number" step="1"></label>
+<label>Level Short (Durchbruch ↓)<input id="c_lvl_short" type="number" step="1"></label>
+<label>Level: Linie<select id="c_lvl_src"><option value="signal">Signallinie</option><option value="wave">Welle</option><option value="both">Beide</option></select></label></div>
+<h3>Welle</h3><div class="g">
+<label>Kanal-Länge<input id="c_n1" type="number" step="1"></label>
+<label>Durchschnitt-Länge<input id="c_n2" type="number" step="1"></label>
+<label>Signallinie Glättung<input id="c_sig" type="number" step="1"></label>
+<label>Skalierung<input id="c_scale" type="number" step="0.05"></label>
+<label>Quelle<select id="c_src"><option value="close">Close</option><option value="hlc3">HLC3</option><option value="ohlc4">OHLC4</option><option value="hl2">HL2</option></select></label></div>
+<h3>Divergenzen</h3><div class="g">
+<label>Anzeigen<select id="c_div"><option value="1">Ja</option><option value="0">Nein</option></select></label>
+<label>Pivot-Länge<input id="c_piv" type="number" step="1"></label>
+<label>Bärisch ab Welle ≥<input id="c_div_ob" type="number" step="1"></label>
+<label>Bullisch ab Welle ≤<input id="c_div_os" type="number" step="1"></label>
+<label>Max. Pivot-Abstand (Kerzen)<input id="c_div_max" type="number" step="1"></label></div>
+<div class="btns"><button class="hbtn" id="cfgSave" style="margin:0">Speichern</button><button class="hbtn" id="cfgPine" style="margin:0">Pine-Werte (9/12/3, Zone 53)</button><button class="hbtn" id="cfgReset" style="margin:0">Zurücksetzen</button><span class="ok" id="cfgMsg"></span></div>
+</div></div>
 <div id="modal"><div class="box" id="modalbox"></div></div>
 <script>
 const G='#1fcf6e',R='#f0354b',Y='#f5b83d',B='#8aa4d6',GR='#7d8696',TRK='#262b35';
@@ -631,6 +777,8 @@ function waBar(c,tf){
   let chip='Kein Punkt',col=GR,bg='#1d2128';
   if(fresh){const lg=l.kind==='long';col=lg?G:R;bg=lg?'rgba(31,207,110,.14)':'rgba(240,53,75,.14)';
     chip=(l.strong?'◉ Starker ':l.ext?'◆ Extrem ':'● ')+(lg?'Long':'Short')+(l.strong||l.ext?'':'-Punkt');}
+  const cr=w.crosses||[];
+  if(!fresh&&cr.length){chip='Kreuzung '+(cr[0].kind==='up'?'↑':'↓')+' '+cr[0].ago+'K (ohne Signal)';}
   const dcol=w.diff>0?(w.wt2<-w.z1?G:GR):(w.wt2>w.z1?R:GR);
   const lo=Math.min(w.wt1,w.wt2),hi=Math.max(w.wt1,w.wt2);
   const zw=((100-w.z1)/2).toFixed(1)+'%';
@@ -651,7 +799,7 @@ function waBar(c,tf){
   <div class="stats"><div class="stat"><span class="cap">WT1 Welle</span><b class="mono">${sgn(w.wt1)}</b></div>
    <div class="stat"><span class="cap">WT2 Signal</span><b class="mono" style="color:#aab2c0">${sgn(w.wt2)}</b></div>
    <div class="stat"><span class="cap">Differenz</span><b class="mono" style="color:${dcol}">${sgn(w.diff)}</b></div></div>
-  <div class="states">${states}</div><div class="note">${lastTxt}</div></div>`;
+  <div class="states">${states}</div><div class="note">${lastTxt}</div>${cr.length?`<div class="note" style="color:#5b6472">Kreuzungen: ${cr.map(x=>(x.kind==='up'?'↑':'↓')+x.ago+'K'+(x.zone?' ●':'')).join(' · ')}</div>`:''}${w.div&&w.div.ago<=5?`<div class="note" style="color:${w.div.kind==='long'?G:R}">◆ ${w.div.kind==='long'?'Bullische':'Bärische'} Divergenz ${ago(w.div.ago)}</div>`:''}</div>`;
 }
 function lwBar(c,tf){
   const w=c.tfs[tf]&&c.tfs[tf].lw;
@@ -777,6 +925,8 @@ function renderModal(){
   ${row('Differenz',d=>d.wa?sgn(d.wa.diff):null)}
   ${row('Zustand',d=>d.wa?col(d.wa.state===1?'LONG':d.wa.state===-1?'SHORT':'ABWARTEN',d.wa.state===1?G:d.wa.state===-1?R:GR):null)}
   ${row('Letzter Punkt',d=>d.wa&&d.wa.last?col((d.wa.last.kind==='long'?'Long':'Short')+(d.wa.last.strong?' ◉':d.wa.last.ext?' ◆':'')+' · '+d.wa.last.ago+'K',d.wa.last.kind==='long'?G:R):'–')}
+  ${row('Letzte Kreuzung',d=>d.wa&&d.wa.crosses&&d.wa.crosses[0]?'<span style="color:'+(d.wa.crosses[0].zone?(d.wa.crosses[0].kind==='up'?G:R):'#5b6472')+'">'+(d.wa.crosses[0].kind==='up'?'↑ ':'↓ ')+d.wa.crosses[0].ago+'K'+(d.wa.crosses[0].zone?' (Signal)':' (grau)')+'</span>':'–')}
+  ${row('Divergenz',d=>d.wa&&d.wa.div?col((d.wa.div.kind==='long'?'◆ Bullisch':'◆ Bärisch')+' · '+d.wa.div.ago+'K',d.wa.div.kind==='long'?G:R):'–')}
   ${sec('Liquidity Waves')}
   ${row('Buyers / Sellers',d=>d.lw&&d.lw.buyers!=null?d.lw.buyers.toFixed(1)+' / '+d.lw.sellers.toFixed(1)+' %':null)}
   ${row('Position',d=>d.lw?col(d.lw.pos==='long'?'LONG':d.lw.pos==='short'?'SHORT':'–',d.lw.pos==='long'?G:d.lw.pos==='short'?R:GR):null)}
@@ -818,6 +968,23 @@ document.getElementById('toggleAll').addEventListener('click',()=>{
 async function load(){
   try{const r=await fetch('/api/screener');if(r.ok){DATA=await r.json();if(DATA.timeframes)TFS=DATA.timeframes;render()}}catch(e){}
 }
+const CFG_IDS=['mode','z1','z3','lvl_long','lvl_short','lvl_src','n1','n2','sig','scale','src','div','piv','div_ob','div_os','div_max'];
+function cfgFill(c){CFG_IDS.forEach(k=>{const e=document.getElementById('c_'+k);if(e)e.value=k==='div'?(c.div?'1':'0'):c[k]})}
+async function cfgPost(body){
+  const r=await fetch('/api/screener/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();if(j.cfg)cfgFill(j.cfg);
+  const m=document.getElementById('cfgMsg');m.textContent=j.ok?'✓ gespeichert, neue Werte in ~10 s sichtbar':'Fehler';setTimeout(()=>m.textContent='',4000);
+}
+document.getElementById('cfgBtn').addEventListener('click',async()=>{
+  try{const r=await fetch('/api/screener/config');const j=await r.json();cfgFill(j.cfg)}catch(e){}
+  document.getElementById('cfg').style.display='flex';
+});
+document.getElementById('cfgClose').addEventListener('click',()=>document.getElementById('cfg').style.display='none');
+document.getElementById('cfgSave').addEventListener('click',()=>{
+  const b={};CFG_IDS.forEach(k=>{const e=document.getElementById('c_'+k);b[k]=k==='div'?e.value==='1':e.value});cfgPost(b);
+});
+document.getElementById('cfgPine').addEventListener('click',()=>cfgPost({n1:9,n2:12,sig:3,scale:1,src:'hlc3',z1:53,mode:'zone'}));
+document.getElementById('cfgReset').addEventListener('click',()=>cfgPost({reset:true}));
 load();setInterval(load,5000);
 </script>
 </body>
