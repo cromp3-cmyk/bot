@@ -382,6 +382,10 @@ def default_config():
         "mt_src": os.getenv("MT_SRC", "close"),
         "mt_spread_full": float(os.getenv("MT_SPREAD_FULL", "15.0")),
         "mt_signal_mode": os.getenv("MT_SIGNAL_MODE", "zone"),   # zone = gruener/roter Hintergrund, cross = Dreh durch Level
+        "mt_mode": os.getenv("MT_MODE", "spread"),   # spread = MTF Spread Trend, momentum = Pure Momentum Oscillator (Signal bei Farbwechsel)
+        "mt_mom_len": int(os.getenv("MT_MOM_LEN", "45")),
+        "mt_mom_long": float(os.getenv("MT_MOM_LONG", "0.05")),
+        "mt_mom_short": float(os.getenv("MT_MOM_SHORT", "-0.05")),
         "mt_confirm_bars": int(os.getenv("MT_CONFIRM_BARS", "3")),   # Zone muss so viele Kerzen halten, bevor das Signal gilt
         "mt_red_below": float(os.getenv("MT_RED_BELOW", "-20.0")),
         "mt_green_above": float(os.getenv("MT_GREEN_ABOVE", "20.0")),
@@ -1862,39 +1866,45 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <input type="number" step="1" min="1" id="mt_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="mtf_spread"><label>Block 1 (Micro) aktiv</label>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Block 1 (Micro) aktiv</label>
     <select class="cfg" id="mt_use_b1"><option value="true">An</option><option value="false">Aus</option></select>
   </div>
-  <div data-mode="mtf_spread"><label>Block 1 Zeitebenen (kommagetrennt, z.B. 1m,3m,5m)</label><input type="text" id="mt_block1"></div>
-  <div data-mode="mtf_spread"><label>Block 2 (Medium) aktiv</label>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Block 1 Zeitebenen (kommagetrennt, z.B. 1m,3m,5m)</label><input type="text" id="mt_block1"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Block 2 (Medium) aktiv</label>
     <select class="cfg" id="mt_use_b2"><option value="true">An</option><option value="false">Aus</option></select>
   </div>
-  <div data-mode="mtf_spread"><label>Block 2 Zeitebenen</label><input type="text" id="mt_block2"></div>
-  <div data-mode="mtf_spread"><label>Block 3 (Macro) aktiv</label>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Block 2 Zeitebenen</label><input type="text" id="mt_block2"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Block 3 (Macro) aktiv</label>
     <select class="cfg" id="mt_use_b3"><option value="true">An</option><option value="false">Aus</option></select>
   </div>
-  <div data-mode="mtf_spread"><label>Block 3 Zeitebenen</label><input type="text" id="mt_block3"></div>
-  <div data-mode="mtf_spread"><label>Kanal-Länge</label><input type="number" step="1" min="2" id="mt_n1"></div>
-  <div data-mode="mtf_spread"><label>Durchschnitt-Länge</label><input type="number" step="1" min="2" id="mt_n2"></div>
-  <div data-mode="mtf_spread"><label>Signallinie (SMA von WT1)</label><input type="number" step="1" min="1" id="mt_sig"></div>
-  <div data-mode="mtf_spread"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" id="mt_scale"></div>
-  <div data-mode="mtf_spread"><label>Quelle der Welle</label>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Block 3 Zeitebenen</label><input type="text" id="mt_block3"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Kanal-Länge</label><input type="number" step="1" min="2" id="mt_n1"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Durchschnitt-Länge</label><input type="number" step="1" min="2" id="mt_n2"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Signallinie (SMA von WT1)</label><input type="number" step="1" min="1" id="mt_sig"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" id="mt_scale"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Quelle der Welle</label>
     <select class="cfg" id="mt_src"><option value="close">close</option><option value="hlc3">hlc3</option><option value="ohlc4">ohlc4</option><option value="hl2">hl2</option></select>
   </div>
-  <div data-mode="mtf_spread"><label>Spread in Punkten = 100 %</label><input type="number" step="0.5" min="0.1" id="mt_spread_full"></div>
-  <div data-mode="mtf_spread"><label>Signal</label>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Spread in Punkten = 100 %</label><input type="number" step="0.5" min="0.1" id="mt_spread_full"></div>
+  <div data-mode="mtf_spread"><label>Basis</label>
+    <select class="cfg" id="mt_mode"><option value="spread">MTF Spread Trend (9 Zeitebenen)</option><option value="momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel)</option></select>
+  </div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="momentum"><label>Momentum: Lookback</label><input type="number" step="1" min="2" id="mt_mom_len"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="momentum"><label>Momentum: Long-Schwelle (darüber = grün = BUY)</label><input type="number" step="0.001" id="mt_mom_long"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="momentum"><label>Momentum: Short-Schwelle (darunter = rot = SELL)</label><input type="number" step="0.001" id="mt_mom_short"></div>
+  <div data-mode="mtf_spread" data-requires="mt_mode" data-requires-value="spread"><label>Signal</label>
     <select class="cfg" id="mt_signal_mode"><option value="zone">Zonen: Wechsel in grünen/roten Hintergrund</option><option value="cross">Dreh durch Buy-/Sell-Level</option></select>
   </div>
-  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="zone"><label>Bestätigung: neue Zone muss so viele Kerzen halten (1 = sofort)</label><input type="number" step="1" min="1" id="mt_confirm_bars"></div>
-  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="zone"><label>Schwelle Rot (Trend % darunter = rot = Short)</label><input type="number" step="1" id="mt_red_below"></div>
-  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="zone"><label>Schwelle Grün (Trend % darüber = grün = Long)</label><input type="number" step="1" id="mt_green_above"></div>
-  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Buy-Level (Trend % dreht von darunter nach oben)</label><input type="number" step="1" id="mt_buy_level"></div>
-  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Sell-Level (Trend % dreht von darüber nach unten)</label><input type="number" step="1" id="mt_sell_level"></div>
-  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Lookback-Kerzen</label><input type="number" step="1" min="1" id="mt_lookback"></div>
-  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Acceleration-Filter aktiv</label>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="zone" data-requires-also="mt_mode=spread"><label>Bestätigung: neue Zone muss so viele Kerzen halten (1 = sofort)</label><input type="number" step="1" min="1" id="mt_confirm_bars"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="zone" data-requires-also="mt_mode=spread"><label>Schwelle Rot (Trend % darunter = rot = Short)</label><input type="number" step="1" id="mt_red_below"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="zone" data-requires-also="mt_mode=spread"><label>Schwelle Grün (Trend % darüber = grün = Long)</label><input type="number" step="1" id="mt_green_above"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross" data-requires-also="mt_mode=spread"><label>Buy-Level (Trend % dreht von darunter nach oben)</label><input type="number" step="1" id="mt_buy_level"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross" data-requires-also="mt_mode=spread"><label>Sell-Level (Trend % dreht von darüber nach unten)</label><input type="number" step="1" id="mt_sell_level"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross" data-requires-also="mt_mode=spread"><label>Lookback-Kerzen</label><input type="number" step="1" min="1" id="mt_lookback"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross" data-requires-also="mt_mode=spread"><label>Acceleration-Filter aktiv</label>
     <select class="cfg" id="mt_use_accel"><option value="true">An</option><option value="false">Aus</option></select>
   </div>
-  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Min. Acceleration-Stärke</label><input type="number" step="0.1" id="mt_accel"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross" data-requires-also="mt_mode=spread"><label>Min. Acceleration-Stärke</label><input type="number" step="0.1" id="mt_accel"></div>
   <div data-mode="mtf_spread"><label>Richtungswechsel erzwingen (erst BUY, dann SELL)</label>
     <select class="cfg" id="mt_force_change"><option value="true">An</option><option value="false">Aus</option></select>
   </div>
@@ -4410,6 +4420,10 @@ async function refresh() {
     document.getElementById('mt_spread_full').value = data.config.mt_spread_full;
     document.getElementById('mt_signal_mode').value = data.config.mt_signal_mode || 'zone';
     document.getElementById('mt_confirm_bars').value = data.config.mt_confirm_bars || 3;
+    document.getElementById('mt_mode').value = data.config.mt_mode || 'spread';
+    document.getElementById('mt_mom_len').value = data.config.mt_mom_len || 45;
+    document.getElementById('mt_mom_long').value = data.config.mt_mom_long != null ? data.config.mt_mom_long : 0.05;
+    document.getElementById('mt_mom_short').value = data.config.mt_mom_short != null ? data.config.mt_mom_short : -0.05;
     document.getElementById('mt_red_below').value = data.config.mt_red_below;
     document.getElementById('mt_green_above').value = data.config.mt_green_above;
     document.getElementById('mt_buy_level').value = data.config.mt_buy_level;
@@ -4819,6 +4833,10 @@ function buildConfigPayload() {
     mt_spread_full: parseFloat(document.getElementById('mt_spread_full').value),
     mt_signal_mode: document.getElementById('mt_signal_mode').value,
     mt_confirm_bars: parseInt(document.getElementById('mt_confirm_bars').value) || 1,
+    mt_mode: document.getElementById('mt_mode').value,
+    mt_mom_len: parseInt(document.getElementById('mt_mom_len').value) || 45,
+    mt_mom_long: parseFloat(document.getElementById('mt_mom_long').value) || 0.05,
+    mt_mom_short: parseFloat(document.getElementById('mt_mom_short').value) || -0.05,
     mt_red_below: parseFloat(document.getElementById('mt_red_below').value),
     mt_green_above: parseFloat(document.getElementById('mt_green_above').value),
     mt_buy_level: parseFloat(document.getElementById('mt_buy_level').value),
@@ -5208,7 +5226,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
+                "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_mode", "mt_mom_len", "mt_mom_long", "mt_mom_short", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
                 "rsi_resolution", "rsi_length", "rsi_oversold", "rsi_overbought", "rsi_direction_mode",

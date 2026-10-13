@@ -7144,6 +7144,9 @@ def _mt_params(cfg):
         tfs = [x.strip().lower() for x in str(cfg.get(key) or default).split(",") if MT_TF_RE.match(x.strip().lower())]
         blocks.append(tfs[:6] if tfs else default.split(","))
     return {
+        "mode": "momentum" if cfg.get("mt_mode", "spread") == "momentum" else "spread",
+        "mom_len": max(2, int(cfg.get("mt_mom_len", 45))),
+        "mom_long": float(cfg.get("mt_mom_long", 0.05)), "mom_short": float(cfg.get("mt_mom_short", -0.05)),
         "blocks": blocks,
         "n1": max(2, int(cfg.get("mt_n1", 10))), "n2": max(2, int(cfg.get("mt_n2", 21))),
         "sig": max(1, int(cfg.get("mt_sig", 4))), "scale": float(cfg.get("mt_scale", 1.35)),
@@ -7175,7 +7178,31 @@ def _mt_all_tfs(p):
 
 
 def _mt_warmup(p):
+    if p["mode"] == "momentum":
+        return max(p["atr_len"], 3 * p["mom_len"]) + 5
     return max(p["atr_len"], p["lookback"] + 2) + 5
+
+
+def _wma_series(x, n):
+    out = [None] * len(x)
+    den = n * (n + 1) / 2.0
+    for i in range(n - 1, len(x)):
+        out[i] = sum(x[i - n + 1 + k] * (k + 1) for k in range(n)) / den
+    return out
+
+
+def _mom_series(h, l, c, n):
+    """Pure Momentum Oscillator (Pine): cd = 2*close - EMA(close,n), cda = WMA(cd,n), change = (cda - cda[1]) / ATR(n)."""
+    ca = _ema_series(c, n)
+    cd = [2.0 * c[i] - ca[i] for i in range(len(c))]
+    cda = _wma_series(cd, n)
+    atr = compute_atr(h, l, c, n) or [0.0] * len(c)
+    out = [None] * len(c)
+    for i in range(max(1, 2 * n), len(c)):
+        if cda[i] is None or cda[i - 1] is None or not atr[i]:
+            continue
+        out[i] = (cda[i] - cda[i - 1]) / atr[i]
+    return out
 
 
 def _mt_spread_values(o, h, l, c, p):
@@ -7221,8 +7248,11 @@ def _mt_align(base_ts, base_ms, htf_ts, htf_ms, vals):
     return out
 
 
-def _mt_trend_series(base_ts, base_ms, htf, p):
-    """htf: {tf: (ts,o,h,l,c)} -> TREND % je Basis-Kerze (None solange nicht alle aktiven Bloecke einen Wert haben)."""
+def _mt_trend_series(base_ts, base_ms, htf, p, hlc=None):
+    """htf: {tf: (ts,o,h,l,c)} -> TREND % je Basis-Kerze (None solange nicht alle aktiven Bloecke einen Wert haben).
+    Im Momentum-Modus: hlc=(h,l,c) der Basis-Kerzen -> Momentum-Wert (kein htf noetig)."""
+    if p["mode"] == "momentum":
+        return _mom_series(hlc[0], hlc[1], hlc[2], p["mom_len"])
     n = len(base_ts)
     aligned = {}
     for tf, d in htf.items():
@@ -7247,6 +7277,23 @@ def compute_mt_signals(trend, p):
     n = len(trend)
     buy, sell = [False] * n, [False] * n
     last_dir = "NONE"
+    if p["mode"] == "momentum":
+        # Farbe wie im Pine-Indikator: Momentum > Long-Schwelle = gruen, < Short-Schwelle = rot, dazwischen bleibt die letzte Farbe.
+        # Signal bei JEDEM Farbwechsel (gruen->rot = SELL, rot->gruen = BUY). Die erste Farbe nach Start setzt nur den Ausgangszustand.
+        col = 0
+        for i in range(n):
+            v = trend[i]
+            if v is None:
+                continue
+            new = 1 if v > p["mom_long"] else (-1 if v < p["mom_short"] else col)
+            if new != col:
+                if col != 0:
+                    if new == 1:
+                        buy[i] = True
+                    else:
+                        sell[i] = True
+                col = new
+        return buy, sell
     if p["signal_mode"] == "zone":
         # Zonen wie der Hintergrund im Pine-Indikator: Trend % < red_below = ROT (Short), > green_above = GRUEN (Long), sonst neutral
         # (rot hat Vorrang, wie bei bgcolor). Eine NEUE Zone gilt erst, wenn sie confirm Kerzen in Folge gehalten wurde; das Signal
@@ -7335,6 +7382,8 @@ def _mt_reset_state(st):
 
 async def _mt_load_htf_backtest(symbol, cfg, base_ts, p):
     htf = {}
+    if p["mode"] == "momentum":
+        return htf, None
     for tf in _mt_all_tfs(p):
         warm_bars = 3 * (p["n1"] + p["n2"] + p["sig"]) + 20
         src = _mt_source(tf)
@@ -7356,6 +7405,8 @@ async def _mt_load_htf_backtest(symbol, cfg, base_ts, p):
 
 async def _mt_load_htf_live(symbol, cfg, p):
     htf = {}
+    if p["mode"] == "momentum":
+        return htf
     now_ms = time.time() * 1000
     for tf in _mt_all_tfs(p):
         try:
@@ -7515,7 +7566,7 @@ async def mt_poll_loop(symbol):
                             debug_log(f"⏳ [{symbol}] MTF-Spread wartet: Daten der höheren Zeitebenen fehlen (Coin nicht auf Binance?)")
                     else:
                         base_ms = closed_ts[-1] - closed_ts[-2] if len(closed_ts) > 1 else _tf_ms(resolution)
-                        trend = _mt_trend_series(closed_ts, base_ms, htf, p)
+                        trend = _mt_trend_series(closed_ts, base_ms, htf, p, (closed_h, closed_l, closed_c))
                         buy, sell = compute_mt_signals(trend, p)
                         atr = compute_atr(closed_h, closed_l, closed_c, p["atr_len"]) or [0.0] * len(closed_c)
                         st["mt_trend"] = trend[-1]
@@ -7620,7 +7671,7 @@ async def run_mt_backtest(symbol, cfg, days, exclude_top_n=1):
     if err:
         return {"error": err}
     p = _mt_params(cfg)
-    if not p["blocks"]:
+    if not p["blocks"] and p["mode"] != "momentum":
         return {"error": "Kein Block aktiv - mindestens einen Block einschalten."}
     min_needed = _mt_warmup(p) + 10
     if not candles or len(candles[4]) < min_needed:
@@ -7630,7 +7681,7 @@ async def run_mt_backtest(symbol, cfg, days, exclude_top_n=1):
     if err:
         return {"error": err}
     base_ms = base_ts[1] - base_ts[0]
-    trend = await asyncio.to_thread(_mt_trend_series, base_ts, base_ms, htf, p)
+    trend = await asyncio.to_thread(_mt_trend_series, base_ts, base_ms, htf, p, (candles[2], candles[3], candles[4]))
     buy, sell = compute_mt_signals(trend, p)
     atr = compute_atr(candles[2], candles[3], candles[4], p["atr_len"]) or [0.0] * len(base_ts)
     trades = _simulate_mt_trades(candles, cfg, buy, sell, atr, _mt_warmup(p), p)
@@ -7653,10 +7704,10 @@ async def mt_chart_payload(symbol, ts, o, h, l, c, cfg, max_bars=1000):
     """Chart-Daten fuer das Bot-Dashboard im Modus mtf_spread: Kerzen, TREND % (statt der Wellenlinien), Buy-/Sell-Level
     und die Signale der Strategie (gleiche Funktionen wie Live-Loop/Backtest). None, wenn Daten der Zeitebenen fehlen."""
     p = _mt_params(cfg)
-    if not p["blocks"] or len(ts) < 3:
+    if (not p["blocks"] and p["mode"] != "momentum") or len(ts) < 3:
         return None
     htf = {}
-    for tf in _mt_all_tfs(p):
+    for tf in ([] if p["mode"] == "momentum" else _mt_all_tfs(p)):
         src = _mt_source(tf)
         d = await fetch_candles_binance_multi(symbol, src[0] if src else tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
         if not d:
@@ -7664,7 +7715,7 @@ async def mt_chart_payload(symbol, ts, o, h, l, c, cfg, max_bars=1000):
         d = tuple(d[:5])
         htf[tf] = _mt_resample_ms(d, _tf_ms(tf)) if src else d
     base_ms = ts[1] - ts[0]
-    trend = await asyncio.to_thread(_mt_trend_series, ts, base_ms, htf, p)
+    trend = await asyncio.to_thread(_mt_trend_series, ts, base_ms, htf, p, (h, l, c))
     buy, sell = compute_mt_signals(trend, p)
     n = len(c)
     off = max(0, n - max_bars)
@@ -7679,5 +7730,5 @@ async def mt_chart_payload(symbol, ts, o, h, l, c, cfg, max_bars=1000):
         if sell[i]:
             markers.append({"time": t, "kind": "short", "price": c[i]})
     last = next((x for x in reversed(trend) if x is not None), 0.0)
-    return {"candles": candles, "wt1": w1, "wt2": [], "markers": markers, "levels": ([p["red_below"], p["green_above"]] if p["signal_mode"] == "zone" else [p["buy_level"], p["sell_level"]]),
+    return {"candles": candles, "wt1": w1, "wt2": [], "markers": markers, "levels": ([p["mom_short"], p["mom_long"]] if p["mode"] == "momentum" else [p["red_below"], p["green_above"]] if p["signal_mode"] == "zone" else [p["buy_level"], p["sell_level"]]),
             "entry_mode": "mtf", "wt1v": round(last, 2), "wt2v": 0, "bars": n}
