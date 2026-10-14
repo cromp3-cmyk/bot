@@ -13,7 +13,7 @@ from bot_core import (
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reverse_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_scalp_trend, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
+    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_scalp_trend, handle_dv_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
@@ -21,6 +21,7 @@ from strategies import (
     liq_poll_loop, wa_poll_loop, load_binance_ban_state,
 )
 from pure_momentum import pm_poll_loop
+from dollar701 import dv_poll_loop
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
     handle_ct_index, handle_ct_status, handle_ct_watch, handle_ct_copy_toggle,
@@ -56,6 +57,7 @@ async def start_web_server():
     app.router.add_post("/api/gc/backtest", handle_gc_backtest)
     app.router.add_post("/api/gc/reset", handle_gc_reset)
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
+    app.router.add_post("/api/dv_mc", handle_dv_montecarlo)
     app.router.add_post("/api/er_sweep", handle_er_sweep)
     app.router.add_post("/api/ab_signal_sweep", handle_ab_signal_sweep)
     app.router.add_post("/api/liq_sweep", handle_liq_sweep)
@@ -139,6 +141,7 @@ async def main():
         *[er_poll_loop(s) for s in SYMBOLS],
         *[mt_poll_loop(s) for s in SYMBOLS],
         *[pm_poll_loop(s) for s in SYMBOLS],
+        *[dv_poll_loop(s) for s in SYMBOLS],
         *[rsi_poll_loop(s) for s in SYMBOLS],
         *[mvwap_poll_loop(s) for s in SYMBOLS],
         *[grid_scalp_poll_loop(s) for s in SYMBOLS],

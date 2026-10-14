@@ -417,6 +417,14 @@ def default_config():
         "pm_tp_usd": float(os.getenv("PM_TP_USD", "5.0")),   # fester TP: Gewinn der Position in $ (0 = aus)
         "pm_sl_cooldown_seconds": float(os.getenv("PM_SL_COOLDOWN_SECONDS", "30.0")),
 
+        # ===== Dollar701 SuperTrend (entry_mode dollar701) =====
+        "dv_resolution": os.getenv("DV_RESOLUTION", "5m"),
+        "dv_sens": float(os.getenv("DV_SENS", "7.0")),   # Sensitivity 1-15, 2 Nachkommastellen (Perioden=(S+1)*10, Multiplikator=(S+1)/2)
+        "dv_direction_mode": os.getenv("DV_DIRECTION_MODE", "both"),
+        "dv_sl_usd": float(os.getenv("DV_SL_USD", "5.0")),
+        "dv_tp_usd": float(os.getenv("DV_TP_USD", "5.0")),
+        "dv_sl_cooldown_seconds": float(os.getenv("DV_SL_COOLDOWN_SECONDS", "30.0")),
+
         # ================= RSI Signal =================
         # Reine Handelsidee: RSI < oversold -> long, RSI > overbought -> short. Ausstieg identisch
         # zu Al-Shatris Wechsel-System (Gegen-Signal dreht die Position, optionaler $-SL,
@@ -751,6 +759,7 @@ PERSISTED_STATE_KEYS = [
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
     "er_sl_price", "er_tp1_price", "er_tp2_price", "er_tp3_price", "er_tp1_done", "er_tp2_done", "er_sl_cooldown_until",
     "pm_sl_price", "pm_tp_price", "pm_sl_cooldown_until",
+    "dv_sl_price", "dv_tp_price", "dv_sl_cooldown_until",
     "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
@@ -1635,6 +1644,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
       <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + ATR-SL/TP)</option>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
+      <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="ema_rsi">EMA + RSI (Smart Money Zone Tracker: Schluss über/unter EMA + RSI über/unter Mittellinie, Swing-SL, TP1/TP2/TP3 mit Teilverkäufen)</option>
       <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
       <option value="mvwap_mf_signal">Multi-VWAP Money-Flow Signal (VWAP+MFI/CMF-Oszillator dreht Richtung, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
@@ -1961,6 +1971,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="pure_momentum"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="pm_sl_usd"></div>
   <div data-mode="pure_momentum"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="pm_tp_usd"></div>
   <div data-mode="pure_momentum"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="pm_sl_cooldown_seconds"></div>
+
+  <div data-mode="dollar701" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📈 <b>Dollar701 SuperTrend</b>: Buy/Sell-Signal des Dollar701-Indikators. SuperTrend auf hl2 mit ATR-Länge = (Sensitivity+1)×10 und Multiplikator = (Sensitivity+1)/2. <b>Signal bei jedem Trendwechsel</b> (rot→grün = Long, grün→rot = Short) auf der geschlossenen Kerze. Ausstieg: Gegen-Signal dreht die Position, dazu optional fester $-SL und fester $-TP. Unten im Backtest-Bereich: Monte-Carlo-Test über Sensitivity × SL × TP.
+  </div>
+  <div data-mode="dollar701"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="dv_resolution">
+      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="45s">45 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="dv_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="dollar701"><label>Sensitivity (1,00 - 15,00)</label><input type="number" step="0.01" min="1" max="15" id="dv_sens"></div>
+  <div data-mode="dollar701"><label>Richtung</label>
+    <select class="cfg" id="dv_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
+  </div>
+  <div data-mode="dollar701"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="dv_sl_usd"></div>
+  <div data-mode="dollar701"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="dv_tp_usd"></div>
+  <div data-mode="dollar701"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="dv_sl_cooldown_seconds"></div>
 
   <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📶 <b>RSI Signal</b>: Long, sobald der RSI unter die Überverkauft-Schwelle fällt, Short sobald er über die Überkauft-Schwelle steigt. Ausstieg wie bei Al-Shatris Wechsel-Modus - der erste Long bleibt offen, bis das Gegen-Signal kommt, das dreht dann direkt. Optional ein fester Dollar-SL und "SL auf Einstieg bei Gewinn". Darunter drei unabhängig zuschaltbare Filter aus dem gemeinsamen Filter-Baukasten (auch für künftige Strategien wiederverwendbar).
@@ -3056,6 +3093,65 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="dollar701" style="display:none;">
+<h2 class="section-title">🎲 Dollar701 Monte-Carlo (Sensitivity × Stop-Loss $ × Take-Profit $)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Zieht zufällige Kombinationen aus den Bereichen unten (Sensitivity mit 2 Nachkommastellen, SL/TP in 0,1-$-Schritten) und
+    simuliert jede auf denselben Kerzen. Zeitrahmen, Richtung, Cooldown, Margin und Hebel kommen aus den Einstellungen oben.
+    Wichtig: einen sehr guten Einzelwert nicht blind übernehmen – die Spalte „PnL ohne beste N“ und die Trade-Zahl zeigen, ob er stabil ist.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="dv-mc-days" value="30" style="width:90px;"></div>
+    <div><label>Durchläufe (max. 2000)</label><input type="number" step="50" min="1" max="2000" id="dv-mc-runs" value="300" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="dv-mc-seed" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="dv-mc-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Sensitivity von</label><input type="number" step="0.01" min="1" max="15" id="dv-mc-sens-min" value="3" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.01" min="1" max="15" id="dv-mc-sens-max" value="12" style="width:80px;"></div>
+    <div><label>Stop-Loss ($) von</label><input type="number" step="0.1" min="0.1" id="dv-mc-sl-min" value="1" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="dv-mc-sl-max" value="10" style="width:80px;"></div>
+    <div><label>Take-Profit ($) von</label><input type="number" step="0.1" min="0.1" id="dv-mc-tp-min" value="1" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="dv-mc-tp-max" value="10" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-dv-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="dv-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="dv-mc-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="dv-mc-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="dv_sens">Sensitivity ⇅</th>
+      <th class="sortable" data-key="dv_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="dv_tp_usd">TP $ ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="dv-mc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="dv-mc-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="dv_sens">Sensitivity ⇅</th>
+      <th class="sortable" data-key="dv_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="dv_tp_usd">TP $ ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="liquidity_waves" style="display:none;">
 <h2 class="section-title">🎲 Liquidity Waves Sweep (Einstiegs-Schwelle × Levels keep alive)</h2>
 <div class="panel-card">
@@ -3724,7 +3820,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -3978,6 +4074,68 @@ const liqSweepRowHtml = (r) => `
   </tr>`;
 const renderLiqSweepResults = makeSortableTable('liq-sweep-results-table', () => window.liqSweepResultsData, liqSweepRowHtml);
 const renderLiqSweepWorst = makeSortableTable('liq-sweep-worst-table', () => window.liqSweepWorstData, liqSweepRowHtml);
+
+window.dvMcResultsData = [];
+window.dvMcWorstData = [];
+const dvMcRowHtml = (r) => `
+  <tr>
+    <td>${r.dv_sens}</td>
+    <td>${r.dv_sl_usd}</td>
+    <td>${r.dv_tp_usd}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+  </tr>`;
+const renderDvMcResults = makeSortableTable('dv-mc-results-table', () => window.dvMcResultsData, dvMcRowHtml);
+const renderDvMcWorst = makeSortableTable('dv-mc-worst-table', () => window.dvMcWorstData, dvMcRowHtml);
+
+document.getElementById('btn-dv-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-dv-mc');
+  const statusEl = document.getElementById('dv-mc-status');
+  const tables = {top: document.getElementById('dv-mc-results-table'), worst: document.getElementById('dv-mc-worst-table')};
+  const titles = {top: document.getElementById('dv-mc-top-title'), worst: document.getElementById('dv-mc-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const num = (id) => parseFloat(document.getElementById(id).value);
+  const payload = {
+    days: parseInt(document.getElementById('dv-mc-days').value) || 30,
+    runs: parseInt(document.getElementById('dv-mc-runs').value) || 300,
+    seed: document.getElementById('dv-mc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('dv-mc-exclude-top-n').value) || 0,
+    sens_min: num('dv-mc-sens-min'), sens_max: num('dv-mc-sens-max'),
+    sl_min: num('dv-mc-sl-min'), sl_max: num('dv-mc-sl-max'),
+    tp_min: num('dv-mc-tp-min'), tp_max: num('dv-mc-tp-max'),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste die Zufalls-Kombinationen...`;
+  try {
+    const res = await fetch(`/api/dv_mc?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - ${data.profitable_pct}% der Kombinationen im Plus, Median ${data.median_pnl_usd} $, bester ${data.best_pnl_usd} $, schlechtester ${data.worst_pnl_usd} $. Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.dvMcResultsData = data.results || [];
+      window.dvMcWorstData = data.worst_results || [];
+      renderDvMcResults();
+      renderDvMcWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
 
 document.getElementById('btn-wa-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-wa-sweep');
@@ -4482,6 +4640,13 @@ async function refresh() {
     document.getElementById('pm_tp_usd').value = data.config.pm_tp_usd;
     document.getElementById('pm_sl_cooldown_seconds').value = data.config.pm_sl_cooldown_seconds;
 
+    setResolutionField('dv_resolution', data.config.dv_resolution);
+    document.getElementById('dv_sens').value = data.config.dv_sens;
+    document.getElementById('dv_direction_mode').value = data.config.dv_direction_mode || 'both';
+    document.getElementById('dv_sl_usd').value = data.config.dv_sl_usd;
+    document.getElementById('dv_tp_usd').value = data.config.dv_tp_usd;
+    document.getElementById('dv_sl_cooldown_seconds').value = data.config.dv_sl_cooldown_seconds;
+
     setResolutionField('rsi_resolution', data.config.rsi_resolution);
     document.getElementById('rsi_length').value = data.config.rsi_length;
     document.getElementById('rsi_oversold').value = data.config.rsi_oversold;
@@ -4899,6 +5064,12 @@ function buildConfigPayload() {
     pm_sl_usd: parseFloat(document.getElementById('pm_sl_usd').value) || 0,
     pm_tp_usd: parseFloat(document.getElementById('pm_tp_usd').value) || 0,
     pm_sl_cooldown_seconds: parseFloat(document.getElementById('pm_sl_cooldown_seconds').value),
+    dv_resolution: getResolutionField('dv_resolution'),
+    dv_sens: parseFloat(document.getElementById('dv_sens').value) || 7,
+    dv_direction_mode: document.getElementById('dv_direction_mode').value,
+    dv_sl_usd: parseFloat(document.getElementById('dv_sl_usd').value) || 0,
+    dv_tp_usd: parseFloat(document.getElementById('dv_tp_usd').value) || 0,
+    dv_sl_cooldown_seconds: parseFloat(document.getElementById('dv_sl_cooldown_seconds').value),
     rsi_resolution: getResolutionField('rsi_resolution'),
     rsi_length: parseInt(document.getElementById('rsi_length').value),
     rsi_oversold: parseFloat(document.getElementById('rsi_oversold').value),
@@ -5267,6 +5438,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_sl_usd", "dv_tp_usd", "dv_sl_cooldown_seconds",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
@@ -5379,9 +5551,10 @@ async def handle_wa_live_chart(request):
     is_wa = cfg.get("entry_mode") == "wellenanker"
     is_mt = cfg.get("entry_mode") == "mtf_spread"
     is_pm = cfg.get("entry_mode") == "pure_momentum"
+    is_dv = cfg.get("entry_mode") == "dollar701"
     tf = request.query.get("tf", "")
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
-        tf = cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else "5m")
+        tf = cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
             tf = "5m"
     data = await fetch_candles_binance_multi(symbol, tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
@@ -5391,7 +5564,10 @@ async def handle_wa_live_chart(request):
     if len(c) < n1 + n2 + sl + 21:
         return web.json_response({"ok": False, "reason": "lädt noch … (zu wenig Kerzen)"})
     payload = None
-    if is_pm:
+    if is_dv:
+        from dollar701 import dv_chart_payload
+        payload = await asyncio.to_thread(dv_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_pm:
         from pure_momentum import pm_chart_payload
         payload = await asyncio.to_thread(pm_chart_payload, ts, o, h, l, c, cfg, 1000)
     elif is_mt:
@@ -5630,6 +5806,40 @@ async def handle_wa_sweep(request):
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] Wellenanker-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_dv_montecarlo(request):
+    """Monte-Carlo-Backtest fuer Dollar701: zufaellige Kombinationen aus Sensitivity x SL x TP, siehe run_dv_montecarlo."""
+    from dollar701 import run_dv_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        runs = max(1, min(2000, int(body.get("runs", 300))))
+        sens_min = float(body.get("sens_min", 3.0)); sens_max = float(body.get("sens_max", 12.0))
+        sl_min = float(body.get("sl_min", 1.0)); sl_max = float(body.get("sl_max", 10.0))
+        tp_min = float(body.get("tp_min", 1.0)); tp_max = float(body.get("tp_max", 10.0))
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(
+            run_dv_montecarlo(symbol, cfg, days, runs, sens_min, sens_max, sl_min, sl_max, tp_min, tp_max, exclude_top_n, seed),
+            timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Dollar701-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
 
