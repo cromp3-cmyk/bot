@@ -177,6 +177,7 @@ def default_config():
         # Binance USD-M Perpetual (fapi.binance.com) statt Spot - dieselben Symbolnamen, aber
         # eigener (leicht abweichender) Kurs. Wichtig zum 1:1-Vergleich mit TradingView-Charts
         # auf ".P"-Symbolen (z.B. "BTCUSDT.P"), die selbst auf dem Perpetual-Kurs basieren.
+        "trade_account": os.getenv("TRADE_ACCOUNT", "main"),   # "main" = Hauptkonto, "sub" = Unterkonto (GRID_ACCOUNT_INDEX/GRID_PRIVATE_KEY wie beim Grid)
         "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "grid_v2", "grid_scalp", "ab_breakout" (weitere folgen bei Bedarf)
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
@@ -817,6 +818,11 @@ async def state_persist_loop():
 
 
 # ========== LIGHTER CLIENT ==========
+def account_role(cfg):
+    """Config 'trade_account' -> role fuer get_lighter_client: 'sub' (Unterkonto) oder None (Hauptkonto)."""
+    return "sub" if (cfg or {}).get("trade_account") == "sub" else None
+
+
 def get_lighter_client(role=None):
     """role="grid": Grid-Bot-Loop (grid_scalp/maker_scalp/grid_classic) laeuft auf einem Unterkonto, wenn
     GRID_ACCOUNT_INDEX + GRID_PRIVATE_KEY (+ GRID_API_KEY_INDEX) gesetzt sind. Sonst Hauptkonto wie bisher."""
@@ -825,7 +831,15 @@ def get_lighter_client(role=None):
         API_KEY_INDEX = int(os.getenv("API_KEY_INDEX", "5"))
         PRIVATE_KEY = os.getenv("PRIVATE_KEY")
         ACCOUNT_INDEX = int(os.getenv("ACCOUNT_INDEX", "50960"))
-        if role == "grid" and os.getenv("GRID_ACCOUNT_INDEX") and os.getenv("GRID_PRIVATE_KEY"):
+        if role == "sub":
+            # Unterkonto ausdruecklich gewaehlt: NIEMALS stillschweigend auf das Hauptkonto ausweichen
+            if not (os.getenv("GRID_ACCOUNT_INDEX") and os.getenv("GRID_PRIVATE_KEY")):
+                debug_log("❌ Unterkonto gewählt, aber GRID_ACCOUNT_INDEX / GRID_PRIVATE_KEY sind nicht gesetzt - keine Order (Hauptkonto wird bewusst NICHT genutzt)")
+                return None
+            ACCOUNT_INDEX = int(os.getenv("GRID_ACCOUNT_INDEX"))
+            PRIVATE_KEY = os.getenv("GRID_PRIVATE_KEY")
+            API_KEY_INDEX = int(os.getenv("GRID_API_KEY_INDEX", str(API_KEY_INDEX)))
+        elif role == "grid" and os.getenv("GRID_ACCOUNT_INDEX") and os.getenv("GRID_PRIVATE_KEY"):
             ACCOUNT_INDEX = int(os.getenv("GRID_ACCOUNT_INDEX"))
             PRIVATE_KEY = os.getenv("GRID_PRIVATE_KEY")
             API_KEY_INDEX = int(os.getenv("GRID_API_KEY_INDEX", str(API_KEY_INDEX)))
@@ -1034,7 +1048,7 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
     avg_entry_before = st["avg_entry_price"] if is_add_on else None  # siehe Nachkauf-Bug unten
 
     if not cfg["dry_run"]:
-        client = get_lighter_client()
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
         if client is None:
             debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Order übersprungen")
             return False
@@ -1182,7 +1196,7 @@ async def _execute_reverse_locked(symbol, price, reason, size_multiplier=None):
     old_base = int(round(old_size * precision))
 
     if not cfg["dry_run"]:
-        client = get_lighter_client()
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
         if client is None:
             debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Reverse übersprungen (Position bleibt wie sie ist!)")
             return False
@@ -1232,7 +1246,7 @@ async def _reverse_confirm(symbol, target, avg_old):
     Bot-State nachtragen (der Zielpreis war nur eine Schaetzung). Schlaegt das fehl, bleibt der Zielpreis stehen."""
     try:
         await asyncio.sleep(1.0)
-        client = get_lighter_client()
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
         if client is None:
             return
         try:
@@ -1282,7 +1296,7 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
     exit_price_for_log = price
 
     if not cfg["dry_run"]:
-        client = get_lighter_client()
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
         if client is None:
             debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Teil-Exit übersprungen")
             return False
@@ -1361,7 +1375,7 @@ async def _execute_exit_locked(symbol, price, reason):
     exit_price_for_log = price
 
     if not cfg["dry_run"]:
-        client = get_lighter_client()
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
         if client is None:
             debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Exit übersprungen (Position bleibt offen!)")
             return
@@ -1632,6 +1646,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div><label>Margin (USDC)</label><input type="number" step="any" id="margin"></div>
 
   <div><label>Hebel</label><input type="number" step="1" id="leverage"></div>
+  <div><label>Konto (für Signal-Strategien; das Grid hat seine eigene Einstellung)</label>
+    <select class="cfg" id="trade_account"><option value="main">Hauptkonto</option><option value="sub">Unterkonto (GRID_ACCOUNT_INDEX / GRID_PRIVATE_KEY aus Render)</option></select>
+  </div>
   <div><label>Strategie</label>
     <select class="cfg" id="entry_mode">
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
@@ -2860,6 +2877,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -2874,6 +2892,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -2888,6 +2907,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -2943,6 +2963,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -2958,6 +2979,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -2999,6 +3021,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -3013,6 +3036,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -3071,6 +3095,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -3087,6 +3112,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -3131,6 +3157,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -3146,6 +3173,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -3189,6 +3217,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -3203,6 +3232,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
@@ -3949,6 +3979,7 @@ const abSigSweepRowHtml = (r) => `
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
+    ${applyBtn({ab_lookback: r.ab_lookback, ab_fast_len: r.ab_fast_len, ab_slow_len: r.ab_slow_len})}
   </tr>`;
 const renderAbSigSweepResults = makeSortableTable('ab-sig-sweep-results-table', () => window.abSigSweepResultsData, abSigSweepRowHtml);
 const renderAbSigSweepWorst = makeSortableTable('ab-sig-sweep-worst-table', () => window.abSigSweepWorstData, abSigSweepRowHtml);
@@ -4010,6 +4041,7 @@ const erSweepRowHtml = (r) => `
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
+    ${applyBtn({er_ema_len: r.er_ema_len, er_rsi_len: r.er_rsi_len})}
   </tr>`;
 const renderErSweepResults = makeSortableTable('er-sweep-results-table', () => window.erSweepResultsData, erSweepRowHtml);
 const renderErSweepWorst = makeSortableTable('er-sweep-worst-table', () => window.erSweepWorstData, erSweepRowHtml);
@@ -4071,6 +4103,7 @@ const liqSweepRowHtml = (r) => `
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
+    ${applyBtn({liq_entry_threshold_pct: r.liq_entry_threshold_pct, liq_max_levels: r.liq_max_levels})}
   </tr>`;
 const renderLiqSweepResults = makeSortableTable('liq-sweep-results-table', () => window.liqSweepResultsData, liqSweepRowHtml);
 const renderLiqSweepWorst = makeSortableTable('liq-sweep-worst-table', () => window.liqSweepWorstData, liqSweepRowHtml);
@@ -4088,6 +4121,7 @@ const dvMcRowHtml = (r) => `
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
+    ${applyBtn({dv_sens: r.dv_sens, dv_sl_usd: r.dv_sl_usd, dv_tp_usd: r.dv_tp_usd})}
   </tr>`;
 const renderDvMcResults = makeSortableTable('dv-mc-results-table', () => window.dvMcResultsData, dvMcRowHtml);
 const renderDvMcWorst = makeSortableTable('dv-mc-worst-table', () => window.dvMcWorstData, dvMcRowHtml);
@@ -4202,6 +4236,7 @@ const waSweepRowHtml = (r) => `
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
+    ${applyBtn({[document.getElementById('wa_entry_mode').value === 'level' ? 'wa_level' : 'wa_zone1']: r.wa_zone1, wa_level_line: r.wa_level_line, wa_max_nachkauf: r.wa_max_nachkauf, wa_sl_usd: r.wa_sl_usd})}
   </tr>`;
 const renderWaSweepResults = makeSortableTable('wa-sweep-results-table', () => window.waSweepResultsData, waSweepRowHtml);
 const renderWaSweepWorst = makeSortableTable('wa-sweep-worst-table', () => window.waSweepWorstData, waSweepRowHtml);
@@ -4277,6 +4312,7 @@ const abSweepRowHtml = (r) => `
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
+    ${applyBtn({ab_trend_filter_resolution: r.ab_trend_filter_resolution, ab_trend_filter_multiplier: r.ab_trend_filter_multiplier})}
   </tr>`;
 const renderAbSweepBestTf = makeSortableTable('ab-sweep-best-tf-table', () => window.abSweepBestTfData, abSweepRowHtml);
 const renderAbSweepResults = makeSortableTable('ab-sweep-results-table', () => window.abSweepResultsData, abSweepRowHtml);
@@ -4550,6 +4586,7 @@ async function refresh() {
     document.getElementById('margin').value = data.config.margin;
     document.getElementById('leverage').value = data.config.leverage;
     document.getElementById('entry_mode').value = data.config.entry_mode;
+    document.getElementById('trade_account').value = data.config.trade_account || 'main';
     document.getElementById('ab_preset').value = data.config.ab_preset;
     setResolutionField('ab_resolution', data.config.ab_resolution);
     document.getElementById('ab_lookback').value = data.config.ab_lookback;
@@ -4976,6 +5013,7 @@ function buildConfigPayload() {
     margin: parseFloat(document.getElementById('margin').value),
     leverage: parseInt(document.getElementById('leverage').value),
     entry_mode: document.getElementById('entry_mode').value,
+    trade_account: document.getElementById('trade_account').value,
     ab_preset: document.getElementById('ab_preset').value,
     ab_resolution: getResolutionField('ab_resolution'),
     ab_lookback: parseInt(document.getElementById('ab_lookback').value),
@@ -5284,6 +5322,31 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   }
 });
 
+// --- Ergebnis einer Sweep-/Monte-Carlo-Zeile in die Einstellungen uebernehmen (nur das Formular fuellen, Speichern bleibt manuell) ---
+const applyBtn = (obj) => `<td><button type="button" class="apply-row" data-apply="${encodeURIComponent(JSON.stringify(obj))}" style="padding:4px 10px; font-size:12px; white-space:nowrap;">↩ Übernehmen</button></td>`;
+function applySweepRow(vals) {
+  let n = 0, first = null;
+  for (const [id, v] of Object.entries(vals)) {
+    const el = document.getElementById(id);
+    if (!el || v === undefined || v === null || v === '-') continue;
+    if (el.tagName === 'SELECT' && document.getElementById(id + '_custom_minutes')) setResolutionField(id, String(v));
+    else el.value = String(v);
+    el.style.outline = '2px solid #1fcf6e';
+    setTimeout(() => { el.style.outline = ''; }, 6000);
+    if (!first) first = el;
+    n++;
+  }
+  document.getElementById('config-form').dispatchEvent(new Event('change'));
+  window.formTouched = true;
+  if (first) first.scrollIntoView({behavior: 'smooth', block: 'center'});
+  showToast(n ? `↩ ${n} Werte in die Einstellungen übernommen (grün markiert) – jetzt „Speichern“ klicken.` : '⚠️ Keine passenden Felder gefunden.');
+}
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button.apply-row');
+  if (!btn) return;
+  try { applySweepRow(JSON.parse(decodeURIComponent(btn.dataset.apply))); } catch (e) { showToast('⚠️ Übernehmen fehlgeschlagen: ' + e); }
+});
+
 function showToast(msg) {
   let el = document.getElementById('save-toast');
   if (!el) {
@@ -5335,6 +5398,29 @@ document.getElementById('toggle-copytrading-global').addEventListener('change', 
   await loadGlobalSettings();
   refresh();
   setInterval(refresh, 6000);
+})();
+// --- Backtest- und Sweep-/Monte-Carlo-Bereiche aufklappbar (Zustand wird gemerkt, Standard: zugeklappt) ---
+(function() {
+  let state = {};
+  try { state = JSON.parse(localStorage.getItem('collapsed_sections') || '{}'); } catch (e) {}
+  document.querySelectorAll('h2.section-title').forEach(h => {
+    if (!/Backtest|Sweep|Monte-Carlo/.test(h.textContent)) return;
+    const card = h.nextElementSibling;
+    if (!card || !card.classList.contains('panel-card')) return;
+    const key = h.textContent.trim().slice(0, 40);
+    const chev = document.createElement('span');
+    chev.style.marginRight = '8px';
+    h.prepend(chev);
+    h.style.cursor = 'pointer';
+    const setOpen = (open) => { card.style.display = open ? '' : 'none'; chev.textContent = open ? '▾' : '▸'; };
+    setOpen(state[key] === true);
+    h.addEventListener('click', () => {
+      const open = card.style.display === 'none';
+      setOpen(open);
+      state[key] = open;
+      try { localStorage.setItem('collapsed_sections', JSON.stringify(state)); } catch (e) {}
+    });
+  });
 })();
 </script>
 </body>
@@ -5417,7 +5503,7 @@ async def handle_config_update(request):
         return web.json_response({"error": "unknown symbol"}, status=404)
     body = await request.json()
     cfg = BOTS[symbol]["config"]
-    for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_direction_mode", "grid_step_pct", "tp_step_pct",
+    for key in ["margin", "leverage", "trade_account", "entry_mode", "grid_mode", "grid_direction_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "grid_sl_enabled", "grid_sl_manual_usd",
                 "grid_anchor_follow_enabled", "grid_anchor_follow_pct", "grid_sl_cooldown_min",
                 "gs_step_notional_usd", "gs_max_levels", "gs_step_pct", "gs_tp_usd",
