@@ -4,23 +4,22 @@ pure_momentum.py - eigene Strategie "Pure Momentum Oscillator" (entry_mode "pure
 Portiert aus dem TradingView-Indikator "Pure Momentum Oscillator":
   cd  = 2*close - EMA(close, N)            (entspricht einer DEMA-artigen Entzerrung)
   cda = WMA(cd, N)                          (geglaettete Linie)
-  Momentum = (cda - cda[1]) / ATR(N)
+  Momentum = (cda - cda[1]) / ATR(N)        (ATR gehoert zur Indikator-Formel, kein SL/TP-Thema)
 Farbe: Momentum > Long-Schwelle = GRUEN, Momentum < Short-Schwelle = ROT, dazwischen bleibt die letzte Farbe.
 SIGNAL: bei JEDEM Farbwechsel auf der geschlossenen Kerze (gruen->rot = SELL, rot->gruen = BUY).
 Die erste Farbe nach dem Start setzt nur den Ausgangszustand (kein Signal).
-Ausstieg: "flip" (Gegen-Signal dreht die Position, optionaler ATR-SL) oder "plan" (ATR-SL + TP1/TP2/TP3 mit Teilverkaeufen).
-Die Handels-Ausfuehrung (Order, Teilverkauf, Backtest-Simulation) nutzt dieselben Bausteine wie die anderen Strategien.
+Ausstieg: Gegen-Signal dreht die Position; dazu optional fester Dollar-SL (Verlust der Position) und fester Dollar-TP
+(Gewinn der Position), jeweils 0 = aus. Kein ATR, kein Plan-Modus.
 """
 
 import asyncio
 import time
 import traceback
 
-from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_partial_exit
+from bot_core import BOTS, debug_log, execute_entry, execute_exit
 from strategies import (
-    SUB_MINUTE_RESOLUTIONS, get_seconds_candles, fetch_candles_binance_multi, _ema_series, compute_atr, _tf_ms,
-    summarize_backtest_trades, _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES,
-    _mt_plan_levels, _simulate_mt_trades,
+    SUB_MINUTE_RESOLUTIONS, get_seconds_candles, fetch_candles_binance_multi, _ema_series, compute_atr,
+    summarize_backtest_trades, _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
 )
 
 
@@ -28,15 +27,12 @@ def _pm_params(cfg):
     return {
         "len": max(2, int(cfg.get("pm_len", 45))),
         "long": float(cfg.get("pm_long", 0.05)), "short": float(cfg.get("pm_short", -0.05)),
-        "atr_len": max(1, int(cfg.get("pm_atr_len", 14))),
-        "sl_atr_mult": max(0.0, float(cfg.get("pm_sl_atr_mult", 2.0))),
-        "tp_mode": cfg.get("pm_tp_mode", "atr"), "tp_step_usd": float(cfg.get("pm_tp_step_usd", 10.0)),
-        "tp_step_atr_mult": float(cfg.get("pm_tp_step_atr_mult", 1.0)),
+        "sl_usd": max(0.0, float(cfg.get("pm_sl_usd", 5.0))), "tp_usd": max(0.0, float(cfg.get("pm_tp_usd", 5.0))),
     }
 
 
 def _pm_warmup(p):
-    return max(p["atr_len"], 3 * p["len"]) + 5
+    return 3 * p["len"] + 5
 
 
 def _wma_series(x, n):
@@ -81,69 +77,19 @@ def pm_signals(mom, p):
     return buy, sell
 
 
-def _pm_as_mt_cfg(cfg):
-    """Backtest-Simulation ist von der MTF-Strategie uebernommen und liest mt_*-Schluessel -> pm_* dorthin spiegeln."""
-    c2 = dict(cfg)
-    for k, v in cfg.items():
-        if k.startswith("pm_"):
-            c2["mt_" + k[3:]] = v
-    return c2
+def _pm_levels(direction, entry, size, p):
+    """Fester Dollar-SL/-TP -> Preise (None = aus). size = Coin-Menge der Position."""
+    if not size or size <= 0:
+        return None, None
+    sgn = 1 if direction == "long" else -1
+    sl = entry - sgn * p["sl_usd"] / size if p["sl_usd"] > 0 else None
+    tp = entry + sgn * p["tp_usd"] / size if p["tp_usd"] > 0 else None
+    return sl, tp
 
 
 def _pm_reset_state(st):
     st["pm_sl_price"] = None
-    st["pm_tp1_price"] = None
-    st["pm_tp2_price"] = None
-    st["pm_tp3_price"] = None
-    st["pm_tp1_done"] = False
-    st["pm_tp2_done"] = False
-
-
-async def _pm_load_htf_backtest(symbol, cfg, base_ts, p):
-    htf = {}
-    for tf in _pm_all_tfs(p):
-        warm_bars = 3 * (p["n1"] + p["n2"] + p["sig"]) + 20
-        src = _pm_source(tf)
-        if src:
-            src_tf, factor = src
-            period = -(-(warm_bars * factor - 20) // 5)
-            data, err = await _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, src_tf, period)
-            if err:
-                return None, err.replace("SuperTrend-Trendfilter-Zeiteinheit", "Pure Momentum-Zeiteinheit")
-            htf[tf] = _pm_resample_ms(data, _tf_ms(tf))
-        else:
-            period = -(-(warm_bars - 20) // 5)
-            data, err = await _fetch_trend_filter_backtest_candles(symbol, cfg, base_ts, tf, period)
-            if err:
-                return None, err.replace("SuperTrend-Trendfilter-Zeiteinheit", "Pure Momentum-Zeiteinheit")
-            htf[tf] = tuple(data[:5])
-    return htf, None
-
-
-async def _pm_load_htf_live(symbol, cfg, p):
-    htf = {}
-    now_ms = time.time() * 1000
-    for tf in _pm_all_tfs(p):
-        try:
-            src = _pm_source(tf)
-            if src:
-                d = await fetch_candles_binance_multi(symbol, src[0], count_back=min(1000, src[1] * 130), market_type=cfg.get("binance_market_type", "spot"))
-                d = _pm_resample_ms(d[:5], _tf_ms(tf)) if d else None
-            else:
-                d = await fetch_candles_binance_multi(symbol, tf, count_back=300, market_type=cfg.get("binance_market_type", "spot"))
-                d = tuple(d[:5]) if d else None
-        except Exception:
-            d = None
-        if not d or len(d[4]) < 5:
-            return None
-        ms = _tf_ms(tf)
-        keep = [i for i in range(len(d[0])) if d[0][i] + ms <= now_ms]   # nur geschlossene HTF-Kerzen
-        if len(keep) < 5:
-            return None
-        htf[tf] = tuple([x[i] for i in keep] for x in d)
-    return htf
-
-
+    st["pm_tp_price"] = None
 
 
 async def check_pm_sl_tp(symbol, price):
@@ -152,49 +98,23 @@ async def check_pm_sl_tp(symbol, price):
     if st["position"] is None or price is None:
         return
     pos = st["position"]
-    sl_price = st.get("pm_sl_price")
+    sl_price, tp_price = st.get("pm_sl_price"), st.get("pm_tp_price")
     if sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)):
-        reason = "SL-AUF-TP1" if st.get("pm_tp2_done") else ("BREAKEVEN" if st.get("pm_tp1_done") else "SL")
-        debug_log(f"🚪 [{symbol}] Pure Momentum {reason}: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, reason)
+        debug_log(f"🚪 [{symbol}] Pure Momentum SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, "SL")
         if st["position"] is None:
             st["pm_sl_cooldown_until"] = time.time() + cfg.get("pm_sl_cooldown_seconds", 30)
             _pm_reset_state(st)
         return
-    if cfg.get("pm_exit_mode", "flip") != "plan":
-        return
-    if not st.get("pm_tp1_done") and st.get("pm_tp1_price") is not None:
-        tp1 = st["pm_tp1_price"]
-        if (pos == "long" and price >= tp1) or (pos == "short" and price <= tp1):
-            if not await execute_partial_exit(symbol, price, cfg.get("pm_tp1_close_pct", 33) / 100, "TP1"):
-                return
-            st["pm_tp1_done"] = True
-            if cfg.get("pm_sl_to_breakeven_on_tp1", True) and st.get("avg_entry_price"):
-                st["pm_sl_price"] = st["avg_entry_price"]
-                debug_log(f"📡 [{symbol}] Pure Momentum TP1 erreicht - SL auf Break-Even")
-        else:
-            return
-    if not st.get("pm_tp2_done") and st.get("pm_tp2_price") is not None:
-        tp2 = st["pm_tp2_price"]
-        if (pos == "long" and price >= tp2) or (pos == "short" and price <= tp2):
-            if not await execute_partial_exit(symbol, price, cfg.get("pm_tp2_close_pct", 50) / 100, "TP2"):
-                return
-            st["pm_tp2_done"] = True
-            if cfg.get("pm_sl_to_tp1_on_tp2", True) and st.get("pm_tp1_price") is not None:
-                st["pm_sl_price"] = st["pm_tp1_price"]
-                debug_log(f"📡 [{symbol}] Pure Momentum TP2 erreicht - SL auf TP1")
-        else:
-            return
-    tp3 = st.get("pm_tp3_price")
-    if tp3 is not None and ((pos == "long" and price >= tp3) or (pos == "short" and price <= tp3)):
-        debug_log(f"🚪 [{symbol}] Pure Momentum TP3 (Rest): {pos.upper()} @ {price}")
-        await execute_exit(symbol, price, "TP3")
+    if tp_price is not None and ((pos == "long" and price >= tp_price) or (pos == "short" and price <= tp_price)):
+        debug_log(f"🎯 [{symbol}] Pure Momentum TP: {pos.upper()} @ {price} (Ziel war {round(tp_price, 4)})")
+        await execute_exit(symbol, price, "TP")
         if st["position"] is None:
             _pm_reset_state(st)
 
 
-async def check_pm_entry(symbol, buy_signal, sell_signal, price, atr_now):
-    """Einstieg auf der Signal-Kerze. Plan: nur wenn flach. Flip: Gegen-Signal schliesst und dreht."""
+async def check_pm_entry(symbol, buy_signal, sell_signal, price):
+    """Einstieg auf der Signal-Kerze (Farbwechsel). Gegen-Signal schliesst und dreht, gleiche Richtung wird ignoriert."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
@@ -208,19 +128,13 @@ async def check_pm_entry(symbol, buy_signal, sell_signal, price, atr_now):
         return
     target = "long" if buy_signal else "short"
     pos = st["position"]
-    flip = cfg.get("pm_exit_mode", "flip") == "flip"
     if pos is not None:
-        if not flip or pos == target:
+        if pos == target:
             return
     elif time.time() < st.get("pm_sl_cooldown_until", 0.0):
         return
-    p = _pm_params(cfg)
-    levels = _mt_plan_levels(target, price, atr_now, p, need_tp=not flip)
-    if levels is None:
-        debug_log(f"⚠️ [{symbol}] Pure Momentum Signal {target.upper()} @ {price} übersprungen: SL/TP-Abstand ungültig (ATR=0 oder Plan ohne SL)")
-        return
     if pos is not None:
-        debug_log(f"🔄 [{symbol}] Pure Momentum Wechsel: {pos.upper()} -> {target.upper()} @ {price}")
+        debug_log(f"🔄 [{symbol}] Pure Momentum Farbwechsel: {pos.upper()} -> {target.upper()} @ {price}")
         await execute_exit(symbol, price, "PM-FLIP")
         if st["position"] is not None:
             return
@@ -230,10 +144,8 @@ async def check_pm_entry(symbol, buy_signal, sell_signal, price, atr_now):
     if st["position"] is None:
         return
     _pm_reset_state(st)
-    sl, tp1, tp2, tp3 = levels
-    st["pm_sl_price"] = sl
-    if not flip:
-        st["pm_tp1_price"], st["pm_tp2_price"], st["pm_tp3_price"] = tp1, tp2, tp3
+    entry = st.get("avg_entry_price") or price
+    st["pm_sl_price"], st["pm_tp_price"] = _pm_levels(target, entry, st.get("total_coin_size") or 0, _pm_params(cfg))
 
 
 async def pm_poll_loop(symbol):
@@ -278,12 +190,11 @@ async def pm_poll_loop(symbol):
                 if closed_ts and len(closed_c) > min_needed and (last_processed_ts is None or closed_ts[-1] > last_processed_ts):
                     mom = await asyncio.to_thread(pm_momentum_series, closed_h, closed_l, closed_c, p["len"])
                     buy, sell = pm_signals(mom, p)
-                    atr = compute_atr(closed_h, closed_l, closed_c, p["atr_len"]) or [0.0] * len(closed_c)
                     st["pm_momentum"] = mom[-1]
                     if due_heartbeat:
                         last_heartbeat = now
                         debug_log(f"💓 [{symbol}] Pure Momentum aktiv: Momentum={None if mom[-1] is None else round(mom[-1], 3)}, "
-                                  f"Schwellen {p['short']}/{p['long']}, Ausstieg={cfg.get('pm_exit_mode', 'flip')}, Preis={closed_c[-1]}")
+                                  f"Schwellen {p['short']}/{p['long']}, SL=${p['sl_usd']} TP=${p['tp_usd']}, Preis={closed_c[-1]}")
                     if last_processed_ts is None:
                         new_indices = [len(closed_ts) - 1]
                     else:
@@ -291,13 +202,56 @@ async def pm_poll_loop(symbol):
                     for idx in new_indices:
                         price_i = st["last_price"] if (idx == len(closed_ts) - 1 and st["last_price"] is not None) else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
-                        await check_pm_entry(symbol, buy[idx], sell[idx], price_i, atr[idx])
+                        await check_pm_entry(symbol, buy[idx], sell[idx], price_i)
                 elif due_heartbeat and not closed_ts:
                     last_heartbeat = now
                     debug_log(f"⏳ [{symbol}] Pure Momentum wartet: keine Kerzen erhalten (Auflösung {resolution})")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Pure-Momentum-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         await asyncio.sleep(5)
+
+
+def _pm_simulate(candles, cfg, buy_sig, sell_sig, warmup, p):
+    """Backtest-Gegenstueck zu check_pm_entry/check_pm_sl_tp: Einstieg zum Schlusskurs der Signal-Kerze, SL/TP ab der
+    naechsten Kerze ueber Hoch/Tief (SL gewinnt bei Gleichzeitigkeit), Gegen-Signal dreht."""
+    ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
+    n = len(c)
+    margin, leverage = cfg["margin"], cfg["leverage"]
+    cooldown_ms = cfg.get("pm_sl_cooldown_seconds", 30) * 1000
+    mode = cfg.get("pm_direction_mode", "both")
+    position, trades, cool_until = None, [], None
+    for i in range(max(warmup, 1), n):
+        if position is not None:
+            pdir, entry, sl, tp = position["dir"], position["entry"], position["sl"], position["tp"]
+            if sl is not None and ((pdir == "long" and l[i] <= sl) or (pdir == "short" and h[i] >= sl)):
+                _bt_close_trade(trades, pdir, entry, sl, position["size"], i, position["entry_i"], "SL", ts=ts)
+                position = None
+                cool_until = ts[i] + cooldown_ms
+            elif tp is not None and ((pdir == "long" and h[i] >= tp) or (pdir == "short" and l[i] <= tp)):
+                _bt_close_trade(trades, pdir, entry, tp, position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
+        buy, sell = buy_sig[i], sell_sig[i]
+        if mode == "long_only":
+            sell = False
+        elif mode == "short_only":
+            buy = False
+        if buy == sell:
+            continue
+        target = "long" if buy else "short"
+        if position is not None and position["dir"] == target:
+            continue
+        price = c[i]
+        if position is not None:
+            _bt_close_trade(trades, position["dir"], position["entry"], price, position["size"], i, position["entry_i"], "PM-FLIP", ts=ts)
+            position = None
+        elif cool_until is not None and ts[i] < cool_until:
+            continue
+        size = (margin * leverage) / price
+        sl, tp = _pm_levels(target, price, size, p)
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl": sl, "tp": tp}
+    if position is not None:
+        _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
+    return trades
 
 
 async def run_pm_backtest(symbol, cfg, days, exclude_top_n=1):
@@ -315,8 +269,7 @@ async def run_pm_backtest(symbol, cfg, days, exclude_top_n=1):
     base_ts = candles[0]
     mom = await asyncio.to_thread(pm_momentum_series, candles[2], candles[3], candles[4], p["len"])
     buy, sell = pm_signals(mom, p)
-    atr = compute_atr(candles[2], candles[3], candles[4], p["atr_len"]) or [0.0] * len(base_ts)
-    trades = _simulate_mt_trades(candles, _pm_as_mt_cfg(cfg), buy, sell, atr, _pm_warmup(p), p)
+    trades = _pm_simulate(candles, cfg, buy, sell, _pm_warmup(p), p)
     stats = summarize_backtest_trades(trades, exclude_top_n)
     actual_days = (base_ts[-1] - base_ts[0]) / 86_400_000
     return {

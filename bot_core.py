@@ -413,16 +413,8 @@ def default_config():
         "pm_long": float(os.getenv("PM_LONG", "0.05")),
         "pm_short": float(os.getenv("PM_SHORT", "-0.05")),
         "pm_direction_mode": os.getenv("PM_DIRECTION_MODE", "both"),
-        "pm_exit_mode": os.getenv("PM_EXIT_MODE", "flip"),
-        "pm_atr_len": int(os.getenv("PM_ATR_LEN", "14")),
-        "pm_sl_atr_mult": float(os.getenv("PM_SL_ATR_MULT", "2.0")),
-        "pm_tp_mode": os.getenv("PM_TP_MODE", "atr"),
-        "pm_tp_step_atr_mult": float(os.getenv("PM_TP_STEP_ATR_MULT", "1.0")),
-        "pm_tp_step_usd": float(os.getenv("PM_TP_STEP_USD", "10.0")),
-        "pm_tp1_close_pct": float(os.getenv("PM_TP1_CLOSE_PCT", "33.0")),
-        "pm_tp2_close_pct": float(os.getenv("PM_TP2_CLOSE_PCT", "50.0")),
-        "pm_sl_to_breakeven_on_tp1": os.getenv("PM_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
-        "pm_sl_to_tp1_on_tp2": os.getenv("PM_SL_TO_TP1_ON_TP2", "true").lower() == "true",
+        "pm_sl_usd": float(os.getenv("PM_SL_USD", "5.0")),   # fester SL: Verlust der Position in $ (0 = aus)
+        "pm_tp_usd": float(os.getenv("PM_TP_USD", "5.0")),   # fester TP: Gewinn der Position in $ (0 = aus)
         "pm_sl_cooldown_seconds": float(os.getenv("PM_SL_COOLDOWN_SECONDS", "30.0")),
 
         # ================= RSI Signal =================
@@ -758,7 +750,7 @@ PERSISTED_STATE_KEYS = [
     "gc_lots", "gc_prev", "gc_range", "gc_sig", "gc_realized", "gc_cycles", "gc_stopped", "gc_sim", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
     "er_sl_price", "er_tp1_price", "er_tp2_price", "er_tp3_price", "er_tp1_done", "er_tp2_done", "er_sl_cooldown_until",
-    "pm_sl_price", "pm_tp1_price", "pm_tp2_price", "pm_tp3_price", "pm_tp1_done", "pm_tp2_done", "pm_sl_cooldown_until",
+    "pm_sl_price", "pm_tp_price", "pm_sl_cooldown_until",
     "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
@@ -1942,7 +1934,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="mtf_spread"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mt_sl_cooldown_seconds"></div>
 
   <div data-mode="pure_momentum" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🟢🔴 <b>Pure Momentum Oscillator</b>: Momentum = Änderung der geglätteten Linie geteilt durch den ATR. Über der Long-Schwelle werden die Kerzen <b>grün</b>, unter der Short-Schwelle <b>rot</b>, dazwischen bleibt die letzte Farbe. <b>Signal bei jedem Farbwechsel</b> (rot→grün = Long, grün→rot = Short) auf der geschlossenen Kerze. Ausstieg: Gegen-Signal dreht (optional ATR-SL) oder Plan mit TP1/TP2/TP3.
+    🟢🔴 <b>Pure Momentum Oscillator</b>: Momentum = Änderung der geglätteten Linie geteilt durch den ATR. Über der Long-Schwelle werden die Kerzen <b>grün</b>, unter der Short-Schwelle <b>rot</b>, dazwischen bleibt die letzte Farbe. <b>Signal bei jedem Farbwechsel</b> (rot→grün = Long, grün→rot = Short) auf der geschlossenen Kerze. Ausstieg: Gegen-Signal (Farbwechsel) dreht die Position, dazu optional fester $-SL und fester $-TP.
   </div>
   <div data-mode="pure_momentum"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="pm_resolution">
@@ -1966,24 +1958,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="pure_momentum"><label>Richtung</label>
     <select class="cfg" id="pm_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
   </div>
-  <div data-mode="pure_momentum"><label>Ausstieg</label>
-    <select class="cfg" id="pm_exit_mode"><option value="flip">Wechsel (Gegen-Signal dreht die Position, optionaler ATR-SL)</option><option value="plan">Plan (ATR-SL + TP1/TP2/TP3 mit Teilverkäufen, Gegen-Signal ignoriert)</option></select>
-  </div>
-  <div data-mode="pure_momentum"><label>ATR-Periode</label><input type="number" step="1" min="1" id="pm_atr_len"></div>
-  <div data-mode="pure_momentum"><label>SL: ATR-Multiplikator (0 = kein SL, nur im Wechsel-Modus erlaubt)</label><input type="number" step="0.1" min="0" id="pm_sl_atr_mult"></div>
-  <div data-mode="pure_momentum" data-requires="pm_exit_mode" data-requires-value="plan"><label>TP-Schritt</label>
-    <select class="cfg" id="pm_tp_mode"><option value="atr">ATR-Vielfaches</option><option value="fixed">Fester Preisabstand</option></select>
-  </div>
-  <div data-mode="pure_momentum" data-requires="pm_exit_mode" data-requires-value="plan"><label>Schritt: ATR-Multiplikator</label><input type="number" step="0.1" min="0.1" id="pm_tp_step_atr_mult"></div>
-  <div data-mode="pure_momentum" data-requires="pm_exit_mode" data-requires-value="plan"><label>Schritt: fester Preisabstand ($)</label><input type="number" step="any" min="0" id="pm_tp_step_usd"></div>
-  <div data-mode="pure_momentum" data-requires="pm_exit_mode" data-requires-value="plan"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="pm_tp1_close_pct"></div>
-  <div data-mode="pure_momentum" data-requires="pm_exit_mode" data-requires-value="plan"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="pm_tp2_close_pct"></div>
-  <div data-mode="pure_momentum" data-requires="pm_exit_mode" data-requires-value="plan"><label>SL auf Break-Even bei TP1</label>
-    <select class="cfg" id="pm_sl_to_breakeven_on_tp1"><option value="true">An</option><option value="false">Aus</option></select>
-  </div>
-  <div data-mode="pure_momentum" data-requires="pm_exit_mode" data-requires-value="plan"><label>SL auf TP1 bei TP2</label>
-    <select class="cfg" id="pm_sl_to_tp1_on_tp2"><option value="true">An</option><option value="false">Aus</option></select>
-  </div>
+  <div data-mode="pure_momentum"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="pm_sl_usd"></div>
+  <div data-mode="pure_momentum"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="pm_tp_usd"></div>
   <div data-mode="pure_momentum"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="pm_sl_cooldown_seconds"></div>
 
   <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -4502,16 +4478,8 @@ async function refresh() {
     document.getElementById('pm_long').value = data.config.pm_long;
     document.getElementById('pm_short').value = data.config.pm_short;
     document.getElementById('pm_direction_mode').value = data.config.pm_direction_mode || 'both';
-    document.getElementById('pm_exit_mode').value = data.config.pm_exit_mode || 'flip';
-    document.getElementById('pm_atr_len').value = data.config.pm_atr_len;
-    document.getElementById('pm_sl_atr_mult').value = data.config.pm_sl_atr_mult;
-    document.getElementById('pm_tp_mode').value = data.config.pm_tp_mode || 'atr';
-    document.getElementById('pm_tp_step_atr_mult').value = data.config.pm_tp_step_atr_mult;
-    document.getElementById('pm_tp_step_usd').value = data.config.pm_tp_step_usd;
-    document.getElementById('pm_tp1_close_pct').value = data.config.pm_tp1_close_pct;
-    document.getElementById('pm_tp2_close_pct').value = data.config.pm_tp2_close_pct;
-    document.getElementById('pm_sl_to_breakeven_on_tp1').value = String(data.config.pm_sl_to_breakeven_on_tp1);
-    document.getElementById('pm_sl_to_tp1_on_tp2').value = String(data.config.pm_sl_to_tp1_on_tp2);
+    document.getElementById('pm_sl_usd').value = data.config.pm_sl_usd;
+    document.getElementById('pm_tp_usd').value = data.config.pm_tp_usd;
     document.getElementById('pm_sl_cooldown_seconds').value = data.config.pm_sl_cooldown_seconds;
 
     setResolutionField('rsi_resolution', data.config.rsi_resolution);
@@ -4928,16 +4896,8 @@ function buildConfigPayload() {
     pm_long: parseFloat(document.getElementById('pm_long').value),
     pm_short: parseFloat(document.getElementById('pm_short').value),
     pm_direction_mode: document.getElementById('pm_direction_mode').value,
-    pm_exit_mode: document.getElementById('pm_exit_mode').value,
-    pm_atr_len: parseInt(document.getElementById('pm_atr_len').value),
-    pm_sl_atr_mult: parseFloat(document.getElementById('pm_sl_atr_mult').value),
-    pm_tp_mode: document.getElementById('pm_tp_mode').value,
-    pm_tp_step_atr_mult: parseFloat(document.getElementById('pm_tp_step_atr_mult').value),
-    pm_tp_step_usd: parseFloat(document.getElementById('pm_tp_step_usd').value),
-    pm_tp1_close_pct: parseFloat(document.getElementById('pm_tp1_close_pct').value),
-    pm_tp2_close_pct: parseFloat(document.getElementById('pm_tp2_close_pct').value),
-    pm_sl_to_breakeven_on_tp1: document.getElementById('pm_sl_to_breakeven_on_tp1').value === 'true',
-    pm_sl_to_tp1_on_tp2: document.getElementById('pm_sl_to_tp1_on_tp2').value === 'true',
+    pm_sl_usd: parseFloat(document.getElementById('pm_sl_usd').value) || 0,
+    pm_tp_usd: parseFloat(document.getElementById('pm_tp_usd').value) || 0,
     pm_sl_cooldown_seconds: parseFloat(document.getElementById('pm_sl_cooldown_seconds').value),
     rsi_resolution: getResolutionField('rsi_resolution'),
     rsi_length: parseInt(document.getElementById('rsi_length').value),
@@ -5307,7 +5267,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_exit_mode", "pm_atr_len", "pm_sl_atr_mult", "pm_tp_mode", "pm_tp_step_atr_mult", "pm_tp_step_usd", "pm_tp1_close_pct", "pm_tp2_close_pct", "pm_sl_to_breakeven_on_tp1", "pm_sl_to_tp1_on_tp2", "pm_sl_cooldown_seconds",
+                "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
