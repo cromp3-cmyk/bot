@@ -28,6 +28,7 @@ def _pm_params(cfg):
         "len": max(2, int(cfg.get("pm_len", 45))),
         "long": float(cfg.get("pm_long", 0.05)), "short": float(cfg.get("pm_short", -0.05)),
         "sl_usd": max(0.0, float(cfg.get("pm_sl_usd", 5.0))), "tp_usd": max(0.0, float(cfg.get("pm_tp_usd", 5.0))),
+        "trail_usd": max(0.0, float(cfg.get("pm_trail_usd", 0.0) or 0.0)),
     }
 
 
@@ -89,6 +90,7 @@ def _pm_levels(direction, entry, size, p):
 
 def _pm_reset_state(st):
     st["pm_sl_price"] = None
+    st["pm_trail_extreme"] = None
     st["pm_tp_price"] = None
 
 
@@ -99,9 +101,21 @@ async def check_pm_sl_tp(symbol, price):
         return
     pos = st["position"]
     sl_price, tp_price = st.get("pm_sl_price"), st.get("pm_tp_price")
+    sl_reason = "SL"
+    trail_usd = max(0.0, float(cfg.get("pm_trail_usd", 0) or 0))
+    size = st.get("total_coin_size") or 0
+    if trail_usd > 0 and size > 0:
+        ext = st.get("pm_trail_extreme")
+        if ext is None:
+            ext = st.get("avg_entry_price") or price
+        ext = max(ext, price) if pos == "long" else min(ext, price)
+        st["pm_trail_extreme"] = ext
+        tr = ext - trail_usd / size if pos == "long" else ext + trail_usd / size
+        if sl_price is None or (pos == "long" and tr > sl_price) or (pos == "short" and tr < sl_price):
+            sl_price, sl_reason = tr, "TRAIL"
     if sl_price is not None and ((pos == "long" and price <= sl_price) or (pos == "short" and price >= sl_price)):
-        debug_log(f"🚪 [{symbol}] Pure Momentum SL: {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
-        await execute_exit(symbol, price, "SL")
+        debug_log(f"🚪 [{symbol}] Pure Momentum SL/Trail ({sl_reason}): {pos.upper()} @ {price} (Ziel war {round(sl_price, 4)})")
+        await execute_exit(symbol, price, sl_reason)
         if st["position"] is None:
             st["pm_sl_cooldown_until"] = time.time() + cfg.get("pm_sl_cooldown_seconds", 30)
             _pm_reset_state(st)
@@ -146,6 +160,7 @@ async def check_pm_entry(symbol, buy_signal, sell_signal, price):
     _pm_reset_state(st)
     entry = st.get("avg_entry_price") or price
     st["pm_sl_price"], st["pm_tp_price"] = _pm_levels(target, entry, st.get("total_coin_size") or 0, _pm_params(cfg))
+    st["pm_trail_extreme"] = entry
 
 
 async def pm_poll_loop(symbol):
@@ -223,13 +238,20 @@ def _pm_simulate(candles, cfg, buy_sig, sell_sig, warmup, p):
     for i in range(max(warmup, 1), n):
         if position is not None:
             pdir, entry, sl, tp = position["dir"], position["entry"], position["sl"], position["tp"]
+            sl_reason = "SL"
+            if p.get("trail_usd", 0) > 0:
+                tr = position["ext"] - (1 if pdir == "long" else -1) * p["trail_usd"] / position["size"]
+                if sl is None or (pdir == "long" and tr > sl) or (pdir == "short" and tr < sl):
+                    sl, sl_reason = tr, "TRAIL"
             if sl is not None and ((pdir == "long" and l[i] <= sl) or (pdir == "short" and h[i] >= sl)):
-                _bt_close_trade(trades, pdir, entry, sl, position["size"], i, position["entry_i"], "SL", ts=ts)
+                _bt_close_trade(trades, pdir, entry, sl, position["size"], i, position["entry_i"], sl_reason, ts=ts)
                 position = None
                 cool_until = ts[i] + cooldown_ms
             elif tp is not None and ((pdir == "long" and h[i] >= tp) or (pdir == "short" and l[i] <= tp)):
                 _bt_close_trade(trades, pdir, entry, tp, position["size"], i, position["entry_i"], "TP", ts=ts)
                 position = None
+            else:
+                position["ext"] = max(position["ext"], h[i]) if pdir == "long" else min(position["ext"], l[i])
         buy, sell = buy_sig[i], sell_sig[i]
         if mode == "long_only":
             sell = False
@@ -248,7 +270,7 @@ def _pm_simulate(candles, cfg, buy_sig, sell_sig, warmup, p):
             continue
         size = (margin * leverage) / price
         sl, tp = _pm_levels(target, price, size, p)
-        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl": sl, "tp": tp}
+        position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl": sl, "tp": tp, "ext": price}
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
     return trades

@@ -416,6 +416,7 @@ def default_config():
         "pm_direction_mode": os.getenv("PM_DIRECTION_MODE", "both"),
         "pm_sl_usd": float(os.getenv("PM_SL_USD", "5.0")),   # fester SL: Verlust der Position in $ (0 = aus)
         "pm_tp_usd": float(os.getenv("PM_TP_USD", "5.0")),   # fester TP: Gewinn der Position in $ (0 = aus)
+        "pm_trail_usd": float(os.getenv("PM_TRAIL_USD", "0")),   # Trailing-Stop-Abstand in $ (0 = aus)
         "pm_sl_cooldown_seconds": float(os.getenv("PM_SL_COOLDOWN_SECONDS", "30.0")),
 
         # ===== Dollar701 SuperTrend (entry_mode dollar701) =====
@@ -424,6 +425,7 @@ def default_config():
         "dv_direction_mode": os.getenv("DV_DIRECTION_MODE", "both"),
         "dv_sl_usd": float(os.getenv("DV_SL_USD", "5.0")),
         "dv_tp_usd": float(os.getenv("DV_TP_USD", "5.0")),
+        "dv_trail_usd": float(os.getenv("DV_TRAIL_USD", "0")),   # Trailing-Stop-Abstand in $ (0 = aus)
         "dv_sl_cooldown_seconds": float(os.getenv("DV_SL_COOLDOWN_SECONDS", "30.0")),
 
         # ================= RSI Signal =================
@@ -759,8 +761,8 @@ PERSISTED_STATE_KEYS = [
     "gc_lots", "gc_prev", "gc_range", "gc_sig", "gc_realized", "gc_cycles", "gc_stopped", "gc_sim", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
     "er_sl_price", "er_tp1_price", "er_tp2_price", "er_tp3_price", "er_tp1_done", "er_tp2_done", "er_sl_cooldown_until",
-    "pm_sl_price", "pm_tp_price", "pm_sl_cooldown_until",
-    "dv_sl_price", "dv_tp_price", "dv_sl_cooldown_until",
+    "pm_sl_price", "pm_tp_price", "pm_trail_extreme", "pm_sl_cooldown_until",
+    "dv_sl_price", "dv_tp_price", "dv_trail_extreme", "dv_sl_cooldown_until",
     "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
@@ -1987,6 +1989,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="pure_momentum"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="pm_sl_usd"></div>
   <div data-mode="pure_momentum"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="pm_tp_usd"></div>
+  <div data-mode="pure_momentum"><label>Trailing-Stop (Abstand in $ hinter dem besten Kurs, laeuft mit; 0 = aus)</label><input type="number" step="0.1" min="0" id="pm_trail_usd"></div>
   <div data-mode="pure_momentum"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="pm_sl_cooldown_seconds"></div>
 
   <div data-mode="dollar701" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -2014,6 +2017,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="dollar701"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="dv_sl_usd"></div>
   <div data-mode="dollar701"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="dv_tp_usd"></div>
+  <div data-mode="dollar701"><label>Trailing-Stop (Abstand in $ hinter dem besten Kurs, laeuft mit; 0 = aus)</label><input type="number" step="0.1" min="0" id="dv_trail_usd"></div>
   <div data-mode="dollar701"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="dv_sl_cooldown_seconds"></div>
 
   <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -4675,6 +4679,7 @@ async function refresh() {
     document.getElementById('pm_direction_mode').value = data.config.pm_direction_mode || 'both';
     document.getElementById('pm_sl_usd').value = data.config.pm_sl_usd;
     document.getElementById('pm_tp_usd').value = data.config.pm_tp_usd;
+    document.getElementById('pm_trail_usd').value = data.config.pm_trail_usd || 0;
     document.getElementById('pm_sl_cooldown_seconds').value = data.config.pm_sl_cooldown_seconds;
 
     setResolutionField('dv_resolution', data.config.dv_resolution);
@@ -4682,6 +4687,7 @@ async function refresh() {
     document.getElementById('dv_direction_mode').value = data.config.dv_direction_mode || 'both';
     document.getElementById('dv_sl_usd').value = data.config.dv_sl_usd;
     document.getElementById('dv_tp_usd').value = data.config.dv_tp_usd;
+    document.getElementById('dv_trail_usd').value = data.config.dv_trail_usd || 0;
     document.getElementById('dv_sl_cooldown_seconds').value = data.config.dv_sl_cooldown_seconds;
 
     setResolutionField('rsi_resolution', data.config.rsi_resolution);
@@ -5101,12 +5107,14 @@ function buildConfigPayload() {
     pm_direction_mode: document.getElementById('pm_direction_mode').value,
     pm_sl_usd: parseFloat(document.getElementById('pm_sl_usd').value) || 0,
     pm_tp_usd: parseFloat(document.getElementById('pm_tp_usd').value) || 0,
+    pm_trail_usd: parseFloat(document.getElementById('pm_trail_usd').value) || 0,
     pm_sl_cooldown_seconds: parseFloat(document.getElementById('pm_sl_cooldown_seconds').value),
     dv_resolution: getResolutionField('dv_resolution'),
     dv_sens: parseFloat(document.getElementById('dv_sens').value) || 7,
     dv_direction_mode: document.getElementById('dv_direction_mode').value,
     dv_sl_usd: parseFloat(document.getElementById('dv_sl_usd').value) || 0,
     dv_tp_usd: parseFloat(document.getElementById('dv_tp_usd').value) || 0,
+    dv_trail_usd: parseFloat(document.getElementById('dv_trail_usd').value) || 0,
     dv_sl_cooldown_seconds: parseFloat(document.getElementById('dv_sl_cooldown_seconds').value),
     rsi_resolution: getResolutionField('rsi_resolution'),
     rsi_length: parseInt(document.getElementById('rsi_length').value),
@@ -5524,8 +5532,8 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_sl_usd", "dv_tp_usd", "dv_sl_cooldown_seconds",
-                "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
+                "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
