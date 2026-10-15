@@ -391,11 +391,15 @@ async def run_dv_montecarlo(symbol, cfg, days, runs=300, sens_min=3.0, sens_max=
     sl_min, sl_max = sorted((max(0.1, float(sl_min)), max(0.1, float(sl_max))))
     tp_min, tp_max = sorted((max(0.1, float(tp_min)), max(0.1, float(tp_max))))
     rng = random.Random(seed)
+    reverse = cfg.get("dv_exit_mode", "sltp") == "reverse"   # Flip-Modus: kein SL/TP -> nur Sensitivity wird variiert
     seen, combos = set(), []
     for _ in range(runs * 5):
         if len(combos) >= runs:
             break
-        k = (round(rng.uniform(sens_min, sens_max), 2), round(rng.uniform(sl_min, sl_max), 1), round(rng.uniform(tp_min, tp_max), 1))
+        if reverse:
+            k = (round(rng.uniform(sens_min, sens_max), 2), 0.0, 0.0)
+        else:
+            k = (round(rng.uniform(sens_min, sens_max), 2), round(rng.uniform(sl_min, sl_max), 1), round(rng.uniform(tp_min, tp_max), 1))
         if k not in seen:
             seen.add(k)
             combos.append(k)
@@ -409,7 +413,7 @@ async def run_dv_montecarlo(symbol, cfg, days, runs=300, sens_min=3.0, sens_max=
     median = pnls[len(pnls) // 2] if pnls else 0
     actual_days = (candles[0][-1] - candles[0][0]) / 86_400_000
     return {
-        "symbol": symbol, "resolution": resolution, "requested_days": days, "actual_days_covered": round(actual_days, 1),
+        "exit_mode": "reverse" if reverse else "sltp", "symbol": symbol, "resolution": resolution, "requested_days": days, "actual_days_covered": round(actual_days, 1),
         "candles_processed": n, "min_reliable_trades": DV_MC_MIN_RELIABLE_TRADES,
         "combos_tested": len(results), "combos_requested": runs, "profitable_pct": round(pos / len(results) * 100, 1) if results else 0,
         "median_pnl_usd": round(median, 2), "best_pnl_usd": pnls[-1] if pnls else 0, "worst_pnl_usd": pnls[0] if pnls else 0,

@@ -3140,6 +3140,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div><label>Durchläufe (max. 2000)</label><input type="number" step="50" min="1" max="2000" id="dv-mc-runs" value="300" style="width:90px;"></div>
     <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="dv-mc-seed" style="width:110px;"></div>
     <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="dv-mc-exclude-top-n" value="1" style="width:90px;"></div>
+    <div><label>Ausstieg im Test</label><select id="dv-mc-exit-mode"><option value="">wie in den Einstellungen</option><option value="sltp">SL / TP / Trailing</option><option value="reverse">Flip / Reverse (nur Sensitivity)</option></select></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <div><label>Sensitivity von</label><input type="number" step="0.01" min="1" max="15" id="dv-mc-sens-min" value="3" style="width:80px;"></div>
@@ -4121,15 +4122,15 @@ window.dvMcWorstData = [];
 const dvMcRowHtml = (r) => `
   <tr>
     <td>${r.dv_sens}</td>
-    <td>${r.dv_sl_usd}</td>
-    <td>${r.dv_tp_usd}</td>
+    <td>${r.dv_sl_usd > 0 ? r.dv_sl_usd : '–'}</td>
+    <td>${r.dv_tp_usd > 0 ? r.dv_tp_usd : '–'}</td>
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
-    ${applyBtn({dv_sens: r.dv_sens, dv_sl_usd: r.dv_sl_usd, dv_tp_usd: r.dv_tp_usd})}
+    ${applyBtn(r.dv_sl_usd > 0 ? {dv_sens: r.dv_sens, dv_exit_mode: 'sltp', dv_sl_usd: r.dv_sl_usd, dv_tp_usd: r.dv_tp_usd} : {dv_sens: r.dv_sens, dv_exit_mode: 'reverse'})}
   </tr>`;
 const renderDvMcResults = makeSortableTable('dv-mc-results-table', () => window.dvMcResultsData, dvMcRowHtml);
 const renderDvMcWorst = makeSortableTable('dv-mc-worst-table', () => window.dvMcWorstData, dvMcRowHtml);
@@ -4149,7 +4150,7 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
     sens_min: num('dv-mc-sens-min'), sens_max: num('dv-mc-sens-max'),
     sl_min: num('dv-mc-sl-min'), sl_max: num('dv-mc-sl-max'),
     tp_min: num('dv-mc-tp-min'), tp_max: num('dv-mc-tp-max'),
-    config: buildConfigPayload(),
+    config: Object.assign(buildConfigPayload(), document.getElementById('dv-mc-exit-mode').value ? {dv_exit_mode: document.getElementById('dv-mc-exit-mode').value} : {}),
   };
   btn.disabled = true;
   Object.values(tables).forEach(t => t.style.display = 'none');
