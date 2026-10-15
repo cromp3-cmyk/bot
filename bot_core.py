@@ -423,6 +423,7 @@ def default_config():
         "dv_resolution": os.getenv("DV_RESOLUTION", "5m"),
         "dv_sens": float(os.getenv("DV_SENS", "7.0")),   # Sensitivity 1-15, 2 Nachkommastellen (Perioden=(S+1)*10, Multiplikator=(S+1)/2)
         "dv_direction_mode": os.getenv("DV_DIRECTION_MODE", "both"),
+        "dv_exit_mode": os.getenv("DV_EXIT_MODE", "sltp"),   # sltp = SL/TP/Trail | reverse = immer im Trade, Gegen-Signal dreht sofort
         "dv_sl_usd": float(os.getenv("DV_SL_USD", "5.0")),
         "dv_tp_usd": float(os.getenv("DV_TP_USD", "5.0")),
         "dv_trail_usd": float(os.getenv("DV_TRAIL_USD", "0")),   # Trailing-Stop-Abstand in $ (0 = aus)
@@ -2014,6 +2015,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="dollar701"><label>Sensitivity (1,00 - 15,00)</label><input type="number" step="0.01" min="1" max="15" id="dv_sens"></div>
   <div data-mode="dollar701"><label>Richtung</label>
     <select class="cfg" id="dv_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
+  </div>
+  <div data-mode="dollar701"><label>Ausstieg</label>
+    <select class="cfg" id="dv_exit_mode"><option value="sltp">SL / TP / Trailing</option><option value="reverse">Reverse (immer im Trade, Gegen-Signal dreht sofort)</option></select>
   </div>
   <div data-mode="dollar701"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="dv_sl_usd"></div>
   <div data-mode="dollar701"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="dv_tp_usd"></div>
@@ -4685,6 +4689,7 @@ async function refresh() {
     setResolutionField('dv_resolution', data.config.dv_resolution);
     document.getElementById('dv_sens').value = data.config.dv_sens;
     document.getElementById('dv_direction_mode').value = data.config.dv_direction_mode || 'both';
+    document.getElementById('dv_exit_mode').value = data.config.dv_exit_mode || 'sltp';
     document.getElementById('dv_sl_usd').value = data.config.dv_sl_usd;
     document.getElementById('dv_tp_usd').value = data.config.dv_tp_usd;
     document.getElementById('dv_trail_usd').value = data.config.dv_trail_usd || 0;
@@ -5112,6 +5117,7 @@ function buildConfigPayload() {
     dv_resolution: getResolutionField('dv_resolution'),
     dv_sens: parseFloat(document.getElementById('dv_sens').value) || 7,
     dv_direction_mode: document.getElementById('dv_direction_mode').value,
+    dv_exit_mode: document.getElementById('dv_exit_mode').value,
     dv_sl_usd: parseFloat(document.getElementById('dv_sl_usd').value) || 0,
     dv_tp_usd: parseFloat(document.getElementById('dv_tp_usd').value) || 0,
     dv_trail_usd: parseFloat(document.getElementById('dv_trail_usd').value) || 0,
@@ -5437,7 +5443,7 @@ document.getElementById('toggle-copytrading-global').addEventListener('change', 
 
 
 async def handle_index(request):
-    return web.Response(text=DASHBOARD_HTML, content_type="text/html")
+    return web.Response(text=DASHBOARD_HTML, content_type="text/html", headers={"Cache-Control": "no-store, max-age=0"})
 
 
 async def handle_symbols(request):
@@ -5532,7 +5538,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",

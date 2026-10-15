@@ -30,6 +30,7 @@ def _dv_params(cfg):
         "sens": sens, "periods": _dv_periods(sens),
         "sl_usd": max(0.0, float(cfg.get("dv_sl_usd", 5.0))), "tp_usd": max(0.0, float(cfg.get("dv_tp_usd", 5.0))),
         "trail_usd": max(0.0, float(cfg.get("dv_trail_usd", 0.0) or 0.0)),
+        "reverse": cfg.get("dv_exit_mode", "sltp") == "reverse",
     }
 
 
@@ -98,6 +99,8 @@ async def check_dv_sl_tp(symbol, price):
     st, cfg = b["state"], b["config"]
     if st["position"] is None or price is None:
         return
+    if cfg.get("dv_exit_mode", "sltp") == "reverse":
+        return  # Reverse-Modus: kein SL/TP/Trail, nur Gegen-Signal
     pos = st["position"]
     sl_price, tp_price = st.get("dv_sl_price"), st.get("dv_tp_price")
     sl_reason = "SL"
@@ -133,6 +136,17 @@ async def check_dv_entry(symbol, buy_signal, sell_signal, price):
     if not cfg["bot_active"] or price is None:
         return
     mode = cfg.get("dv_direction_mode", "both")
+    reverse = cfg.get("dv_exit_mode", "sltp") == "reverse"
+    pos = st["position"]
+    if reverse and pos is not None and buy_signal != sell_signal:
+        # Reverse-Modus mit eingeschraenkter Richtung: Gegen-Signal schliesst, ohne gegenlaeufig neu zu oeffnen
+        want = "long" if buy_signal else "short"
+        if want != pos and ((mode == "long_only" and want == "short") or (mode == "short_only" and want == "long")):
+            debug_log(f"🔄 [{symbol}] Dollar701 Reverse: {pos.upper()} schliessen @ {price}")
+            await execute_exit(symbol, price, "DV-FLIP")
+            if st["position"] is None:
+                _dv_reset_state(st)
+            return
     if mode == "long_only":
         sell_signal = False
     elif mode == "short_only":
@@ -140,7 +154,6 @@ async def check_dv_entry(symbol, buy_signal, sell_signal, price):
     if buy_signal == sell_signal:
         return
     target = "long" if buy_signal else "short"
-    pos = st["position"]
     if pos is not None:
         if pos == target:
             return
@@ -158,7 +171,8 @@ async def check_dv_entry(symbol, buy_signal, sell_signal, price):
         return
     _dv_reset_state(st)
     entry = st.get("avg_entry_price") or price
-    st["dv_sl_price"], st["dv_tp_price"] = _dv_levels(target, entry, st.get("total_coin_size") or 0, _dv_params(cfg))
+    if cfg.get("dv_exit_mode", "sltp") != "reverse":
+        st["dv_sl_price"], st["dv_tp_price"] = _dv_levels(target, entry, st.get("total_coin_size") or 0, _dv_params(cfg))
     st["dv_trail_extreme"] = entry
 
 
@@ -234,7 +248,7 @@ def _dv_simulate(candles, cfg, buy_sig, sell_sig, warmup, p):
     mode = cfg.get("dv_direction_mode", "both")
     position, trades, cool_until = None, [], None
     for i in range(max(warmup, 1), n):
-        if position is not None:
+        if position is not None and not p.get("reverse"):
             pdir, entry, sl, tp = position["dir"], position["entry"], position["sl"], position["tp"]
             sl_reason = "SL"
             if p.get("trail_usd", 0) > 0:
@@ -251,6 +265,12 @@ def _dv_simulate(candles, cfg, buy_sig, sell_sig, warmup, p):
             else:
                 position["ext"] = max(position["ext"], h[i]) if pdir == "long" else min(position["ext"], l[i])
         buy, sell = buy_sig[i], sell_sig[i]
+        if p.get("reverse") and position is not None and buy != sell:
+            want = "long" if buy else "short"
+            if want != position["dir"] and ((mode == "long_only" and want == "short") or (mode == "short_only" and want == "long")):
+                _bt_close_trade(trades, position["dir"], position["entry"], c[i], position["size"], i, position["entry_i"], "DV-FLIP", ts=ts)
+                position = None
+                continue
         if mode == "long_only":
             sell = False
         elif mode == "short_only":
@@ -267,7 +287,7 @@ def _dv_simulate(candles, cfg, buy_sig, sell_sig, warmup, p):
         elif cool_until is not None and ts[i] < cool_until:
             continue
         size = (margin * leverage) / price
-        sl, tp = _dv_levels(target, price, size, p)
+        sl, tp = (None, None) if p.get("reverse") else _dv_levels(target, price, size, p)
         position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl": sl, "tp": tp, "ext": price}
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
@@ -342,7 +362,7 @@ def _dv_mc_compute(candles, base_cfg, combos, warmup_extra, exclude_top_n, deadl
         if sens not in st_cache:
             st_cache[sens] = dv_supertrend(h, l, c, sens, atr_cache[per])
         _, buy, sell = st_cache[sens]
-        p = {"sens": sens, "periods": per, "sl_usd": sl, "tp_usd": tp, "trail_usd": max(0.0, float(base_cfg.get("dv_trail_usd", 0) or 0))}
+        p = {"sens": sens, "periods": per, "sl_usd": sl, "tp_usd": tp, "trail_usd": max(0.0, float(base_cfg.get("dv_trail_usd", 0) or 0)), "reverse": base_cfg.get("dv_exit_mode", "sltp") == "reverse"}
         trades = _dv_simulate(candles, base_cfg, buy, sell, per + 10, p)
         st = summarize_backtest_trades(trades, exclude_top_n)
         out.append({"dv_sens": sens, "dv_sl_usd": sl, "dv_tp_usd": tp, "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
