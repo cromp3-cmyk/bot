@@ -678,7 +678,7 @@ th.s:hover{color:#fff}
 </style>
 </head>
 <body>
-<header><h1>GUSS Sniperentry · Backtest</h1><nav><a href="/">Bot-Dashboard</a><a href="/screener">Coin Screener</a><a href="/scalp">Scalp</a></nav></header>
+<header><h1>GUSS Sniperentry · Backtest</h1><nav><a href="/">Bot-Dashboard</a><a href="/screener">Coin Screener</a><a href="/scalp">Scalp</a><a href="/copytrading">Copy-Trading</a></nav></header>
 <main>
 <div class="card">
   <h2>Backtest starten</h2>

@@ -1092,7 +1092,7 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
 <div class="wrap">
  <div class="row" style="justify-content:space-between">
   <div class="row"><h1 style="margin:0;font-size:18px">Scalp Dashboard</h1><span id="badge" class="pill n">…</span></div>
-  <nav class="row" style="gap:18px;font-size:13px"><a href="#" id="layBtn">✥ Layout</a><a href="#" id="layFlip" style="display:none">⇄ Spalten tauschen</a><a href="#" id="layReset" style="display:none">↺ Zurücksetzen</a><a href="/">Bot-Dashboard</a><a href="/screener">Coin Screener</a><a href="/copytrading">Copy-Trading</a></nav>
+  <nav class="row" style="gap:18px;font-size:13px"><a href="#" id="layBtn">✥ Layout</a><a href="#" id="layFlip" style="display:none">⇄ Spalten tauschen</a><a href="#" id="layReset" style="display:none">↺ Zurücksetzen</a><a href="/">Bot-Dashboard</a><a href="/screener">Coin Screener</a><a href="/copytrading">Copy-Trading</a><a href="/guss">GUSS</a></nav>
  </div>
  <div class="chips" id="chips"></div>
  <div class="main">

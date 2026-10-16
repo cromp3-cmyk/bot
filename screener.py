@@ -698,7 +698,7 @@ header nav a:hover{color:#fff}
 <body>
 <header>
   <h1>Coin Screener <span id="status"></span><button class="hbtn" id="toggleAll">Alle aufklappen</button><button class="hbtn" id="cfgBtn">⚙ Wellenanker-Einstellungen</button></h1>
-  <nav><a href="/">Bot-Dashboard</a><a href="/copytrading">Copy-Trading</a></nav>
+  <nav><a href="/">Bot-Dashboard</a><a href="/copytrading">Copy-Trading</a><a href="/guss">GUSS</a></nav>
 </header>
 <div id="grid"><div class="loading">Lade ...</div></div>
 <div id="cfg" style="position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto;z-index:11"><div class="box" style="background:#12151b;border:1px solid #242932;border-radius:16px;padding:22px 24px;width:100%;max-width:640px">
