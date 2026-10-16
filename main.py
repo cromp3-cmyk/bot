@@ -33,6 +33,7 @@ from binance_ws import binance_ws_cache_loop
 from grid_scalp import grid_scalp_poll_loop, handle_gc_backtest, handle_gc_reset
 from screener import screener_loop, handle_screener_index, handle_screener_api, handle_screener_cfg_get, handle_screener_cfg_set, load_screener_cfg
 from lighter_candles import lighter_candles_loop
+from guss import handle_guss_index, handle_guss_universe, handle_guss_bt_status, handle_guss_bt_start
 from scalp import (
     scalp_loop, handle_scalp_index, handle_scalp_chart, handle_scalp_status,
     handle_scalp_order, handle_scalp_close, handle_scalp_reverse, handle_scalp_tpsl, handle_scalp_auto, handle_scalp_wa,
@@ -69,6 +70,10 @@ async def start_web_server():
     app.router.add_get("/api/screener", handle_screener_api)
     app.router.add_get("/api/screener/config", handle_screener_cfg_get)
     app.router.add_post("/api/screener/config", handle_screener_cfg_set)
+    app.router.add_get("/guss", handle_guss_index)
+    app.router.add_get("/api/guss/universe", handle_guss_universe)
+    app.router.add_get("/api/guss/backtest", handle_guss_bt_status)
+    app.router.add_post("/api/guss/backtest", handle_guss_bt_start)
     app.router.add_get("/scalp", handle_scalp_index)
     app.router.add_get("/api/scalp/chart", handle_scalp_chart)
     app.router.add_get("/api/scalp/status", handle_scalp_status)
