@@ -17,7 +17,7 @@ import random
 import time
 import traceback
 
-from bot_core import BOTS, debug_log, execute_entry, execute_exit
+from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_reverse
 from strategies import (
     SUB_MINUTE_RESOLUTIONS, get_seconds_candles, fetch_candles_binance_multi, compute_atr,
     summarize_backtest_trades, _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
@@ -158,6 +158,13 @@ async def check_dv_entry(symbol, buy_signal, sell_signal, price):
         if pos == target:
             return
     elif time.time() < st.get("dv_sl_cooldown_until", 0.0):
+        return
+    if pos is not None and reverse:
+        # Reverse-Modus: EINE Market-Order dreht die Position direkt (schneller Wechsel, nie flat)
+        debug_log(f"⚡ [{symbol}] Dollar701 Reverse: {pos.upper()} -> {target.upper()} @ {price}")
+        if await execute_reverse(symbol, price, "DV-FLIP", size_multiplier=1.0):
+            _dv_reset_state(st)
+            st["dv_trail_extreme"] = st.get("avg_entry_price") or price
         return
     if pos is not None:
         debug_log(f"🔄 [{symbol}] Dollar701 Farbwechsel: {pos.upper()} -> {target.upper()} @ {price}")
