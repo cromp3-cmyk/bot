@@ -23,6 +23,29 @@ from strategies import (
 )
 
 
+def _res_seconds(res):
+    """Kerzenlaenge in Sekunden ("10s", "1m", "4h", "1d" ...)."""
+    if res in SUB_MINUTE_RESOLUTIONS:
+        return SUB_MINUTE_RESOLUTIONS[res]
+    try:
+        n, u = int(res[:-1]), res[-1]
+        return n * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}.get(u, 60)
+    except (ValueError, TypeError, IndexError):
+        return 60
+
+
+def _poll_delay(res, st):
+    """Abfrage-Takt: 1 s bei offener Position (SL/TP/Trail), bei Sekunden-Kerzen und rund um den Kerzenschluss,
+    sonst bis kurz vor den naechsten Kerzenschluss schlafen (max. 5 s)."""
+    per = _res_seconds(res)
+    if st.get("position") is not None or per <= 60:
+        return 1.0
+    into = time.time() % per
+    if into < 6:
+        return 1.0
+    return max(1.0, min(5.0, per - into - 0.5))
+
+
 def _pm_params(cfg):
     return {
         "len": max(2, int(cfg.get("pm_len", 45))),
@@ -183,7 +206,10 @@ async def pm_poll_loop(symbol):
                     if local:
                         closed_ts, closed_o, closed_h, closed_l, closed_c = local
                 else:
-                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot"))
+                    # Kerzen nur rund um den Kerzenschluss neu holen (dort jede Sekunde), sonst genuegt die Ruhe
+                    _per = _res_seconds(resolution)
+                    _need_fetch = last_processed_ts is None or (time.time() % _per) < 6 or _per <= 60
+                    data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot")) if _need_fetch else None
                     if data:
                         timestamps, opens, highs, lows, closes = data[:5]
                         closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
@@ -218,12 +244,12 @@ async def pm_poll_loop(symbol):
                         price_i = st["last_price"] if (idx == len(closed_ts) - 1 and st["last_price"] is not None) else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
                         await check_pm_entry(symbol, buy[idx], sell[idx], price_i)
-                elif due_heartbeat and not closed_ts:
+                elif due_heartbeat and not closed_ts and (resolution in SUB_MINUTE_RESOLUTIONS or _need_fetch):
                     last_heartbeat = now
                     debug_log(f"⏳ [{symbol}] Pure Momentum wartet: keine Kerzen erhalten (Auflösung {resolution})")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Pure-Momentum-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
-        await asyncio.sleep(5)
+        await asyncio.sleep(_poll_delay(cfg.get("pm_resolution", "5m"), b["state"]))
 
 
 def _pm_simulate(candles, cfg, buy_sig, sell_sig, warmup, p):
