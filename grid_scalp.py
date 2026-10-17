@@ -1575,12 +1575,19 @@ def gc_backtest(candles, cfg, trend=None):
     realized, cycles, max_lots, worst_float, stopped_at = 0.0, 0, 0, 0.0, None
     flips, pause = 0, False
     steps = []
+    flip_log = []      # je Richtungswechsel: Ergebnis der gerade beendeten Phase
+    phase = {"start": ts[0], "base": 0.0, "cycles0": 0}
 
     def mtm(price):
         return sum((price - px) * sz * d for px, sz in lots.values())
 
-    def switch(want, price):
+    def switch(want, price, i, close_loss=0.0, how="auslaufen"):
         nonlocal d, lo, hi, levels, flips, pause
+        flip_log.append({"ts": ts[i], "from": "long" if d > 0 else "short", "to": "long" if want > 0 else "short",
+                         "price": price, "how": how, "close_loss": round(close_loss, 2),
+                         "phase_pnl": round(realized - phase["base"], 2), "phase_cycles": cycles - phase["cycles0"],
+                         "phase_start": phase["start"]})
+        phase.update({"start": ts[i], "base": realized, "cycles0": cycles})
         d = want
         flips += 1
         pause = False
@@ -1620,13 +1627,13 @@ def gc_backtest(candles, cfg, trend=None):
             want = 1 if trend[i] > 0 else -1
             if want != d:
                 if not lots:
-                    switch(want, o[i])
+                    switch(want, o[i], i)
                 elif on_flip == "close":
                     loss = mtm(o[i])
                     realized += loss
                     steps.append({"ts": ts[i], "px": o[i], "exit": o[i], "pnl": loss, "reason": "GRID-TREND"})
                     lots.clear()
-                    switch(want, o[i])
+                    switch(want, o[i], i, loss, "sofort geschlossen")
                 else:
                     pause = True
             else:
@@ -1637,7 +1644,7 @@ def gc_backtest(candles, cfg, trend=None):
             if lots:
                 worst_float = min(worst_float, mtm(b))
             if pause and not lots and want and want != d:
-                switch(want, b)
+                switch(want, b, i)
         if stop_pct > 0 and ((d > 0 and l[i] < lo * (1 - stop_pct / 100)) or (d < 0 and h[i] > hi * (1 + stop_pct / 100))):
             loss = mtm(lo * (1 - stop_pct / 100) if d > 0 else hi * (1 + stop_pct / 100))
             realized += loss; stopped_at = ts[i]; lots.clear()
@@ -1649,7 +1656,8 @@ def gc_backtest(candles, cfg, trend=None):
             "total": round(realized + final_float, 2), "max_lots": max_lots, "worst_float": round(worst_float, 2),
             "per_day": round(realized / days, 2), "stopped_at": stopped_at, "days": round(days, 1),
             "step_profit": round(usd * ((hi - lo) / n) / max(o[0], 1e-9), 3), "margin_peak_notional": round(max_lots * usd, 0),
-            "candles": n_c, "steps": steps[-300:], "flips": flips,
+            "candles": n_c, "steps": steps[-300:], "flips": flips, "flip_log": flip_log[-60:],
+            "last_phase_pnl": round(realized - phase["base"], 2),
             "trend_mode": str(_gcv(cfg, "gc_trend_mode")) if trend is not None else "off", "trend_tf": str(_gcv(cfg, "gc_trend_tf"))}
 
 
