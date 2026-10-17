@@ -162,7 +162,7 @@ async def basic_auth_middleware(request, handler):
 
 # ========== WELCHE COINS LAUFEN SOLLEN ==========
 # Komma-getrennt, z.B. GRID_SYMBOLS="BTC,SOL,ETH". Default: nur BTC (abwaertskompatibel).
-SYMBOLS = [s.strip().upper() for s in os.getenv("GRID_SYMBOLS", os.getenv("GRID_SYMBOL", "BTC")).split(",") if s.strip()]
+SYMBOLS = [s.strip().upper() for s in (os.getenv("GRID_SYMBOLS") or os.getenv("GRID_SYMBOL") or "BTC").split(",") if s.strip()] or ["BTC"]
 for _s in SYMBOLS:
     if _s not in MARKET_INDICES:
         raise ValueError(f"Symbol {_s} nicht in MARKET_INDICES - hier ergänzen")
