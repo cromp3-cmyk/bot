@@ -3473,17 +3473,17 @@ async function gcRunBacktest(days) {
   const res = await fetch(`/api/gc/backtest?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({days:days, config: buildConfigPayload()})});
   const d = await res.json();
   if (d.error) { o.textContent = '❌ ' + d.error; return; }
-  let t = `${d.direction}-Grid ${d.lower.toPrecision(6)}…${d.upper.toPrecision(6)} · ${d.n} Stufen · ${d.days} Tage\nStufen: ${d.cycles} → realisiert $${d.realized} ($${d.per_day}/Tag)\nOffen am Ende: ${d.open_lots} Lots, $${d.open_float}\nGesamt: $${d.total} · max. Lots ${d.max_lots} (Notional ${d.margin_peak_notional}$) · schlimmster Buchverlust $${d.worst_float}` + (d.stopped_at ? '\n⛔ Notbremse ausgelöst' : '');
+  let t = `${d.direction}-Grid ${d.lower.toPrecision(6)}…${d.upper.toPrecision(6)} · ${d.n} Stufen · ${d.days} Tage\\nStufen: ${d.cycles} → realisiert $${d.realized} ($${d.per_day}/Tag)\\nOffen am Ende: ${d.open_lots} Lots, $${d.open_float}\\nGesamt: $${d.total} · max. Lots ${d.max_lots} (Notional ${d.margin_peak_notional}$) · schlimmster Buchverlust $${d.worst_float}` + (d.stopped_at ? '\\n⛔ Notbremse ausgelöst' : '');
   if (d.trend_mode && d.trend_mode !== 'off') {
-    t += `\n🧭 Trend-Automatik (${d.trend_tf}, ${d.trend_mode}): ${d.flips} Richtungswechsel, am Ende ${d.direction.toUpperCase()}`;
+    t += `\\n🧭 Trend-Automatik (${d.trend_tf}, ${d.trend_mode}): ${d.flips} Richtungswechsel, am Ende ${d.direction.toUpperCase()}`;
     const fl = d.flip_log || [];
     if (fl.length) {
       const f2 = (x) => (x >= 0 ? '+' : '') + x.toFixed(2);
-      t += '\n\nWechsel (Ergebnis der beendeten Phase = Stufengewinne + Verlust beim Schließen):';
-      t += '\n' + fl.map(x => `${new Date(x.ts).toLocaleString('de-DE', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})}  ${x.from.toUpperCase()} → ${x.to.toUpperCase()} @ ${x.price.toPrecision(6)}  Phase: $${f2(x.phase_pnl)} (${x.phase_cycles} Stufen)` + (x.close_loss ? `  · davon Schließen: $${f2(x.close_loss)}` : '') + `  [${x.how}]`).join('\n');
-      t += `\nLetzte Phase (läuft noch, ${d.direction.toUpperCase()}): $${f2(d.last_phase_pnl)}`;
+      t += '\\n\\nWechsel (Ergebnis der beendeten Phase = Stufengewinne + Verlust beim Schließen):';
+      t += '\\n' + fl.map(x => `${new Date(x.ts).toLocaleString('de-DE', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})}  ${x.from.toUpperCase()} → ${x.to.toUpperCase()} @ ${x.price.toPrecision(6)}  Phase: $${f2(x.phase_pnl)} (${x.phase_cycles} Stufen)` + (x.close_loss ? `  · davon Schließen: $${f2(x.close_loss)}` : '') + `  [${x.how}]`).join('\\n');
+      t += `\\nLetzte Phase (läuft noch, ${d.direction.toUpperCase()}): $${f2(d.last_phase_pnl)}`;
       const sumClose = fl.reduce((a, x) => a + (x.close_loss || 0), 0);
-      if (sumClose) t += `\nSumme Verluste/Gewinne durch Schließen beim Wechsel: $${f2(sumClose)}`;
+      if (sumClose) t += `\\nSumme Verluste/Gewinne durch Schließen beim Wechsel: $${f2(sumClose)}`;
     }
   }
   o.textContent = t;
