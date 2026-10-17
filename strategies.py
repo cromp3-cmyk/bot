@@ -1078,7 +1078,7 @@ async def ab_poll_loop(symbol):
                     # das faengt "haengengebliebene" Daten ab, auch wenn deren Preis zufaellig nah am
                     # aktuellen Kurs liegt; (2) grobe Preis-Ausreisser als zusaetzliches Sicherheitsnetz.
                     candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
-                    max_age_seconds = 300  # grosszuegig fuer alle hier ueblichen Aufloesungen (10s-1h)
+                    max_age_seconds = 300 + _tf_ms(resolution) / 1000  # Kerzenalter = seit ihrer ERÖFFNUNG, also Kerzenlänge + 5 Min. Puffer
                     if candle_age_seconds > max_age_seconds:
                         debug_log(f"⚠️ [{symbol}] Al-Shatri Breakout: letzte Kerze wirkt veraltet "
                                   f"({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
@@ -1982,6 +1982,9 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
     if entry_mode == "pure_momentum":
         from pure_momentum import run_pm_backtest
         return await run_pm_backtest(symbol, cfg, days, exclude_top_n)
+    if entry_mode == "trendfolge":
+        from trendfolge import run_tfl_backtest
+        return await run_tfl_backtest(symbol, cfg, days, exclude_top_n)
     if entry_mode == "dollar701":
         from dollar701 import run_dv_backtest
         return await run_dv_backtest(symbol, cfg, days, exclude_top_n)
@@ -2242,7 +2245,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "chart": wa_chart_payload(candles[0], candles[1], candles[2], candles[3], candles[4], cfg),
         }
 
-    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, ema_rsi, mtf_spread, pure_momentum, dollar701, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, ema_rsi, mtf_spread, pure_momentum, dollar701, trendfolge, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 AB_SWEEP_MAX_COMBOS = 600
 AB_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -2527,6 +2530,7 @@ BACKTEST_MAX_CANDLES = {
     "mtf_spread": 100_000,
     "pure_momentum": 100_000,
     "dollar701": 100_000,
+    "trendfolge": 100_000,
     "scalp_vwap_obv_rsi": 100_000,
     "liquidity_waves": 100_000,
     "wellenanker": 100_000,
@@ -3992,7 +3996,7 @@ async def rsi_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
-                    max_age_seconds = 300
+                    max_age_seconds = 300 + _tf_ms(resolution) / 1000  # Alter seit Kerzen-Eröffnung: Kerzenlänge + 5 Min. Puffer
                     if candle_age_seconds > max_age_seconds:
                         debug_log(f"⚠️ [{symbol}] RSI Signal: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
                     else:
@@ -4503,7 +4507,7 @@ async def mvwap_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
-                    max_age_seconds = 300
+                    max_age_seconds = 300 + _tf_ms(resolution) / 1000  # Alter seit Kerzen-Eröffnung: Kerzenlänge + 5 Min. Puffer
                     if candle_age_seconds > max_age_seconds:
                         debug_log(f"⚠️ [{symbol}] Multi-VWAP Money-Flow: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
                     else:
@@ -5079,7 +5083,7 @@ async def scalp_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
-                    max_age_seconds = 300
+                    max_age_seconds = 300 + _tf_ms(resolution) / 1000  # Alter seit Kerzen-Eröffnung: Kerzenlänge + 5 Min. Puffer
                     if candle_age_seconds > max_age_seconds:
                         debug_log(f"⚠️ [{symbol}] Scalp VWAP OBV RSI: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
                     else:
@@ -5548,7 +5552,7 @@ async def liq_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
-                    max_age_seconds = 300
+                    max_age_seconds = 300 + _tf_ms(resolution) / 1000  # Alter seit Kerzen-Eröffnung: Kerzenlänge + 5 Min. Puffer
                     if candle_age_seconds > max_age_seconds:
                         debug_log(f"⚠️ [{symbol}] Liquidity Waves: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
                     else:
@@ -6062,7 +6066,7 @@ async def wa_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
-                    max_age_seconds = 300
+                    max_age_seconds = 300 + _tf_ms(resolution) / 1000  # Alter seit Kerzen-Eröffnung: Kerzenlänge + 5 Min. Puffer
                     if candle_age_seconds > max_age_seconds:
                         debug_log(f"⚠️ [{symbol}] Wellenanker: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
                     else:
@@ -6243,6 +6247,96 @@ async def wa_trend_table(symbol, cfg):
         except Exception:
             rows.append({"tf": tf, "intern": None, "swing": None})
     return rows
+
+
+# ============================================================================
+# GRID-BOT (grid_classic): Marktstruktur-Trend (BOS/CHoCH) bestimmt die Gitter-Richtung
+# ============================================================================
+GC_TREND_TFS = ["5m", "15m", "1h", "4h", "1d"]
+
+
+def _gc_trend_cfg(cfg):
+    """-> (modus 'off'/'intern'/'swing', zeitebene, interne Pivot-Laenge, Swing-Pivot-Laenge)"""
+    mode = cfg.get("gc_trend_mode", "off")
+    if mode not in ("intern", "swing"):
+        mode = "off"
+    tf = cfg.get("gc_trend_tf", "1h")
+    if tf not in GC_TREND_TFS:
+        tf = "1h"
+    return mode, tf, max(2, int(cfg.get("gc_trend_ilen", 4) or 4)), max(2, int(cfg.get("gc_trend_slen", 50) or 50))
+
+
+_gc_trend_cache = {}
+
+
+async def gc_trend_now(symbol, cfg):
+    """Live-Trend fuer die Gitter-Richtung (nur GESCHLOSSENE Kerzen der gewaehlten Zeitebene, damit die Richtung nicht
+    flackert): 1 bullish / -1 bearish / 0 aus oder noch unbekannt. Kurz gecacht (20 s), Neuberechnung nur bei neuer Kerze."""
+    mode, tf, ilen, slen = _gc_trend_cfg(cfg)
+    if mode == "off":
+        return 0
+    key = (symbol, mode, tf, ilen, slen)
+    cached = _gc_trend_cache.get(key)
+    if cached and time.time() - cached["at"] < 20:
+        return cached["val"]
+    L = ilen if mode == "intern" else slen
+    data = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, 2 * L + 150), market_type=cfg.get("binance_market_type", "spot"))
+    if not data or len(data[4]) < 2 * L + 6:
+        return cached["val"] if cached else 0
+    ts, _o, h, l, c = data
+    last = ts[-2]   # letzte geschlossene Kerze
+    if cached and cached["last"] == last:
+        cached["at"] = time.time()
+        return cached["val"]
+    itr, swt, _ev = await asyncio.to_thread(ms_trend_series, h[:-1], l[:-1], c[:-1], ilen, slen)
+    val = (itr if mode == "intern" else swt)[-1]
+    _gc_trend_cache[key] = {"at": time.time(), "last": last, "val": val}
+    return val
+
+
+async def gc_trend_table(symbol, cfg):
+    """Trend aller Zeitebenen (intern + swing, nur geschlossene Kerzen - so wie der Bot entscheidet) fuers Dashboard."""
+    _m, _tf, ilen, slen = _gc_trend_cfg(cfg)
+    rows = []
+    for tf in GC_TREND_TFS:
+        try:
+            data = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, 2 * max(ilen, slen) + 150), market_type=cfg.get("binance_market_type", "spot"))
+            if not data or len(data[4]) < 2 * ilen + 8:
+                rows.append({"tf": tf, "intern": None, "swing": None}); continue
+            _ts, _o, h, l, c = data
+            itr, swt, _ev = await asyncio.to_thread(ms_trend_series, h[:-1], l[:-1], c[:-1], ilen, slen)
+            rows.append({"tf": tf, "intern": itr[-1], "swing": swt[-1] if len(c) - 1 >= 2 * slen + 6 else None})
+        except Exception:
+            rows.append({"tf": tf, "intern": None, "swing": None})
+    return rows
+
+
+async def gc_structure_events(symbol, cfg, chart_ts):
+    """BOS/CHoCH-Ereignisse der Trend-Zeitebene (gewaehlter Modus intern/swing), auf die Chart-Kerzen abgebildet:
+    [{time, kind 'BOS'|'CHoCH', dir 1|-1}] - fuers Chart-Overlay im Dashboard. Leer, wenn der Trend aus ist."""
+    mode, tf, ilen, slen = _gc_trend_cfg(cfg)
+    if mode == "off" or not chart_ts:
+        return []
+    L = ilen if mode == "intern" else slen
+    data = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, 2 * L + 400), market_type=cfg.get("binance_market_type", "spot"))
+    if not data or len(data[4]) < 2 * L + 6:
+        return []
+    hts, _o, h, l, c = data
+    _itr, _swt, events = await asyncio.to_thread(ms_trend_series, h[:-1], l[:-1], c[:-1], ilen, slen)
+    htf_ms = _tf_ms(tf)
+    out, j = [], 0
+    for idx, kind, direction, scope in events:
+        if scope != mode:
+            continue
+        t_close = hts[idx] + htf_ms
+        if t_close < chart_ts[0]:
+            continue
+        while j < len(chart_ts) and chart_ts[j] < t_close:
+            j += 1
+        if j >= len(chart_ts):
+            break
+        out.append({"time": chart_ts[j] // 1000, "kind": kind, "dir": direction})
+    return out
 
 
 SCALP_MS_TFS = ["10s", "30s", "1m", "5m", "15m", "30m", "1h", "4h"]
@@ -6933,7 +7027,7 @@ async def er_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     age = (now * 1000 - closed_ts[-1]) / 1000
-                    if age > 300:
+                    if age > 300 + _tf_ms(resolution) / 1000:
                         debug_log(f"⚠️ [{symbol}] EMA+RSI: letzte Kerze wirkt veraltet ({round(age)}s alt, Auflösung {resolution}) - überspringe Durchlauf.")
                         closed_ts = None
                     elif st["last_price"] is not None and closed_c[-1] and abs(closed_c[-1] - st["last_price"]) / st["last_price"] * 100 > 2.0:
@@ -7530,7 +7624,7 @@ async def mt_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     age = (now * 1000 - closed_ts[-1]) / 1000
-                    if age > 300:
+                    if age > 300 + _tf_ms(resolution) / 1000:
                         debug_log(f"⚠️ [{symbol}] MTF-Spread: letzte Kerze wirkt veraltet ({round(age)}s alt, Auflösung {resolution}) - überspringe Durchlauf.")
                         closed_ts = None
                     elif st["last_price"] is not None and closed_c[-1] and abs(closed_c[-1] - st["last_price"]) / st["last_price"] * 100 > 2.0:

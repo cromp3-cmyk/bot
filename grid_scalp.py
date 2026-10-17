@@ -1083,6 +1083,11 @@ GC_DEFAULTS = {
     "gc_order_cap": 30,            # Boersen-Limit aktiver Limit-Orders je Markt (Lighter: Fehler 21718) - Einstiege werden darauf gedeckelt
     "gc_stop_pct": 0.0,            # Notbremse: % ausserhalb der Spanne -> alles schliessen + stoppen (0 = aus)
     "gc_poll_seconds": 2.0,
+    "gc_trend_mode": "off",        # off / intern / swing: Marktstruktur-Trend (BOS/CHoCH) bestimmt die Gitter-Richtung automatisch
+    "gc_trend_tf": "1h",           # Zeitebene des Trends: 5m / 15m / 1h / 4h / 1d
+    "gc_trend_ilen": 4,            # Pivot-Laenge intern
+    "gc_trend_slen": 50,           # Pivot-Laenge swing
+    "gc_trend_on_flip": "wait",    # wait = Lots auslaufen lassen (keine neuen Kaeufe), dann wechseln / close = sofort alles schliessen
 }
 GC_COI_BASE = 10 ** 11
 
@@ -1164,6 +1169,8 @@ def _gc_desired(symbol, cfg, st, rng, levels, best_bid, best_ask):
     held = {int(l["k"]) for l in lots}
     free = max(0, int(_gcv(cfg, "gc_max_lots")) - len(lots))
     each = min(int(_gcv(cfg, "gc_open_each_side")), free, max(0, int(_gcv(cfg, "gc_order_cap")) - n_exit_orders))
+    if st.get("gc_pause_entries"):
+        each = 0    # Trend steht gegen das laufende Gitter: nur noch Ausstiege, keine neuen Lots
     cands = []
     for k in range(n + 1):
         if not _gc_valid_entry(d, k, n) or k in held:
@@ -1288,6 +1295,27 @@ async def grid_classic_tick(client, symbol):
     rng = st.get("gc_range")
     lots = st.setdefault("gc_lots", [])
     cfg_dir = "short" if _gcv(cfg, "gc_direction") == "short" else "long"
+    # ---- Marktstruktur-Trend bestimmt die Richtung (optional) ---------------
+    trend_mode = str(_gcv(cfg, "gc_trend_mode"))
+    trend_flip = False
+    st["gc_pause_entries"] = False
+    if trend_mode in ("intern", "swing"):
+        try:
+            from strategies import gc_trend_now
+            tv = int(await gc_trend_now(symbol, cfg) or 0)
+        except Exception as e:
+            tv = int(st.get("gc_trend") or 0)
+            if time.time() - float(st.get("gc_trend_err_log") or 0) > 120:
+                st["gc_trend_err_log"] = time.time()
+                debug_log(f"⚠️ [{symbol}] Grid-Bot: Trend nicht abrufbar - behalte letzte Richtung", {"error": str(e)})
+        st["gc_trend"] = tv
+        if tv:
+            cfg_dir = "long" if tv > 0 else "short"
+        elif rng is not None:
+            cfg_dir = rng["dir"]      # Trend noch unbekannt: Richtung behalten
+        trend_flip = rng is not None and cfg_dir != rng["dir"]
+        if trend_flip and lots:
+            st["gc_pause_entries"] = True    # keine neuen Kaeufe gegen den neuen Trend, die offenen Lots laufen aus
     if rng is None:
         lo, hi = float(_gcv(cfg, "gc_lower")), float(_gcv(cfg, "gc_upper"))
         if lo <= 0 or hi <= lo:
@@ -1305,6 +1333,10 @@ async def grid_classic_tick(client, symbol):
         lo, hi = float(_gcv(cfg, "gc_lower")), float(_gcv(cfg, "gc_upper"))
         if lo <= 0 or hi <= lo:
             lo, hi = rng["lower"], rng["upper"]       # Auto-Spanne bleibt, wie sie beim Start festgelegt wurde
+            if trend_flip and not lots:
+                # Trendwechsel ohne offene Lots + Auto-Spanne: Gitter um den aktuellen Kurs neu zentrieren
+                p = float(_gcv(cfg, "gc_auto_pct")) / 100.0
+                lo, hi = mid * (1 - p), mid * (1 + p)
         new_dir = cfg_dir
         if lots and new_dir != rng["dir"]:
             if time.time() - float(st.get("gc_dir_warn") or 0) > 300:
@@ -1320,7 +1352,12 @@ async def grid_classic_tick(client, symbol):
             l["px"] = new_levels[l["k"]]
         st["gc_range"], st["gc_sig"] = rng, sig
         debug_log(f"🧱 [{symbol}] Grid-Bot: Gitter geändert → {lo:.6g} … {hi:.6g}, {rng['n']} Stufen ({len(lots)} Lots neu zugeordnet)")
-    if lots and cfg_dir != rng["dir"] and time.time() - float(st.get("gc_dir_warn") or 0) > 300:
+    if lots and trend_flip and time.time() - float(st.get("gc_dir_warn") or 0) > 300:
+        st["gc_dir_warn"] = time.time()
+        debug_log(f"🧭 [{symbol}] Grid-Bot: Trend ({_gcv(cfg, 'gc_trend_tf')}, {trend_mode}) steht jetzt auf {cfg_dir.upper()}, das Gitter läuft noch {rng['dir']} "
+                  f"({len(lots)} Lots offen) - keine neuen Käufe, Wechsel sobald die Lots geschlossen sind"
+                  + (" (Einstellung 'sofort schließen' greift gleich)" if str(_gcv(cfg, "gc_trend_on_flip")) == "close" else ""))
+    elif lots and cfg_dir != rng["dir"] and time.time() - float(st.get("gc_dir_warn") or 0) > 300:
         st["gc_dir_warn"] = time.time()
         debug_log(f"⚠️ [{symbol}] Grid-Bot: Formular steht auf {cfg_dir}, das Gitter läuft aber noch {rng['dir']} ({len(lots)} Lots offen). "
                   f"Zum Wechsel: Stop, Position schließen, 'Gitter & Lots zurücksetzen', dann neu starten.")
@@ -1365,6 +1402,25 @@ async def grid_classic_tick(client, symbol):
             await save_bot_configs()
             await save_bot_state()
             return
+
+    # ---- Trendwechsel mit offenen Lots: Einstellung "sofort schliessen" --------
+    if trend_flip and lots and str(_gcv(cfg, "gc_trend_on_flip")) == "close" and pos_known:
+        tot = sum(float(l["size"]) for l in lots)
+        avg_px = sum(float(l["px"]) * float(l["size"]) for l in lots) / tot if tot else mid
+        flat_pnl = sum((mid - float(l["px"])) * float(l["size"]) * d for l in lots)
+        debug_log(f"🧭 [{symbol}] Grid-Bot TRENDWECHSEL ({rng['dir']} → {cfg_dir}): {len(lots)} Lots werden sofort geschlossen ({flat_pnl:+.3f} $), Gitter dreht")
+        if not dry and pos_signed != 0:
+            await _flatten_market(client, symbol, market_index, pos_signed, "grid-trend", cooldown_s=0)
+        elif not dry:
+            await _gc_cancel_own(client, market_index, cfg)
+        st["gc_realized"] = float(st.get("gc_realized") or 0.0) + flat_pnl
+        _dash_trade(st, rng["dir"], avg_px, mid, flat_pnl, "GRID-TREND")
+        gc_reset_state(st)
+        st["position"] = None
+        st["avg_entry_price"] = None
+        st["total_coin_size"] = 0.0
+        await save_bot_state()
+        return
 
     # ---- Aktuelle Orders (Boerse bzw. Simulation) -------------------------
     prev = st.get("gc_prev") or {}
@@ -1473,6 +1529,9 @@ async def grid_classic_tick(client, symbol):
         "upnl": round(upnl, 4), "max_lots": int(_gcv(cfg, "gc_max_lots")),
         "step_profit": round(float(_gcv(cfg, "gc_size_usd")) * ((rng["upper"] - rng["lower"]) / n) / max(mid, 1e-9), 4),
         "stopped": st.get("gc_stopped"),
+        "trend": int(st.get("gc_trend") or 0) if trend_mode in ("intern", "swing") else None,
+        "trend_mode": trend_mode, "trend_tf": str(_gcv(cfg, "gc_trend_tf")),
+        "pause": bool(st.get("gc_pause_entries")), "want_dir": cfg_dir,
     }
     if changed:
         now = time.time()

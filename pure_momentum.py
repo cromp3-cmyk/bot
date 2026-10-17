@@ -221,7 +221,7 @@ async def pm_poll_loop(symbol):
 
                 if closed_ts and len(closed_c) > min_needed:
                     age = (now * 1000 - closed_ts[-1]) / 1000
-                    if age > 300:
+                    if age > 300 + _res_seconds(resolution):
                         debug_log(f"⚠️ [{symbol}] Pure Momentum: letzte Kerze wirkt veraltet ({round(age)}s alt, Auflösung {resolution}) - überspringe Durchlauf.")
                         closed_ts = None
                     elif st["last_price"] is not None and closed_c[-1] and abs(closed_c[-1] - st["last_price"]) / st["last_price"] * 100 > 2.0:

@@ -212,6 +212,7 @@ def default_config():
         "gc_direction": "long", "gc_lower": 0.0, "gc_upper": 0.0, "gc_auto_pct": 5.0, "gc_levels": 20,
         "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6, "gc_exit_orders": 15,
         "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0,
+        "gc_trend_mode": "off", "gc_trend_tf": "1h", "gc_trend_ilen": 4, "gc_trend_slen": 50, "gc_trend_on_flip": "wait",
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
         # Grid/AB-Breakout/RSI/MVWAP) - kein eigenes scalp_position_size_usd noetig.
@@ -428,6 +429,16 @@ def default_config():
         "dv_tp_usd": float(os.getenv("DV_TP_USD", "5.0")),
         "dv_trail_usd": float(os.getenv("DV_TRAIL_USD", "0")),   # Trailing-Stop-Abstand in $ (0 = aus)
         "dv_sl_cooldown_seconds": float(os.getenv("DV_SL_COOLDOWN_SECONDS", "30.0")),
+
+        # ===== Trendfolge (entry_mode trendfolge): Marktstruktur-Trend + rote/gruene Kerzen =====
+        "tfl_resolution": os.getenv("TFL_RESOLUTION", "1m"),        # Kerzen-Zeitebene (rot/gruen), ab 10s
+        "tfl_trend_tf": os.getenv("TFL_TREND_TF", "5m"),            # Trend-Zeitebene, ab 10s
+        "tfl_trend_mode": os.getenv("TFL_TREND_MODE", "swing"),     # swing | intern
+        "tfl_trend_ilen": 4, "tfl_trend_slen": 50,
+        "tfl_direction_mode": os.getenv("TFL_DIRECTION_MODE", "both"),
+        "tfl_tp_usd": float(os.getenv("TFL_TP_USD", "3.0")),        # fester TP: Gewinn der GESAMTEN Position in $ (0 = aus)
+        "tfl_sl_usd": float(os.getenv("TFL_SL_USD", "0")),          # optionaler fester SL: Verlust der Position in $ (0 = aus)
+        "tfl_max_entries": int(os.getenv("TFL_MAX_ENTRIES", "10")), # max. Kaeufe/Nachkaeufe je Position (0 = unbegrenzt)
 
         # ================= RSI Signal =================
         # Reine Handelsidee: RSI < oversold -> long, RSI > overbought -> short. Ausstieg identisch
@@ -1599,7 +1610,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
       <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
     </label>
-    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><a href="/guss" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🎯 GUSS →</a><span id="mode-badge"></span><span id="active-badge"></span>
+    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
 </div>
 <div class="container">
@@ -1611,7 +1622,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <button type="button" id="wac-tab-live" class="pill on">🔴 Live</button>
     <button type="button" id="wac-tab-bt" class="pill">📊 Backtest-Trades</button>
     <select id="wac-tf" class="pill-select" title="Zeitrahmen">
-      <option value="">TF: Strategie</option><option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option>
+      <option value="">TF: Strategie</option><option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option>
     </select>
     <button type="button" id="wac-center" class="pill" title="Aktuelle Kerze in die Mitte des Charts setzen">🎯 Mitte</button>
     <button type="button" id="wac-fit" class="pill" title="Gesamten Verlauf einpassen">⤢ Alles</button>
@@ -1665,6 +1676,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + ATR-SL/TP)</option>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
+      <option value="trendfolge">Trendfolge (Marktstruktur-Trend: im Aufwärtstrend bei jeder roten Kerze kaufen, im Abwärtstrend bei jeder grünen shorten, fester $-TP, Trendwechsel = schließen)</option>
       <option value="ema_rsi">EMA + RSI (Smart Money Zone Tracker: Schluss über/unter EMA + RSI über/unter Mittellinie, Swing-SL, TP1/TP2/TP3 mit Teilverkäufen)</option>
       <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
       <option value="mvwap_mf_signal">Multi-VWAP Money-Flow Signal (VWAP+MFI/CMF-Oszillator dreht Richtung, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
@@ -2023,6 +2035,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="dollar701"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="dv_tp_usd"></div>
   <div data-mode="dollar701"><label>Trailing-Stop (Abstand in $ hinter dem besten Kurs, laeuft mit; 0 = aus)</label><input type="number" step="0.1" min="0" id="dv_trail_usd"></div>
   <div data-mode="dollar701"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="dv_sl_cooldown_seconds"></div>
+
+  <div data-mode="trendfolge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🧭 <b>Trendfolge</b>: Der Trend kommt aus der Marktstruktur (BOS/CHoCH). <b>Aufwärtstrend: bei jeder roten Kerze Kauf</b> (Nachkauf, solange die Position läuft), <b>Abwärtstrend: bei jeder grünen Kerze Short</b>. Ausstieg: fester $-TP auf die gesamte Position, optional fester $-SL. <b>Trendwechsel = Position sofort schließen</b>. Kerzen- und Trend-Zeitebene sind getrennt wählbar (ab 10 Sekunden).
+  </div>
+  <div data-mode="trendfolge"><label>Kerzen-Zeitebene (rot/grün wird hier gezählt)</label><select class="cfg" id="tfl_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
+  <div data-mode="trendfolge"><label>Trend-Zeitebene (Marktstruktur)</label><select class="cfg" id="tfl_trend_tf"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
+  <div data-mode="trendfolge"><label>Trend-Art</label><select class="cfg" id="tfl_trend_mode"><option value="swing">Swing-Struktur (größere Wellen)</option><option value="intern">Interne Struktur (kleinere Wellen)</option></select></div>
+  <div data-mode="trendfolge"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="tfl_trend_ilen"></div>
+  <div data-mode="trendfolge"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="tfl_trend_slen"></div>
+  <div data-mode="trendfolge"><label>Richtung</label><select class="cfg" id="tfl_direction_mode"><option value="both">Beide (Trend bestimmt)</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="trendfolge"><label>Take-Profit (fester $-Gewinn der Gesamtposition, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="tfl_tp_usd"></div>
+  <div data-mode="trendfolge"><label>Stop-Loss (fester $-Verlust der Gesamtposition, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="tfl_sl_usd"></div>
+  <div data-mode="trendfolge"><label>Max. Käufe pro Position (0 = unbegrenzt)</label><input type="number" step="1" min="0" id="tfl_max_entries"></div>
 
   <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📶 <b>RSI Signal</b>: Long, sobald der RSI unter die Überverkauft-Schwelle fällt, Short sobald er über die Überkauft-Schwelle steigt. Ausstieg wie bei Al-Shatris Wechsel-Modus - der erste Long bleibt offen, bis das Gegen-Signal kommt, das dreht dann direkt. Optional ein fester Dollar-SL und "SL auf Einstieg bei Gewinn". Darunter drei unabhängig zuschaltbare Filter aus dem gemeinsamen Filter-Baukasten (auch für künftige Strategien wiederverwendbar).
@@ -2578,6 +2603,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_classic"><label>Gegen-Orders im Buch (nur die nächsten Lots, 0 = alle)</label><input type="number" step="1" min="0" id="gc_exit_orders"></div>
   <div data-mode="grid_classic"><label>Notbremse: % außerhalb (0 = aus)</label><input type="number" step="any" id="gc_stop_pct"></div>
   <div data-mode="grid_classic"><label>Poll (Sek.)</label><input type="number" step="any" id="gc_poll_seconds"></div>
+  <div data-mode="grid_classic"><label>🧭 Richtung automatisch nach Marktstruktur-Trend (BOS/CHoCH): Aufwärtstrend = Long-Gitter, Abwärtstrend = Short-Gitter</label>
+    <select class="cfg" id="gc_trend_mode"><option value="off">Aus (feste Richtung oben)</option><option value="swing">An – Swing-Struktur (größere Wellen)</option><option value="intern">An – interne Struktur (kleinere Wellen)</option></select>
+  </div>
+  <div data-mode="grid_classic"><label>Trend-Zeitebene</label>
+    <select class="cfg" id="gc_trend_tf"><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select>
+  </div>
+  <div data-mode="grid_classic"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="gc_trend_ilen"></div>
+  <div data-mode="grid_classic"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="gc_trend_slen"></div>
+  <div data-mode="grid_classic"><label>Bei Trendwechsel mit offenen Lots</label>
+    <select class="cfg" id="gc_trend_on_flip"><option value="wait">Lots auslaufen lassen (keine neuen Käufe), dann Richtung wechseln</option><option value="close">Sofort alles schließen und Richtung wechseln</option></select>
+  </div>
   <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
     <select class="cfg" id="grid_sl_enabled">
       <option value="false">Aus (Standard)</option>
@@ -2730,6 +2766,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="panel-card">
   <div id="gc-kpis" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-bottom:10px;"></div>
   <div id="gc-info" style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Warte auf Daten…</div>
+  <div id="gc-trend-box" style="display:none; margin-bottom:10px; padding:10px; border:1px solid var(--panel-border); border-radius:12px;">
+    <div style="font-size:12px; font-weight:700; margin-bottom:6px;">🧭 Trend (Marktstruktur) · oben intern, unten swing · <span id="gc-trend-state"></span></div>
+    <div id="gc-trend-tfs" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+  </div>
   <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
     <button type="button" id="gc-bt">📊 Backtest (14 Tage)</button>
     <button type="button" id="gc-reset">♻️ Gitter &amp; Lots zurücksetzen</button>
@@ -3397,9 +3437,34 @@ async function gcPoll() {
       box('Gewinn je Stufe', '≈ $'+v.step_profit.toFixed(3));
     const ga = d.grid_account; const acc = ga ? (ga.sub ? ` · 🟢 Unterkonto ${ga.index}` : ` · Hauptkonto ${ga.index}`) : '';
     inf.textContent = `${v.dir.toUpperCase()}-Gitter ${v.lower.toPrecision(6)} … ${v.upper.toPrecision(6)}, ${v.n} Stufen, ${v.orders.length} Orders im Buch` + acc + (v.stopped ? ' · ⛔ ' + v.stopped : '');
+    const ts_ = document.getElementById('gc-trend-state');
+    if (ts_) {
+      if (v.trend === null || v.trend === undefined) { ts_.textContent = 'Trend-Automatik aus'; }
+      else {
+        const tx = v.trend > 0 ? '▲ AUFWÄRTS' : v.trend < 0 ? '▼ ABWÄRTS' : '– unbekannt';
+        ts_.textContent = `Auswahl: ${v.trend_tf} ${v.trend_mode} → ${tx}` + (v.want_dir && v.want_dir !== v.dir ? ` · wechselt auf ${v.want_dir.toUpperCase()}` + (v.pause ? ' (keine neuen Käufe, Lots laufen aus)' : '') : '');
+        ts_.style.color = v.trend > 0 ? 'var(--green,#1fcf6e)' : v.trend < 0 ? 'var(--red,#f0354b)' : '';
+      }
+    }
   } catch (e) {}
 }
 setInterval(gcPoll, 3000);
+async function gcTrendPoll() {
+  try {
+    const box = document.getElementById('gc-trend-box');
+    if (document.getElementById('entry_mode').value !== 'grid_classic') return;
+    const r = await fetch(`/api/gc/trend?symbol=${currentSymbol}`); const d = await r.json();
+    if (!d.rows) return;
+    box.style.display = '';
+    const cell = (v) => v === 1 ? '<span style="color:#1fcf6e">▲ BULL</span>' : v === -1 ? '<span style="color:#f0354b">▼ BEAR</span>' : '<span style="color:#7d8696">–</span>';
+    document.getElementById('gc-trend-tfs').innerHTML = d.rows.map(x => {
+      const sel = d.mode !== 'off' && x.tf === d.tf;
+      return `<div style="min-width:78px;padding:6px 8px;border-radius:10px;background:rgba(255,255,255,.04);${sel ? 'outline:2px solid #3b82f6;' : ''}"><div style="font-size:11px;letter-spacing:.08em;opacity:.7">${x.tf}${sel ? ' ★' : ''}</div><div style="font-size:12px;font-weight:700">${cell(x.intern)}</div><div style="font-size:12px;font-weight:700">${cell(x.swing)}</div></div>`;
+    }).join('');
+  } catch (e) {}
+}
+setInterval(gcTrendPoll, 15000);
+setTimeout(gcTrendPoll, 1500);
 document.getElementById('gc-bt').addEventListener('click', async () => {
   const o = document.getElementById('gc-bt-out'); o.textContent = 'Läuft…';
   const res = await fetch(`/api/gc/backtest?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({days:14, config: buildConfigPayload()})});
@@ -3619,9 +3684,12 @@ function wacRender(d, markers, keepRange) {
   wacSetLevels(d.levels);
 }
 function wacSigMarkers(d) {
-  return (d.markers || []).map(m => m.kind === 'long'
+  const sig = (d.markers || []).map(m => m.kind === 'long'
     ? {time: m.time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: ''}
     : {time: m.time, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: ''});
+  const st = (d.structure || []).map(e => ({time: e.time, position: e.dir > 0 ? 'belowBar' : 'aboveBar', color: e.dir > 0 ? '#1fcf6e' : '#f0354b',
+    shape: e.kind === 'CHoCH' ? 'square' : 'circle', text: e.kind}));
+  return sig.concat(st).sort((a, b) => a.time - b.time);
 }
 async function wacPollLive() {
   if (WAC.mode !== 'live') return;
@@ -4695,6 +4763,15 @@ async function refresh() {
     document.getElementById('dv_tp_usd').value = data.config.dv_tp_usd;
     document.getElementById('dv_trail_usd').value = data.config.dv_trail_usd || 0;
     document.getElementById('dv_sl_cooldown_seconds').value = data.config.dv_sl_cooldown_seconds;
+    document.getElementById('tfl_resolution').value = data.config.tfl_resolution || '1m';
+    document.getElementById('tfl_trend_tf').value = data.config.tfl_trend_tf || '5m';
+    document.getElementById('tfl_trend_mode').value = data.config.tfl_trend_mode || 'swing';
+    document.getElementById('tfl_trend_ilen').value = data.config.tfl_trend_ilen ?? 4;
+    document.getElementById('tfl_trend_slen').value = data.config.tfl_trend_slen ?? 50;
+    document.getElementById('tfl_direction_mode').value = data.config.tfl_direction_mode || 'both';
+    document.getElementById('tfl_tp_usd').value = data.config.tfl_tp_usd ?? 3;
+    document.getElementById('tfl_sl_usd').value = data.config.tfl_sl_usd ?? 0;
+    document.getElementById('tfl_max_entries').value = data.config.tfl_max_entries ?? 10;
 
     setResolutionField('rsi_resolution', data.config.rsi_resolution);
     document.getElementById('rsi_length').value = data.config.rsi_length;
@@ -4865,6 +4942,11 @@ async function refresh() {
     { const e=document.getElementById('gc_exit_orders'); if(e && data.config.gc_exit_orders!==undefined) e.value = data.config.gc_exit_orders; }
     { const e=document.getElementById('gc_stop_pct'); if(e && data.config.gc_stop_pct!==undefined) e.value = data.config.gc_stop_pct; }
     { const e=document.getElementById('gc_poll_seconds'); if(e && data.config.gc_poll_seconds!==undefined) e.value = data.config.gc_poll_seconds; }
+    { const e=document.getElementById('gc_trend_mode'); if(e) e.value = data.config.gc_trend_mode || 'off'; }
+    { const e=document.getElementById('gc_trend_tf'); if(e) e.value = data.config.gc_trend_tf || '1h'; }
+    { const e=document.getElementById('gc_trend_ilen'); if(e) e.value = data.config.gc_trend_ilen ?? 4; }
+    { const e=document.getElementById('gc_trend_slen'); if(e) e.value = data.config.gc_trend_slen ?? 50; }
+    { const e=document.getElementById('gc_trend_on_flip'); if(e) e.value = data.config.gc_trend_on_flip || 'wait'; }
     { const e=document.getElementById('gc_direction'); if(e && data.config.gc_direction!==undefined) e.value = data.config.gc_direction; }
     { const e=document.getElementById('gc_spacing'); if(e && data.config.gc_spacing!==undefined) e.value = data.config.gc_spacing; }
 
@@ -5123,6 +5205,15 @@ function buildConfigPayload() {
     dv_tp_usd: parseFloat(document.getElementById('dv_tp_usd').value) || 0,
     dv_trail_usd: parseFloat(document.getElementById('dv_trail_usd').value) || 0,
     dv_sl_cooldown_seconds: parseFloat(document.getElementById('dv_sl_cooldown_seconds').value),
+    tfl_resolution: document.getElementById('tfl_resolution').value,
+    tfl_trend_tf: document.getElementById('tfl_trend_tf').value,
+    tfl_trend_mode: document.getElementById('tfl_trend_mode').value,
+    tfl_trend_ilen: parseInt(document.getElementById('tfl_trend_ilen').value) || 4,
+    tfl_trend_slen: parseInt(document.getElementById('tfl_trend_slen').value) || 50,
+    tfl_direction_mode: document.getElementById('tfl_direction_mode').value,
+    tfl_tp_usd: parseFloat(document.getElementById('tfl_tp_usd').value) || 0,
+    tfl_sl_usd: parseFloat(document.getElementById('tfl_sl_usd').value) || 0,
+    tfl_max_entries: parseInt(document.getElementById('tfl_max_entries').value) || 0,
     rsi_resolution: getResolutionField('rsi_resolution'),
     rsi_length: parseInt(document.getElementById('rsi_length').value),
     rsi_oversold: parseFloat(document.getElementById('rsi_oversold').value),
@@ -5292,6 +5383,11 @@ function buildConfigPayload() {
     gc_exit_orders: parseInt(document.getElementById('gc_exit_orders').value),
     gc_stop_pct: parseFloat(document.getElementById('gc_stop_pct').value),
     gc_poll_seconds: parseFloat(document.getElementById('gc_poll_seconds').value),
+    gc_trend_mode: document.getElementById('gc_trend_mode').value,
+    gc_trend_tf: document.getElementById('gc_trend_tf').value,
+    gc_trend_ilen: parseInt(document.getElementById('gc_trend_ilen').value) || 4,
+    gc_trend_slen: parseInt(document.getElementById('gc_trend_slen').value) || 50,
+    gc_trend_on_flip: document.getElementById('gc_trend_on_flip').value,
     gc_direction: document.getElementById('gc_direction').value,
     gc_spacing: document.getElementById('gc_spacing').value,
     grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
@@ -5526,6 +5622,7 @@ async def handle_config_update(request):
                 "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
                 "gc_direction", "gc_lower", "gc_upper", "gc_auto_pct", "gc_levels", "gc_spacing", "gc_size_usd",
                 "gc_max_lots", "gc_open_each_side", "gc_exit_orders", "gc_stop_pct", "gc_poll_seconds",
+                "gc_trend_mode", "gc_trend_tf", "gc_trend_ilen", "gc_trend_slen", "gc_trend_on_flip",
                 "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",
@@ -5540,6 +5637,7 @@ async def handle_config_update(request):
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
                 "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
+                "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
@@ -5619,6 +5717,28 @@ async def handle_wa_trend(request):
 
 
 _wa_trend_ui_cache = {}
+
+
+_gc_trend_ui_cache = {}
+
+
+async def handle_gc_trend(request):
+    """Trend (Marktstruktur BOS/CHoCH) aller Zeitebenen fuer das Grid-Bot-Panel - 30 s gecacht."""
+    from strategies import gc_trend_table, _gc_trend_cfg
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    cfg = BOTS[symbol]["config"]
+    sig = (cfg.get("gc_trend_ilen"), cfg.get("gc_trend_slen"))
+    ent = _gc_trend_ui_cache.get(symbol)
+    if ent and time.time() - ent[0] < 30 and ent[2] == sig:
+        rows = ent[1]
+    else:
+        rows = await gc_trend_table(symbol, cfg)
+        _gc_trend_ui_cache[symbol] = (time.time(), rows, sig)
+    mode, tf, _i, _s = _gc_trend_cfg(cfg)
+    return web.json_response({"rows": rows, "mode": mode, "tf": tf, "active": BOTS[symbol]["state"].get("gc_trend", 0)})
+
 _scalp_trend_ui_cache = {}
 
 
@@ -5653,9 +5773,10 @@ async def handle_wa_live_chart(request):
     is_mt = cfg.get("entry_mode") == "mtf_spread"
     is_pm = cfg.get("entry_mode") == "pure_momentum"
     is_dv = cfg.get("entry_mode") == "dollar701"
+    is_tfl = cfg.get("entry_mode") == "trendfolge"
     tf = request.query.get("tf", "")
-    if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
-        tf = cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
+    if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"):
+        tf = cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
             tf = "5m"
     data = await fetch_candles_binance_multi(symbol, tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
@@ -5665,7 +5786,10 @@ async def handle_wa_live_chart(request):
     if len(c) < n1 + n2 + sl + 21:
         return web.json_response({"ok": False, "reason": "lädt noch … (zu wenig Kerzen)"})
     payload = None
-    if is_dv:
+    if is_tfl:
+        from trendfolge import tfl_chart_payload
+        payload = await asyncio.to_thread(tfl_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_dv:
         from dollar701 import dv_chart_payload
         payload = await asyncio.to_thread(dv_chart_payload, ts, o, h, l, c, cfg, 1000)
     elif is_pm:
@@ -5687,6 +5811,19 @@ async def handle_wa_live_chart(request):
                "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else None}
     gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
     grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
+    structure = []
+    if cfg.get("entry_mode") == "grid_classic" and cfg.get("gc_trend_mode", "off") in ("intern", "swing"):
+        try:
+            from strategies import gc_structure_events
+            structure = await gc_structure_events(symbol, cfg, ts)
+        except Exception as e:
+            debug_log(f"⚠️ Marktstruktur-Overlay fehlgeschlagen: {e}")
+    elif is_tfl:
+        try:
+            from trendfolge import tfl_structure_events
+            structure = await tfl_structure_events(symbol, cfg, st, ts)
+        except Exception as e:
+            debug_log(f"⚠️ Marktstruktur-Overlay (Trendfolge) fehlgeschlagen: {e}")
     overlays = []
     try:
         from strategies import fetch_candles_binance_vol, chart_overlays
@@ -5697,7 +5834,7 @@ async def handle_wa_live_chart(request):
             overlays = await asyncio.to_thread(chart_overlays, ts, h, l, c, vol, h1)
     except Exception as e:
         debug_log(f"⚠️ Chart-Overlays fehlgeschlagen: {e}")
-    payload.update({"ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid, "overlays": overlays,
+    payload.update({"ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid, "overlays": overlays, "structure": structure,
                     "active": bool(cfg.get("bot_active"))})
     return web.json_response(payload)
 

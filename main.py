@@ -13,7 +13,7 @@ from bot_core import (
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reverse_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_scalp_trend, handle_dv_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
+    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_gc_trend, handle_scalp_trend, handle_dv_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
@@ -22,6 +22,7 @@ from strategies import (
 )
 from pure_momentum import pm_poll_loop
 from dollar701 import dv_poll_loop
+from trendfolge import tfl_poll_loop
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
     handle_ct_index, handle_ct_status, handle_ct_watch, handle_ct_copy_toggle,
@@ -33,7 +34,6 @@ from binance_ws import binance_ws_cache_loop
 from grid_scalp import grid_scalp_poll_loop, handle_gc_backtest, handle_gc_reset
 from screener import screener_loop, handle_screener_index, handle_screener_api, handle_screener_cfg_get, handle_screener_cfg_set, load_screener_cfg
 from lighter_candles import lighter_candles_loop
-from guss import handle_guss_index, handle_guss_universe, handle_guss_bt_status, handle_guss_bt_start
 from scalp import (
     scalp_loop, handle_scalp_index, handle_scalp_chart, handle_scalp_status,
     handle_scalp_order, handle_scalp_close, handle_scalp_reverse, handle_scalp_tpsl, handle_scalp_auto, handle_scalp_wa,
@@ -55,6 +55,7 @@ async def start_web_server():
     app.router.add_get("/api/wa/live_chart", handle_wa_live_chart)
     app.router.add_get("/api/wa/trend", handle_wa_trend)
     app.router.add_get("/api/scalp/trend", handle_scalp_trend)
+    app.router.add_get("/api/gc/trend", handle_gc_trend)
     app.router.add_post("/api/gc/backtest", handle_gc_backtest)
     app.router.add_post("/api/gc/reset", handle_gc_reset)
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
@@ -70,10 +71,6 @@ async def start_web_server():
     app.router.add_get("/api/screener", handle_screener_api)
     app.router.add_get("/api/screener/config", handle_screener_cfg_get)
     app.router.add_post("/api/screener/config", handle_screener_cfg_set)
-    app.router.add_get("/guss", handle_guss_index)
-    app.router.add_get("/api/guss/universe", handle_guss_universe)
-    app.router.add_get("/api/guss/backtest", handle_guss_bt_status)
-    app.router.add_post("/api/guss/backtest", handle_guss_bt_start)
     app.router.add_get("/scalp", handle_scalp_index)
     app.router.add_get("/api/scalp/chart", handle_scalp_chart)
     app.router.add_get("/api/scalp/status", handle_scalp_status)
@@ -147,6 +144,7 @@ async def main():
         *[mt_poll_loop(s) for s in SYMBOLS],
         *[pm_poll_loop(s) for s in SYMBOLS],
         *[dv_poll_loop(s) for s in SYMBOLS],
+        *[tfl_poll_loop(s) for s in SYMBOLS],
         *[rsi_poll_loop(s) for s in SYMBOLS],
         *[mvwap_poll_loop(s) for s in SYMBOLS],
         *[grid_scalp_poll_loop(s) for s in SYMBOLS],
