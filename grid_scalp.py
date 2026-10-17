@@ -1299,7 +1299,7 @@ async def grid_classic_tick(client, symbol):
     trend_mode = str(_gcv(cfg, "gc_trend_mode"))
     trend_flip = False
     st["gc_pause_entries"] = False
-    if trend_mode in ("intern", "swing"):
+    if trend_mode in ("intern", "swing", "wave"):
         try:
             from strategies import gc_trend_now
             tv = int(await gc_trend_now(symbol, cfg) or 0)
@@ -1529,7 +1529,7 @@ async def grid_classic_tick(client, symbol):
         "upnl": round(upnl, 4), "max_lots": int(_gcv(cfg, "gc_max_lots")),
         "step_profit": round(float(_gcv(cfg, "gc_size_usd")) * ((rng["upper"] - rng["lower"]) / n) / max(mid, 1e-9), 4),
         "stopped": st.get("gc_stopped"),
-        "trend": int(st.get("gc_trend") or 0) if trend_mode in ("intern", "swing") else None,
+        "trend": int(st.get("gc_trend") or 0) if trend_mode in ("intern", "swing", "wave") else None,
         "trend_mode": trend_mode, "trend_tf": str(_gcv(cfg, "gc_trend_tf")),
         "pause": bool(st.get("gc_pause_entries")), "want_dir": cfg_dir,
     }
@@ -1548,34 +1548,52 @@ async def grid_classic_tick(client, symbol):
 # ----------------------------------------------------------------------------
 # Backtest (Kerzen: Hoch/Tief je Kerze, Pfad O -> L -> H -> C bzw. O -> H -> L -> C)
 # ----------------------------------------------------------------------------
-def gc_backtest(candles, cfg):
-    """candles: (ts, o, h, l, c, v). Gibt Kennzahlen + Stufen-Liste zurueck."""
+def gc_backtest(candles, cfg, trend=None):
+    """candles: (ts, o, h, l, c, v). Gibt Kennzahlen + Stufen-Liste zurueck.
+    trend (optional): je Kerze 1 / -1 / 0 (Marktstruktur-Trend) - dann wechselt das Gitter wie live die Richtung:
+    ohne offene Lots sofort (Auto-Spanne wird um den Kurs neu zentriert), mit offenen Lots je nach gc_trend_on_flip
+    'wait' (keine neuen Kaeufe, Lots auslaufen lassen, dann wechseln) oder 'close' (sofort zum Kurs schliessen)."""
     ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     n_c = len(c)
     d = 1 if _gcv(cfg, "gc_direction") != "short" else -1
-    lo, hi = float(_gcv(cfg, "gc_lower")), float(_gcv(cfg, "gc_upper"))
-    if lo <= 0 or hi <= lo:
-        p = float(_gcv(cfg, "gc_auto_pct")) / 100.0
-        lo, hi = o[0] * (1 - p), o[0] * (1 + p)
-    rng = {"lower": lo, "upper": hi, "n": max(2, min(200, int(_gcv(cfg, "gc_levels")))), "spacing": _gcv(cfg, "gc_spacing")}
-    levels = _gc_levels(rng)
-    n = rng["n"]
+    if trend is not None:
+        first = next((x for x in trend if x), 0)
+        if first:
+            d = 1 if first > 0 else -1
+    man_lo, man_hi = float(_gcv(cfg, "gc_lower")), float(_gcv(cfg, "gc_upper"))
+    auto = man_lo <= 0 or man_hi <= man_lo
+    p_auto = float(_gcv(cfg, "gc_auto_pct")) / 100.0
+    lo, hi = (o[0] * (1 - p_auto), o[0] * (1 + p_auto)) if auto else (man_lo, man_hi)
+    n = max(2, min(200, int(_gcv(cfg, "gc_levels"))))
+    spacing = _gcv(cfg, "gc_spacing")
+    levels = _gc_levels({"lower": lo, "upper": hi, "n": n, "spacing": spacing})
     usd = float(_gcv(cfg, "gc_size_usd"))
     cap = int(_gcv(cfg, "gc_max_lots"))
     stop_pct = float(_gcv(cfg, "gc_stop_pct"))
+    on_flip = str(_gcv(cfg, "gc_trend_on_flip"))
     lots = {}          # k -> (px, size)
     realized, cycles, max_lots, worst_float, stopped_at = 0.0, 0, 0, 0.0, None
+    flips, pause = 0, False
     steps = []
 
     def mtm(price):
         return sum((price - px) * sz * d for px, sz in lots.values())
+
+    def switch(want, price):
+        nonlocal d, lo, hi, levels, flips, pause
+        d = want
+        flips += 1
+        pause = False
+        if auto:
+            lo, hi = price * (1 - p_auto), price * (1 + p_auto)
+            levels = _gc_levels({"lower": lo, "upper": hi, "n": n, "spacing": spacing})
 
     def move(a, b, i):
         nonlocal realized, cycles, max_lots
         if d > 0:
             if b < a:      # fallend: Kaeufe auf Levels dazwischen (absteigend)
                 for k in range(n - 1, -1, -1):
-                    if b <= levels[k] < a and k not in lots and len(lots) < cap:
+                    if b <= levels[k] < a and k not in lots and len(lots) < cap and not pause:
                         lots[k] = (levels[k], usd / levels[k])
             elif b > a:    # steigend: Verkaeufe
                 for k in sorted(lots):
@@ -1586,22 +1604,40 @@ def gc_backtest(candles, cfg):
         else:
             if b > a:
                 for k in range(1, n + 1):
-                    if a < levels[k] <= b and k not in lots and len(lots) < cap:
+                    if a < levels[k] <= b and k not in lots and len(lots) < cap and not pause:
                         lots[k] = (levels[k], usd / levels[k])
             elif b < a:
                 for k in sorted(lots, reverse=True):
                     if b <= levels[k - 1] < a:
                         px, sz = lots.pop(k)
                         pnl = (px - levels[k - 1]) * sz
-                        realized += pnl; cycles += 1; steps.append({"ts": ts[i], "px": px, "exit": levels[k - 1], "pnl": -pnl * -1})
+                        realized += pnl; cycles += 1; steps.append({"ts": ts[i], "px": px, "exit": levels[k - 1], "pnl": pnl})
         max_lots = max(max_lots, len(lots))
 
     for i in range(n_c):
+        want = 0
+        if trend is not None and trend[i]:
+            want = 1 if trend[i] > 0 else -1
+            if want != d:
+                if not lots:
+                    switch(want, o[i])
+                elif on_flip == "close":
+                    loss = mtm(o[i])
+                    realized += loss
+                    steps.append({"ts": ts[i], "px": o[i], "exit": o[i], "pnl": loss, "reason": "GRID-TREND"})
+                    lots.clear()
+                    switch(want, o[i])
+                else:
+                    pause = True
+            else:
+                pause = False
         path = (o[i], l[i], h[i], c[i]) if c[i] >= o[i] else (o[i], h[i], l[i], c[i])
         for a, b in zip(path, path[1:]):
             move(a, b, i)
             if lots:
                 worst_float = min(worst_float, mtm(b))
+            if pause and not lots and want and want != d:
+                switch(want, b)
         if stop_pct > 0 and ((d > 0 and l[i] < lo * (1 - stop_pct / 100)) or (d < 0 and h[i] > hi * (1 + stop_pct / 100))):
             loss = mtm(lo * (1 - stop_pct / 100) if d > 0 else hi * (1 + stop_pct / 100))
             realized += loss; stopped_at = ts[i]; lots.clear()
@@ -1613,7 +1649,34 @@ def gc_backtest(candles, cfg):
             "total": round(realized + final_float, 2), "max_lots": max_lots, "worst_float": round(worst_float, 2),
             "per_day": round(realized / days, 2), "stopped_at": stopped_at, "days": round(days, 1),
             "step_profit": round(usd * ((hi - lo) / n) / max(o[0], 1e-9), 3), "margin_peak_notional": round(max_lots * usd, 0),
-            "candles": n_c, "steps": steps[-300:]}
+            "candles": n_c, "steps": steps[-300:], "flips": flips,
+            "trend_mode": str(_gcv(cfg, "gc_trend_mode")) if trend is not None else "off", "trend_tf": str(_gcv(cfg, "gc_trend_tf"))}
+
+
+async def _gc_trend_for_backtest(symbol, cfg, cand, days):
+    """Marktstruktur-Trend der gewaehlten Zeitebene, passend auf die 1m-Backtest-Kerzen (nur geschlossene Trend-Kerzen,
+    kein Blick in die Zukunft). -> (liste|None, fehlertext|None)"""
+    from strategies import (_gc_trend_cfg, ms_trend_series, _trend_align, _tf_ms, _fetch_cached_mo7_backtest_candles)
+    mode, tf, ilen, slen = _gc_trend_cfg(cfg)
+    L = ilen if mode == "intern" else slen
+    htf_ms = _tf_ms(tf)
+    if mode == "wave":
+        from strategies import wave_dir_series
+        n1 = int(cfg.get("wa_n1", 10)); n2 = int(cfg.get("wa_n2", 21)); sl_ = int(cfg.get("wa_sig_len", 4))
+        warm = (n1 + n2 + sl_ + 60) * htf_ms / 86_400_000
+        data, err = await _fetch_cached_mo7_backtest_candles(symbol, tf, days + warm + 1, 100_000, market_type=cfg.get("binance_market_type", "spot"))
+        if err or not data or len(data[4]) < n1 + n2 + sl_ + 30:
+            return None, err or "Zu wenig Kerzen der Trend-Zeitebene für den Backtest."
+        hts, ho, hh, hl, hc, _v = data
+        ser = await asyncio.to_thread(wave_dir_series, ho, hh, hl, hc, cfg)
+        return _trend_align(cand[0], 60_000, hts, htf_ms, ser), None
+    warm_days = (2 * L + 30) * htf_ms / 86_400_000
+    data, err = await _fetch_cached_mo7_backtest_candles(symbol, tf, days + warm_days + 1, 100_000, market_type=cfg.get("binance_market_type", "spot"))
+    if err or not data or len(data[4]) < 2 * L + 5:
+        return None, err or "Zu wenig Kerzen der Trend-Zeitebene für den Backtest."
+    hts, _o, hh, hl, hc, _v = data
+    itr, swt, _ev = await asyncio.to_thread(ms_trend_series, hh, hl, hc, ilen, slen)
+    return _trend_align(cand[0], 60_000, hts, htf_ms, itr if mode == "intern" else swt), None
 
 
 async def handle_gc_backtest(request):
@@ -1635,7 +1698,12 @@ async def handle_gc_backtest(request):
         cand, err = await asyncio.wait_for(_fetch_cached_mo7_backtest_candles(symbol, "1m", days, 100_000, market_type=cfg.get("binance_market_type", "spot")), timeout=90)
         if err:
             return web.json_response({"error": err}, status=400)
-        res = await asyncio.to_thread(gc_backtest, cand, cfg)
+        trend = None
+        if str(_gcv(cfg, "gc_trend_mode")) in ("intern", "swing", "wave"):
+            trend, terr = await _gc_trend_for_backtest(symbol, cfg, cand, days)
+            if trend is None:
+                return web.json_response({"error": terr}, status=400)
+        res = await asyncio.to_thread(gc_backtest, cand, cfg, trend)
     except asyncio.TimeoutError:
         return web.json_response({"error": "Backtest nach 90 s abgebrochen - kürzeren Zeitraum wählen"}, status=504)
     except Exception as e:

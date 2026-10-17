@@ -439,6 +439,7 @@ def default_config():
         "tfl_tp_usd": float(os.getenv("TFL_TP_USD", "3.0")),        # fester TP: Gewinn der GESAMTEN Position in $ (0 = aus)
         "tfl_sl_usd": float(os.getenv("TFL_SL_USD", "0")),          # optionaler fester SL: Verlust der Position in $ (0 = aus)
         "tfl_max_entries": int(os.getenv("TFL_MAX_ENTRIES", "10")), # max. Kaeufe/Nachkaeufe je Position (0 = unbegrenzt)
+        "tfl_flip_mode": os.getenv("TFL_FLIP_MODE", "reverse"),     # reverse = bei Trendwechsel drehen + neu einsteigen | close = nur schliessen
 
         # ================= RSI Signal =================
         # Reine Handelsidee: RSI < oversold -> long, RSI > overbought -> short. Ausstieg identisch
@@ -2037,7 +2038,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="dollar701"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="dv_sl_cooldown_seconds"></div>
 
   <div data-mode="trendfolge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🧭 <b>Trendfolge</b>: Der Trend kommt aus der Marktstruktur (BOS/CHoCH). <b>Aufwärtstrend: bei jeder roten Kerze Kauf</b> (Nachkauf, solange die Position läuft), <b>Abwärtstrend: bei jeder grünen Kerze Short</b>. Ausstieg: fester $-TP auf die gesamte Position, optional fester $-SL. <b>Trendwechsel = Position sofort schließen</b>. Kerzen- und Trend-Zeitebene sind getrennt wählbar (ab 10 Sekunden).
+    🧭 <b>Trendfolge</b>: Der Trend kommt aus der Marktstruktur (BOS/CHoCH). <b>Aufwärtstrend: bei jeder roten Kerze Kauf</b> (Nachkauf, solange die Position läuft), <b>Abwärtstrend: bei jeder grünen Kerze Short</b>. Ausstieg: fester $-TP auf die gesamte Position, optional fester $-SL. <b>Trendwechsel = Position drehen</b> (beenden und sofort im neuen Trend einsteigen, oder nur schließen). Kerzen- und Trend-Zeitebene sind getrennt wählbar (ab 10 Sekunden).
   </div>
   <div data-mode="trendfolge"><label>Kerzen-Zeitebene (rot/grün wird hier gezählt)</label><select class="cfg" id="tfl_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
   <div data-mode="trendfolge"><label>Trend-Zeitebene (Marktstruktur)</label><select class="cfg" id="tfl_trend_tf"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
@@ -2047,6 +2048,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="trendfolge"><label>Richtung</label><select class="cfg" id="tfl_direction_mode"><option value="both">Beide (Trend bestimmt)</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
   <div data-mode="trendfolge"><label>Take-Profit (fester $-Gewinn der Gesamtposition, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="tfl_tp_usd"></div>
   <div data-mode="trendfolge"><label>Stop-Loss (fester $-Verlust der Gesamtposition, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="tfl_sl_usd"></div>
+  <div data-mode="trendfolge"><label>Bei Trendwechsel</label><select class="cfg" id="tfl_flip_mode"><option value="reverse">Drehen: Position beenden und sofort im neuen Trend einsteigen (eine Order)</option><option value="close">Nur schließen (neuer Einstieg bei der nächsten passenden Kerze)</option></select></div>
   <div data-mode="trendfolge"><label>Max. Käufe pro Position (0 = unbegrenzt)</label><input type="number" step="1" min="0" id="tfl_max_entries"></div>
 
   <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -2603,8 +2605,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_classic"><label>Gegen-Orders im Buch (nur die nächsten Lots, 0 = alle)</label><input type="number" step="1" min="0" id="gc_exit_orders"></div>
   <div data-mode="grid_classic"><label>Notbremse: % außerhalb (0 = aus)</label><input type="number" step="any" id="gc_stop_pct"></div>
   <div data-mode="grid_classic"><label>Poll (Sek.)</label><input type="number" step="any" id="gc_poll_seconds"></div>
-  <div data-mode="grid_classic"><label>🧭 Richtung automatisch nach Marktstruktur-Trend (BOS/CHoCH): Aufwärtstrend = Long-Gitter, Abwärtstrend = Short-Gitter</label>
-    <select class="cfg" id="gc_trend_mode"><option value="off">Aus (feste Richtung oben)</option><option value="swing">An – Swing-Struktur (größere Wellen)</option><option value="intern">An – interne Struktur (kleinere Wellen)</option></select>
+  <div data-mode="grid_classic"><label>🧭 Richtung automatisch: Marktstruktur-Trend (BOS/CHoCH) oder Wellenanker-Signal – Aufwärts/Long = Long-Gitter, Abwärts/Short = Short-Gitter</label>
+    <select class="cfg" id="gc_trend_mode"><option value="off">Aus (feste Richtung oben)</option><option value="swing">An – Swing-Struktur (größere Wellen)</option><option value="intern">An – interne Struktur (kleinere Wellen)</option><option value="wave">An – Wellenanker-Signal (Long-/Short-Signal = Richtung, Einstellungen wie Wellenanker)</option></select>
   </div>
   <div data-mode="grid_classic"><label>Trend-Zeitebene</label>
     <select class="cfg" id="gc_trend_tf"><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select>
@@ -2767,7 +2769,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div id="gc-kpis" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-bottom:10px;"></div>
   <div id="gc-info" style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Warte auf Daten…</div>
   <div id="gc-trend-box" style="display:none; margin-bottom:10px; padding:10px; border:1px solid var(--panel-border); border-radius:12px;">
-    <div style="font-size:12px; font-weight:700; margin-bottom:6px;">🧭 Trend (Marktstruktur) · oben intern, unten swing · <span id="gc-trend-state"></span></div>
+    <div style="font-size:12px; font-weight:700; margin-bottom:6px;">🧭 Richtung · oben intern, mitte swing (Marktstruktur), unten 〰 Wellenanker · <span id="gc-trend-state"></span></div>
     <div id="gc-trend-tfs" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
   </div>
   <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
@@ -3459,7 +3461,7 @@ async function gcTrendPoll() {
     const cell = (v) => v === 1 ? '<span style="color:#1fcf6e">▲ BULL</span>' : v === -1 ? '<span style="color:#f0354b">▼ BEAR</span>' : '<span style="color:#7d8696">–</span>';
     document.getElementById('gc-trend-tfs').innerHTML = d.rows.map(x => {
       const sel = d.mode !== 'off' && x.tf === d.tf;
-      return `<div style="min-width:78px;padding:6px 8px;border-radius:10px;background:rgba(255,255,255,.04);${sel ? 'outline:2px solid #3b82f6;' : ''}"><div style="font-size:11px;letter-spacing:.08em;opacity:.7">${x.tf}${sel ? ' ★' : ''}</div><div style="font-size:12px;font-weight:700">${cell(x.intern)}</div><div style="font-size:12px;font-weight:700">${cell(x.swing)}</div></div>`;
+      return `<div style="min-width:78px;padding:6px 8px;border-radius:10px;background:rgba(255,255,255,.04);${sel ? 'outline:2px solid #3b82f6;' : ''}"><div style="font-size:11px;letter-spacing:.08em;opacity:.7">${x.tf}${sel ? ' ★' : ''}</div><div style="font-size:12px;font-weight:700">${cell(x.intern)}</div><div style="font-size:12px;font-weight:700">${cell(x.swing)}</div><div style="font-size:12px;font-weight:700;opacity:.9">〰 ${cell(x.wave)}</div></div>`;
     }).join('');
   } catch (e) {}
 }
@@ -3470,7 +3472,7 @@ document.getElementById('gc-bt').addEventListener('click', async () => {
   const res = await fetch(`/api/gc/backtest?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({days:14, config: buildConfigPayload()})});
   const d = await res.json();
   if (d.error) { o.textContent = '❌ ' + d.error; return; }
-  o.textContent = `${d.direction}-Grid ${d.lower.toPrecision(6)}…${d.upper.toPrecision(6)} · ${d.n} Stufen · ${d.days} Tage\\nStufen: ${d.cycles} → realisiert $${d.realized} ($${d.per_day}/Tag)\\nOffen am Ende: ${d.open_lots} Lots, $${d.open_float}\\nGesamt: $${d.total} · max. Lots ${d.max_lots} (Notional ${d.margin_peak_notional}$) · schlimmster Buchverlust $${d.worst_float}` + (d.stopped_at ? '\\n⛔ Notbremse ausgelöst' : '');
+  o.textContent = `${d.direction}-Grid ${d.lower.toPrecision(6)}…${d.upper.toPrecision(6)} · ${d.n} Stufen · ${d.days} Tage\\nStufen: ${d.cycles} → realisiert $${d.realized} ($${d.per_day}/Tag)\\nOffen am Ende: ${d.open_lots} Lots, $${d.open_float}\\nGesamt: $${d.total} · max. Lots ${d.max_lots} (Notional ${d.margin_peak_notional}$) · schlimmster Buchverlust $${d.worst_float}` + (d.stopped_at ? '\\n⛔ Notbremse ausgelöst' : '') + (d.trend_mode && d.trend_mode !== 'off' ? `\\n🧭 Trend-Automatik (${d.trend_tf}, ${d.trend_mode}): ${d.flips} Richtungswechsel, am Ende ${d.direction.toUpperCase()}` : '');
 });
 document.getElementById('gc-reset').addEventListener('click', async () => {
   if (!confirm('Gitter und Lot-Buch zurücksetzen? (Bot muss gestoppt sein. Offene Börsen-Position bleibt bestehen und wird NICHT geschlossen.)')) return;
@@ -4772,6 +4774,7 @@ async function refresh() {
     document.getElementById('tfl_tp_usd').value = data.config.tfl_tp_usd ?? 3;
     document.getElementById('tfl_sl_usd').value = data.config.tfl_sl_usd ?? 0;
     document.getElementById('tfl_max_entries').value = data.config.tfl_max_entries ?? 10;
+    document.getElementById('tfl_flip_mode').value = data.config.tfl_flip_mode || 'reverse';
 
     setResolutionField('rsi_resolution', data.config.rsi_resolution);
     document.getElementById('rsi_length').value = data.config.rsi_length;
@@ -5214,6 +5217,7 @@ function buildConfigPayload() {
     tfl_tp_usd: parseFloat(document.getElementById('tfl_tp_usd').value) || 0,
     tfl_sl_usd: parseFloat(document.getElementById('tfl_sl_usd').value) || 0,
     tfl_max_entries: parseInt(document.getElementById('tfl_max_entries').value) || 0,
+    tfl_flip_mode: document.getElementById('tfl_flip_mode').value,
     rsi_resolution: getResolutionField('rsi_resolution'),
     rsi_length: parseInt(document.getElementById('rsi_length').value),
     rsi_oversold: parseFloat(document.getElementById('rsi_oversold').value),
@@ -5637,7 +5641,7 @@ async def handle_config_update(request):
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
                 "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
-                "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries",
+                "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
@@ -5729,7 +5733,7 @@ async def handle_gc_trend(request):
     if symbol not in BOTS:
         return web.json_response({"error": "unknown symbol"}, status=404)
     cfg = BOTS[symbol]["config"]
-    sig = (cfg.get("gc_trend_ilen"), cfg.get("gc_trend_slen"))
+    sig = (cfg.get("gc_trend_ilen"), cfg.get("gc_trend_slen"), cfg.get("wa_n1"), cfg.get("wa_n2"), cfg.get("wa_sig_len"), cfg.get("wa_entry_mode"), cfg.get("wa_zone1"), cfg.get("wa_level"), cfg.get("wa_level_line"))
     ent = _gc_trend_ui_cache.get(symbol)
     if ent and time.time() - ent[0] < 30 and ent[2] == sig:
         rows = ent[1]

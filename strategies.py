@@ -6258,7 +6258,7 @@ GC_TREND_TFS = ["5m", "15m", "1h", "4h", "1d"]
 def _gc_trend_cfg(cfg):
     """-> (modus 'off'/'intern'/'swing', zeitebene, interne Pivot-Laenge, Swing-Pivot-Laenge)"""
     mode = cfg.get("gc_trend_mode", "off")
-    if mode not in ("intern", "swing"):
+    if mode not in ("intern", "swing", "wave"):
         mode = "off"
     tf = cfg.get("gc_trend_tf", "1h")
     if tf not in GC_TREND_TFS:
@@ -6269,16 +6269,55 @@ def _gc_trend_cfg(cfg):
 _gc_trend_cache = {}
 
 
+def wave_dir_series(o, h, l, c, cfg):
+    """Wellenanker als Richtungsgeber: je Kerze 1 (letztes Signal war LONG) / -1 (letztes Signal war SHORT) / 0 (noch keins).
+    Gleiche Einstellungen/Signale wie die Wellenanker-Strategie (wa_n1, wa_n2, wa_sig_len, wa_entry_mode, wa_zone1/wa_level ...);
+    die Richtung bleibt bis zum Gegensignal stehen."""
+    n1 = int(cfg.get("wa_n1", 10)); n2 = int(cfg.get("wa_n2", 21)); sig_len = int(cfg.get("wa_sig_len", 4))
+    n = len(c)
+    out = [0] * n
+    min_needed = n1 + n2 + sig_len + 20
+    if n <= min_needed + 1:
+        return out
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
+    emode = _wa_entry_mode(cfg)
+    z1 = float(cfg.get("wa_level", 10.0)) if emode == "level" else float(cfg.get("wa_zone1", 53.0))
+    line = cfg.get("wa_level_line", "signal")
+    cur = 0
+    for i in range(min_needed, n):
+        lr, sr, _cu, _cd = _wa_raw_signals(wt1, wt2, i, z1, emode, line)
+        if lr and not sr:
+            cur = 1
+        elif sr and not lr:
+            cur = -1
+        out[i] = cur
+    return out
+
+
 async def gc_trend_now(symbol, cfg):
     """Live-Trend fuer die Gitter-Richtung (nur GESCHLOSSENE Kerzen der gewaehlten Zeitebene, damit die Richtung nicht
     flackert): 1 bullish / -1 bearish / 0 aus oder noch unbekannt. Kurz gecacht (20 s), Neuberechnung nur bei neuer Kerze."""
     mode, tf, ilen, slen = _gc_trend_cfg(cfg)
     if mode == "off":
         return 0
-    key = (symbol, mode, tf, ilen, slen)
+    wkey = (cfg.get("wa_n1"), cfg.get("wa_n2"), cfg.get("wa_sig_len"), cfg.get("wa_entry_mode"), cfg.get("wa_zone1"),
+            cfg.get("wa_level"), cfg.get("wa_level_line"), cfg.get("wa_src")) if mode == "wave" else None
+    key = (symbol, mode, tf, ilen, slen, wkey)
     cached = _gc_trend_cache.get(key)
     if cached and time.time() - cached["at"] < 20:
         return cached["val"]
+    if mode == "wave":
+        data = await fetch_candles_binance_multi(symbol, tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
+        if not data or len(data[4]) < 80:
+            return cached["val"] if cached else 0
+        ts, o_, h_, l_, c_ = data
+        last = ts[-2]
+        if cached and cached["last"] == last:
+            cached["at"] = time.time()
+            return cached["val"]
+        ser = await asyncio.to_thread(wave_dir_series, o_[:-1], h_[:-1], l_[:-1], c_[:-1], cfg)
+        _gc_trend_cache[key] = {"at": time.time(), "last": last, "val": ser[-1]}
+        return ser[-1]
     L = ilen if mode == "intern" else slen
     data = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, 2 * L + 150), market_type=cfg.get("binance_market_type", "spot"))
     if not data or len(data[4]) < 2 * L + 6:
@@ -6300,14 +6339,18 @@ async def gc_trend_table(symbol, cfg):
     rows = []
     for tf in GC_TREND_TFS:
         try:
-            data = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, 2 * max(ilen, slen) + 150), market_type=cfg.get("binance_market_type", "spot"))
+            data = await fetch_candles_binance_multi(symbol, tf, count_back=600, market_type=cfg.get("binance_market_type", "spot"))
             if not data or len(data[4]) < 2 * ilen + 8:
-                rows.append({"tf": tf, "intern": None, "swing": None}); continue
-            _ts, _o, h, l, c = data
+                rows.append({"tf": tf, "intern": None, "swing": None, "wave": None}); continue
+            _ts, o, h, l, c = data
             itr, swt, _ev = await asyncio.to_thread(ms_trend_series, h[:-1], l[:-1], c[:-1], ilen, slen)
-            rows.append({"tf": tf, "intern": itr[-1], "swing": swt[-1] if len(c) - 1 >= 2 * slen + 6 else None})
+            try:
+                wv = (await asyncio.to_thread(wave_dir_series, o[:-1], h[:-1], l[:-1], c[:-1], cfg))[-1]
+            except Exception:
+                wv = None
+            rows.append({"tf": tf, "intern": itr[-1], "swing": swt[-1] if len(c) - 1 >= 2 * slen + 6 else None, "wave": wv})
         except Exception:
-            rows.append({"tf": tf, "intern": None, "swing": None})
+            rows.append({"tf": tf, "intern": None, "swing": None, "wave": None})
     return rows
 
 
@@ -6315,7 +6358,7 @@ async def gc_structure_events(symbol, cfg, chart_ts):
     """BOS/CHoCH-Ereignisse der Trend-Zeitebene (gewaehlter Modus intern/swing), auf die Chart-Kerzen abgebildet:
     [{time, kind 'BOS'|'CHoCH', dir 1|-1}] - fuers Chart-Overlay im Dashboard. Leer, wenn der Trend aus ist."""
     mode, tf, ilen, slen = _gc_trend_cfg(cfg)
-    if mode == "off" or not chart_ts:
+    if mode in ("off", "wave") or not chart_ts:
         return []
     L = ilen if mode == "intern" else slen
     data = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, 2 * L + 400), market_type=cfg.get("binance_market_type", "spot"))
