@@ -7303,10 +7303,8 @@ def _mt_params(cfg):
         "long_limit": float(cfg.get("mt_long_limit", -20.0)), "short_limit": float(cfg.get("mt_short_limit", 20.0)),
         "use_accel": bool(cfg.get("mt_use_accel", True)), "accel": float(cfg.get("mt_accel", 0.5)),
         "force_change": bool(cfg.get("mt_force_change", True)),
-        "atr_len": max(1, int(cfg.get("mt_atr_len", 14))),
-        "sl_atr_mult": max(0.0, float(cfg.get("mt_sl_atr_mult", 2.0))),
-        "tp_mode": cfg.get("mt_tp_mode", "atr"), "tp_step_usd": float(cfg.get("mt_tp_step_usd", 10.0)),
-        "tp_step_atr_mult": float(cfg.get("mt_tp_step_atr_mult", 1.0)),
+        "sl_usd": max(0.0, float(cfg.get("mt_sl_usd", 5.0) or 0)),   # fester SL: Verlust der Position in $ (0 = aus)
+        "tp_usd": max(0.0, float(cfg.get("mt_tp_usd", 5.0) or 0)),   # fester TP: Gewinn der Position in $ (0 = aus); Plan: Schritt je TP
     }
 
 
@@ -7320,7 +7318,7 @@ def _mt_all_tfs(p):
 
 
 def _mt_warmup(p):
-    return max(p["atr_len"], p["lookback"] + 2) + 5
+    return p["lookback"] + 2 + 5
 
 
 def _wma_series(x, n):
@@ -7472,22 +7470,20 @@ def compute_mt_signals(trend, p):
     return buy, sell
 
 
-def _mt_plan_levels(direction, entry, atr_now, p, need_tp):
-    """-> (sl|None, tp1, tp2, tp3) oder None bei ungueltigem Abstand."""
-    sl = None
-    if p["sl_atr_mult"] > 0:
-        dist = (atr_now or 0) * p["sl_atr_mult"]
-        if dist <= 0:
-            return None
-        sl = entry - dist if direction == "long" else entry + dist
-    if not need_tp:
-        return sl, None, None, None
-    if sl is None:
-        return None   # Plan-Modus braucht einen SL (sonst kein Schutz)
-    step = p["tp_step_usd"] if p["tp_mode"] == "fixed" else (atr_now or 0) * p["tp_step_atr_mult"]
-    if not step or step <= 0:
+def _mt_plan_levels(direction, entry, size, p, need_tp):
+    """Fester Dollar-SL/-TP -> Preise. size = Coin-Menge der Position.
+    -> (sl|None, tp1, tp2, tp3) oder None bei ungueltigem Abstand.
+    Wechsel-Modus (need_tp False): tp1 = einziger TP (Rest None). Plan-Modus: TP1/TP2/TP3 = 1x/2x/3x TP-Betrag, SL Pflicht."""
+    if not size or size <= 0:
         return None
     sgn = 1 if direction == "long" else -1
+    sl = entry - sgn * p["sl_usd"] / size if p["sl_usd"] > 0 else None
+    if not need_tp:
+        tp = entry + sgn * p["tp_usd"] / size if p["tp_usd"] > 0 else None
+        return sl, tp, None, None
+    if sl is None or p["tp_usd"] <= 0:
+        return None   # Plan-Modus braucht SL und TP-Betrag
+    step = p["tp_usd"] / size
     return sl, entry + sgn * step, entry + sgn * 2 * step, entry + sgn * 3 * step
 
 
@@ -7561,6 +7557,12 @@ async def check_mt_sl_tp(symbol, price):
             _mt_reset_state(st)
         return
     if cfg.get("mt_exit_mode", "flip") != "plan":
+        tp = st.get("mt_tp1_price")
+        if tp is not None and ((pos == "long" and price >= tp) or (pos == "short" and price <= tp)):
+            debug_log(f"🚪 [{symbol}] MTF-Spread TP: {pos.upper()} @ {price} (Ziel war {round(tp, 4)})")
+            await execute_exit(symbol, price, "TP")
+            if st["position"] is None:
+                _mt_reset_state(st)
         return
     if not st.get("mt_tp1_done") and st.get("mt_tp1_price") is not None:
         tp1 = st["mt_tp1_price"]
@@ -7592,7 +7594,7 @@ async def check_mt_sl_tp(symbol, price):
             _mt_reset_state(st)
 
 
-async def check_mt_entry(symbol, buy_signal, sell_signal, price, atr_now):
+async def check_mt_entry(symbol, buy_signal, sell_signal, price):
     """Einstieg auf der Signal-Kerze. Plan: nur wenn flach. Flip: Gegen-Signal schliesst und dreht."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -7614,9 +7616,10 @@ async def check_mt_entry(symbol, buy_signal, sell_signal, price, atr_now):
     elif time.time() < st.get("mt_sl_cooldown_until", 0.0):
         return
     p = _mt_params(cfg)
-    levels = _mt_plan_levels(target, price, atr_now, p, need_tp=not flip)
+    est_size = (cfg["margin"] * cfg["leverage"]) / price if price else 0
+    levels = _mt_plan_levels(target, price, est_size, p, need_tp=not flip)
     if levels is None:
-        debug_log(f"⚠️ [{symbol}] MTF-Spread Signal {target.upper()} @ {price} übersprungen: SL/TP-Abstand ungültig (ATR=0 oder Plan ohne SL)")
+        debug_log(f"⚠️ [{symbol}] MTF-Spread Signal {target.upper()} @ {price} übersprungen: Plan-Modus braucht SL-$ und TP-$ größer 0")
         return
     if pos is not None:
         debug_log(f"🔄 [{symbol}] MTF-Spread Wechsel: {pos.upper()} -> {target.upper()} @ {price}")
@@ -7629,10 +7632,12 @@ async def check_mt_entry(symbol, buy_signal, sell_signal, price, atr_now):
     if st["position"] is None:
         return
     _mt_reset_state(st)
+    real_size = st.get("total_coin_size") or est_size
+    entry_px = st.get("avg_entry_price") or price
+    levels = _mt_plan_levels(target, entry_px, real_size, p, need_tp=not flip) or levels
     sl, tp1, tp2, tp3 = levels
     st["mt_sl_price"] = sl
-    if not flip:
-        st["mt_tp1_price"], st["mt_tp2_price"], st["mt_tp3_price"] = tp1, tp2, tp3
+    st["mt_tp1_price"], st["mt_tp2_price"], st["mt_tp3_price"] = tp1, tp2, tp3
 
 
 async def mt_poll_loop(symbol):
@@ -7684,7 +7689,6 @@ async def mt_poll_loop(symbol):
                         base_ms = closed_ts[-1] - closed_ts[-2] if len(closed_ts) > 1 else _tf_ms(resolution)
                         trend = _mt_trend_series(closed_ts, base_ms, htf, p)
                         buy, sell = compute_mt_signals(trend, p)
-                        atr = compute_atr(closed_h, closed_l, closed_c, p["atr_len"]) or [0.0] * len(closed_c)
                         st["mt_trend"] = trend[-1]
                         if due_heartbeat:
                             last_heartbeat = now
@@ -7697,7 +7701,7 @@ async def mt_poll_loop(symbol):
                         for idx in new_indices:
                             price_i = st["last_price"] if (idx == len(closed_ts) - 1 and st["last_price"] is not None) else closed_c[idx]
                             last_processed_ts = closed_ts[idx]
-                            await check_mt_entry(symbol, buy[idx], sell[idx], price_i, atr[idx])
+                            await check_mt_entry(symbol, buy[idx], sell[idx], price_i)
                 elif due_heartbeat and not closed_ts:
                     last_heartbeat = now
                     debug_log(f"⏳ [{symbol}] MTF-Spread wartet: keine Kerzen erhalten (Auflösung {resolution})")
@@ -7706,7 +7710,7 @@ async def mt_poll_loop(symbol):
         await asyncio.sleep(5)
 
 
-def _simulate_mt_trades(candles, cfg, buy_sig, sell_sig, atr, warmup, p):
+def _simulate_mt_trades(candles, cfg, buy_sig, sell_sig, warmup, p):
     """Backtest-Gegenstueck zu check_mt_entry/check_mt_sl_tp (Einstieg zum Schlusskurs der Signal-Kerze, SL/TP ab der
     naechsten Kerze ueber Hoch/Tief, SL gewinnt bei Gleichzeitigkeit)."""
     ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
@@ -7749,6 +7753,9 @@ def _simulate_mt_trades(candles, cfg, buy_sig, sell_sig, atr, warmup, p):
                 if position["tp1_done"] and position["tp2_done"] and _hit(position["tp3"]):
                     _bt_close_trade(trades, pdir, entry, position["tp3"], position["size"], i, position["entry_i"], "TP3", ts=ts)
                     position = None
+            elif position["tp1"] is not None and ((pdir == "long" and h[i] >= position["tp1"]) or (pdir == "short" and l[i] <= position["tp1"])):
+                _bt_close_trade(trades, pdir, entry, position["tp1"], position["size"], i, position["entry_i"], "TP", ts=ts)
+                position = None
 
         buy, sell = buy_sig[i], sell_sig[i]
         if mode == "long_only":
@@ -7761,7 +7768,7 @@ def _simulate_mt_trades(candles, cfg, buy_sig, sell_sig, atr, warmup, p):
         if position is not None and (plan or position["dir"] == target):
             continue
         price = c[i]
-        levels = _mt_plan_levels(target, price, atr[i], p, need_tp=plan)
+        levels = _mt_plan_levels(target, price, (margin * leverage) / price, p, need_tp=plan)
         if levels is None:
             continue
         if position is not None:
@@ -7799,8 +7806,7 @@ async def run_mt_backtest(symbol, cfg, days, exclude_top_n=1):
     base_ms = base_ts[1] - base_ts[0]
     trend = await asyncio.to_thread(_mt_trend_series, base_ts, base_ms, htf, p)
     buy, sell = compute_mt_signals(trend, p)
-    atr = compute_atr(candles[2], candles[3], candles[4], p["atr_len"]) or [0.0] * len(base_ts)
-    trades = _simulate_mt_trades(candles, cfg, buy, sell, atr, _mt_warmup(p), p)
+    trades = _simulate_mt_trades(candles, cfg, buy, sell, _mt_warmup(p), p)
     stats = summarize_backtest_trades(trades, exclude_top_n)
     actual_days = (base_ts[-1] - base_ts[0]) / 86_400_000
     valid = sum(1 for x in trend if x is not None)

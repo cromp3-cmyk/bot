@@ -398,11 +398,8 @@ def default_config():
         "mt_force_change": os.getenv("MT_FORCE_CHANGE", "true").lower() == "true",
         "mt_direction_mode": os.getenv("MT_DIRECTION_MODE", "both"),
         "mt_exit_mode": os.getenv("MT_EXIT_MODE", "flip"),
-        "mt_atr_len": int(os.getenv("MT_ATR_LEN", "14")),
-        "mt_sl_atr_mult": float(os.getenv("MT_SL_ATR_MULT", "2.0")),
-        "mt_tp_mode": os.getenv("MT_TP_MODE", "atr"),
-        "mt_tp_step_atr_mult": float(os.getenv("MT_TP_STEP_ATR_MULT", "1.0")),
-        "mt_tp_step_usd": float(os.getenv("MT_TP_STEP_USD", "10.0")),
+        "mt_sl_usd": float(os.getenv("MT_SL_USD", "5.0")),   # fester SL: Verlust der Position in $ (0 = aus)
+        "mt_tp_usd": float(os.getenv("MT_TP_USD", "5.0")),   # fester TP: Gewinn der Position in $ (0 = aus); im Plan-Modus = Schritt (TP1 = 1x, TP2 = 2x, TP3 = 3x)
         "mt_tp1_close_pct": float(os.getenv("MT_TP1_CLOSE_PCT", "33.0")),
         "mt_tp2_close_pct": float(os.getenv("MT_TP2_CLOSE_PCT", "50.0")),
         "mt_sl_to_breakeven_on_tp1": os.getenv("MT_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
@@ -1674,7 +1671,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
       <option value="wellenanker">Wellenanker (WaveTrend-Punkte, Nachkauf, TP Gegentrade/Überlauf/Fest, $-SL)</option>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
-      <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + ATR-SL/TP)</option>
+      <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + fester $-SL/TP)</option>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="trendfolge">Trendfolge (Marktstruktur-Trend: im Aufwärtstrend bei jeder roten Kerze kaufen, im Abwärtstrend bei jeder grünen shorten, fester $-TP, Trendwechsel = schließen)</option>
@@ -1899,7 +1896,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="ema_rsi"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="er_sl_cooldown_seconds"></div>
 
   <div data-mode="mtf_spread" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🌊 <b>Wellenanker MTF Spread Trend</b>: Je Zeitebene Spread % = (WT1−WT2)/„Spread = 100 %“, begrenzt auf ±100; je Block der Mittelwert, TREND % = Mittel der Blöcke (nur geschlossene Kerzen höherer Zeitebenen). <b>Long</b>, wenn der Trend % in den letzten N Kerzen ≤ Buy-Level war und jetzt wieder darüber liegt (Short spiegelbildlich); dazu Limit-/Acceleration-Filter und Richtungswechsel wie im Pine-Skript. Ausstieg: Gegen-Signal dreht (optional ATR-SL) oder Plan mit TP1/TP2/TP3.
+    🌊 <b>Wellenanker MTF Spread Trend</b>: Je Zeitebene Spread % = (WT1−WT2)/„Spread = 100 %“, begrenzt auf ±100; je Block der Mittelwert, TREND % = Mittel der Blöcke (nur geschlossene Kerzen höherer Zeitebenen). <b>Long</b>, wenn der Trend % in den letzten N Kerzen ≤ Buy-Level war und jetzt wieder darüber liegt (Short spiegelbildlich); dazu Limit-/Acceleration-Filter und Richtungswechsel wie im Pine-Skript. Ausstieg: Gegen-Signal dreht (dazu fester $-SL/$-TP) oder Plan mit TP1/TP2/TP3.
   </div>
   <div data-mode="mtf_spread"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="mt_resolution">
@@ -1957,15 +1954,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="mt_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
   </div>
   <div data-mode="mtf_spread"><label>Ausstieg</label>
-    <select class="cfg" id="mt_exit_mode"><option value="flip">Wechsel (Gegen-Signal dreht die Position, optionaler ATR-SL)</option><option value="plan">Plan (ATR-SL + TP1/TP2/TP3 mit Teilverkäufen, Gegen-Signal ignoriert)</option></select>
+    <select class="cfg" id="mt_exit_mode"><option value="flip">Wechsel (Gegen-Signal dreht die Position, fester $-SL und $-TP optional)</option><option value="plan">Plan (fester $-SL + TP1/TP2/TP3 mit Teilverkäufen, Gegen-Signal ignoriert)</option></select>
   </div>
-  <div data-mode="mtf_spread"><label>ATR-Periode</label><input type="number" step="1" min="1" id="mt_atr_len"></div>
-  <div data-mode="mtf_spread"><label>SL: ATR-Multiplikator (0 = kein SL, nur im Wechsel-Modus erlaubt)</label><input type="number" step="0.1" min="0" id="mt_sl_atr_mult"></div>
-  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>TP-Schritt</label>
-    <select class="cfg" id="mt_tp_mode"><option value="atr">ATR-Vielfaches</option><option value="fixed">Fester Preisabstand</option></select>
-  </div>
-  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>Schritt: ATR-Multiplikator</label><input type="number" step="0.1" min="0.1" id="mt_tp_step_atr_mult"></div>
-  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>Schritt: fester Preisabstand ($)</label><input type="number" step="any" min="0" id="mt_tp_step_usd"></div>
+  <div data-mode="mtf_spread"><label>Fester SL: Verlust der Position in $ (0 = kein SL, nur im Wechsel-Modus erlaubt)</label><input type="number" step="any" min="0" id="mt_sl_usd"></div>
+  <div data-mode="mtf_spread"><label>Fester TP: Gewinn der Position in $ (0 = kein TP; im Plan-Modus = Schritt: TP1 = 1×, TP2 = 2×, TP3 = 3×)</label><input type="number" step="any" min="0" id="mt_tp_usd"></div>
   <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="mt_tp1_close_pct"></div>
   <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="mt_tp2_close_pct"></div>
   <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>SL auf Break-Even bei TP1</label>
@@ -4752,11 +4744,8 @@ async function refresh() {
     document.getElementById('mt_force_change').value = String(data.config.mt_force_change);
     document.getElementById('mt_direction_mode').value = data.config.mt_direction_mode || 'both';
     document.getElementById('mt_exit_mode').value = data.config.mt_exit_mode || 'flip';
-    document.getElementById('mt_atr_len').value = data.config.mt_atr_len;
-    document.getElementById('mt_sl_atr_mult').value = data.config.mt_sl_atr_mult;
-    document.getElementById('mt_tp_mode').value = data.config.mt_tp_mode || 'atr';
-    document.getElementById('mt_tp_step_atr_mult').value = data.config.mt_tp_step_atr_mult;
-    document.getElementById('mt_tp_step_usd').value = data.config.mt_tp_step_usd;
+    document.getElementById('mt_sl_usd').value = data.config.mt_sl_usd ?? 5;
+    document.getElementById('mt_tp_usd').value = data.config.mt_tp_usd ?? 5;
     document.getElementById('mt_tp1_close_pct').value = data.config.mt_tp1_close_pct;
     document.getElementById('mt_tp2_close_pct').value = data.config.mt_tp2_close_pct;
     document.getElementById('mt_sl_to_breakeven_on_tp1').value = String(data.config.mt_sl_to_breakeven_on_tp1);
@@ -5196,11 +5185,8 @@ function buildConfigPayload() {
     mt_force_change: document.getElementById('mt_force_change').value === 'true',
     mt_direction_mode: document.getElementById('mt_direction_mode').value,
     mt_exit_mode: document.getElementById('mt_exit_mode').value,
-    mt_atr_len: parseInt(document.getElementById('mt_atr_len').value),
-    mt_sl_atr_mult: parseFloat(document.getElementById('mt_sl_atr_mult').value),
-    mt_tp_mode: document.getElementById('mt_tp_mode').value,
-    mt_tp_step_atr_mult: parseFloat(document.getElementById('mt_tp_step_atr_mult').value),
-    mt_tp_step_usd: parseFloat(document.getElementById('mt_tp_step_usd').value),
+    mt_sl_usd: parseFloat(document.getElementById('mt_sl_usd').value) || 0,
+    mt_tp_usd: parseFloat(document.getElementById('mt_tp_usd').value) || 0,
     mt_tp1_close_pct: parseFloat(document.getElementById('mt_tp1_close_pct').value),
     mt_tp2_close_pct: parseFloat(document.getElementById('mt_tp2_close_pct').value),
     mt_sl_to_breakeven_on_tp1: document.getElementById('mt_sl_to_breakeven_on_tp1').value === 'true',
@@ -5659,7 +5645,7 @@ async def handle_config_update(request):
                 "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
-                "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_atr_len", "mt_sl_atr_mult", "mt_tp_mode", "mt_tp_step_atr_mult", "mt_tp_step_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
+                "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
                 "rsi_resolution", "rsi_length", "rsi_oversold", "rsi_overbought", "rsi_direction_mode",
