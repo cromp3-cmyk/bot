@@ -20,6 +20,7 @@ Sicherheitsregeln:
   - Der Chart zeigt Binance-Kerzen, ausgefuehrt wird auf Lighter: Preise koennen minimal abweichen.
 """
 
+import re
 import asyncio
 import os
 import time
@@ -45,6 +46,16 @@ from screener import (
 # ============================================================================
 TFS = ["10s", "15s", "30s", "1m", "5m", "15m"]
 SECOND_AGG = {"10s": 10, "15s": 15, "30s": 30}   # aus 1s-Spot-Kerzen zusammengerechnet
+MAX_SECOND_TF = 300                               # MTF-Tabelle: Sekunden-Zeitebenen bis 300 s frei waehlbar
+
+
+def _sec_of(tf):
+    """'10s' -> 10 (Sekunden-Zeitebene, aus 1s-Kerzen gebaut), sonst 0. Frei waehlbar (5s, 20s, 45s ...)."""
+    m = re.match(r"^(\d{1,3})s$", str(tf or ""))
+    if not m:
+        return 0
+    n = int(m.group(1))
+    return n if 1 <= n <= MAX_SECOND_TF else 0
 CHART_BARS = 200                                  # so viele Kerzen gehen an den Browser
 WARMUP_BARS = 150                                 # zusaetzliche Kerzen fuer das Einschwingen der Indikatoren
 MIN_BARS = 60                                     # Autotrade: darunter keine Signale (Indikator noch nicht eingeschwungen)
@@ -240,19 +251,19 @@ def _log(sym, text, kind="info"):
 def _raw_candles(sym, tf, bars=None):
     """-> (candles|None, reason|None). Abonniert die noetigen Streams im WS-Cache (kein eigener Traffic)."""
     nbars = bars or (CHART_BARS + WARMUP_BARS)
-    if tf in SECOND_AGG and sym in lighter_candles.COINS:
-        back = SECOND_AGG[tf] * nbars
+    if _sec_of(tf) and sym in lighter_candles.COINS:
+        back = _sec_of(tf) * nbars
         return lighter_candles.get(sym, back), None
     if sym in lighter_candles.COINS:
         return lighter_candles.get_tf(sym, tf, nbars), None
     pair = BINANCE_SYMBOL_MAP.get(sym)
     if not pair:
         return None, "Kein Binance-Paar für diesen Coin – Chart nicht verfügbar"
-    if tf in SECOND_AGG:
+    if _sec_of(tf):
         if sym in BINANCE_FUTURES_ONLY_SYMBOLS:
             return None, f"{tf} nicht verfügbar (nur Futures, dort gibt es keine 1s-Kerzen)"
         binance_ws.ensure_subscribed("spot", pair, "1s")
-        back = SECOND_AGG[tf] * nbars
+        back = _sec_of(tf) * nbars
         return binance_ws.get_cached_candles_ext("spot", pair, "1s", back), None
     market = _market_for(sym)
     binance_ws.ensure_subscribed(market, pair, tf)
@@ -262,8 +273,8 @@ def _raw_candles(sym, tf, bars=None):
 def _prepare(raw, tf, min_bars=MIN_BARS):
     if not raw:
         return None
-    if tf in SECOND_AGG:
-        raw = _resample_1s(raw, SECOND_AGG[tf])
+    if _sec_of(tf):
+        raw = _resample_1s(raw, _sec_of(tf))
     return raw if len(raw) >= min_bars else None
 
 
@@ -381,49 +392,173 @@ def _wvf_series(cs):
     return wvf, hot
 
 
-MTF_TFS = ["1m", "3m", "5m", "15m", "30m", "45m", "1h", "2h", "4h"]
-MTF_BLOCKS = [("Micro", ["1m", "3m", "5m"]), ("Medium", ["15m", "30m", "45m"]), ("Macro", ["1h", "2h", "4h"])]   # wie im Pine-Skript
-MTF_SPREAD_FULL = 15.0   # Spread in Punkten = 100 %
-MTF_N1, MTF_N2, MTF_SIG, MTF_SCALE = 10, 21, 4, 1.35
+MTF_FILE = os.getenv("SCALP_MTF_FILE", "scalp_mtf.json")
+MTF_REDIS_KEY = "scalp:mtf"
+MTF_CFG = {"b1": "5s,10s,30s", "b2": "1m,5m,15m", "b3": "1h,2h,4h",   # je Block bis zu 6 Zeitebenen, kommagetrennt: 5s, 10s, 45s, 1m, 3m, 15m, 1h, 4h, 1d ...
+           "full": 15.0, "n1": 10, "n2": 21, "sig": 4, "scale": 1.35}   # Spread in Punkten = 100 % + Wellenanker-Parameter wie im Pine-Skript
+MTF_NAMES = ("Micro", "Medium", "Macro")
+MTF_NATIVE = ("1m", "3m", "5m", "15m", "30m", "1h", "4h")
+_TF_RE = re.compile(r"^(\d{1,3})([smhd])$")
 
 
-def _mtf_states(sym):
-    """Wellenanker MTF Spread Trend (Pine-Skript): Spread% = (WT1-WT2)/15*100, begrenzt auf +-100, je Zeitebene; Block-Mittel; TREND %.
-    Laeuft im Thread. Zeitebenen ohne Daten (z.B. 30m/1h/2h/4h bei reinen Lighter-Coins) -> None."""
-    spreads = {}
-    for tf in MTF_TFS:
+def _tf_ms(tf):
+    m = _TF_RE.match(str(tf))
+    if not m:
+        return 0
+    return int(m.group(1)) * {"s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}[m.group(2)]
+
+
+def _mtf_parse(text):
+    """'5s, 10s,30S' -> ['5s','10s','30s'] (ungueltige Eintraege fliegen raus, max. 6). Wirft ValueError bei unbekannter Zeitebene."""
+    out = []
+    for part in str(text or "").replace(";", ",").split(","):
+        t = part.strip().lower()
+        if not t:
+            continue
+        m = _TF_RE.match(t)
+        if not m or int(m.group(1)) < 1:
+            raise ValueError(f"Zeitebene '{part.strip()}' ungültig – erlaubt: z.B. 5s, 10s, 45s, 1m, 3m, 15m, 1h, 4h, 1d")
+        if t.endswith("s") and not _sec_of(t):
+            raise ValueError(f"Sekunden-Zeitebene '{t}' zu groß – bis {MAX_SECOND_TF}s (darüber bitte Minuten nehmen)")
+        t = f"{int(m.group(1))}{m.group(2)}"
+        if t not in out:
+            out.append(t)
+    return out[:6]
+
+
+def _mtf_validate(d, base):
+    new = dict(base)
+    for k in ("b1", "b2", "b3"):
+        if k in d:
+            new[k] = ",".join(_mtf_parse(d[k]))
+    try:
+        for k, f in (("full", float), ("scale", float), ("n1", int), ("n2", int), ("sig", int)):
+            if k in d and d[k] not in (None, ""):
+                new[k] = f(str(d[k]).replace(",", "."))
+    except (TypeError, ValueError):
+        raise ValueError("Spread, Skalierung, Kanal-/Durchschnitt-/Signal-Länge müssen Zahlen sein")
+    if not 0.1 <= new["full"] <= 1000:
+        raise ValueError("Spread in Punkten = 100 %: 0,1 bis 1000")
+    if not 2 <= new["n1"] <= 100 or not 2 <= new["n2"] <= 200 or not 1 <= new["sig"] <= 50:
+        raise ValueError("Kanal 2–100, Durchschnitt 2–200, Signallinie 1–50")
+    if not 0.5 <= new["scale"] <= 5:
+        raise ValueError("Wellen-Skalierung: 0,5 bis 5")
+    return new
+
+
+async def _load_mtf():
+    import json
+    raw = None
+    try:
+        r = await get_redis()
+        if r is not None:
+            raw = await asyncio.wait_for(r.get(MTF_REDIS_KEY), timeout=5)
+    except Exception:
+        raw = None
+    if not raw:
         try:
-            if tf in ("45m", "2h"):   # kein Binance-Intervall -> aus 15m- bzw. 1h-Kerzen zusammensetzen (Buckets ab 00:00 UTC wie TradingView)
-                src_tf, bms = ("15m", 2_700_000) if tf == "45m" else ("1h", 7_200_000)
-                raw_src, _ = _raw_candles(sym, src_tf)
-                raw = None
-                if raw_src:
-                    raw, bk = [], None
-                    for x in raw_src:
-                        b = x["ts"] // bms
-                        if b != bk:
-                            raw.append(dict(x, ts=b * bms)); bk = b
-                        else:
-                            y = raw[-1]; y["h"] = max(y["h"], x["h"]); y["l"] = min(y["l"], x["l"]); y["c"] = x["c"]; y["v"] = y.get("v", 0) + x.get("v", 0)
-            else:
-                raw, _ = _raw_candles(sym, tf)
-            cs = _prepare(raw, tf, 60) if raw and len(raw) >= 60 else None   # 2h braucht ~120 1h-Kerzen im Cache
-            if cs is None:
-                spreads[tf] = None
-                continue
-            cfg = _cfg(sym)
-            wt1, wt2 = compute_wavetrend_series([x["o"] for x in cs], [x["h"] for x in cs], [x["l"] for x in cs], [x["c"] for x in cs],
-                                                MTF_N1, MTF_N2, MTF_SIG, cfg.get("src", "close"), MTF_SCALE)
-            v = (wt1[-1] - wt2[-1]) / MTF_SPREAD_FULL * 100
-            spreads[tf] = _r(max(-100.0, min(100.0, v)), 1)
+            with open(MTF_FILE) as f:
+                raw = f.read()
         except Exception:
-            spreads[tf] = None
+            raw = None
+    if raw:
+        try:
+            MTF_CFG.update(_mtf_validate(json.loads(raw), MTF_CFG))
+        except Exception as e:
+            debug_log("⚠️ Scalp: gespeicherte MTF-Tabelle ungültig", {"error": str(e)})
+
+
+async def _save_mtf():
+    import json
+    data = json.dumps(MTF_CFG)
+    ok = False
+    try:
+        r = await get_redis()
+        if r is not None:
+            await asyncio.wait_for(r.set(MTF_REDIS_KEY, data), timeout=5)
+            ok = True
+    except Exception as e:
+        debug_log("⚠️ Scalp: MTF-Tabelle in Redis speichern fehlgeschlagen", {"error": str(e)})
+    try:
+        with open(MTF_FILE, "w") as f:
+            f.write(data)
+    except Exception:
+        pass
+    return ok
+
+
+def _mtf_raw(sym, tf):
+    """Kerzen fuer eine beliebige Zeitebene (Sekunden aus 1s-Kerzen, Minuten/Stunden nativ oder aus der groessten passenden
+    Basis zusammengesetzt, Buckets ab 00:00 UTC wie TradingView). None = zu wenig Daten (< 60 Kerzen)."""
+    if _sec_of(tf):
+        raw, _ = _raw_candles(sym, tf, bars=300)
+        return _prepare(raw, tf, 60)
+    ms = _tf_ms(tf)
+    if not ms:
+        return None
+    if tf in MTF_NATIVE:
+        raw, _ = _raw_candles(sym, tf)
+        return raw if raw and len(raw) >= 60 else None
+    for base, bms in (("1h", 3_600_000), ("15m", 900_000), ("5m", 300_000), ("1m", 60_000)):
+        if ms % bms == 0 and ms > bms:
+            raw_src, _ = _raw_candles(sym, base, bars=min(1500, 100 * (ms // bms)))
+            if not raw_src:
+                return None
+            raw, bk = [], None
+            for x in raw_src:
+                b = x["ts"] // ms
+                if b != bk:
+                    raw.append(dict(x, ts=b * ms)); bk = b
+                else:
+                    y = raw[-1]; y["h"] = max(y["h"], x["h"]); y["l"] = min(y["l"], x["l"]); y["c"] = x["c"]; y["v"] = y.get("v", 0) + x.get("v", 0)
+            return raw if len(raw) >= 60 else None
+    return None
+
+
+def _mtf_wt(cs, cfg_src):
+    c = MTF_CFG
+    return compute_wavetrend_series([x["o"] for x in cs], [x["h"] for x in cs], [x["l"] for x in cs], [x["c"] for x in cs],
+                                    c["n1"], c["n2"], c["sig"], cfg_src, c["scale"])
+
+
+def _mtf_states(sym, main_tf="1m"):
+    """Wellenanker MTF Spread Trend (Pine-Skript): Spread % = (WT1-WT2)/Spread-Punkte*100, begrenzt auf +-100, je Zeitebene;
+    Block-Mittel; TREND % = Mittel der Bloecke. Zeitebenen/Bloecke frei waehlbar (MTF_CFG). Laeuft im Thread.
+    Zeitebenen ohne genug Daten -> None und zaehlen im Mittel nicht mit."""
+    src = _cfg(sym).get("src", "close")
+    spreads = {}
     blocks = []
-    for name, tfs in MTF_BLOCKS:
-        vals = [spreads.get(t) for t in tfs]
-        blocks.append({"name": name, "tfs": tfs, "avg": _r(sum(vals) / 3, 1) if all(v is not None for v in vals) else None})
+    for i, key in enumerate(("b1", "b2", "b3")):
+        try:
+            tfs = _mtf_parse(MTF_CFG[key])
+        except ValueError:
+            tfs = []
+        for tf in tfs:
+            if tf in spreads:
+                continue
+            try:
+                cs = _mtf_raw(sym, tf)
+                if cs is None:
+                    spreads[tf] = None
+                    continue
+                wt1, wt2 = _mtf_wt(cs, src)
+                v = (wt1[-1] - wt2[-1]) / MTF_CFG["full"] * 100
+                spreads[tf] = _r(max(-100.0, min(100.0, v)), 1)
+            except Exception:
+                spreads[tf] = None
+        vals = [spreads.get(t) for t in tfs if spreads.get(t) is not None]
+        blocks.append({"name": MTF_NAMES[i], "tfs": tfs, "avg": _r(sum(vals) / len(vals), 1) if vals else None, "have": len(vals)})
     avgs = [b["avg"] for b in blocks if b["avg"] is not None]
-    return {"spreads": spreads, "blocks": blocks, "trend": _r(sum(avgs) / len(avgs), 1) if avgs else None}
+    wt = None
+    try:
+        cs = _mtf_raw(sym, main_tf)
+        if cs is not None:
+            wt1, wt2 = _mtf_wt(cs, src)
+            wt = {"tf": main_tf, "wt1": _r(wt1[-1], 1), "wt2": _r(wt2[-1], 1), "d": _r(wt1[-1] - wt2[-1], 1),
+                  "dpct": _r((wt1[-1] - wt2[-1]) / MTF_CFG["full"] * 100, 0)}
+    except Exception:
+        wt = None
+    return {"spreads": spreads, "blocks": blocks, "trend": _r(sum(avgs) / len(avgs), 1) if avgs else None, "wt": wt, "cfg": dict(MTF_CFG)}
 
 
 def _compute_chart(main_raw, tf, other_raws, cfg):
@@ -702,6 +837,7 @@ async def _run_auto_w2(sym, a, ev, cfg):
 async def scalp_loop():
     """In main.py's asyncio.gather einhaengen."""
     await _load_wa()
+    await _load_mtf()
     await asyncio.sleep(8)
     tick = 0
     while True:
@@ -759,8 +895,8 @@ async def handle_scalp_chart(request):
     if data is None:
         return web.json_response({"ok": False, "reason": "lädt noch … (Kerzen werden aufgebaut)", "tfstates": states})
     mc = _mtf_cache.get(sym)
-    if mc is None or time.time() - mc[0] > TREND_TTL:
-        mc = (time.time(), await asyncio.to_thread(_mtf_states, sym))
+    if mc is None or time.time() - mc[0] > TREND_TTL or mc[2] != tf:
+        mc = (time.time(), await asyncio.to_thread(_mtf_states, sym, tf), tf)
         _mtf_cache[sym] = mc
     tc = _trend_cache.get(sym)
     if tc is None or time.time() - tc[0] > TREND_TTL:
@@ -951,6 +1087,19 @@ async def handle_scalp_auto(request):
     return web.json_response({"success": True})
 
 
+async def handle_scalp_mtf(request):
+    """MTF-Spread-Tabelle: Zeitebenen je Block (frei waehlbar, auch Sekunden), Spread-Punkte und Wellenanker-Parameter speichern."""
+    b = await _body(request)
+    try:
+        new = _mtf_validate(b, MTF_CFG)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    MTF_CFG.update(new)
+    saved = await _save_mtf()
+    _mtf_cache.clear()
+    return web.json_response({"success": True, "persistent": saved, "cfg": dict(MTF_CFG)})
+
+
 async def handle_scalp_wa(request):
     b = await _body(request)
     return await _wa_update(b, str(b.get("coin", "")).upper())
@@ -1092,7 +1241,7 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
 <div class="wrap">
  <div class="row" style="justify-content:space-between">
   <div class="row"><h1 style="margin:0;font-size:18px">Scalp Dashboard</h1><span id="badge" class="pill n">…</span></div>
-  <nav class="row" style="gap:18px;font-size:13px"><a href="#" id="layBtn">✥ Layout</a><a href="#" id="layFlip" style="display:none">⇄ Spalten tauschen</a><a href="#" id="layReset" style="display:none">↺ Zurücksetzen</a><a href="/">Bot-Dashboard</a><a href="/screener">Coin Screener</a><a href="/copytrading">Copy-Trading</a><a href="/guss">GUSS</a></nav>
+  <nav class="row" style="gap:18px;font-size:13px"><a href="#" id="layBtn">✥ Layout</a><a href="#" id="layFlip" style="display:none">⇄ Spalten tauschen</a><a href="#" id="layReset" style="display:none">↺ Zurücksetzen</a><a href="/">Bot-Dashboard</a><a href="/screener">Coin Screener</a><a href="/copytrading">Copy-Trading</a></nav>
  </div>
  <div class="chips" id="chips"></div>
  <div class="main">
@@ -1177,7 +1326,21 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
    </div>
    <div class="card"><b style="font-size:13px">Wellenanker je Zeitebene</b><div class="tfs" id="tfs"></div></div>
    <div class="card"><b style="font-size:13px">Trend (Marktstruktur) je Zeitebene</b><div class="small" style="margin:4px 0 8px">oben intern · unten swing</div><div class="tfs" id="trendbox"></div></div>
-   <div class="card"><b style="font-size:13px">Wellenanker MTF Spread Trend</b><div class="small" style="margin:4px 0 8px">Spread % je Zeitebene (WT1−WT2, 15 Punkte = 100 %) · wie im TradingView-Indikator</div><div id="mtfbox" style="display:flex;flex-direction:column;gap:6px"></div></div>
+   <div class="card"><b style="font-size:13px">Wellenanker MTF Spread Trend</b><div class="small" style="margin:4px 0 8px">Spread % je Zeitebene = (WT1−WT2) / Spread-Punkte · 100, begrenzt auf ±100 · wie im TradingView-Indikator</div><div id="mtfbox" style="display:flex;flex-direction:column;gap:6px"></div>
+    <details id="mtfcfg" style="margin-top:10px"><summary style="cursor:pointer;font-size:12px;color:var(--mut)">⚙️ Zeitebenen &amp; Spread anpassen (Sekunden frei wählbar)</summary>
+     <div class="small" style="margin:8px 0">Je Block bis zu 6 Zeitebenen, mit Komma getrennt – z. B. <span class="mono">5s,10s,30s</span> · <span class="mono">1m,5m,15m</span> · <span class="mono">1h,2h,4h</span>. Erlaubt: Sekunden (1s–300s), Minuten (m), Stunden (h), Tage (d). Sehr hohe Zeitebenen brauchen genug Kerzen-Historie, sonst zeigt die Zeile „–".</div>
+     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px">
+      <label class="wafld"><span class="lab">Micro (Block 1)</span><input class="inp" id="mtf-b1" type="text" autocomplete="off"></label>
+      <label class="wafld"><span class="lab">Medium (Block 2)</span><input class="inp" id="mtf-b2" type="text" autocomplete="off"></label>
+      <label class="wafld"><span class="lab">Macro (Block 3)</span><input class="inp" id="mtf-b3" type="text" autocomplete="off"></label>
+      <label class="wafld"><span class="lab">Spread in Punkten = 100 %</span><input class="inp" id="mtf-full" type="text" inputmode="decimal"></label>
+      <label class="wafld"><span class="lab">Kanal-Länge</span><input class="inp" id="mtf-n1" type="number" step="1" min="2" max="100"></label>
+      <label class="wafld"><span class="lab">Durchschnitt-Länge</span><input class="inp" id="mtf-n2" type="number" step="1" min="2" max="200"></label>
+      <label class="wafld"><span class="lab">Signallinie</span><input class="inp" id="mtf-sig" type="number" step="1" min="1" max="50"></label>
+      <label class="wafld"><span class="lab">Wellen-Skalierung</span><input class="inp" id="mtf-scale" type="text" inputmode="decimal"></label>
+     </div>
+     <button class="btn ghost" id="mtf-save" style="margin-top:10px;width:100%">Tabelle speichern</button>
+    </details></div>
    <div class="card"><b style="font-size:13px">Letzte Signale</b><div id="feed" style="display:flex;flex-direction:column;gap:8px"></div></div>
   </div>
  </div>
@@ -1318,15 +1481,29 @@ function renderTfStates(s){
  $('tfs').innerHTML=TFS.map(t=>{const v=s[t];const txt=v===undefined||v===null?'…':v===1?'LONG':v===-1?'SHORT':'ABWARTEN';const c=v===1?G:v===-1?R:'#7d8696';
   return '<div><span style="letter-spacing:.08em;color:var(--mut)">'+t+'</span><span style="color:'+c+'">'+txt+'</span></div>'}).join('');
 }
+const MTF_IDS=['mtf-b1','mtf-b2','mtf-b3','mtf-full','mtf-n1','mtf-n2','mtf-sig','mtf-scale'];
+function mtfBusy(){return MTF_IDS.some(i=>document.activeElement===$(i))}
+function fillMtf(c){if(!c||mtfBusy())return;$('mtf-b1').value=c.b1;$('mtf-b2').value=c.b2;$('mtf-b3').value=c.b3;$('mtf-full').value=c.full;$('mtf-n1').value=c.n1;$('mtf-n2').value=c.n2;$('mtf-sig').value=c.sig;$('mtf-scale').value=c.scale}
+async function saveMtf(){
+ const body={b1:$('mtf-b1').value,b2:$('mtf-b2').value,b3:$('mtf-b3').value,full:$('mtf-full').value,n1:$('mtf-n1').value,n2:$('mtf-n2').value,sig:$('mtf-sig').value,scale:$('mtf-scale').value};
+ try{const r=await api('/api/scalp/mtf',body);toast(r.persistent?'Tabelle gespeichert':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);fillMtf(r.cfg);loadChart()}
+ catch(e){toast(e.message,true)}
+}
+$('mtf-save').addEventListener('click',saveMtf);
 function renderMtf(m){
  if(!m){$('mtfbox').innerHTML='';return}
+ fillMtf(m.cfg);
  const col=v=>v==null?'#7d8696':v>0?G:R,fm=v=>v==null?'–':(v>0?'+':'')+v.toFixed(v%1?1:0)+'%';
+ const bgc=v=>v==null?'#0d1015':v>0?'rgba(31,207,110,.14)':'rgba(240,53,75,.14)';
  const row=(a,b,c,bg)=>'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 10px;background:'+(bg||'#0d1015')+';border-radius:8px;font-size:11px;font-weight:700"><span style="color:var(--mut)">'+a+'</span>'+b+c+'</div>';
- let h='';
+ const head='<div style="display:flex;justify-content:space-between;padding:2px 10px;font-size:10px;letter-spacing:.08em;color:var(--mut)"><span>ZEITEBENE</span><span>SPREAD %</span></div>';
+ let h=head;
  (m.blocks||[]).forEach(b=>{
-  b.tfs.forEach(t=>{const v=(m.spreads||{})[t];h+=row(t,'<span class="mono" style="color:'+col(v)+'">'+fm(v)+'</span>','')});
-  h+=row(b.name+' Ø','<span class="mono" style="color:'+col(b.avg)+'">'+fm(b.avg)+'</span>','','#171c24')});
+  b.tfs.forEach(t=>{const v=(m.spreads||{})[t];h+=row(t,'<span class="mono" style="color:'+col(v)+'">'+fm(v)+'</span>','',bgc(v))});
+  h+=row(b.name+' Ø'+(b.tfs.length&&b.have<b.tfs.length?' <span style="font-weight:400">('+b.have+'/'+b.tfs.length+')</span>':''),'<span class="mono" style="color:'+col(b.avg)+'">'+fm(b.avg)+'</span>','','#171c24')});
  h+=row('TREND % (Ø der Blöcke)','<span class="mono" style="color:'+col(m.trend)+';font-size:13px">'+fm(m.trend)+'</span>','','#1d2430');
+ if(m.wt){h+=row('WT1 / WT2 ('+m.wt.tf+')','<span class="mono">'+m.wt.wt1+' / '+m.wt.wt2+'</span>','','#171c24');
+  h+=row('Δ WT1−WT2','<span class="mono" style="color:'+col(m.wt.d)+'">'+(m.wt.d>0?'+':'')+m.wt.d+' / '+fm(m.wt.dpct)+'</span>','','#171c24')}
  $('mtfbox').innerHTML=h;
 }
 function renderTrend(s){
