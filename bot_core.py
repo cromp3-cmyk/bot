@@ -438,6 +438,27 @@ def default_config():
         "tfl_max_entries": int(os.getenv("TFL_MAX_ENTRIES", "10")), # max. Kaeufe/Nachkaeufe je Position (0 = unbegrenzt)
         "tfl_flip_mode": os.getenv("TFL_FLIP_MODE", "reverse"),     # reverse = bei Trendwechsel drehen + neu einsteigen | close = nur schliessen
 
+        # ===== Reaction Level Matrix (entry_mode rlm): Swing-Level + Ablehnung (Rejection) an Unterstuetzung/Widerstand =====
+        "rlm_resolution": os.getenv("RLM_RESOLUTION", "5m"),
+        "rlm_swing_len": int(os.getenv("RLM_SWING_LEN", "6")),         # Balken links/rechts, die einen Swing bestaetigen
+        "rlm_level_tol": float(os.getenv("RLM_LEVEL_TOL", "0.6")),     # Level-Toleranz in x ATR(34)
+        "rlm_min_touches": int(os.getenv("RLM_MIN_TOUCHES", "2")),     # Swings, bis ein Level aktiv ist
+        "rlm_half_life": int(os.getenv("RLM_HALF_LIFE", "500")),       # Halbwertszeit der Level-Staerke in Kerzen
+        "rlm_levels_per_side": int(os.getenv("RLM_LEVELS_PER_SIDE", "3")),
+        "rlm_min_score": float(os.getenv("RLM_MIN_SCORE", "50")),      # Mindest-Score (0-100) eines Levels fuer Signale
+        "rlm_reject_clv": float(os.getenv("RLM_REJECT_CLV", "0.6")),   # Schluss im oberen/unteren Teil der Kerzenspanne
+        "rlm_cooldown": int(os.getenv("RLM_COOLDOWN", "10")),          # Kerzen Pause je Level zwischen zwei Signalen
+        "rlm_direction_mode": os.getenv("RLM_DIRECTION_MODE", "both"),
+        "rlm_sl_mode": os.getenv("RLM_SL_MODE", "usd"),                # usd = fester $-SL | wick = hinter dem Docht der Signalkerze (ATR-Puffer wie im Original)
+        "rlm_sl_usd": float(os.getenv("RLM_SL_USD", "5.0")),           # fester SL: Verlust der Position in $ (0 = kein SL)
+        "rlm_tp_usd": float(os.getenv("RLM_TP_USD", "5.0")),           # TP-Schritt in $ Gewinn: TP1 = 1x, TP2 = 2x, TP3 = 3x
+        "rlm_atr_len": int(os.getenv("RLM_ATR_LEN", "14")),            # nur fuer den Docht-SL
+        "rlm_tp1_r": float(os.getenv("RLM_TP1_R", "1.0")), "rlm_tp2_r": float(os.getenv("RLM_TP2_R", "2.0")), "rlm_tp3_r": float(os.getenv("RLM_TP3_R", "3.0")),   # nur Docht-SL: TPs als Vielfache des Risikos
+        "rlm_tp1_close_pct": float(os.getenv("RLM_TP1_CLOSE_PCT", "33")),   # 100 = TP1 schliesst alles
+        "rlm_tp2_close_pct": float(os.getenv("RLM_TP2_CLOSE_PCT", "50")),
+        "rlm_be_after_tp1": os.getenv("RLM_BE_AFTER_TP1", "true").lower() == "true",
+        "rlm_reverse": os.getenv("RLM_REVERSE", "true").lower() == "true",   # Gegen-Signal dreht die offene Position
+
         # ================= RSI Signal =================
         # Reine Handelsidee: RSI < oversold -> long, RSI > overbought -> short. Ausstieg identisch
         # zu Al-Shatris Wechsel-System (Gegen-Signal dreht die Position, optionaler $-SL,
@@ -1674,6 +1695,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + fester $-SL/TP)</option>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
+      <option value="rlm">Reaction Level Matrix (Swing-Level mit Score, Einstieg bei Ablehnung an Unterstützung/Widerstand, SL/TP1-TP3 mit Teilverkäufen, Gegen-Signal dreht)</option>
       <option value="trendfolge">Trendfolge (Marktstruktur-Trend: im Aufwärtstrend bei jeder roten Kerze kaufen, im Abwärtstrend bei jeder grünen shorten, fester $-TP, Trendwechsel = schließen)</option>
       <option value="ema_rsi">EMA + RSI (Smart Money Zone Tracker: Schluss über/unter EMA + RSI über/unter Mittellinie, Swing-SL, TP1/TP2/TP3 mit Teilverkäufen)</option>
       <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
@@ -2042,6 +2064,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="trendfolge"><label>Stop-Loss (fester $-Verlust der Gesamtposition, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="tfl_sl_usd"></div>
   <div data-mode="trendfolge"><label>Bei Trendwechsel</label><select class="cfg" id="tfl_flip_mode"><option value="reverse">Drehen: Position beenden und sofort im neuen Trend einsteigen (eine Order)</option><option value="close">Nur schließen (neuer Einstieg bei der nächsten passenden Kerze)</option></select></div>
   <div data-mode="trendfolge"><label>Max. Käufe pro Position (0 = unbegrenzt)</label><input type="number" step="1" min="0" id="tfl_max_entries"></div>
+
+  <div data-mode="rlm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📐 <b>Reaction Level Matrix</b>: Aus bestätigten Swing-Hochs/-Tiefs entstehen Preis-Level (Bänder) mit Score 0–100 (mehr Berührungen = stärker, alte Level verblassen). <b>Long</b>, wenn eine Kerze in eine Unterstützung eintaucht, wieder darüber schließt und im oberen Teil ihrer Spanne endet; <b>Short</b> spiegelbildlich am Widerstand. Signal erst bei Kerzenschluss. Ausstieg: SL, TP1/TP2/TP3 mit Teilverkäufen, Break-Even nach TP1; ein Gegen-Signal dreht die Position.
+  </div>
+  <div data-mode="rlm"><label>Kerzen-Zeitebene (Signal bei Kerzenschluss)</label><select class="cfg" id="rlm_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option></select></div>
+  <div data-mode="rlm"><label>Swing-Länge (Kerzen links/rechts, 2–30)</label><input type="number" step="1" min="2" max="30" id="rlm_swing_len"></div>
+  <div data-mode="rlm"><label>Level-Toleranz (× ATR, 0.2–2)</label><input type="number" step="0.05" min="0.2" max="2" id="rlm_level_tol"></div>
+  <div data-mode="rlm"><label>Berührungen bis ein Level aktiv ist</label><input type="number" step="1" min="2" max="10" id="rlm_min_touches"></div>
+  <div data-mode="rlm"><label>Halbwertszeit der Level (Kerzen)</label><input type="number" step="50" min="50" max="5000" id="rlm_half_life"></div>
+  <div data-mode="rlm"><label>Level je Seite (nächste über / unter dem Kurs)</label><input type="number" step="1" min="1" max="8" id="rlm_levels_per_side"></div>
+  <div data-mode="rlm"><label>Mindest-Score eines Levels für Signale (0–100)</label><input type="number" step="1" min="0" max="100" id="rlm_min_score"></div>
+  <div data-mode="rlm"><label>Ablehnungs-Stärke des Schlusses (0.5–0.9)</label><input type="number" step="0.05" min="0.5" max="0.9" id="rlm_reject_clv"></div>
+  <div data-mode="rlm"><label>Pause je Level nach einem Signal (Kerzen)</label><input type="number" step="1" min="0" id="rlm_cooldown"></div>
+  <div data-mode="rlm"><label>Richtung</label><select class="cfg" id="rlm_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="rlm"><label>Stop-Loss</label><select class="cfg" id="rlm_sl_mode"><option value="usd">Fester $-Betrag (Verlust der Position)</option><option value="wick">Hinter dem Docht der Signalkerze (ATR-Puffer wie im Original)</option></select></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="usd"><label>Fester SL: Verlust der Position in $ (0 = kein SL)</label><input type="number" step="any" min="0" id="rlm_sl_usd"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="usd"><label>TP-Schritt: Gewinn der Position in $ (TP1 = 1×, TP2 = 2×, TP3 = 3×)</label><input type="number" step="any" min="0" id="rlm_tp_usd"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="wick"><label>ATR-Länge (nur Docht-SL)</label><input type="number" step="1" min="5" max="50" id="rlm_atr_len"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="wick"><label>TP1 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="rlm_tp1_r"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="wick"><label>TP2 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="rlm_tp2_r"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="wick"><label>TP3 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="rlm_tp3_r"></div>
+  <div data-mode="rlm"><label>TP1 Teilverkauf (% der Position, 100 = alles)</label><input type="number" step="1" min="1" max="100" id="rlm_tp1_close_pct"></div>
+  <div data-mode="rlm"><label>TP2 Teilverkauf (% der verbleibenden Position, 100 = alles)</label><input type="number" step="1" min="1" max="100" id="rlm_tp2_close_pct"></div>
+  <div data-mode="rlm"><label>SL auf Break-Even nach TP1</label><select class="cfg" id="rlm_be_after_tp1"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="rlm"><label>Gegen-Signal dreht die Position</label><select class="cfg" id="rlm_reverse"><option value="true">Ja (wie im Original)</option><option value="false">Nein (Position bleibt bis SL/TP)</option></select></div>
 
   <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📶 <b>RSI Signal</b>: Long, sobald der RSI unter die Überverkauft-Schwelle fällt, Short sobald er über die Überkauft-Schwelle steigt. Ausstieg wie bei Al-Shatris Wechsel-Modus - der erste Long bleibt offen, bis das Gegen-Signal kommt, das dreht dann direkt. Optional ein fester Dollar-SL und "SL auf Einstieg bei Gewinn". Darunter drei unabhängig zuschaltbare Filter aus dem gemeinsamen Filter-Baukasten (auch für künftige Strategien wiederverwendbar).
@@ -3676,6 +3723,12 @@ function wacSetPosition(p) {
   if (!p) return;
   wacPosLines.push(WAC.cs.createPriceLine({price: p.avg, color: p.dir === 'long' ? '#22c55e' : '#ef4444', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: p.dir.toUpperCase() + ' Ø'}));
   if (p.sl) wacPosLines.push(WAC.cs.createPriceLine({price: p.sl, color: '#f97316', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL'}));
+  (p.tps || []).forEach((v, i) => wacPosLines.push(WAC.cs.createPriceLine({price: v, color: '#66bb6a', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'TP' + (i + 1)})));
+}
+let wacRlmLines = [];
+function wacSetRlm(list) {
+  wacRlmLines.forEach(x => WAC.cs.removePriceLine(x)); wacRlmLines = [];
+  (list || []).forEach(v => wacRlmLines.push(WAC.cs.createPriceLine({price: v.mid, color: v.side === 'support' ? '#089981' : '#f23645', lineWidth: 1, lineStyle: 0, axisLabelVisible: true, title: v.score + ' · ' + v.touches + 'T' + (v.polar ? ' ⇅' : '')})));
 }
 function wacSetGrid(g) {
   wacGridLines.forEach(x => WAC.cs.removePriceLine(x)); wacGridLines = [];
@@ -3725,6 +3778,7 @@ async function wacPollLive() {
     wacRender(d, wacSigMarkers(d));
     wacSetPosition(d.position);
     wacSetGrid(d.grid);
+    wacSetRlm(d.rlm_levels);
     wacSetOverlays(d.overlays);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
     const wtTxt = isWa ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
@@ -4780,6 +4834,27 @@ async function refresh() {
     document.getElementById('tfl_sl_usd').value = data.config.tfl_sl_usd ?? 0;
     document.getElementById('tfl_max_entries').value = data.config.tfl_max_entries ?? 10;
     document.getElementById('tfl_flip_mode').value = data.config.tfl_flip_mode || 'reverse';
+    document.getElementById('rlm_swing_len').value = data.config.rlm_swing_len ?? '';
+    document.getElementById('rlm_level_tol').value = data.config.rlm_level_tol ?? '';
+    document.getElementById('rlm_min_touches').value = data.config.rlm_min_touches ?? '';
+    document.getElementById('rlm_half_life').value = data.config.rlm_half_life ?? '';
+    document.getElementById('rlm_levels_per_side').value = data.config.rlm_levels_per_side ?? '';
+    document.getElementById('rlm_min_score').value = data.config.rlm_min_score ?? '';
+    document.getElementById('rlm_reject_clv').value = data.config.rlm_reject_clv ?? '';
+    document.getElementById('rlm_cooldown').value = data.config.rlm_cooldown ?? '';
+    document.getElementById('rlm_sl_usd').value = data.config.rlm_sl_usd ?? '';
+    document.getElementById('rlm_tp_usd').value = data.config.rlm_tp_usd ?? '';
+    document.getElementById('rlm_atr_len').value = data.config.rlm_atr_len ?? '';
+    document.getElementById('rlm_tp1_r').value = data.config.rlm_tp1_r ?? '';
+    document.getElementById('rlm_tp2_r').value = data.config.rlm_tp2_r ?? '';
+    document.getElementById('rlm_tp3_r').value = data.config.rlm_tp3_r ?? '';
+    document.getElementById('rlm_tp1_close_pct').value = data.config.rlm_tp1_close_pct ?? '';
+    document.getElementById('rlm_tp2_close_pct').value = data.config.rlm_tp2_close_pct ?? '';
+    document.getElementById('rlm_resolution').value = data.config.rlm_resolution || '';
+    document.getElementById('rlm_direction_mode').value = data.config.rlm_direction_mode || '';
+    document.getElementById('rlm_sl_mode').value = data.config.rlm_sl_mode || '';
+    document.getElementById('rlm_be_after_tp1').value = String(data.config.rlm_be_after_tp1 !== false);
+    document.getElementById('rlm_reverse').value = String(data.config.rlm_reverse !== false);
 
     setResolutionField('rsi_resolution', data.config.rsi_resolution);
     document.getElementById('rsi_length').value = data.config.rsi_length;
@@ -5220,6 +5295,27 @@ function buildConfigPayload() {
     tfl_sl_usd: parseFloat(document.getElementById('tfl_sl_usd').value) || 0,
     tfl_max_entries: parseInt(document.getElementById('tfl_max_entries').value) || 0,
     tfl_flip_mode: document.getElementById('tfl_flip_mode').value,
+    rlm_swing_len: parseInt(document.getElementById('rlm_swing_len').value) || 0,
+    rlm_level_tol: parseFloat(document.getElementById('rlm_level_tol').value) || 0,
+    rlm_min_touches: parseInt(document.getElementById('rlm_min_touches').value) || 0,
+    rlm_half_life: parseInt(document.getElementById('rlm_half_life').value) || 0,
+    rlm_levels_per_side: parseInt(document.getElementById('rlm_levels_per_side').value) || 0,
+    rlm_min_score: parseFloat(document.getElementById('rlm_min_score').value) || 0,
+    rlm_reject_clv: parseFloat(document.getElementById('rlm_reject_clv').value) || 0,
+    rlm_cooldown: parseInt(document.getElementById('rlm_cooldown').value) || 0,
+    rlm_sl_usd: parseFloat(document.getElementById('rlm_sl_usd').value) || 0,
+    rlm_tp_usd: parseFloat(document.getElementById('rlm_tp_usd').value) || 0,
+    rlm_atr_len: parseInt(document.getElementById('rlm_atr_len').value) || 0,
+    rlm_tp1_r: parseFloat(document.getElementById('rlm_tp1_r').value) || 0,
+    rlm_tp2_r: parseFloat(document.getElementById('rlm_tp2_r').value) || 0,
+    rlm_tp3_r: parseFloat(document.getElementById('rlm_tp3_r').value) || 0,
+    rlm_tp1_close_pct: parseFloat(document.getElementById('rlm_tp1_close_pct').value) || 0,
+    rlm_tp2_close_pct: parseFloat(document.getElementById('rlm_tp2_close_pct').value) || 0,
+    rlm_resolution: document.getElementById('rlm_resolution').value,
+    rlm_direction_mode: document.getElementById('rlm_direction_mode').value,
+    rlm_sl_mode: document.getElementById('rlm_sl_mode').value,
+    rlm_be_after_tp1: document.getElementById('rlm_be_after_tp1').value === 'true',
+    rlm_reverse: document.getElementById('rlm_reverse').value === 'true',
     rsi_resolution: getResolutionField('rsi_resolution'),
     rsi_length: parseInt(document.getElementById('rsi_length').value),
     rsi_oversold: parseFloat(document.getElementById('rsi_oversold').value),
@@ -5643,6 +5739,7 @@ async def handle_config_update(request):
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
                 "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
+                "rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
@@ -5780,9 +5877,10 @@ async def handle_wa_live_chart(request):
     is_pm = cfg.get("entry_mode") == "pure_momentum"
     is_dv = cfg.get("entry_mode") == "dollar701"
     is_tfl = cfg.get("entry_mode") == "trendfolge"
+    is_rlm = cfg.get("entry_mode") == "rlm"
     tf = request.query.get("tf", "")
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"):
-        tf = cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
+        tf = cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
             tf = "5m"
     data = await fetch_candles_binance_multi(symbol, tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
@@ -5792,7 +5890,10 @@ async def handle_wa_live_chart(request):
     if len(c) < n1 + n2 + sl + 21:
         return web.json_response({"ok": False, "reason": "lädt noch … (zu wenig Kerzen)"})
     payload = None
-    if is_tfl:
+    if is_rlm:
+        from rlm import rlm_chart_payload
+        payload = await asyncio.to_thread(rlm_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_tfl:
         from trendfolge import tfl_chart_payload
         payload = await asyncio.to_thread(tfl_chart_payload, ts, o, h, l, c, cfg, 1000)
     elif is_dv:
@@ -5814,7 +5915,8 @@ async def handle_wa_live_chart(request):
         sl_usd = float(cfg.get("wa_sl_usd", 5.0))
         d = (sl_usd / size) if size else 0
         pos = {"dir": st["position"], "avg": avg, "size": size, "pnl": ((st.get("last_price") or avg) - avg) * size * (1 if st["position"] == "long" else -1),
-               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else None}
+               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else None),
+               "tps": (st.get("rlm_tps") or []) if is_rlm else []}
     gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
     grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
     structure = []

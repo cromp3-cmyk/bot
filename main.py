@@ -23,6 +23,7 @@ from strategies import (
 from pure_momentum import pm_poll_loop
 from dollar701 import dv_poll_loop
 from trendfolge import tfl_poll_loop
+from rlm import rlm_poll_loop
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
     handle_ct_index, handle_ct_status, handle_ct_watch, handle_ct_copy_toggle,
@@ -146,6 +147,7 @@ async def main():
         *[pm_poll_loop(s) for s in SYMBOLS],
         *[dv_poll_loop(s) for s in SYMBOLS],
         *[tfl_poll_loop(s) for s in SYMBOLS],
+        *[rlm_poll_loop(s) for s in SYMBOLS],
         *[rsi_poll_loop(s) for s in SYMBOLS],
         *[mvwap_poll_loop(s) for s in SYMBOLS],
         *[grid_scalp_poll_loop(s) for s in SYMBOLS],
