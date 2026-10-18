@@ -458,6 +458,10 @@ def default_config():
         "rlm_tp2_close_pct": float(os.getenv("RLM_TP2_CLOSE_PCT", "50")),
         "rlm_be_after_tp1": os.getenv("RLM_BE_AFTER_TP1", "true").lower() == "true",
         "rlm_reverse": os.getenv("RLM_REVERSE", "true").lower() == "true",   # Gegen-Signal dreht die offene Position
+        "rlm_trend_filter": os.getenv("RLM_TREND_FILTER", "off"),   # off | entry (nur Signale in Trendrichtung) | entry_close (zusaetzlich Position bei Trendwechsel schliessen)
+        "rlm_trend_tf": os.getenv("RLM_TREND_TF", "15m"),
+        "rlm_trend_mode": os.getenv("RLM_TREND_MODE", "swing"),      # swing | intern
+        "rlm_trend_ilen": 4, "rlm_trend_slen": 50,
 
         # ================= RSI Signal =================
         # Reine Handelsidee: RSI < oversold -> long, RSI > overbought -> short. Ausstieg identisch
@@ -2088,6 +2092,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="rlm"><label>TP1 Teilverkauf (% der Position, 100 = alles)</label><input type="number" step="1" min="1" max="100" id="rlm_tp1_close_pct"></div>
   <div data-mode="rlm"><label>TP2 Teilverkauf (% der verbleibenden Position, 100 = alles)</label><input type="number" step="1" min="1" max="100" id="rlm_tp2_close_pct"></div>
   <div data-mode="rlm"><label>SL auf Break-Even nach TP1</label><select class="cfg" id="rlm_be_after_tp1"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="rlm"><label>Trend-Filter (Marktstruktur BOS/CHoCH)</label><select class="cfg" id="rlm_trend_filter"><option value="off">Aus</option><option value="entry">Nur Signale in Trendrichtung (Long nur im Aufwärtstrend, Short nur im Abwärtstrend)</option><option value="entry_close">Wie oben + Position schließen, wenn die Struktur dagegen dreht</option></select></div>
+  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Trend-Zeitebene</label><select class="cfg" id="rlm_trend_tf"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
+  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Trend-Art</label><select class="cfg" id="rlm_trend_mode"><option value="swing">Swing-Struktur (größere Wellen)</option><option value="intern">Interne Struktur (kleinere Wellen)</option></select></div>
+  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="rlm_trend_ilen"></div>
+  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="rlm_trend_slen"></div>
   <div data-mode="rlm"><label>Gegen-Signal dreht die Position</label><select class="cfg" id="rlm_reverse"><option value="true">Ja (wie im Original)</option><option value="false">Nein (Position bleibt bis SL/TP)</option></select></div>
 
   <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -3271,6 +3280,75 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="rlm" style="display:none;">
+<h2 class="section-title">🎲 Reaction Level Matrix Monte-Carlo (Score × Swing × Toleranz × Berührungen × Ablehnung)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Zieht zufällige Kombinationen aus den Bereichen unten und simuliert jede auf denselben Kerzen. Zeitebene, Richtung, SL/TP, Trend-Filter, Margin und Hebel kommen aus den Einstellungen oben.
+    Einen Spitzenwert nicht blind übernehmen: Die Spalte „PnL ohne beste N“, die Trade-Zahl und die Tabelle „Einfluss je Parameter“ zeigen, ob es ein stabiles Plateau gibt.
+    Tipp: auf einem Zeitraum suchen und danach auf einem anderen (z. B. letzte 30 Tage) mit den übernommenen Werten per Backtest gegenprüfen.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="rlm-mc-days" value="30" style="width:90px;"></div>
+    <div><label>Durchläufe (max. 1000)</label><input type="number" step="50" min="1" max="1000" id="rlm-mc-runs" value="150" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="rlm-mc-seed" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="rlm-mc-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Mindest-Score von</label><input type="number" step="1" min="0" max="100" id="rlm-mc-score-min" value="30" style="width:80px;"></div><div><label>bis</label><input type="number" step="1" min="0" max="100" id="rlm-mc-score-max" value="80" style="width:80px;"></div>
+    <div><label>Swing-Länge von</label><input type="number" step="1" min="2" max="30" id="rlm-mc-swing-min" value="3" style="width:80px;"></div><div><label>bis</label><input type="number" step="1" min="2" max="30" id="rlm-mc-swing-max" value="12" style="width:80px;"></div>
+    <div><label>Toleranz von</label><input type="number" step="0.05" min="0.2" max="2" id="rlm-mc-tol-min" value="0.3" style="width:80px;"></div><div><label>bis</label><input type="number" step="0.05" min="0.2" max="2" id="rlm-mc-tol-max" value="1.0" style="width:80px;"></div>
+    <div><label>Berührungen von</label><input type="number" step="1" min="2" max="10" id="rlm-mc-touches-min" value="2" style="width:80px;"></div><div><label>bis</label><input type="number" step="1" min="2" max="10" id="rlm-mc-touches-max" value="4" style="width:80px;"></div>
+    <div><label>Ablehnung von</label><input type="number" step="0.05" min="0.5" max="0.9" id="rlm-mc-clv-min" value="0.55" style="width:80px;"></div><div><label>bis</label><input type="number" step="0.05" min="0.5" max="0.9" id="rlm-mc-clv-max" value="0.8" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-rlm-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="rlm-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="rlm-mc-effect-title">🧭 Einfluss je Parameter (Median-PnL im unteren / mittleren / oberen Drittel des Bereichs)</h3>
+  <table id="rlm-mc-effect-table" style="display:none; margin-top:8px;">
+    <thead><tr><th>Parameter</th><th>unteres Drittel</th><th>mittleres Drittel</th><th>oberes Drittel</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="rlm-mc-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="rlm-mc-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="rlm_min_score">Score ⇅</th>
+      <th class="sortable" data-key="rlm_swing_len">Swing ⇅</th>
+      <th class="sortable" data-key="rlm_level_tol">Toleranz ⇅</th>
+      <th class="sortable" data-key="rlm_min_touches">Berührungen ⇅</th>
+      <th class="sortable" data-key="rlm_reject_clv">Ablehnung ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="rlm-mc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="rlm-mc-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="rlm_min_score">Score ⇅</th>
+      <th class="sortable" data-key="rlm_swing_len">Swing ⇅</th>
+      <th class="sortable" data-key="rlm_level_tol">Toleranz ⇅</th>
+      <th class="sortable" data-key="rlm_min_touches">Berührungen ⇅</th>
+      <th class="sortable" data-key="rlm_reject_clv">Ablehnung ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="liquidity_waves" style="display:none;">
 <h2 class="section-title">🎲 Liquidity Waves Sweep (Einstiegs-Schwelle × Levels keep alive)</h2>
 <div class="panel-card">
@@ -3424,7 +3502,8 @@ function applyFilterRequires() {
     // Mehrwert-Selects (z.B. mv_sl_mode: "fixed"/"guide_trail") - dann zaehlt Gleichheit mit
     // diesem Wert statt 'true'.
     const expected = el.dataset.requiresValue;
-    let active = ctrl && (expected !== undefined ? ctrl.value === expected : ctrl.value === 'true');
+    const notExpected = el.dataset.requiresNot;
+    let active = ctrl && (notExpected !== undefined ? ctrl.value !== notExpected : expected !== undefined ? ctrl.value === expected : ctrl.value === 'true');
     // Optional zweite Bedingung "data-requires-also=\"id=wert\"" (z.B. Feld gilt nur bei Preset Custom UND
     // Ausstiegs-Modus Plan) - beide muessen erfuellt sein.
     if (active && el.dataset.requiresAlso) {
@@ -4312,6 +4391,76 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
   if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
+window.rlmMcResultsData = [];
+window.rlmMcWorstData = [];
+const rlmMcRowHtml = (r) => `
+  <tr>
+    <td>${r.rlm_min_score}</td>
+    <td>${r.rlm_swing_len}</td>
+    <td>${r.rlm_level_tol}</td>
+    <td>${r.rlm_min_touches}</td>
+    <td>${r.rlm_reject_clv}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+    ${applyBtn({rlm_min_score: r.rlm_min_score, rlm_swing_len: r.rlm_swing_len, rlm_level_tol: r.rlm_level_tol, rlm_min_touches: r.rlm_min_touches, rlm_reject_clv: r.rlm_reject_clv})}
+  </tr>`;
+const renderRlmMcResults = makeSortableTable('rlm-mc-results-table', () => window.rlmMcResultsData, rlmMcRowHtml);
+const renderRlmMcWorst = makeSortableTable('rlm-mc-worst-table', () => window.rlmMcWorstData, rlmMcRowHtml);
+
+document.getElementById('btn-rlm-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-rlm-mc');
+  const statusEl = document.getElementById('rlm-mc-status');
+  const tables = {top: document.getElementById('rlm-mc-results-table'), worst: document.getElementById('rlm-mc-worst-table'), eff: document.getElementById('rlm-mc-effect-table')};
+  const titles = {top: document.getElementById('rlm-mc-top-title'), worst: document.getElementById('rlm-mc-worst-title'), eff: document.getElementById('rlm-mc-effect-title')};
+  const sweepSymbol = currentSymbol;
+  const num = (id) => parseFloat(document.getElementById(id).value);
+  const payload = {
+    days: parseInt(document.getElementById('rlm-mc-days').value) || 30,
+    runs: parseInt(document.getElementById('rlm-mc-runs').value) || 150,
+    seed: document.getElementById('rlm-mc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('rlm-mc-exclude-top-n').value) || 0,
+    score_min: num('rlm-mc-score-min'), score_max: num('rlm-mc-score-max'),
+    swing_min: num('rlm-mc-swing-min'), swing_max: num('rlm-mc-swing-max'),
+    tol_min: num('rlm-mc-tol-min'), tol_max: num('rlm-mc-tol-max'),
+    touches_min: num('rlm-mc-touches-min'), touches_max: num('rlm-mc-touches-max'),
+    clv_min: num('rlm-mc-clv-min'), clv_max: num('rlm-mc-clv-max'),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste die Zufalls-Kombinationen (kann einige Minuten dauern)...`;
+  try {
+    const res = await fetch(`/api/rlm_mc?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - ${data.profitable_pct}% der Kombinationen im Plus, Median ${data.median_pnl_usd} $, bester ${data.best_pnl_usd} $, schlechtester ${data.worst_pnl_usd} $. Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.rlmMcResultsData = data.results || [];
+      window.rlmMcWorstData = data.worst_results || [];
+      renderRlmMcResults();
+      renderRlmMcWorst();
+      const fmt = (v) => v === null || v === undefined ? '–' : `<span class="${v >= 0 ? 'green' : 'red'}">${v} $</span>`;
+      tables.eff.querySelector('tbody').innerHTML = (data.effects || []).map(e => `<tr><td>${e.param}</td><td>${e.low_range}: ${fmt(e.low)}</td><td>${e.mid_range}: ${fmt(e.mid)}</td><td>${e.high_range}: ${fmt(e.high)}</td></tr>`).join('');
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+      if (!(data.effects || []).length) { tables.eff.style.display = 'none'; titles.eff.style.display = 'none'; }
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
 document.getElementById('btn-wa-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-wa-sweep');
   const statusEl = document.getElementById('wa-sweep-status');
@@ -4851,7 +5000,12 @@ async function refresh() {
     document.getElementById('rlm_tp1_close_pct').value = data.config.rlm_tp1_close_pct ?? '';
     document.getElementById('rlm_tp2_close_pct').value = data.config.rlm_tp2_close_pct ?? '';
     document.getElementById('rlm_resolution').value = data.config.rlm_resolution || '';
-    document.getElementById('rlm_direction_mode').value = data.config.rlm_direction_mode || '';
+    document.getElementById('rlm_direction_mode').value = data.config.rlm_direction_mode || 'both';
+    document.getElementById('rlm_trend_filter').value = data.config.rlm_trend_filter || 'off';
+    document.getElementById('rlm_trend_tf').value = data.config.rlm_trend_tf || '15m';
+    document.getElementById('rlm_trend_mode').value = data.config.rlm_trend_mode || 'swing';
+    document.getElementById('rlm_trend_ilen').value = data.config.rlm_trend_ilen ?? 4;
+    document.getElementById('rlm_trend_slen').value = data.config.rlm_trend_slen ?? 50;
     document.getElementById('rlm_sl_mode').value = data.config.rlm_sl_mode || '';
     document.getElementById('rlm_be_after_tp1').value = String(data.config.rlm_be_after_tp1 !== false);
     document.getElementById('rlm_reverse').value = String(data.config.rlm_reverse !== false);
@@ -5313,6 +5467,11 @@ function buildConfigPayload() {
     rlm_tp2_close_pct: parseFloat(document.getElementById('rlm_tp2_close_pct').value) || 0,
     rlm_resolution: document.getElementById('rlm_resolution').value,
     rlm_direction_mode: document.getElementById('rlm_direction_mode').value,
+    rlm_trend_filter: document.getElementById('rlm_trend_filter').value,
+    rlm_trend_tf: document.getElementById('rlm_trend_tf').value,
+    rlm_trend_mode: document.getElementById('rlm_trend_mode').value,
+    rlm_trend_ilen: parseInt(document.getElementById('rlm_trend_ilen').value) || 4,
+    rlm_trend_slen: parseInt(document.getElementById('rlm_trend_slen').value) || 50,
     rlm_sl_mode: document.getElementById('rlm_sl_mode').value,
     rlm_be_after_tp1: document.getElementById('rlm_be_after_tp1').value === 'true',
     rlm_reverse: document.getElementById('rlm_reverse').value === 'true',
@@ -5739,7 +5898,7 @@ async def handle_config_update(request):
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
                 "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
-                "rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
+                "rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
@@ -6185,6 +6344,36 @@ async def handle_dv_montecarlo(request):
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] Dollar701-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_rlm_montecarlo(request):
+    """Monte-Carlo fuer die Reaction Level Matrix: zufaellige Kombinationen aus Score, Swing, Toleranz, Beruehrungen, Ablehnungs-Staerke."""
+    from rlm import run_rlm_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        runs = max(1, min(1000, int(body.get("runs", 150))))
+        ranges = {k: (float(body.get(k + "_min")), float(body.get(k + "_max"))) for k in ("score", "swing", "tol", "touches", "clv")}
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(run_rlm_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n, seed), timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] RLM-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 

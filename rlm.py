@@ -15,15 +15,17 @@ Prinzip:
 
 import asyncio
 import math
+import random
 import time
 import traceback
 
 from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_reverse, execute_partial_exit
 from strategies import (
-    SUB_MINUTE_RESOLUTIONS, get_seconds_candles, fetch_candles_binance_multi, _tf_ms,
+    SUB_MINUTE_RESOLUTIONS, get_seconds_candles, fetch_candles_binance_multi, _tf_ms, ms_trend_series, _trend_align,
     summarize_backtest_trades, _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
 )
 
+TREND_TFS = ["10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"]
 RLM_TFS = ["10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "4h"]
 
 # feste Konstanten des Pine-Originals
@@ -69,6 +71,11 @@ def _rlm_params(cfg):
         "tp2_pct": max(1.0, min(100.0, float(cfg.get("rlm_tp2_close_pct", 50) or 50))),
         "be": bool(cfg.get("rlm_be_after_tp1", True)),
         "reverse": bool(cfg.get("rlm_reverse", True)),
+        "trend_filter": cfg.get("rlm_trend_filter", "off") if cfg.get("rlm_trend_filter", "off") in ("off", "entry", "entry_close") else "off",
+        "trend_tf": cfg.get("rlm_trend_tf", "15m") if cfg.get("rlm_trend_tf", "15m") in TREND_TFS else "15m",
+        "trend_mode": cfg.get("rlm_trend_mode", "swing") if cfg.get("rlm_trend_mode", "swing") in ("intern", "swing") else "swing",
+        "ilen": max(2, int(cfg.get("rlm_trend_ilen", 4) or 4)),
+        "slen": max(2, int(cfg.get("rlm_trend_slen", 50) or 50)),
     }
 
 
@@ -315,6 +322,42 @@ async def _closed(symbol, cfg, st, tf, bars):
     return ts[:-1], o[:-1], h[:-1], l[:-1], c[:-1]
 
 
+_trend_cache = {}
+
+
+async def rlm_trend_now(symbol, cfg, st, p):
+    """Aktueller Marktstruktur-Trend 1 / -1 / 0 (unbekannt) aus geschlossenen Kerzen der Trend-Zeitebene (Neuberechnung nur bei neuer Kerze)."""
+    L = p["ilen"] if p["trend_mode"] == "intern" else p["slen"]
+    key = (symbol, p["trend_tf"], p["trend_mode"], p["ilen"], p["slen"])
+    cached = _trend_cache.get(key)
+    if cached and time.time() - cached["at"] < (2.0 if p["trend_tf"] in SUB_MINUTE_RESOLUTIONS else 10.0):
+        return cached["val"]
+    cs = await _closed(symbol, cfg, st, p["trend_tf"], 2 * L + 150)
+    if not cs or len(cs[4]) < 2 * L + 6:
+        return cached["val"] if cached else 0
+    ts, _o, h, l, c = cs
+    if cached and cached["last"] == ts[-1]:
+        cached["at"] = time.time()
+        return cached["val"]
+    itr, swt, _ev = await asyncio.to_thread(ms_trend_series, h, l, c, p["ilen"], p["slen"])
+    val = (itr if p["trend_mode"] == "intern" else swt)[-1]
+    _trend_cache[key] = {"at": time.time(), "last": ts[-1], "val": val}
+    return val
+
+
+async def check_rlm_trend_close(symbol, trend, price):
+    """Option 'Einstieg + Ausstieg': dreht die Marktstruktur gegen die offene Position, wird sie geschlossen."""
+    st = BOTS[symbol]["state"]
+    pos = st["position"]
+    if pos is None or not trend or price is None:
+        return
+    if (pos == "long" and trend < 0) or (pos == "short" and trend > 0):
+        debug_log(f"🧭 [{symbol}] RLM: Marktstruktur dreht gegen {pos.upper()} - Position schließen @ {price}")
+        await execute_exit(symbol, price, "TREND-FLIP")
+        if st["position"] is None:
+            _rlm_reset_state(st)
+
+
 async def check_rlm_sl_tp(symbol, price):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -380,7 +423,7 @@ def _set_levels_after_entry(st, target, price, bar, atr_r, p):
     st["rlm_sl"], st["rlm_tps"] = sl, tps
 
 
-async def check_rlm_signal(symbol, direction, price, bar, atr_r, info):
+async def check_rlm_signal(symbol, direction, price, bar, atr_r, info, trend=None):
     """direction 1 / -1 auf der neu geschlossenen Kerze (bar = (high, low, close) der Signalkerze)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
@@ -389,6 +432,9 @@ async def check_rlm_signal(symbol, direction, price, bar, atr_r, info):
     p = _rlm_params(cfg)
     target = "long" if direction > 0 else "short"
     allowed = not ((target == "long" and p["direction"] == "short_only") or (target == "short" and p["direction"] == "long_only"))
+    if p["trend_filter"] != "off" and trend != direction:
+        debug_log(f"⛔ [{symbol}] RLM Signal {target.upper()} ignoriert - Marktstruktur {p['trend_tf']} ({p['trend_mode']}) ist {'aufwärts' if trend and trend > 0 else 'abwärts' if trend else 'unbekannt'}")
+        return
     pos = st["position"]
     if pos == target:
         return   # gleiche Richtung: kein Nachkauf (wie im Pine-Skript)
@@ -438,6 +484,12 @@ async def rlm_poll_loop(symbol):
                 price = st.get("last_price")
                 if st["position"] is not None and price is not None:
                     await check_rlm_sl_tp(symbol, price)
+                trend = None
+                if p["trend_filter"] != "off":
+                    trend = await rlm_trend_now(symbol, cfg, st, p)
+                    st["rlm_trend"] = trend
+                    if p["trend_filter"] == "entry_close" and st["position"] is not None and price is not None:
+                        await check_rlm_trend_close(symbol, trend, price)
                 cs = await _closed(symbol, cfg, st, p["res"], 1000)
                 if cs and len(cs[4]) >= 2 * p["swing"] + STRUCT_ATR_LEN + 5:
                     ts, o, h, l, c = cs
@@ -457,7 +509,7 @@ async def rlm_poll_loop(symbol):
                         st["rlm_levels"] = res["levels"]
                         if res["sig"][-1]:
                             await check_rlm_signal(symbol, res["sig"][-1], price if price is not None else c[-1],
-                                                   (h[-1], l[-1], c[-1]), res["atr_risk"][-1], res["info"][-1])
+                                                   (h[-1], l[-1], c[-1]), res["atr_risk"][-1], res["info"][-1], trend)
                     if now - last_heartbeat > 300:
                         last_heartbeat = now
                         debug_log(f"💓 [{symbol}] RLM aktiv: Kerzen {p['res']}, Swing {p['swing']}, Score ≥ {p['min_score']}, SL={p['sl_mode']}, Preis={price}")
@@ -472,7 +524,7 @@ async def rlm_poll_loop(symbol):
 # ============================================================================
 # BACKTEST
 # ============================================================================
-def _rlm_simulate(candles, cfg, eng, p):
+def _rlm_simulate(candles, cfg, eng, p, trend=None):
     """Backtest-Gegenstueck: Kerze i - zuerst SL/TP einer schon offenen Position ueber Hoch/Tief (SL gewinnt bei Gleichzeitigkeit,
     ein auf dieser Kerze nachgezogener Break-Even-SL greift erst ab der naechsten), dann das Signal zum Schlusskurs."""
     ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
@@ -523,8 +575,14 @@ def _rlm_simulate(candles, cfg, eng, p):
                 if position is not None and position["tp2"] and hit(tps[2]):
                     _bt_close_trade(trades, d, e, tps[2], position["size"], i, position["entry_i"], "TP3", ts=ts)
                     position = None
+        if trend is not None and p["trend_filter"] == "entry_close" and position is not None and position["entry_i"] < i:
+            if (position["dir"] == "long" and trend[i] < 0) or (position["dir"] == "short" and trend[i] > 0):
+                _bt_close_trade(trades, position["dir"], position["entry"], c[i], position["size"], i, position["entry_i"], "TREND-FLIP", ts=ts)
+                position = None
         s = sig[i]
         if not s:
+            continue
+        if trend is not None and p["trend_filter"] != "off" and trend[i] != s:
             continue
         target = "long" if s > 0 else "short"
         allowed = not ((target == "long" and p["direction"] == "short_only") or (target == "short" and p["direction"] == "long_only"))
@@ -540,6 +598,29 @@ def _rlm_simulate(candles, cfg, eng, p):
     return trades
 
 
+async def _rlm_trend_for_backtest(symbol, cfg, candles, days, p):
+    """Trend-Array passend zu den Basis-Kerzen (nur geschlossene Trend-Kerzen, kein Blick in die Zukunft) oder (None, Fehlertext)."""
+    ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
+    L = p["ilen"] if p["trend_mode"] == "intern" else p["slen"]
+    pick = (lambda itr, swt: itr if p["trend_mode"] == "intern" else swt)
+    if p["trend_tf"] == p["res"]:
+        itr, swt, _ev = await asyncio.to_thread(ms_trend_series, h, l, c, p["ilen"], p["slen"])
+        return pick(itr, swt), None
+    if p["trend_tf"] in SUB_MINUTE_RESOLUTIONS:
+        return None, "Backtest: Trend-Zeitebene unter 1 Minute geht nur, wenn sie gleich der Kerzen-Zeitebene ist (keine Sekunden-Historie)."
+    if p["res"] not in SUB_MINUTE_RESOLUTIONS and _tf_ms(p["trend_tf"]) < _tf_ms(p["res"]):
+        return None, "Backtest: Trend-Zeitebene muss gleich oder größer als die Kerzen-Zeitebene sein."
+    htf_ms = _tf_ms(p["trend_tf"])
+    warm_days = (2 * L + 30) * htf_ms / 86_400_000
+    data, err = await _fetch_cached_mo7_backtest_candles(symbol, p["trend_tf"], days + warm_days + 1, 5000, market_type=cfg.get("binance_market_type", "spot"))
+    if err or not data or len(data[4]) < 2 * L + 5:
+        return None, err or "Zu wenig Kerzen der Trend-Zeitebene für den Backtest."
+    hts, _o, hh, hl, hc, _v = data
+    itr, swt, _ev = await asyncio.to_thread(ms_trend_series, hh, hl, hc, p["ilen"], p["slen"])
+    base_ms = ts[1] - ts[0] if len(ts) > 1 else _tf_ms(p["res"])
+    return _trend_align(ts, base_ms, hts, htf_ms, pick(itr, swt)), None
+
+
 async def run_rlm_backtest(symbol, cfg, days, exclude_top_n=1):
     max_candles = BACKTEST_MAX_CANDLES.get("rlm", 30_000)
     p = _rlm_params(cfg)
@@ -553,7 +634,12 @@ async def run_rlm_backtest(symbol, cfg, days, exclude_top_n=1):
         return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
     ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     eng = await asyncio.to_thread(rlm_engine, ts, o, h, l, c, p)
-    trades = _rlm_simulate(candles, cfg, eng, p)
+    trend = None
+    if p["trend_filter"] != "off":
+        trend, terr = await _rlm_trend_for_backtest(symbol, cfg, candles, days, p)
+        if trend is None:
+            return {"error": terr}
+    trades = _rlm_simulate(candles, cfg, eng, p, trend)
     stats = summarize_backtest_trades(trades, exclude_top_n)
     actual_days = (ts[-1] - ts[0]) / 86_400_000
     return {
@@ -565,6 +651,103 @@ async def run_rlm_backtest(symbol, cfg, days, exclude_top_n=1):
         "stats_long": summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n),
         "stats_short": summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n),
         "trades": trades,
+    }
+
+
+# ============================================================================
+# MONTE-CARLO: zufaellige Kombinationen aus Mindest-Score x Swing-Laenge x Toleranz x Beruehrungen x Ablehnungs-Staerke
+# ============================================================================
+RLM_MC_MAX_RUNS = 1000
+RLM_MC_MIN_RELIABLE_TRADES = 5
+RLM_MC_KEYS = [("rlm_min_score", "Mindest-Score"), ("rlm_swing_len", "Swing-Länge"), ("rlm_level_tol", "Level-Toleranz"),
+               ("rlm_min_touches", "Berührungen"), ("rlm_reject_clv", "Ablehnungs-Stärke")]
+
+
+def _rlm_mc_compute(candles, cfg, combos, base_p, trend, exclude_top_n, deadline):
+    ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
+    out = []
+    for score, swing, tol, touches, clv in combos:
+        if time.time() > deadline:
+            break
+        p = dict(base_p, min_score=float(score), swing=int(swing), tol=float(tol), touches=int(touches), clv=float(clv))
+        eng = rlm_engine(ts, o, h, l, c, p)
+        trades = _rlm_simulate(candles, cfg, eng, p, trend)
+        st = summarize_backtest_trades(trades, exclude_top_n)
+        out.append({"rlm_min_score": score, "rlm_swing_len": swing, "rlm_level_tol": tol, "rlm_min_touches": touches, "rlm_reject_clv": clv,
+                    "trades": st["trades"], "win_rate_pct": st["win_rate_pct"], "total_pnl_usd": st["total_pnl_usd"],
+                    "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"], "max_drawdown_usd": st["max_drawdown_usd"],
+                    "avg_bars_held": st["avg_bars_held"]})
+    return out
+
+
+def _rlm_mc_effects(results):
+    """Je Parameter: Median-PnL im unteren / mittleren / oberen Drittel des getesteten Bereichs (zeigt, ob es ein stabiles Plateau gibt)."""
+    eff = []
+    for key, label in RLM_MC_KEYS:
+        vals = sorted(r[key] for r in results)
+        if len(vals) < 9 or vals[0] == vals[-1]:
+            continue
+        lo_t, hi_t = vals[len(vals) // 3], vals[(2 * len(vals)) // 3]
+        groups = {"low": [], "mid": [], "high": []}
+        for r in results:
+            v = r[key]
+            groups["low" if v < lo_t else "high" if v > hi_t else "mid"].append(r["total_pnl_usd"])
+        def med(x):
+            x = sorted(x)
+            return round(x[len(x) // 2], 2) if x else None
+        eff.append({"param": label, "low_range": f"{vals[0]}–{lo_t}", "mid_range": f"{lo_t}–{hi_t}", "high_range": f"{hi_t}–{vals[-1]}",
+                    "low": med(groups["low"]), "mid": med(groups["mid"]), "high": med(groups["high"])})
+    return eff
+
+
+async def run_rlm_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, seed=None):
+    """ranges: {'score':(a,b), 'swing':(a,b), 'tol':(a,b), 'touches':(a,b), 'clv':(a,b)}. Alles andere kommt aus der Config."""
+    max_candles = BACKTEST_MAX_CANDLES.get("rlm", 30_000)
+    p = _rlm_params(cfg)
+    if p["res"] in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, p["res"], days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    n = len(candles[4]) if candles else 0
+    if n < 300:
+        return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Monte-Carlo-Test erhalten (mind. ~300 nötig)."}
+    trend = None
+    if p["trend_filter"] != "off":
+        trend, terr = await _rlm_trend_for_backtest(symbol, cfg, candles, days, p)
+        if trend is None:
+            return {"error": terr}
+    runs = max(1, min(RLM_MC_MAX_RUNS, int(runs)))
+
+    def rng_pair(key, lo, hi):
+        a, b = sorted((max(lo, min(hi, float(ranges[key][0]))), max(lo, min(hi, float(ranges[key][1])))))
+        return a, b
+    sc = rng_pair("score", 0, 100); sw = rng_pair("swing", 2, 30); tl = rng_pair("tol", 0.2, 2.0)
+    tc = rng_pair("touches", 2, 10); cv = rng_pair("clv", 0.5, 0.9)
+    rnd = random.Random(seed)
+    seen, combos = set(), []
+    for _ in range(runs * 6):
+        if len(combos) >= runs:
+            break
+        k = (int(round(rnd.uniform(*sc))), int(round(rnd.uniform(*sw))), round(round(rnd.uniform(*tl) / 0.05) * 0.05, 2),
+             int(round(rnd.uniform(*tc))), round(round(rnd.uniform(*cv) / 0.05) * 0.05, 2))
+        if k not in seen:
+            seen.add(k)
+            combos.append(k)
+    deadline = time.time() + 240
+    results = await asyncio.to_thread(_rlm_mc_compute, candles, cfg, combos, p, trend, exclude_top_n, deadline)
+    best = sorted(results, key=lambda r: (r["trades"] >= RLM_MC_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    worst = sorted(results, key=lambda r: r["total_pnl_usd"])
+    pnls = sorted(r["total_pnl_usd"] for r in results)
+    actual_days = (candles[0][-1] - candles[0][0]) / 86_400_000
+    return {
+        "symbol": symbol, "resolution": p["res"], "requested_days": days, "actual_days_covered": round(actual_days, 1),
+        "candles_processed": n, "min_reliable_trades": RLM_MC_MIN_RELIABLE_TRADES,
+        "combos_tested": len(results), "combos_requested": runs,
+        "profitable_pct": round(sum(1 for x in pnls if x > 0) / len(pnls) * 100, 1) if pnls else 0,
+        "median_pnl_usd": round(pnls[len(pnls) // 2], 2) if pnls else 0,
+        "best_pnl_usd": pnls[-1] if pnls else 0, "worst_pnl_usd": pnls[0] if pnls else 0,
+        "effects": _rlm_mc_effects(results), "results": best[:30], "worst_results": worst[:20],
     }
 
 
