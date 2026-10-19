@@ -458,6 +458,7 @@ def default_config():
         "rlm_tp2_close_pct": float(os.getenv("RLM_TP2_CLOSE_PCT", "50")),
         "rlm_be_after_tp1": os.getenv("RLM_BE_AFTER_TP1", "true").lower() == "true",
         "rlm_reverse": os.getenv("RLM_REVERSE", "true").lower() == "true",   # Gegen-Signal dreht die offene Position
+        "rlm_candle_type": os.getenv("RLM_CANDLE_TYPE", "normal"),   # normal | heikin (Signale auf Heikin-Ashi-Kerzen)
         "rlm_trend_filter": os.getenv("RLM_TREND_FILTER", "off"),   # off | entry (nur Signale in Trendrichtung) | entry_close (zusaetzlich Position bei Trendwechsel schliessen)
         "rlm_trend_tf": os.getenv("RLM_TREND_TF", "15m"),
         "rlm_trend_mode": os.getenv("RLM_TREND_MODE", "swing"),      # swing | intern
@@ -1645,7 +1646,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <button type="button" id="wac-tab-live" class="pill on">🔴 Live</button>
     <button type="button" id="wac-tab-bt" class="pill">📊 Backtest-Trades</button>
     <select id="wac-tf" class="pill-select" title="Zeitrahmen">
-      <option value="">TF: Strategie</option><option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option>
+      <option value="">TF: Strategie</option><option value="10s">10s</option><option value="15s">15s</option><option value="30s">30s</option><option value="45s">45s</option><option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option>
     </select>
     <button type="button" id="wac-center" class="pill" title="Aktuelle Kerze in die Mitte des Charts setzen">🎯 Mitte</button>
     <button type="button" id="wac-fit" class="pill" title="Gesamten Verlauf einpassen">⤢ Alles</button>
@@ -1658,7 +1659,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div id="wac-wt" style="height:180px;"></div>
   </div>
   <div id="wac-trend" style="display:none; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; font-size:12px;"></div>
-  <div style="font-size:12px; color:var(--text-dim); margin-top:6px;" id="wac-legend">Pfeile = Signale · Linien = Position / SL / Grid-Level · Backtest: ▲/▼ Einstieg, ● Ausstieg mit PnL – Klick auf Trade in der Tabelle zoomt hin.</div>
+  <div style="font-size:12px; color:var(--text-dim); margin-top:6px;" id="wac-legend">Kleine Pfeile = Signale · gelbe Pfeile „Einstieg“ = echte Einstiege des Bots, Kreise = Ausstiege mit PnL · Linien = Position / SL / Grid-Level · Backtest: ▲/▼ Einstieg, ● Ausstieg mit PnL – Klick auf Trade in der Tabelle zoomt hin.</div>
 </div>
 
 <div id="scalp-trend" style="display:none; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0; font-size:12px;"></div>
@@ -2073,6 +2074,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     📐 <b>Reaction Level Matrix</b>: Aus bestätigten Swing-Hochs/-Tiefs entstehen Preis-Level (Bänder) mit Score 0–100 (mehr Berührungen = stärker, alte Level verblassen). <b>Long</b>, wenn eine Kerze in eine Unterstützung eintaucht, wieder darüber schließt und im oberen Teil ihrer Spanne endet; <b>Short</b> spiegelbildlich am Widerstand. Signal erst bei Kerzenschluss. Ausstieg: SL, TP1/TP2/TP3 mit Teilverkäufen, Break-Even nach TP1; ein Gegen-Signal dreht die Position.
   </div>
   <div data-mode="rlm"><label>Kerzen-Zeitebene (Signal bei Kerzenschluss)</label><select class="cfg" id="rlm_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option></select></div>
+  <div data-mode="rlm"><label>Kerzenart (Signale berechnen auf …)</label><select class="cfg" id="rlm_candle_type"><option value="normal">Normale Kerzen</option><option value="heikin">Heikin-Ashi-Kerzen (geglättet; Ein-/Ausstiege, SL und TP laufen auf echten Kursen)</option></select></div>
   <div data-mode="rlm"><label>Swing-Länge (Kerzen links/rechts, 2–30)</label><input type="number" step="1" min="2" max="30" id="rlm_swing_len"></div>
   <div data-mode="rlm"><label>Level-Toleranz (× ATR, 0.2–2)</label><input type="number" step="0.05" min="0.2" max="2" id="rlm_level_tol"></div>
   <div data-mode="rlm"><label>Berührungen bis ein Level aktiv ist</label><input type="number" step="1" min="2" max="10" id="rlm_min_touches"></div>
@@ -3303,6 +3305,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div><label>Ablehnung von</label><input type="number" step="0.05" min="0.5" max="0.9" id="rlm-mc-clv-min" value="0.55" style="width:80px;"></div><div><label>bis</label><input type="number" step="0.05" min="0.5" max="0.9" id="rlm-mc-clv-max" value="0.8" style="width:80px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label><input type="checkbox" id="rlm-mc-sl-on" style="width:auto; vertical-align:middle;"> Stop-Loss ($) variieren von</label><input type="number" step="0.1" min="0.1" id="rlm-mc-sl-min" value="3" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="rlm-mc-sl-max" value="15" style="width:80px;"></div>
+    <div><label><input type="checkbox" id="rlm-mc-tp-on" style="width:auto; vertical-align:middle;"> TP-Schritt ($) variieren von</label><input type="number" step="0.1" min="0.1" id="rlm-mc-tp-min" value="2" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="rlm-mc-tp-max" value="15" style="width:80px;"></div>
+    <div><label>Kerzenart im Test</label><select id="rlm-mc-candle"><option value="">wie in den Einstellungen</option><option value="normal">Normale Kerzen</option><option value="heikin">Heikin-Ashi</option></select></div>
+  </div>
+  <div style="font-size:12px; color:var(--text-dim); margin-bottom:12px;">Ohne Haken gelten SL und TP-Schritt aus den Einstellungen oben (nur bei SL-Modus „Fester $-Betrag").</div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <button id="btn-rlm-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
   </div>
   <div id="rlm-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
@@ -3319,6 +3329,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="rlm_level_tol">Toleranz ⇅</th>
       <th class="sortable" data-key="rlm_min_touches">Berührungen ⇅</th>
       <th class="sortable" data-key="rlm_reject_clv">Ablehnung ⇅</th>
+      <th class="sortable" data-key="rlm_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="rlm_tp_usd">TP-Schritt $ ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -3337,6 +3349,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="rlm_level_tol">Toleranz ⇅</th>
       <th class="sortable" data-key="rlm_min_touches">Berührungen ⇅</th>
       <th class="sortable" data-key="rlm_reject_clv">Ablehnung ⇅</th>
+      <th class="sortable" data-key="rlm_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="rlm_tp_usd">TP-Schritt $ ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -3743,9 +3757,9 @@ function wacInit() {
   const LW = window.LightweightCharts;
   const opt = {layout: {background: {color: 'transparent'}, textColor: '#9aa4bf'}, grid: {vertLines: {color: '#171b22'}, horzLines: {color: '#171b22'}},
                rightPriceScale: {borderColor: '#242932'},
-               localization: {timeFormatter: t => new Date(t * 1000).toLocaleString('de-DE', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false})},
-               timeScale: {borderColor: '#242932', timeVisible: true, secondsVisible: false, rightOffset: 25,
-                 tickMarkFormatter: (t, type) => { const d = new Date(t * 1000); return type <= 1 ? d.toLocaleDateString('de-DE', {month: '2-digit', year: '2-digit'}) : type === 2 ? d.toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'}) : d.toLocaleTimeString('de-DE', {hour: '2-digit', minute: '2-digit', hour12: false}); }},
+               localization: {timeFormatter: t => new Date(t * 1000).toLocaleString('de-DE', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: (WAC.tf && /s$/.test(WAC.tf)) ? '2-digit' : undefined, hour12: false})},
+               timeScale: {borderColor: '#242932', timeVisible: true, secondsVisible: true, rightOffset: 25,
+                 tickMarkFormatter: (t, type) => { const d = new Date(t * 1000); return type <= 1 ? d.toLocaleDateString('de-DE', {month: '2-digit', year: '2-digit'}) : type === 2 ? d.toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'}) : d.toLocaleTimeString('de-DE', type >= 4 ? {hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false} : {hour: '2-digit', minute: '2-digit', hour12: false}); }},
                crosshair: {mode: 0},
                handleScroll: {mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true},
                handleScale: {mouseWheel: true, pinch: true, axisPressedMouseMove: true, axisDoubleClickReset: true}};
@@ -3832,7 +3846,10 @@ function wacSigMarkers(d) {
     : {time: m.time, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: ''});
   const st = (d.structure || []).map(e => ({time: e.time, position: e.dir > 0 ? 'belowBar' : 'aboveBar', color: e.dir > 0 ? '#1fcf6e' : '#f0354b',
     shape: e.kind === 'CHoCH' ? 'square' : 'circle', text: e.kind}));
-  return sig.concat(st).sort((a, b) => a.time - b.time);
+  const tm = (d.trade_marks || []).map(m => m.kind === 'entry'
+    ? {time: m.time, position: m.dir === 'long' ? 'belowBar' : 'aboveBar', color: '#facc15', shape: m.dir === 'long' ? 'arrowUp' : 'arrowDown', text: 'Einstieg'}
+    : {time: m.time, position: m.dir === 'long' ? 'aboveBar' : 'belowBar', color: (m.pnl || 0) >= 0 ? '#22c55e' : '#ef4444', shape: 'circle', text: ((m.pnl || 0) >= 0 ? '+' : '') + (m.pnl === null || m.pnl === undefined ? '' : Number(m.pnl).toFixed(1)) + (m.reason ? ' ' + m.reason : '')});
+  return sig.concat(st, tm).sort((a, b) => a.time - b.time);
 }
 async function wacPollLive() {
   if (WAC.mode !== 'live') return;
@@ -4401,13 +4418,15 @@ const rlmMcRowHtml = (r) => `
     <td>${r.rlm_level_tol}</td>
     <td>${r.rlm_min_touches}</td>
     <td>${r.rlm_reject_clv}</td>
+    <td>${r.rlm_sl_usd > 0 ? r.rlm_sl_usd : '–'}</td>
+    <td>${r.rlm_tp_usd > 0 ? r.rlm_tp_usd : '–'}</td>
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
-    ${applyBtn({rlm_min_score: r.rlm_min_score, rlm_swing_len: r.rlm_swing_len, rlm_level_tol: r.rlm_level_tol, rlm_min_touches: r.rlm_min_touches, rlm_reject_clv: r.rlm_reject_clv})}
+    ${applyBtn(Object.assign({rlm_min_score: r.rlm_min_score, rlm_swing_len: r.rlm_swing_len, rlm_level_tol: r.rlm_level_tol, rlm_min_touches: r.rlm_min_touches, rlm_reject_clv: r.rlm_reject_clv}, window.rlmMcVaried && window.rlmMcVaried.sl ? {rlm_sl_usd: r.rlm_sl_usd} : {}, window.rlmMcVaried && window.rlmMcVaried.tp ? {rlm_tp_usd: r.rlm_tp_usd} : {}, window.rlmMcCandle ? {rlm_candle_type: window.rlmMcCandle} : {}))}
   </tr>`;
 const renderRlmMcResults = makeSortableTable('rlm-mc-results-table', () => window.rlmMcResultsData, rlmMcRowHtml);
 const renderRlmMcWorst = makeSortableTable('rlm-mc-worst-table', () => window.rlmMcWorstData, rlmMcRowHtml);
@@ -4429,7 +4448,9 @@ document.getElementById('btn-rlm-mc').addEventListener('click', async () => {
     tol_min: num('rlm-mc-tol-min'), tol_max: num('rlm-mc-tol-max'),
     touches_min: num('rlm-mc-touches-min'), touches_max: num('rlm-mc-touches-max'),
     clv_min: num('rlm-mc-clv-min'), clv_max: num('rlm-mc-clv-max'),
-    config: buildConfigPayload(),
+    sl_min: document.getElementById('rlm-mc-sl-on').checked ? num('rlm-mc-sl-min') : null, sl_max: num('rlm-mc-sl-max'),
+    tp_min: document.getElementById('rlm-mc-tp-on').checked ? num('rlm-mc-tp-min') : null, tp_max: num('rlm-mc-tp-max'),
+    config: Object.assign(buildConfigPayload(), document.getElementById('rlm-mc-candle').value ? {rlm_candle_type: document.getElementById('rlm-mc-candle').value} : {}),
   };
   btn.disabled = true;
   Object.values(tables).forEach(t => t.style.display = 'none');
@@ -4445,6 +4466,9 @@ document.getElementById('btn-rlm-mc').addEventListener('click', async () => {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
       statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - ${data.profitable_pct}% der Kombinationen im Plus, Median ${data.median_pnl_usd} $, bester ${data.best_pnl_usd} $, schlechtester ${data.worst_pnl_usd} $. Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.rlmMcVaried = data.varied || {};
+      window.rlmMcCandle = document.getElementById('rlm-mc-candle').value;
+      if (data.sl_tp_ignored) statusEl.innerText += ' Hinweis: SL/TP wurden nicht variiert, weil der SL-Modus „Hinter dem Docht" ist.';
       window.rlmMcResultsData = data.results || [];
       window.rlmMcWorstData = data.worst_results || [];
       renderRlmMcResults();
@@ -5004,6 +5028,7 @@ async function refresh() {
     document.getElementById('rlm_tp2_close_pct').value = data.config.rlm_tp2_close_pct ?? '';
     document.getElementById('rlm_resolution').value = data.config.rlm_resolution || '';
     document.getElementById('rlm_direction_mode').value = data.config.rlm_direction_mode || 'both';
+    document.getElementById('rlm_candle_type').value = data.config.rlm_candle_type || 'normal';
     document.getElementById('rlm_trend_filter').value = data.config.rlm_trend_filter || 'off';
     document.getElementById('rlm_trend_tf').value = data.config.rlm_trend_tf || '15m';
     document.getElementById('rlm_trend_mode').value = data.config.rlm_trend_mode || 'swing';
@@ -5471,6 +5496,7 @@ function buildConfigPayload() {
     rlm_tp2_close_pct: parseFloat(document.getElementById('rlm_tp2_close_pct').value) || 0,
     rlm_resolution: document.getElementById('rlm_resolution').value,
     rlm_direction_mode: document.getElementById('rlm_direction_mode').value,
+    rlm_candle_type: document.getElementById('rlm_candle_type').value,
     rlm_trend_filter: document.getElementById('rlm_trend_filter').value,
     rlm_trend_tf: document.getElementById('rlm_trend_tf').value,
     rlm_trend_mode: document.getElementById('rlm_trend_mode').value,
@@ -5931,7 +5957,7 @@ async def handle_config_update(request):
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
                 "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
-                "rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
+                "rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
@@ -6071,11 +6097,18 @@ async def handle_wa_live_chart(request):
     is_tfl = cfg.get("entry_mode") == "trendfolge"
     is_rlm = cfg.get("entry_mode") == "rlm"
     tf = request.query.get("tf", "")
-    if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"):
+    SUBMIN = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}
+    if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
         tf = cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
-        if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h"):
+        if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
             tf = "5m"
-    data = await fetch_candles_binance_multi(symbol, tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
+    if tf in SUBMIN:
+        from strategies import get_seconds_candles
+        data = get_seconds_candles(st, SUBMIN[tf], 1000)   # aus dem 1s-Puffer des Bots
+        if not data:
+            return web.json_response({"ok": False, "reason": f"sammelt noch Sekunden-Kerzen für {tf} … (der Puffer füllt sich nach dem Start; Bot einmal aktiv starten)"})
+    else:
+        data = await fetch_candles_binance_multi(symbol, tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
     if not data:
         return web.json_response({"ok": False, "reason": "lädt noch … (keine Kerzen erhalten)"})
     ts, o, h, l, c = data
@@ -6126,6 +6159,8 @@ async def handle_wa_live_chart(request):
             debug_log(f"⚠️ Marktstruktur-Overlay (Trendfolge) fehlgeschlagen: {e}")
     overlays = []
     try:
+        if tf in SUBMIN:
+            raise RuntimeError("keine Overlays für Sekunden-Zeitebenen")
         from strategies import fetch_candles_binance_vol, chart_overlays
         vd, h1 = await asyncio.gather(fetch_candles_binance_vol(symbol, tf, count_back=1000), fetch_candles_binance_vol(symbol, "1h", count_back=1000))
         if vd:
@@ -6133,8 +6168,41 @@ async def handle_wa_live_chart(request):
             vol = [vmap.get(t, 0.0) for t in ts]
             overlays = await asyncio.to_thread(chart_overlays, ts, h, l, c, vol, h1)
     except Exception as e:
-        debug_log(f"⚠️ Chart-Overlays fehlgeschlagen: {e}")
-    payload.update({"ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid, "overlays": overlays, "structure": structure,
+        if tf not in SUBMIN:
+            debug_log(f"⚠️ Chart-Overlays fehlgeschlagen: {e}")
+    # echte Ein-/Ausstiege des Bots (aus dem Trade-Log und der offenen Position) fuer den Chart
+    trade_marks = []
+    try:
+        import bisect
+        ct = [cd["time"] for cd in payload.get("candles", [])]
+
+        def _snap(iso):
+            if not iso or not ct:
+                return None
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=DISPLAY_TZ) if DISPLAY_TZ is not None else dt
+            t = int(dt.timestamp())
+            if t < ct[0]:
+                return None
+            return ct[max(0, bisect.bisect_right(ct, t) - 1)]
+        seen_open = set()
+        for tr in (st.get("trade_log") or [])[-40:]:
+            d = "long" if tr.get("side") == "long" else "short"
+            key = (tr.get("opened_at"), d)
+            t_in, t_out = _snap(tr.get("opened_at")), _snap(tr.get("closed_at"))
+            if t_in and key not in seen_open:
+                seen_open.add(key)
+                trade_marks.append({"time": t_in, "kind": "entry", "dir": d, "price": tr.get("avg_entry")})
+            if t_out:
+                trade_marks.append({"time": t_out, "kind": "exit", "dir": d, "price": tr.get("exit"), "pnl": tr.get("pnl_usd"), "reason": tr.get("reason"), "partial": bool(tr.get("partial"))})
+        for en in (st.get("current_position_entries") or []):
+            t_in = _snap(en.get("time"))
+            if t_in and st.get("position"):
+                trade_marks.append({"time": t_in, "kind": "entry", "dir": st["position"], "price": en.get("price")})
+    except Exception as e:
+        debug_log(f"⚠️ Chart-Trade-Markierungen fehlgeschlagen: {e}")
+    payload.update({"trade_marks": trade_marks, "ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid, "overlays": overlays, "structure": structure,
                     "active": bool(cfg.get("bot_active"))})
     return web.json_response(payload)
 
@@ -6392,6 +6460,9 @@ async def handle_rlm_montecarlo(request):
         days = max(1, min(365, int(body.get("days", 30))))
         runs = max(1, min(1000, int(body.get("runs", 150))))
         ranges = {k: (float(body.get(k + "_min")), float(body.get(k + "_max"))) for k in ("score", "swing", "tol", "touches", "clv")}
+        for k in ("sl", "tp"):
+            if body.get(k + "_min") not in (None, ""):
+                ranges[k] = (float(body.get(k + "_min")), float(body.get(k + "_max")))
         exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
         seed = body.get("seed")
         seed = int(seed) if seed not in (None, "") else None

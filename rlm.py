@@ -71,12 +71,30 @@ def _rlm_params(cfg):
         "tp2_pct": max(1.0, min(100.0, float(cfg.get("rlm_tp2_close_pct", 50) or 50))),
         "be": bool(cfg.get("rlm_be_after_tp1", True)),
         "reverse": bool(cfg.get("rlm_reverse", True)),
+        "ha": cfg.get("rlm_candle_type", "normal") == "heikin",
         "trend_filter": cfg.get("rlm_trend_filter", "off") if cfg.get("rlm_trend_filter", "off") in ("off", "entry", "entry_close") else "off",
         "trend_tf": cfg.get("rlm_trend_tf", "15m") if cfg.get("rlm_trend_tf", "15m") in TREND_TFS else "15m",
         "trend_mode": cfg.get("rlm_trend_mode", "swing") if cfg.get("rlm_trend_mode", "swing") in ("intern", "swing") else "swing",
         "ilen": max(2, int(cfg.get("rlm_trend_ilen", 4) or 4)),
         "slen": max(2, int(cfg.get("rlm_trend_slen", 50) or 50)),
     }
+
+
+def heikin_ashi(o, h, l, c):
+    """Heikin-Ashi-Kerzen (ho, hh, hl, hc) aus normalen Kerzen. Die Signale der Strategie werden auf diesen geglaetteten Kerzen
+    berechnet; Ein-/Ausstiege, SL und TP laufen weiter auf den echten Kursen."""
+    n = len(c)
+    ho, hh, hl, hc = [0.0] * n, [0.0] * n, [0.0] * n, [0.0] * n
+    for i in range(n):
+        hc[i] = (o[i] + h[i] + l[i] + c[i]) / 4.0
+        ho[i] = (o[i] + c[i]) / 2.0 if i == 0 else (ho[i - 1] + hc[i - 1]) / 2.0
+        hh[i] = max(h[i], ho[i], hc[i])
+        hl[i] = min(l[i], ho[i], hc[i])
+    return ho, hh, hl, hc
+
+
+def _engine_input(o, h, l, c, p):
+    return heikin_ashi(o, h, l, c) if p["ha"] else (o, h, l, c)
 
 
 # ============================================================================
@@ -505,7 +523,8 @@ async def rlm_poll_loop(symbol):
                         last_processed_ts = ts[-1]        # erste Kerze nach dem Start nur merken, nicht handeln
                     elif ts[-1] > last_processed_ts:
                         last_processed_ts = ts[-1]        # bei Luecken nur die NEUESTE Kerze werten
-                        res = await asyncio.to_thread(rlm_engine, ts, o, h, l, c, p)
+                        eo, eh, el, ec = _engine_input(o, h, l, c, p)
+                        res = await asyncio.to_thread(rlm_engine, ts, eo, eh, el, ec, p)
                         st["rlm_levels"] = res["levels"]
                         if res["sig"][-1]:
                             await check_rlm_signal(symbol, res["sig"][-1], price if price is not None else c[-1],
@@ -633,7 +652,8 @@ async def run_rlm_backtest(symbol, cfg, days, exclude_top_n=1):
     if not candles or len(candles[4]) < warm + 100:
         return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten."}
     ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
-    eng = await asyncio.to_thread(rlm_engine, ts, o, h, l, c, p)
+    eo, eh, el, ec = _engine_input(o, h, l, c, p)
+    eng = await asyncio.to_thread(rlm_engine, ts, eo, eh, el, ec, p)
     trend = None
     if p["trend_filter"] != "off":
         trend, terr = await _rlm_trend_for_backtest(symbol, cfg, candles, days, p)
@@ -644,7 +664,7 @@ async def run_rlm_backtest(symbol, cfg, days, exclude_top_n=1):
     actual_days = (ts[-1] - ts[0]) / 86_400_000
     return {
         "symbol": symbol, "entry_mode": "rlm", "resolution": p["res"],
-        "requested_days": days, "actual_days_covered": round(actual_days, 1),
+        "requested_days": days, "actual_days_covered": round(actual_days, 1), "candle_type": "heikin" if p["ha"] else "normal",
         "candles_processed": len(ts), "candle_cap": max_candles, "cache_used": False,
         "signals_buy": sum(1 for x in eng["sig"] if x > 0), "signals_sell": sum(1 for x in eng["sig"] if x < 0),
         "stats": stats,
@@ -665,25 +685,32 @@ RLM_MC_KEYS = [("rlm_min_score", "Mindest-Score"), ("rlm_swing_len", "Swing-Län
 
 def _rlm_mc_compute(candles, cfg, combos, base_p, trend, exclude_top_n, deadline):
     ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
-    out = []
-    for score, swing, tol, touches, clv in combos:
+    eo, eh, el, ec = _engine_input(o, h, l, c, base_p)
+    out, eng_cache = [], {}
+    for score, swing, tol, touches, clv, sl, tp in combos:
         if time.time() > deadline:
             break
-        p = dict(base_p, min_score=float(score), swing=int(swing), tol=float(tol), touches=int(touches), clv=float(clv))
-        eng = rlm_engine(ts, o, h, l, c, p)
-        trades = _rlm_simulate(candles, cfg, eng, p, trend)
+        p = dict(base_p, min_score=float(score), swing=int(swing), tol=float(tol), touches=int(touches), clv=float(clv),
+                 sl_usd=float(sl), tp_usd=float(tp))
+        ek = (score, swing, tol, touches, clv)
+        if ek not in eng_cache:
+            if len(eng_cache) > 40:
+                eng_cache.clear()
+            eng_cache[ek] = rlm_engine(ts, eo, eh, el, ec, p)
+        trades = _rlm_simulate(candles, cfg, eng_cache[ek], p, trend)
         st = summarize_backtest_trades(trades, exclude_top_n)
         out.append({"rlm_min_score": score, "rlm_swing_len": swing, "rlm_level_tol": tol, "rlm_min_touches": touches, "rlm_reject_clv": clv,
+                    "rlm_sl_usd": sl, "rlm_tp_usd": tp,
                     "trades": st["trades"], "win_rate_pct": st["win_rate_pct"], "total_pnl_usd": st["total_pnl_usd"],
                     "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"], "max_drawdown_usd": st["max_drawdown_usd"],
                     "avg_bars_held": st["avg_bars_held"]})
     return out
 
 
-def _rlm_mc_effects(results):
+def _rlm_mc_effects(results, keys=None):
     """Je Parameter: Median-PnL im unteren / mittleren / oberen Drittel des getesteten Bereichs (zeigt, ob es ein stabiles Plateau gibt)."""
     eff = []
-    for key, label in RLM_MC_KEYS:
+    for key, label in (keys or RLM_MC_KEYS):
         vals = sorted(r[key] for r in results)
         if len(vals) < 9 or vals[0] == vals[-1]:
             continue
@@ -701,7 +728,8 @@ def _rlm_mc_effects(results):
 
 
 async def run_rlm_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, seed=None):
-    """ranges: {'score':(a,b), 'swing':(a,b), 'tol':(a,b), 'touches':(a,b), 'clv':(a,b)}. Alles andere kommt aus der Config."""
+    """ranges: {'score':(a,b), 'swing':(a,b), 'tol':(a,b), 'touches':(a,b), 'clv':(a,b)} und optional 'sl':(a,b) / 'tp':(a,b)
+    (fester $-SL bzw. TP-Schritt - nur im SL-Modus 'usd'). Fehlt sl/tp, gilt der Wert aus der Config. Alles andere kommt aus der Config."""
     max_candles = BACKTEST_MAX_CANDLES.get("rlm", 30_000)
     p = _rlm_params(cfg)
     if p["res"] in SUB_MINUTE_RESOLUTIONS:
@@ -724,13 +752,19 @@ async def run_rlm_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, s
         return a, b
     sc = rng_pair("score", 0, 100); sw = rng_pair("swing", 2, 30); tl = rng_pair("tol", 0.2, 2.0)
     tc = rng_pair("touches", 2, 10); cv = rng_pair("clv", 0.5, 0.9)
+    use_usd = p["sl_mode"] == "usd"
+    vary_sl = use_usd and ranges.get("sl") is not None
+    vary_tp = use_usd and ranges.get("tp") is not None
+    slr = tuple(sorted((max(0.1, float(ranges["sl"][0])), max(0.1, float(ranges["sl"][1]))))) if vary_sl else None
+    tpr = tuple(sorted((max(0.1, float(ranges["tp"][0])), max(0.1, float(ranges["tp"][1]))))) if vary_tp else None
     rnd = random.Random(seed)
     seen, combos = set(), []
     for _ in range(runs * 6):
         if len(combos) >= runs:
             break
         k = (int(round(rnd.uniform(*sc))), int(round(rnd.uniform(*sw))), round(round(rnd.uniform(*tl) / 0.05) * 0.05, 2),
-             int(round(rnd.uniform(*tc))), round(round(rnd.uniform(*cv) / 0.05) * 0.05, 2))
+             int(round(rnd.uniform(*tc))), round(round(rnd.uniform(*cv) / 0.05) * 0.05, 2),
+             round(rnd.uniform(*slr), 1) if vary_sl else p["sl_usd"], round(rnd.uniform(*tpr), 1) if vary_tp else p["tp_usd"])
         if k not in seen:
             seen.add(k)
             combos.append(k)
@@ -747,7 +781,9 @@ async def run_rlm_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, s
         "profitable_pct": round(sum(1 for x in pnls if x > 0) / len(pnls) * 100, 1) if pnls else 0,
         "median_pnl_usd": round(pnls[len(pnls) // 2], 2) if pnls else 0,
         "best_pnl_usd": pnls[-1] if pnls else 0, "worst_pnl_usd": pnls[0] if pnls else 0,
-        "effects": _rlm_mc_effects(results), "results": best[:30], "worst_results": worst[:20],
+        "effects": _rlm_mc_effects(results, RLM_MC_KEYS + ([("rlm_sl_usd", "Stop-Loss $")] if vary_sl else []) + ([("rlm_tp_usd", "TP-Schritt $")] if vary_tp else [])),
+        "varied": {"sl": vary_sl, "tp": vary_tp}, "sl_tp_ignored": (not use_usd) and (ranges.get("sl") is not None or ranges.get("tp") is not None),
+        "candle_type": "heikin" if p["ha"] else "normal", "results": best[:30], "worst_results": worst[:20],
     }
 
 
@@ -757,9 +793,10 @@ async def run_rlm_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, s
 def rlm_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
     p = _rlm_params(cfg)
     n = len(c)
-    eng = rlm_engine(ts, o, h, l, c, p)
+    eo, eh, el, ec = _engine_input(o, h, l, c, p)   # bei Heikin-Ashi zeigt der Chart die Kerzen, auf denen die Signale entstehen
+    eng = rlm_engine(ts, eo, eh, el, ec, p)
     off = max(0, n - max_bars)
-    candles = [{"time": ts[i] // 1000, "open": o[i], "high": h[i], "low": l[i], "close": c[i]} for i in range(off, n)]
-    markers = [{"time": ts[i] // 1000, "kind": "long" if eng["sig"][i] > 0 else "short", "price": c[i]} for i in range(off, n) if eng["sig"][i]]
+    candles = [{"time": ts[i] // 1000, "open": eo[i], "high": eh[i], "low": el[i], "close": ec[i]} for i in range(off, n)]
+    markers = [{"time": ts[i] // 1000, "kind": "long" if eng["sig"][i] > 0 else "short", "price": ec[i]} for i in range(off, n) if eng["sig"][i]]
     return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "entry_mode": "rlm", "wt1v": 0, "wt2v": 0, "bars": n,
             "rlm_levels": eng["levels"]}
