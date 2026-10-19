@@ -2806,6 +2806,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <button type="submit">Speichern</button>
+  <button type="button" id="btn-reset-defaults" title="Trägt die Grundeinstellungen der gewählten Strategie ins Formular ein (erst nach Klick auf Speichern aktiv). Margin, Hebel, Strategie-Auswahl, Konto und Datenquelle bleiben unverändert." style="margin-left:8px; background:transparent; border:1px solid var(--border, #444); color:var(--text-dim);">↺ Auf Standard zurücksetzen</button>
 </form>
 <div class="warn" id="live-warn">⚠️ LIVE-Modus aktiv - echte Orders werden platziert!</div>
 <div style="font-size:12px; color:var(--text-dim); margin-top:8px;" id="abs-distances"></div>
@@ -4872,6 +4873,8 @@ async function refresh() {
 
   document.getElementById('status-grid').innerHTML = coreCards.concat(diagnosticCards).join('');
 
+  const realConfig = data.config;
+  if (window.resetCfg) data.config = Object.assign({}, data.config, window.resetCfg);   // "Auf Standard zurücksetzen": Standardwerte statt gespeicherter Werte ins Formular
   if (!window.formTouched) {
     document.getElementById('margin').value = data.config.margin;
     document.getElementById('leverage').value = data.config.leverage;
@@ -5211,6 +5214,7 @@ async function refresh() {
     document.getElementById('g2_size_multiplier').value = data.config.g2_size_multiplier;
     document.getElementById('g2_deviation_multiplier').value = data.config.g2_deviation_multiplier;
   }
+  data.config = realConfig;
   updateModeFields();
 
   document.getElementById('abs-distances').innerText =
@@ -5677,6 +5681,30 @@ function buildConfigPayload() {
   };
 }
 
+document.getElementById('btn-reset-defaults').addEventListener('click', async () => {
+  const mode = document.getElementById('entry_mode').value;
+  if (!confirm('Alle Einstellungen der gewählten Strategie (' + mode + ') für ' + currentSymbol + ' auf die Grundeinstellung zurücksetzen?\\nMargin, Hebel, Strategie, Konto und Datenquelle bleiben unverändert. Gespeichert wird erst, wenn du auf Speichern klickst.')) return;
+  try {
+    const res = await fetch('/api/config/defaults');
+    const defaults = await res.json();
+    const subset = {};
+    document.querySelectorAll('[data-mode="' + mode + '"]').forEach(box => {
+      const fields = box.matches('input,select,textarea') ? [box] : box.querySelectorAll('input,select,textarea');
+      fields.forEach(f => { if (f.id && Object.prototype.hasOwnProperty.call(defaults, f.id)) subset[f.id] = defaults[f.id]; });
+    });
+    ['margin', 'leverage', 'entry_mode', 'trade_account', 'binance_market_type'].forEach(id => { const el = document.getElementById(id); if (el) subset[id] = el.value; });   // diese bleiben, wie im Formular eingestellt
+    window.resetCfg = subset;
+    window.formTouched = false;
+    await refresh();
+    window.resetCfg = null;
+    window.formTouched = true;
+    showToast('↺ ' + (Object.keys(subset).length - 5) + ' Felder auf Standard gesetzt - zum Übernehmen auf Speichern klicken.');
+  } catch (e) {
+    window.resetCfg = null;
+    showToast('❌ Zurücksetzen fehlgeschlagen: ' + e);
+  }
+});
+
 document.getElementById('config-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const payload = buildConfigPayload();
@@ -5817,6 +5845,11 @@ async def handle_overview(request):
                      # (faellt nach jedem Deploy/Neustart auf False, siehe handle_control)
                      "bot_active": bool(BOTS[s]["config"].get("bot_active")), "session_started": bool(st.get("session_started"))}
     return web.json_response(result)
+
+
+async def handle_config_defaults(request):
+    """Grundeinstellungen (Standardwerte) - fuer den Knopf 'Auf Standard zuruecksetzen' im Dashboard."""
+    return web.json_response(default_config())
 
 
 async def handle_status(request):

@@ -13,7 +13,7 @@ from bot_core import (
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reverse_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_gc_trend, handle_scalp_trend, handle_dv_montecarlo, handle_rlm_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
+    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_gc_trend, handle_scalp_trend, handle_dv_montecarlo, handle_config_defaults, handle_rlm_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
@@ -48,6 +48,7 @@ async def start_web_server():
     app.router.add_get("/api/overview", handle_overview)
     app.router.add_get("/api/status", handle_status)
     app.router.add_post("/api/config", handle_config_update)
+    app.router.add_get("/api/config/defaults", handle_config_defaults)
     app.router.add_post("/api/control", handle_control)
     app.router.add_post("/api/close", handle_close_position)
     app.router.add_post("/api/reverse", handle_reverse_position)
