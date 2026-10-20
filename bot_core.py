@@ -289,6 +289,8 @@ def default_config():
         "wa_trend_mode": os.getenv("WA_TREND_MODE", "off"),   # Trendfilter: off / intern / swing (Marktstruktur BOS/CHoCH)
         "wa_trend_tf": os.getenv("WA_TREND_TF", "1h"),        # Zeitebene des Trends
         "wa_trend_ilen": 4, "wa_trend_slen": 50,              # Pivot-Laengen (intern / swing)
+        "wa_tp_cross_zero": os.getenv("WA_TP_CROSS_ZERO", "off"),  # TP 'Gegenkreuzung': off | reversal (Long nur ueber 0, Short nur unter 0 schliessen) | trend
+        "wa_cross_zero": os.getenv("WA_CROSS_ZERO", "off"),    # Kreuzung zu Kreuzung: off | reversal (Long nur unter 0, Short nur ueber 0) | trend (umgekehrt)
         "wa_level_line": os.getenv("WA_LEVEL_LINE", "signal"),  # Level-Modus: signal / wave / both
         "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 20)
         "wa_reverse_only_profit": os.getenv("WA_REVERSE_ONLY_PROFIT", "false").lower() == "true",  # Gegentrade/Wechsel nur, wenn die laufende Position im Plus liegt (nie mit Verlust drehen)
@@ -2554,6 +2556,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="cross">Kreuzung zu Kreuzung: jede Kreuzung der beiden Linien (egal wo) = Wechsel Long ↔ Short</option>
     </select>
   </div>
+  <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="cross"><label>Nulllinien-Filter für die Kreuzung</label>
+    <select class="cfg" id="wa_cross_zero">
+      <option value="off">Aus: jede Kreuzung zählt</option>
+      <option value="reversal">Long nur wenn die Linien UNTER 0 kreuzen, Short nur ÜBER 0</option>
+      <option value="trend">Long nur wenn die Linien ÜBER 0 kreuzen, Short nur UNTER 0 (Trendfolge)</option>
+    </select>
+  </div>
   <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="zone"><label>Zone 1 (Long &lt; -X, Short &gt; X)</label><input type="number" step="1" min="1" max="100" id="wa_zone1"></div>
   <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="level"><label>Level-Abstand ± (0 bis 30): Long bricht −X nach oben durch, Short bricht +X nach unten durch</label><input type="number" step="0.5" min="0" max="30" id="wa_level"></div>
   <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="level"><label>Welche Linie zählt</label>
@@ -2572,6 +2581,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="ueberlauf">Überlauflinie (Exit bei Rücklauf zur Linie)</option>
       <option value="fester_betrag">Fester $-Betrag</option>
       <option value="kreuzung">Gegenkreuzung der beiden Linien (egal wo sie sich kreuzen)</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="kreuzung"><label>Nulllinien-Filter für die TP-Kreuzung (gilt nicht bei „Kreuzung zu Kreuzung“ – dort zählt der Filter oben)</label>
+    <select class="cfg" id="wa_tp_cross_zero">
+      <option value="off">Aus: Gegenkreuzung egal wo</option>
+      <option value="reversal">Long schließt nur bei einer Kreuzung ÜBER 0, Short nur UNTER 0</option>
+      <option value="trend">Long schließt nur bei einer Kreuzung UNTER 0, Short nur ÜBER 0</option>
     </select>
   </div>
   <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="ueberlauf"><label>Überlauflinie (±)</label><input type="number" step="1" min="1" max="100" id="wa_ueberlauf_level"></div>
@@ -5156,6 +5172,8 @@ async function refresh() {
     document.getElementById('wa_entry_mode').value = data.config.wa_entry_mode || 'zone';
     document.getElementById('wa_level').value = data.config.wa_level ?? 10;
     document.getElementById('wa_level_line').value = data.config.wa_level_line || 'signal';
+    document.getElementById('wa_cross_zero').value = data.config.wa_cross_zero || 'off';
+    document.getElementById('wa_tp_cross_zero').value = data.config.wa_tp_cross_zero || 'off';
     document.getElementById('wa_max_nachkauf').value = data.config.wa_max_nachkauf;
     document.getElementById('wa_nachkauf_min_pct').value = data.config.wa_nachkauf_min_pct ?? 0;
     document.getElementById('wa_reverse_only_profit').checked = !!data.config.wa_reverse_only_profit;
@@ -5623,6 +5641,8 @@ function buildConfigPayload() {
     wa_entry_mode: document.getElementById('wa_entry_mode').value,
     wa_level: parseFloat(document.getElementById('wa_level').value),
     wa_level_line: document.getElementById('wa_level_line').value,
+    wa_cross_zero: document.getElementById('wa_cross_zero').value,
+    wa_tp_cross_zero: document.getElementById('wa_tp_cross_zero').value,
     wa_max_nachkauf: parseInt(document.getElementById('wa_max_nachkauf').value),
     wa_nachkauf_min_pct: parseFloat(document.getElementById('wa_nachkauf_min_pct').value) || 0,
     wa_reverse_only_profit: document.getElementById('wa_reverse_only_profit').checked,
@@ -5985,7 +6005,7 @@ async def handle_config_update(request):
                 "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
                 "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
                 "liq_max_nachkauf", "liq_nachkauf_progress_pct",
-                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_entry_mode", "wa_level", "wa_level_line", "wa_max_nachkauf", "wa_nachkauf_min_pct", "wa_reverse_only_profit",
+                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_entry_mode", "wa_level", "wa_level_line", "wa_cross_zero", "wa_tp_cross_zero", "wa_max_nachkauf", "wa_nachkauf_min_pct", "wa_reverse_only_profit",
                 "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd",
                 "wa_open_every", "wa_trend_mode", "wa_trend_tf", "wa_trend_ilen", "wa_trend_slen"]:
         if key in body:
@@ -6050,7 +6070,7 @@ async def handle_gc_trend(request):
     if symbol not in BOTS:
         return web.json_response({"error": "unknown symbol"}, status=404)
     cfg = BOTS[symbol]["config"]
-    sig = (cfg.get("gc_trend_ilen"), cfg.get("gc_trend_slen"), cfg.get("wa_n1"), cfg.get("wa_n2"), cfg.get("wa_sig_len"), cfg.get("wa_entry_mode"), cfg.get("wa_zone1"), cfg.get("wa_level"), cfg.get("wa_level_line"))
+    sig = (cfg.get("gc_trend_ilen"), cfg.get("gc_trend_slen"), cfg.get("wa_n1"), cfg.get("wa_n2"), cfg.get("wa_sig_len"), cfg.get("wa_entry_mode"), cfg.get("wa_zone1"), cfg.get("wa_level"), cfg.get("wa_level_line"), cfg.get("wa_cross_zero"))
     ent = _gc_trend_ui_cache.get(symbol)
     if ent and time.time() - ent[0] < 30 and ent[2] == sig:
         rows = ent[1]

@@ -5847,6 +5847,26 @@ def _wa_entry_mode(cfg):
     return m if m in ("level", "cross") else "zone"
 
 
+def _wa_sig_line(cfg):
+    """Das 'line'-Argument fuer _wa_raw_signals: im Modus 'Kreuzung zu Kreuzung' steuert es den Null-Filter
+    (wa_cross_zero: 'reversal' = Long nur unter 0 / Short nur ueber 0, 'trend' = Long nur ueber 0 / Short nur unter 0),
+    sonst die Linie des Level-Modus."""
+    if _wa_entry_mode(cfg) == "cross":
+        z = cfg.get("wa_cross_zero", "off")
+        return "zero_" + z if z in ("reversal", "trend") else "signal"
+    return cfg.get("wa_level_line", "signal")
+
+
+def _wa_tp_cross_ok(mode, pos_dir, w2):
+    """TP 'Gegenkreuzung' mit Nulllinien-Filter: 'reversal' = Long schliesst nur bei einer Kreuzung ueber 0, Short nur unter 0
+    (Gewinn mitnehmen, wenn die Welle weit genug gelaufen ist); 'trend' = umgekehrt; 'off' = egal wo."""
+    if mode == "reversal":
+        return w2 > 0 if pos_dir == "long" else w2 < 0
+    if mode == "trend":
+        return w2 < 0 if pos_dir == "long" else w2 > 0
+    return True
+
+
 def _wa_raw_signals(wt1, wt2, i, level, entry_mode="zone", line="signal"):
     """Einstiegssignale der Kerze i -> (long_raw, short_raw, cross_up, cross_dn).
     Modus 'zone': Kreuzung wt1/wt2 ausserhalb von +-level (wie bisher, level = Zone 1).
@@ -5859,6 +5879,10 @@ def _wa_raw_signals(wt1, wt2, i, level, entry_mode="zone", line="signal"):
     if entry_mode == "cross":
         # Kreuzung zu Kreuzung: jede Kreuzung der beiden Linien ist ein Signal, egal wo (Long = wt1 kreuzt wt2 nach oben)
         long_raw, short_raw = cross_up, cross_dn
+        if line == "zero_reversal":    # Kreuzung zaehlt nur auf der "richtigen" Seite der Nulllinie: Long unter 0, Short ueber 0
+            long_raw, short_raw = cross_up and b1 < 0, cross_dn and b1 > 0
+        elif line == "zero_trend":     # Trendfolge: Long nur ueber 0, Short nur unter 0
+            long_raw, short_raw = cross_up and b1 > 0, cross_dn and b1 < 0
     elif entry_mode == "level":
         if line == "wave":
             lo1, lo0, hi1, hi0 = a1, a0, a1, a0
@@ -5977,7 +6001,7 @@ async def check_wa_candle(symbol, long_raw, short_raw, wt2, price, cross_up=Fals
                 return  # Position hat sich trotzdem veraendert - nichts weiter tun
             debug_log(f"⚠️ [{symbol}] Reverse fehlgeschlagen - Position bleibt {pos.upper()}")
             return
-        if tp_mode == "kreuzung" and (cross_dn if is_long else cross_up):
+        if tp_mode == "kreuzung" and (cross_dn if is_long else cross_up) and _wa_tp_cross_ok(cfg.get("wa_tp_cross_zero", "off"), pos, wt2):
             # TP bei entgegengesetzter Kreuzung der beiden Linien - egal wo sie sich kreuzen
             avg_entry = st.get("avg_entry_price")
             if cfg.get("wa_reverse_only_profit") and avg_entry and ((price < avg_entry) if is_long else (price > avg_entry)):
@@ -6080,7 +6104,7 @@ async def wa_poll_loop(symbol):
                         emode = _wa_entry_mode(cfg)
                         z1 = float(cfg.get("wa_level", 10.0)) if emode == "level" else cfg.get("wa_zone1", 53.0)
                         long_raw, short_raw, cross_up, cross_dn = _wa_raw_signals(
-                            wt1_arr, wt2_arr, -1, z1, emode, cfg.get("wa_level_line", "signal"))
+                            wt1_arr, wt2_arr, -1, z1, emode, _wa_sig_line(cfg))
                         st["wa_wt2_last"] = wt2_arr[-1]
                         sig_key = (timestamps[-1], bool(long_raw), bool(short_raw), bool(cross_up), bool(cross_dn))
                         if last_processed_ts is None:
@@ -6286,7 +6310,7 @@ def wave_dir_series(o, h, l, c, cfg):
     wt1, wt2 = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
     emode = _wa_entry_mode(cfg)
     z1 = float(cfg.get("wa_level", 10.0)) if emode == "level" else float(cfg.get("wa_zone1", 53.0))
-    line = cfg.get("wa_level_line", "signal")
+    line = _wa_sig_line(cfg)
     cur = 0
     for i in range(min_needed, n):
         lr, sr, _cu, _cd = _wa_raw_signals(wt1, wt2, i, z1, emode, line)
@@ -6305,7 +6329,7 @@ async def gc_trend_now(symbol, cfg):
     if mode == "off":
         return 0
     wkey = (cfg.get("wa_n1"), cfg.get("wa_n2"), cfg.get("wa_sig_len"), cfg.get("wa_entry_mode"), cfg.get("wa_zone1"),
-            cfg.get("wa_level"), cfg.get("wa_level_line"), cfg.get("wa_src")) if mode == "wave" else None
+            cfg.get("wa_level"), cfg.get("wa_level_line"), cfg.get("wa_cross_zero"), cfg.get("wa_src")) if mode == "wave" else None
     key = (symbol, mode, tf, ilen, slen, wkey)
     cached = _gc_trend_cache.get(key)
     if cached and time.time() - cached["at"] < 20:
@@ -6493,7 +6517,7 @@ def wa_chart_payload(ts, o, h, l, c, cfg, max_bars=6000):
     wt1, wt2 = compute_wavetrend_series(o, h, l, c, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
     emode = _wa_entry_mode(cfg)
     z1 = float(cfg.get("wa_level", 10.0)) if emode == "level" else float(cfg.get("wa_zone1", 53.0))
-    line = cfg.get("wa_level_line", "signal")
+    line = _wa_sig_line(cfg)
     n = len(c)
     min_needed = n1 + n2 + sig_len + 20
     off = max(0, n - max_bars)
@@ -6606,13 +6630,13 @@ def backtest_wellenanker(candles, cfg, trend_arr=None):
     return _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
                                 sl_usd, max_nachkauf, margin, leverage, min_needed,
                                 bool(cfg.get("wa_reverse_only_profit")), float(cfg.get("wa_nachkauf_min_pct", 0) or 0),
-                                entry_mode, cfg.get("wa_level_line", "signal"), trend_arr,
-                                int(cfg.get("wa_open_every", 1) or 1))
+                                entry_mode, _wa_sig_line(cfg), trend_arr,
+                                int(cfg.get("wa_open_every", 1) or 1), cfg.get("wa_tp_cross_zero", "off"))
 
 
 def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level, tp_usd,
                          sl_usd, max_nachkauf, margin, leverage, min_needed, reverse_only_profit=False,
-                         nachkauf_min_pct=0.0, entry_mode="zone", level_line="signal", trend_arr=None, open_every=1):
+                         nachkauf_min_pct=0.0, entry_mode="zone", level_line="signal", trend_arr=None, open_every=1, tp_cross_zero="off"):
     """Die eigentliche Handelssimulation fuer Wellenanker, getrennt von der (teuren) WaveTrend-
     Berechnung (compute_wavetrend_series) - siehe backtest_wellenanker/run_wa_sweep."""
     n = len(c)
@@ -6685,7 +6709,7 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
                 _recalc_sl_tp(position)
                 _bt_record_addon(trades, target, price, i, i, 1, ts=ts, is_add_on=False)
                 continue
-            if tp_mode == "kreuzung" and (cross_dn if pdir == "long" else cross_up):
+            if tp_mode == "kreuzung" and (cross_dn if pdir == "long" else cross_up) and _wa_tp_cross_ok(tp_cross_zero, pdir, wt2_arr[i]):
                 if not (reverse_only_profit and ((price < entry) if pdir == "long" else (price > entry))):
                     _bt_close_trade(trades, pdir, entry, price, position["size"], i, position["entry_i"], "TP-KREUZUNG", ts=ts)
                     position = None
@@ -6736,7 +6760,7 @@ def _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf
 
 def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list, tp_mode,
                        ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n,
-                       reverse_only_profit=False, nachkauf_min_pct=0.0, entry_mode="zone", lines=("signal",), trend_arr=None, open_every=1):
+                       reverse_only_profit=False, nachkauf_min_pct=0.0, entry_mode="zone", lines=("signal",), trend_arr=None, open_every=1, tp_cross_zero="off"):
     """Rechenteil des Wellenanker-'Monte-Carlo'-Sweeps (Zone 1 x Max. Nachkäufe x Stop-Loss $),
     reine CPU-Arbeit im Thread. wt1_arr/wt2_arr (die WaveTrend-Welle/Signallinie) haengen nur von
     n1/n2/sig_len/Quelle/Wellen-Skalierung ab und werden darum NUR EINMAL vor dem Sweep berechnet
@@ -6750,7 +6774,7 @@ def _wa_sweep_compute(candles, wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_l
                 for sl_usd in sl_list:
                     trades = _wa_simulate_trades(o, h, l, c, ts, wt1_arr, wt2_arr, z1, tp_mode, ueberlauf_level,
                                                   tp_usd, sl_usd, max_nachkauf, margin, leverage, min_needed,
-                                                  reverse_only_profit, nachkauf_min_pct, entry_mode, line, trend_arr, open_every)
+                                                  reverse_only_profit, nachkauf_min_pct, entry_mode, line, trend_arr, open_every, tp_cross_zero)
                     closed_trades = [t for t in trades if t["pnl"] is not None]
                     stats = summarize_backtest_trades(closed_trades, exclude_top_n)
                     results.append({"wa_zone1": z1, "wa_level_line": line if entry_mode == "level" else "-",
@@ -6790,7 +6814,7 @@ async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_
 
     entry_mode = _wa_entry_mode(cfg)
     # Level-Modus: "zone1_*" ist dann der Level-Abstand (0-30) und zusaetzlich wird ueber die Linie (Signal/Welle/Beide) getestet
-    lines = [x for x in (level_lines or [cfg.get("wa_level_line", "signal")]) if x in WA_LEVEL_LINES] if entry_mode == "level" else ["-"]
+    lines = [x for x in (level_lines or [cfg.get("wa_level_line", "signal")]) if x in WA_LEVEL_LINES] if entry_mode == "level" else [_wa_sig_line(cfg) if entry_mode == "cross" else "-"]
     if not lines:
         return {"error": "Keine Linie (Signallinie/Welle/Beide) für den Sweep gewählt."}
     zone1_list = [0.0] if entry_mode == "cross" else _float_range(zone1_min, zone1_max, zone1_step)   # Kreuzungs-Modus hat keinen Abstand
@@ -6825,7 +6849,7 @@ async def run_wa_sweep(symbol, cfg, days, zone1_min=30.0, zone1_max=80.0, zone1_
         None, _wa_sweep_compute, (ts, o, h, l, c), wt1_arr, wt2_arr, zone1_list, nachkauf_list, sl_list,
         tp_mode, ueberlauf_level, tp_usd, margin, leverage, min_needed, exclude_top_n,
         bool(cfg.get("wa_reverse_only_profit")), float(cfg.get("wa_nachkauf_min_pct", 0) or 0),
-        entry_mode, tuple(lines), trend_arr, int(cfg.get("wa_open_every", 1) or 1))
+        entry_mode, tuple(lines), trend_arr, int(cfg.get("wa_open_every", 1) or 1), cfg.get("wa_tp_cross_zero", "off"))
 
     rank_key = lambda r: (r["trades"] >= AB_SIGNAL_SWEEP_MIN_RELIABLE_TRADES, r["total_pnl_usd"])
     best_sorted = sorted(results, key=rank_key, reverse=True)
