@@ -217,6 +217,17 @@ def _decode_snapshot(raw):
     return out
 
 
+_SNAP_SEM = None
+
+
+def _snap_sem():
+    """Hoechstens 4 Snapshot-Zugriffe gleichzeitig (sonst ueberrennen ~50 Streams beim Start das Redis-Limit)."""
+    global _SNAP_SEM
+    if _SNAP_SEM is None:
+        _SNAP_SEM = asyncio.Semaphore(4)
+    return _SNAP_SEM
+
+
 async def _load_snapshot(market_type, pair, interval):
     """-> Liste von Kerzen-Dicts oder None. Fehler/fehlendes Redis sind kein Problem (dann normaler Seed)."""
     try:
@@ -224,7 +235,8 @@ async def _load_snapshot(market_type, pair, interval):
         r = await get_redis()
         if r is None:
             return None
-        raw = await asyncio.wait_for(r.get(_snap_key(market_type, pair, interval)), timeout=5)
+        async with _snap_sem():
+            raw = await asyncio.wait_for(r.get(_snap_key(market_type, pair, interval)), timeout=15)
         if not raw:
             return None
         candles = await asyncio.to_thread(_decode_snapshot, raw)
@@ -246,7 +258,8 @@ async def _save_snapshot(market_type, pair, interval, st):
     if len(candles) < SNAPSHOT_MIN_CANDLES:
         return False
     data = await asyncio.to_thread(_encode_snapshot, candles)
-    await asyncio.wait_for(r.set(_snap_key(market_type, pair, interval), data, ex=SNAPSHOT_TTL_SECONDS), timeout=5)
+    async with _snap_sem():
+        await asyncio.wait_for(r.set(_snap_key(market_type, pair, interval), data, ex=SNAPSHOT_TTL_SECONDS), timeout=15)
     return True
 
 
@@ -498,6 +511,98 @@ async def _websocket_loop(market_type):
         backoff = min(backoff * 2, 60)
 
 
+# ============================================================================
+# LUECKEN-REPARATUR
+# ----------------------------------------------------------------------------
+# Reisst die WS-Verbindung kurz ab, fehlen die Kerzen dieser Zeit im Puffer fuer immer (der Puffer behaelt nur die
+# Historie, holt aber nichts nach). Das gab Luecken im Chart UND falsche Berechnungen (Swings, ATR, Level) in den
+# Strategien. Dieser Loop sucht regelmaessig fehlende Kerzen in den letzten Kerzen jedes Streams und holt genau
+# diese Bereiche per REST nach. Jede Luecke wird nur EINMAL versucht (echte Luecken ohne Handel gibt es auch).
+# 1s-Streams bleiben aussen vor (Binance liefert dort legitim nicht jede Sekunde eine Kerze).
+# ============================================================================
+GAP_SCAN_INTERVAL_SECONDS = 20
+GAP_SCAN_LAST_CANDLES = 1500
+GAP_MAX_FETCH = 1000
+_gap_tried = {}   # (market_type, "PAIR|interval") -> {(start_ts, end_ts), ...}
+
+
+def _find_gaps(candles, interval_ms, last_n=GAP_SCAN_LAST_CANDLES):
+    """-> Liste (erste_fehlende_ts, letzte_fehlende_ts) innerhalb der letzten last_n Kerzen (aufsteigend)."""
+    cs = list(candles)[-last_n:]
+    out = []
+    for prev, cur in zip(cs, cs[1:]):
+        if cur["ts"] - prev["ts"] > interval_ms:
+            out.append((prev["ts"] + interval_ms, cur["ts"] - interval_ms))
+    return out
+
+
+async def _rest_klines_range(market_type, pair, interval, start_ts, end_ts, limit):
+    """Kerzen im Bereich [start_ts, end_ts] per REST (mit Drossel/Bann-Schutz wie beim Seed). None bei Fehler/Bann."""
+    import aiohttp
+    from strategies import _binance_throttle, _binance_is_banned, _binance_register_ban, _binance_note_response
+    if _binance_is_banned(market_type):
+        return None
+    await _binance_throttle(market_type, f"gap:{interval}")
+    if _binance_is_banned(market_type):
+        return None
+    base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
+    url = f"{base_url}?symbol={pair}&interval={interval}&startTime={start_ts}&endTime={end_ts + 1}&limit={min(limit, GAP_MAX_FETCH)}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            _binance_note_response(market_type, resp)
+            if resp.status in (418, 429):
+                _binance_register_ban(market_type, pair, resp.status, await resp.text())
+                return None
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+    return [_k_to_candle(k) for k in data] if isinstance(data, list) else None
+
+
+async def _repair_stream_gaps(market_type, k, st, fetcher=None):
+    """Repariert die Luecken EINES Streams. Rueckgabe: Anzahl nachgeholter Kerzen."""
+    pair, interval = k.split("|")
+    interval_ms = INTERVAL_SECONDS.get(interval, 60) * 1000
+    tried = _gap_tried.setdefault((market_type, k), set())
+    fetched_total = 0
+    for gap in _find_gaps(st.candles, interval_ms):
+        if gap in tried:
+            continue
+        tried.add(gap)   # jede Luecke nur einmal versuchen
+        n_missing = (gap[1] - gap[0]) // interval_ms + 1
+        got = await (fetcher or _rest_klines_range)(market_type, pair, interval, gap[0], gap[1], n_missing)
+        if got is None:
+            tried.discard(gap)   # Fehler/Bann: spaeter nochmal versuchen
+            continue
+        if not got:
+            continue             # Binance hat dort wirklich keine Kerzen (kein Handel) - nicht erneut fragen
+        _merge_into_stream(st, got)
+        fetched_total += len(got)
+    if len(tried) > 500:
+        tried.clear()
+    return fetched_total
+
+
+async def gap_repair_loop():
+    await asyncio.sleep(45)   # erst nach dem Start/Seed der Streams
+    while True:
+        try:
+            for market_type in ("spot", "futures"):
+                for k, st in list(_streams.get(market_type, {}).items()):
+                    if not st.ready or not st.candles or k.endswith("|1s"):
+                        continue
+                    try:
+                        n = await _repair_stream_gaps(market_type, k, st)
+                        if n:
+                            debug_log(f"🩹 [WS-Cache] {k} ({market_type}): {n} fehlende Kerzen nachgeholt")
+                    except Exception as e:
+                        debug_log(f"⚠️ [WS-Cache] Lücken-Reparatur fehlgeschlagen ({k})", {"error": str(e)})
+                    await asyncio.sleep(0.2)
+        except Exception as e:
+            debug_log("⚠️ [WS-Cache] Lücken-Reparatur-Runde fehlgeschlagen", {"error": str(e)})
+        await asyncio.sleep(GAP_SCAN_INTERVAL_SECONDS)
+
+
 async def binance_ws_cache_loop():
     """In main.py's asyncio.gather einhaengen - haelt je eine dauerhafte WS-Verbindung
     fuer Spot und Futures am Laufen (jede mit eigenem Reconnect-Backoff)."""
@@ -505,4 +610,5 @@ async def binance_ws_cache_loop():
         _websocket_loop("spot"),
         _websocket_loop("futures"),
         snapshot_loop(),
+        gap_repair_loop(),
     )

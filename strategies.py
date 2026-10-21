@@ -6093,8 +6093,10 @@ async def wa_poll_loop(symbol):
                     await check_wa_sl(symbol, st["last_price"])
 
                 if closed_ts and len(closed_c) > min_needed:
-                    candle_age_seconds = (now * 1000 - closed_ts[-1]) / 1000
-                    max_age_seconds = 300 + _tf_ms(resolution) / 1000  # Alter seit Kerzen-Eröffnung: Kerzenlänge + 5 Min. Puffer
+                    # Alter der LAUFENDEN Kerze (seit ihrer Eroeffnung) - nicht der letzten geschlossenen, sonst waere sie im
+                    # Live-Modus ab Minute 5 jeder 15m-Kerze "veraltet" und das Signal (Kreis) wuerde uebersprungen.
+                    candle_age_seconds = (now * 1000 - timestamps[-1]) / 1000
+                    max_age_seconds = 300 + _tf_ms(resolution) / 1000  # Kerzenlänge + 5 Min. Puffer
                     if candle_age_seconds > max_age_seconds:
                         debug_log(f"⚠️ [{symbol}] Wellenanker: letzte Kerze wirkt veraltet ({round(candle_age_seconds)}s alt, Auflösung {resolution}) - überspringe Signal-Berechnung diesen Durchlauf.")
                     else:

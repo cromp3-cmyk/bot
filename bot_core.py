@@ -689,12 +689,17 @@ async def get_redis():
                 "beginnt_mit": REDIS_URL[:12] + "...",
                 "startet_korrekt_mit_redis://": REDIS_URL.startswith("redis://"),
             })
-            _redis_client = redis_lib.from_url(
+            # Begrenzter Pool: viele Stellen (WS-Cache-Snapshots, Configs ...) greifen gleichzeitig zu. Ohne Limit oeffnet jede
+            # Anfrage eine eigene Verbindung -> "max number of clients reached" beim Redis-Anbieter. Wartet jetzt stattdessen.
+            _pool = redis_lib.BlockingConnectionPool.from_url(
                 REDIS_URL,
+                max_connections=int(os.getenv("REDIS_MAX_CONNECTIONS", "8")),
+                timeout=20,
                 decode_responses=True,
                 socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
                 socket_timeout=REDIS_TIMEOUT_SECONDS,
             )
+            _redis_client = redis_lib.Redis(connection_pool=_pool)
             await asyncio.wait_for(_redis_client.ping(), timeout=REDIS_TIMEOUT_SECONDS)
             debug_log("✅ Redis verbunden - Einstellungen werden ab jetzt gespeichert")
         except Exception as e:
