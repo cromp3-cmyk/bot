@@ -290,6 +290,7 @@ def default_config():
         "wa_trend_tf": os.getenv("WA_TREND_TF", "1h"),        # Zeitebene des Trends
         "wa_trend_ilen": 4, "wa_trend_slen": 50,              # Pivot-Laengen (intern / swing)
         "wa_tp_cross_zero": os.getenv("WA_TP_CROSS_ZERO", "off"),  # TP 'Gegenkreuzung': off | reversal (Long nur ueber 0, Short nur unter 0 schliessen) | trend
+        "wa_signal_timing": os.getenv("WA_SIGNAL_TIMING", "live"),   # live = sofort beim Kreis (laufende Kerze) | close = erst bei Kerzenschluss (voller Punkt)
         "wa_cross_zero": os.getenv("WA_CROSS_ZERO", "off"),    # Kreuzung zu Kreuzung: off | reversal (Long nur unter 0, Short nur ueber 0) | trend (umgekehrt)
         "wa_level_line": os.getenv("WA_LEVEL_LINE", "signal"),  # Level-Modus: signal / wave / both
         "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 20)
@@ -2554,6 +2555,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="zone">Zone: Kreuzung der Linien außerhalb ±Zone 1</option>
       <option value="level">Level: Durchbruch durch −X (Long) / +X (Short)</option>
       <option value="cross">Kreuzung zu Kreuzung: jede Kreuzung der beiden Linien (egal wo) = Wechsel Long ↔ Short</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker"><label>Signal-Zeitpunkt</label>
+    <select class="cfg" id="wa_signal_timing">
+      <option value="live">Sofort beim Kreis (laufende Kerze, Signal kann wieder verschwinden)</option>
+      <option value="close">Erst bei Kerzenschluss (voller Punkt, kein Zurücknehmen)</option>
     </select>
   </div>
   <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="cross"><label>Nulllinien-Filter für die Kreuzung</label>
@@ -5173,6 +5180,7 @@ async function refresh() {
     document.getElementById('wa_level').value = data.config.wa_level ?? 10;
     document.getElementById('wa_level_line').value = data.config.wa_level_line || 'signal';
     document.getElementById('wa_cross_zero').value = data.config.wa_cross_zero || 'off';
+    document.getElementById('wa_signal_timing').value = data.config.wa_signal_timing || 'live';
     document.getElementById('wa_tp_cross_zero').value = data.config.wa_tp_cross_zero || 'off';
     document.getElementById('wa_max_nachkauf').value = data.config.wa_max_nachkauf;
     document.getElementById('wa_nachkauf_min_pct').value = data.config.wa_nachkauf_min_pct ?? 0;
@@ -5642,6 +5650,7 @@ function buildConfigPayload() {
     wa_level: parseFloat(document.getElementById('wa_level').value),
     wa_level_line: document.getElementById('wa_level_line').value,
     wa_cross_zero: document.getElementById('wa_cross_zero').value,
+    wa_signal_timing: document.getElementById('wa_signal_timing').value,
     wa_tp_cross_zero: document.getElementById('wa_tp_cross_zero').value,
     wa_max_nachkauf: parseInt(document.getElementById('wa_max_nachkauf').value),
     wa_nachkauf_min_pct: parseFloat(document.getElementById('wa_nachkauf_min_pct').value) || 0,
@@ -6005,7 +6014,7 @@ async def handle_config_update(request):
                 "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
                 "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
                 "liq_max_nachkauf", "liq_nachkauf_progress_pct",
-                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_entry_mode", "wa_level", "wa_level_line", "wa_cross_zero", "wa_tp_cross_zero", "wa_max_nachkauf", "wa_nachkauf_min_pct", "wa_reverse_only_profit",
+                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_entry_mode", "wa_level", "wa_level_line", "wa_cross_zero", "wa_signal_timing", "wa_tp_cross_zero", "wa_max_nachkauf", "wa_nachkauf_min_pct", "wa_reverse_only_profit",
                 "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd",
                 "wa_open_every", "wa_trend_mode", "wa_trend_tf", "wa_trend_ilen", "wa_trend_slen"]:
         if key in body:

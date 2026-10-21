@@ -6100,13 +6100,19 @@ async def wa_poll_loop(symbol):
                     else:
                         # LIVE: die noch laufende Kerze auswerten, Signal feuert SOFORT (nicht erst bei Kerzenschluss).
                         # Pro Kerze feuert dasselbe Signal nur einmal (Merker = Kerzen-ts + Signal).
-                        wt1_arr, wt2_arr = compute_wavetrend_series(opens, highs, lows, closes, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
+                        # Signal-Zeitpunkt: "live" = laufende Kerze zaehlt (Kreis), "close" = nur geschlossene Kerzen (voller Punkt)
+                        on_close = cfg.get("wa_signal_timing", "live") == "close"
+                        if on_close:
+                            s_ts, s_o, s_h, s_l, s_c = closed_ts, closed_o, closed_h, closed_l, closed_c
+                        else:
+                            s_ts, s_o, s_h, s_l, s_c = timestamps, opens, highs, lows, closes
+                        wt1_arr, wt2_arr = compute_wavetrend_series(s_o, s_h, s_l, s_c, n1, n2, sig_len, cfg.get("wa_src", "close"), cfg.get("wa_wave_scale", 1.35))
                         emode = _wa_entry_mode(cfg)
                         z1 = float(cfg.get("wa_level", 10.0)) if emode == "level" else cfg.get("wa_zone1", 53.0)
                         long_raw, short_raw, cross_up, cross_dn = _wa_raw_signals(
                             wt1_arr, wt2_arr, -1, z1, emode, _wa_sig_line(cfg))
                         st["wa_wt2_last"] = wt2_arr[-1]
-                        sig_key = (timestamps[-1], bool(long_raw), bool(short_raw), bool(cross_up), bool(cross_dn))
+                        sig_key = (s_ts[-1], bool(long_raw), bool(short_raw), bool(cross_up), bool(cross_dn))
                         if last_processed_ts is None:
                             last_processed_ts = sig_key   # Basislinie nach (Neu)Start: vorhandene Signale zaehlen nicht
                         elif sig_key != last_processed_ts:
@@ -6117,10 +6123,10 @@ async def wa_poll_loop(symbol):
                             cnt = st.setdefault("wa_cnt", {"long": 0, "short": 0, "lts": None, "sts": None})
                             edge_l = bool(long_raw) and not prev_l
                             edge_s = bool(short_raw) and not prev_s
-                            if edge_l and cnt["lts"] != timestamps[-1]:
-                                cnt["long"] += 1; cnt["lts"] = timestamps[-1]
-                            if edge_s and cnt["sts"] != timestamps[-1]:
-                                cnt["short"] += 1; cnt["sts"] = timestamps[-1]
+                            if edge_l and cnt["lts"] != s_ts[-1]:
+                                cnt["long"] += 1; cnt["lts"] = s_ts[-1]
+                            if edge_s and cnt["sts"] != s_ts[-1]:
+                                cnt["short"] += 1; cnt["sts"] = s_ts[-1]
                             ok_l = n_open <= 1 or (edge_l and cnt["long"] % n_open == 0)
                             ok_s = n_open <= 1 or (edge_s and cnt["short"] % n_open == 0)
                             if n_open > 1 and (edge_l or edge_s):
