@@ -560,6 +560,8 @@ input[type=number]{width:90px}
 button.act{padding:8px 16px;background:#1d2128;color:#e9ecf1;border:1px solid #2a303a;border-radius:10px;font:700 12px Inter,sans-serif;cursor:pointer}
 button.act:hover{filter:brightness(1.15)}
 #edit{display:none;margin-bottom:14px}
+th.sh{cursor:pointer;user-select:none}th.sh:hover{color:#e9ecf1}th.sh.on{color:#f5b83d}
+button.rm{background:transparent;border:1px solid #2a303a;color:#8b93a1;border-radius:8px;width:30px;height:30px;font:700 14px Inter,sans-serif;cursor:pointer}button.rm:hover{color:#ef4444;border-color:#ef4444}
 </style>
 </head>
 <body>
@@ -587,12 +589,12 @@ button.act:hover{filter:brightness(1.15)}
       <span class="err" id="edit-msg"></span>
     </div>
   </div>
-  <table><thead><tr><th style="width:13%">Coin</th><th>Day-VWAP</th><th>Week-VWAP</th><th>Month-VWAP</th></tr></thead><tbody id="tb"></tbody></table>
+  <table><thead><tr><th style="width:13%">Coin</th><th class="sh" id="h-d">Day-VWAP<span class="ar"></span></th><th class="sh" id="h-w">Week-VWAP<span class="ar"></span></th><th class="sh" id="h-m">Month-VWAP<span class="ar"></span></th><th style="width:44px"></th></tr></thead><tbody id="tb"></tbody></table>
   <div class="leg"><span>Balken rechts der Mitte: EMA über VWAP · links: darunter</span><span>Prozent: Abstand bis zum Cross</span><span class="yellow">Gelb: Cross nah</span><span>Buy = EMA kreuzt VWAP nach oben, Sell = nach unten</span></div>
 </div></div>
 <script>
-var CFG=null,DATA=null,SORT='d',busy=false;
-try{SORT=localStorage.getItem('vwapSort')||'d';}catch(e){}
+var CFG=null,DATA=null,SORT='d',DIR=1,busy=false;
+try{SORT=localStorage.getItem('vwapSort')||'d';DIR=localStorage.getItem('vwapDir')==='-1'?-1:1;}catch(e){}
 function $(i){return document.getElementById(i);}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function fmt(v){return Math.abs(v).toFixed(2).replace('.',',');}
@@ -607,23 +609,25 @@ function cell(o,near,win){
    +'<div class="trk"><div class="mid"></div><div class="f" style="'+(up?'left:50%':'right:50%')+';width:'+a+'%;background:'+(up?'var(--green)':'var(--red)')+'"></div></div>'
    +'<div class="last">'+lc+'</div>';
 }
+function rmBtn(c){return '<td style="text-align:right"><button class="rm" data-c="'+esc(c)+'" title="Coin aus der Liste entfernen">✕</button></td>';}
 function sortRows(rows){
   var r=rows.slice();
   if(SORT==='l')return r;
-  r.sort(function(a,b){var x=(a[SORT]&&a[SORT].pct!=null)?Math.abs(a[SORT].pct):1e9,y=(b[SORT]&&b[SORT].pct!=null)?Math.abs(b[SORT].pct):1e9;return x-y;});
+  r.sort(function(a,b){var x=(a[SORT]&&a[SORT].pct!=null)?Math.abs(a[SORT].pct):1e9,y=(b[SORT]&&b[SORT].pct!=null)?Math.abs(b[SORT].pct):1e9;return (x-y)*DIR;});
   return r;
 }
 function render(){
   if(!DATA)return;
   var near=DATA.cfg.near,tb=[];
   sortRows(DATA.rows).forEach(function(r){
-    if(r.loading){tb.push('<tr><td><div class="coin">'+esc(r.coin)+'</div></td><td colspan="3" class="err">lädt …</td></tr>');return;}
-    if(r.err){tb.push('<tr><td><div class="coin">'+esc(r.coin)+'</div></td><td colspan="3" class="err">'+esc(r.err)+'</td></tr>');return;}
+    if(r.loading){tb.push('<tr><td><div class="coin">'+esc(r.coin)+'</div></td><td colspan="3" class="err">lädt …</td>'+rmBtn(r.coin)+'</tr>');return;}
+    if(r.err){tb.push('<tr><td><div class="coin">'+esc(r.coin)+'</div></td><td colspan="3" class="err">'+esc(r.err)+'</td>'+rmBtn(r.coin)+'</tr>');return;}
     var nr=['d','w','m'].some(function(k){return r[k]&&r[k].pct!=null&&Math.abs(r[k].pct)<near;});
-    tb.push('<tr class="'+(nr?'near':'')+'"><td><div class="coin">'+esc(r.coin)+'</div><div class="sub mono">'+price(r.price)+' · '+esc(r.src||'')+(r.stale?' · veraltet':'')+'</div></td><td>'+cell(r.d,near,r.win_h)+'</td><td>'+cell(r.w,near,r.win_h)+'</td><td>'+cell(r.m,near,r.win_h)+'</td></tr>');
+    tb.push('<tr class="'+(nr?'near':'')+'"><td><div class="coin">'+esc(r.coin)+'</div><div class="sub mono">'+price(r.price)+' · '+esc(r.src||'')+(r.stale?' · veraltet':'')+'</div></td><td>'+cell(r.d,near,r.win_h)+'</td><td>'+cell(r.w,near,r.win_h)+'</td><td>'+cell(r.m,near,r.win_h)+'</td>'+rmBtn(r.coin)+'</tr>');
   });
   $('tb').innerHTML=tb.join('');
   ['d','w','m','l'].forEach(function(k){$('s-'+k).className='pill'+(SORT===k?' on':'');});
+  ['d','w','m'].forEach(function(k){$('h-'+k).className='sh'+(SORT===k?' on':'');$('h-'+k).querySelector('.ar').textContent=SORT===k?(DIR===1?' ▲':' ▼'):'';});
   ['1m','3m'].forEach(function(k){$('tf-'+k).className='pill'+(DATA.cfg.tf===k?' on':'');});
   $('elen').textContent=DATA.cfg.ema;
   var t=DATA.updated?new Date(DATA.updated*1000).toLocaleTimeString('de-DE'):'–';
@@ -644,7 +648,15 @@ function save(body){
    });
 }
 ['1m','3m'].forEach(function(k){$('tf-'+k).onclick=function(){save({tf:k});};});
-['d','w','m','l'].forEach(function(k){$('s-'+k).onclick=function(){SORT=k;try{localStorage.setItem('vwapSort',k);}catch(e){}render();};});
+function setSort(k,toggle){if(toggle&&SORT===k)DIR=-DIR;else{SORT=k;DIR=1;}try{localStorage.setItem('vwapSort',SORT);localStorage.setItem('vwapDir',String(DIR));}catch(e){}render();}
+['d','w','m','l'].forEach(function(k){$('s-'+k).onclick=function(){setSort(k,false);};});
+['d','w','m'].forEach(function(k){$('h-'+k).onclick=function(){setSort(k,true);};});
+$('tb').onclick=function(e){
+  var b=e.target.closest?e.target.closest('button.rm'):null;if(!b||!DATA)return;
+  var c=b.getAttribute('data-c'),keep=DATA.cfg.coins.filter(function(x){return x!==c;});
+  if(!keep.length){$('info').textContent='Mindestens ein Coin muss bleiben';return;}
+  DATA.cfg.coins=keep;DATA.rows=DATA.rows.filter(function(r){return r.coin!==c;});render();save({coins:keep});
+};
 $('btn-edit').onclick=function(){var e=$('edit');e.style.display=e.style.display==='block'?'none':'block';};
 $('btn-save').onclick=function(){save({coins:$('coins').value,ema:$('ema').value,near:$('near').value});};
 $('btn-reset').onclick=function(){save({reset:true});};
