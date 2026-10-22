@@ -34,6 +34,8 @@ from copytrade import (
 from binance_ws import binance_ws_cache_loop
 from grid_scalp import grid_scalp_poll_loop, handle_gc_backtest, handle_gc_reset
 from screener import screener_loop, handle_screener_index, handle_screener_api, handle_screener_cfg_get, handle_screener_cfg_set, load_screener_cfg
+from vwap_cross import vc_poll_loop
+from vwap_scanner import vwap_scanner_loop, load_vwap_scanner_cfg, handle_vwap_index, handle_vwap_api, handle_vwap_cfg_set, handle_vwap_lighter
 from lighter_candles import lighter_candles_loop
 from scalp import (
     scalp_loop, handle_scalp_index, handle_scalp_chart, handle_scalp_status,
@@ -74,6 +76,10 @@ async def start_web_server():
     app.router.add_get("/api/screener", handle_screener_api)
     app.router.add_get("/api/screener/config", handle_screener_cfg_get)
     app.router.add_post("/api/screener/config", handle_screener_cfg_set)
+    app.router.add_get("/vwap-scanner", handle_vwap_index)
+    app.router.add_get("/api/vwap_scanner", handle_vwap_api)
+    app.router.add_post("/api/vwap_scanner/config", handle_vwap_cfg_set)
+    app.router.add_get("/api/vwap_scanner/lighter", handle_vwap_lighter)
     app.router.add_get("/scalp", handle_scalp_index)
     app.router.add_get("/api/scalp/chart", handle_scalp_chart)
     app.router.add_get("/api/scalp/status", handle_scalp_status)
@@ -124,6 +130,7 @@ async def main():
     await load_global_settings()
     await load_ct_watched()
     await load_screener_cfg()
+    await load_vwap_scanner_cfg()
     # MUSS vor allen Poll-Loops geladen werden: sonst "vergisst" der Bot bei jedem Neustart einen
     # noch laufenden Binance-Bann und alle Coins feuern sofort wieder frische Anfragen gegen einen
     # Server, der sie noch immer ablehnt - siehe Kommentar bei save_binance_ban_state() in strategies.py.
@@ -156,11 +163,13 @@ async def main():
         *[scalp_poll_loop(s) for s in SYMBOLS],
         *[liq_poll_loop(s) for s in SYMBOLS],
         *[wa_poll_loop(s) for s in SYMBOLS],
+        *[vc_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),
         binance_ws_cache_loop(),
         screener_loop(),
+        vwap_scanner_loop(),
         scalp_loop(),
         lighter_candles_loop(),
         return_exceptions=True,

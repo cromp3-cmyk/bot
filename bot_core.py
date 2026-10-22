@@ -442,6 +442,20 @@ def default_config():
         "tfl_flip_mode": os.getenv("TFL_FLIP_MODE", "reverse"),     # reverse = bei Trendwechsel drehen + neu einsteigen | close = nur schliessen
 
         # ===== Reaction Level Matrix (entry_mode rlm): Swing-Level + Ablehnung (Rejection) an Unterstuetzung/Widerstand =====
+        "vc_resolution": os.getenv("VC_RESOLUTION", "15m"),
+        "vc_ema_len": int(os.getenv("VC_EMA_LEN", "9")),
+        "vc_use_day": os.getenv("VC_USE_DAY", "true").lower() == "true",
+        "vc_use_week": os.getenv("VC_USE_WEEK", "false").lower() == "true",
+        "vc_use_month": os.getenv("VC_USE_MONTH", "false").lower() == "true",
+        "vc_skip_first": os.getenv("VC_SKIP_FIRST", "true").lower() == "true",   # ersten echten Cross nach Tag-/Wochen-/Monatsstart nicht handeln
+        "vc_direction_mode": os.getenv("VC_DIRECTION_MODE", "both"),
+        "vc_sl_mode": os.getenv("VC_SL_MODE", "kerze"),                # kerze = hinter der letzten ganzen Kerze auf der falschen VWAP-Seite | usd = fester $-Betrag
+        "vc_sl_candle_rule": os.getenv("VC_SL_CANDLE_RULE", "whole"),  # whole = ganze Kerze (Hoch<VWAP bzw. Tief>VWAP) | close = Schluss auf der falschen Seite
+        "vc_sl_buffer_pct": float(os.getenv("VC_SL_BUFFER_PCT", "0.0")),
+        "vc_sl_usd": float(os.getenv("VC_SL_USD", "5.0")),             # fester SL bzw. $-Limit bei Kerzen-SL (0 = kein Limit)
+        "vc_tp_mode": os.getenv("VC_TP_MODE", "kreuzung"),             # kreuzung | fester_betrag | gegentrade | aus
+        "vc_tp_usd": float(os.getenv("VC_TP_USD", "5.0")),
+        "vc_tp_vwap": os.getenv("VC_TP_VWAP", "d"),                    # welcher VWAP bei TP "kreuzung" zaehlt
         "rlm_resolution": os.getenv("RLM_RESOLUTION", "5m"),
         "rlm_swing_len": int(os.getenv("RLM_SWING_LEN", "6")),         # Balken links/rechts, die einen Swing bestaetigen
         "rlm_level_tol": float(os.getenv("RLM_LEVEL_TOL", "0.6")),     # Level-Toleranz in x ATR(34)
@@ -1642,7 +1656,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
       <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
     </label>
-    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
+    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
 </div>
 <div class="container">
@@ -1708,6 +1722,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + fester $-SL/TP)</option>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
+      <option value="vwap_cross">EMA 9 + VWAP (Einstieg bei Kreuzung EMA9 / Day-Week-Month-VWAP, SL hinter letzter Kerze, TP Kreuzung/Fest/Gegentrade, Backtest)</option>
       <option value="rlm">Reaction Level Matrix (Swing-Level mit Score, Einstieg bei Ablehnung an Unterstützung/Widerstand, SL/TP1-TP3 mit Teilverkäufen, Gegen-Signal dreht)</option>
       <option value="trendfolge">Trendfolge (Marktstruktur-Trend: im Aufwärtstrend bei jeder roten Kerze kaufen, im Abwärtstrend bei jeder grünen shorten, fester $-TP, Trendwechsel = schließen)</option>
       <option value="ema_rsi">EMA + RSI (Smart Money Zone Tracker: Schluss über/unter EMA + RSI über/unter Mittellinie, Swing-SL, TP1/TP2/TP3 mit Teilverkäufen)</option>
@@ -2077,6 +2092,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="trendfolge"><label>Stop-Loss (fester $-Verlust der Gesamtposition, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="tfl_sl_usd"></div>
   <div data-mode="trendfolge"><label>Bei Trendwechsel</label><select class="cfg" id="tfl_flip_mode"><option value="reverse">Drehen: Position beenden und sofort im neuen Trend einsteigen (eine Order)</option><option value="close">Nur schließen (neuer Einstieg bei der nächsten passenden Kerze)</option></select></div>
   <div data-mode="trendfolge"><label>Max. Käufe pro Position (0 = unbegrenzt)</label><input type="number" step="1" min="0" id="tfl_max_entries"></div>
+
+  <div data-mode="vwap_cross" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📈 <b>EMA 9 + VWAP</b>: <b>Long</b>, wenn die EMA den gewählten VWAP (Day / Week / Month, UTC, Woche ab Montag) nach oben kreuzt, <b>Short</b> bei Kreuzung nach unten – Signal bei Kerzenschluss. Der Sprung des VWAP beim Start einer neuen Periode zählt nie als Kreuzung. Mit „Ersten Cross überspringen“ wird zusätzlich der erste echte Cross nach jedem Tag-/Wochen-/Monatsstart nicht gehandelt. Daten: Binance (Spot/Futures laut Einstellung), nur Coins mit Binance-Paar.
+  </div>
+  <div data-mode="vwap_cross"><label>Zeitebene (Signal bei Kerzenschluss)</label><select class="cfg" id="vc_resolution"><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option></select></div>
+  <div data-mode="vwap_cross"><label>EMA-Länge</label><input type="number" step="1" min="2" max="200" id="vc_ema_len"></div>
+  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_use_day" style="width:auto; vertical-align:middle;"> Day-VWAP verwenden</label></div>
+  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_use_week" style="width:auto; vertical-align:middle;"> Week-VWAP verwenden</label></div>
+  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_use_month" style="width:auto; vertical-align:middle;"> Month-VWAP verwenden</label></div>
+  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_skip_first" style="width:auto; vertical-align:middle;"> Ersten Cross nach Tag-/Wochen-/Monatsstart überspringen (je VWAP)</label></div>
+  <div data-mode="vwap_cross"><label>Richtung</label><select class="cfg" id="vc_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="vwap_cross"><label>Stop-Loss</label><select class="cfg" id="vc_sl_mode"><option value="kerze">Hinter der letzten Kerze auf der falschen VWAP-Seite (Long: unter ihrem Tief, Short: über ihrem Hoch)</option><option value="usd">Fester $-Betrag (Verlust der Position)</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_sl_mode" data-requires-value="kerze"><label>Welche Kerze zählt</label><select class="cfg" id="vc_sl_candle_rule"><option value="whole">Ganze Kerze unter dem VWAP (Long) / über dem VWAP (Short)</option><option value="close">Kerze mit Schluss auf der falschen Seite</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_sl_mode" data-requires-value="kerze"><label>Puffer hinter der Kerze (%)</label><input type="number" step="0.01" min="0" id="vc_sl_buffer_pct"></div>
+  <div data-mode="vwap_cross"><label>SL in $ Verlust der Position (bei „Kerze“ als Begrenzung/Ersatz, 0 = keine)</label><input type="number" step="any" min="0" id="vc_sl_usd"></div>
+  <div data-mode="vwap_cross"><label>Take-Profit</label><select class="cfg" id="vc_tp_mode"><option value="kreuzung">Kreuzung der EMA mit einem VWAP in Gegenrichtung (Long: nach unten, Short: nach oben)</option><option value="fester_betrag">Fester $-Gewinn</option><option value="gegentrade">Gegentrade (Gegen-Signal dreht die Position)</option><option value="aus">Kein TP (nur SL)</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="kreuzung"><label>Welcher VWAP für die TP-Kreuzung</label><select class="cfg" id="vc_tp_vwap"><option value="d">Day-VWAP</option><option value="w">Week-VWAP</option><option value="m">Month-VWAP</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="fester_betrag"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="any" min="0" id="vc_tp_usd"></div>
 
   <div data-mode="rlm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📐 <b>Reaction Level Matrix</b>: Aus bestätigten Swing-Hochs/-Tiefs entstehen Preis-Level (Bänder) mit Score 0–100 (mehr Berührungen = stärker, alte Level verblassen). <b>Long</b>, wenn eine Kerze in eine Unterstützung eintaucht, wieder darüber schließt und im oberen Teil ihrer Spanne endet; <b>Short</b> spiegelbildlich am Widerstand. Signal erst bei Kerzenschluss. Ausstieg: SL, TP1/TP2/TP3 mit Teilverkäufen, Break-Even nach TP1; ein Gegen-Signal dreht die Position.
@@ -3809,7 +3842,7 @@ function wacSetLevels(levels) {
 // ===== Chart-Linien (VWAP / EMA / Swing) - Farben + Sichtbarkeit pro Browser gespeichert =====
 const OV_DEF = [
   ['vwap_d','VWAP Day','#f5b83d',true], ['vwap_w','VWAP Week','#3b82f6',true], ['vwap_m','VWAP Month','#a855f7',true],
-  ['ema21','21 EMA','#22d3ee',true], ['ema50','50 EMA','#f97316',true],
+  ['ema9','9 EMA','#e5e7eb',false], ['ema21','21 EMA','#22d3ee',true], ['ema50','50 EMA','#f97316',true],
   ['swing_h','Swing High','#f0354b',true], ['swing_l','Swing Low','#1fcf6e',true]];
 let OV = {};
 try { OV = JSON.parse(localStorage.getItem('ov_cfg') || '{}') || {}; } catch (e) { OV = {}; }
@@ -5055,6 +5088,20 @@ async function refresh() {
     document.getElementById('rlm_tp1_close_pct').value = data.config.rlm_tp1_close_pct ?? '';
     document.getElementById('rlm_tp2_close_pct').value = data.config.rlm_tp2_close_pct ?? '';
     document.getElementById('rlm_resolution').value = data.config.rlm_resolution || '';
+    document.getElementById('vc_resolution').value = data.config.vc_resolution || '15m';
+    document.getElementById('vc_ema_len').value = data.config.vc_ema_len ?? 9;
+    document.getElementById('vc_use_day').checked = !!data.config.vc_use_day;
+    document.getElementById('vc_use_week').checked = !!data.config.vc_use_week;
+    document.getElementById('vc_use_month').checked = !!data.config.vc_use_month;
+    document.getElementById('vc_skip_first').checked = !!data.config.vc_skip_first;
+    document.getElementById('vc_direction_mode').value = data.config.vc_direction_mode || 'both';
+    document.getElementById('vc_sl_mode').value = data.config.vc_sl_mode || 'kerze';
+    document.getElementById('vc_sl_candle_rule').value = data.config.vc_sl_candle_rule || 'whole';
+    document.getElementById('vc_sl_buffer_pct').value = data.config.vc_sl_buffer_pct ?? 0;
+    document.getElementById('vc_sl_usd').value = data.config.vc_sl_usd ?? '';
+    document.getElementById('vc_tp_mode').value = data.config.vc_tp_mode || 'kreuzung';
+    document.getElementById('vc_tp_vwap').value = data.config.vc_tp_vwap || 'd';
+    document.getElementById('vc_tp_usd').value = data.config.vc_tp_usd ?? '';
     document.getElementById('rlm_direction_mode').value = data.config.rlm_direction_mode || 'both';
     document.getElementById('rlm_candle_type').value = data.config.rlm_candle_type || 'normal';
     document.getElementById('rlm_trend_filter').value = data.config.rlm_trend_filter || 'off';
@@ -5526,6 +5573,20 @@ function buildConfigPayload() {
     rlm_tp1_close_pct: parseFloat(document.getElementById('rlm_tp1_close_pct').value) || 0,
     rlm_tp2_close_pct: parseFloat(document.getElementById('rlm_tp2_close_pct').value) || 0,
     rlm_resolution: document.getElementById('rlm_resolution').value,
+    vc_resolution: document.getElementById('vc_resolution').value,
+    vc_ema_len: parseInt(document.getElementById('vc_ema_len').value) || 9,
+    vc_use_day: document.getElementById('vc_use_day').checked,
+    vc_use_week: document.getElementById('vc_use_week').checked,
+    vc_use_month: document.getElementById('vc_use_month').checked,
+    vc_skip_first: document.getElementById('vc_skip_first').checked,
+    vc_direction_mode: document.getElementById('vc_direction_mode').value,
+    vc_sl_mode: document.getElementById('vc_sl_mode').value,
+    vc_sl_candle_rule: document.getElementById('vc_sl_candle_rule').value,
+    vc_sl_buffer_pct: parseFloat(document.getElementById('vc_sl_buffer_pct').value) || 0,
+    vc_sl_usd: parseFloat(document.getElementById('vc_sl_usd').value) || 0,
+    vc_tp_mode: document.getElementById('vc_tp_mode').value,
+    vc_tp_vwap: document.getElementById('vc_tp_vwap').value,
+    vc_tp_usd: parseFloat(document.getElementById('vc_tp_usd').value) || 0,
     rlm_direction_mode: document.getElementById('rlm_direction_mode').value,
     rlm_candle_type: document.getElementById('rlm_candle_type').value,
     rlm_trend_filter: document.getElementById('rlm_trend_filter').value,
@@ -5991,7 +6052,7 @@ async def handle_config_update(request):
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
                 "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
-                "rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
+                "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
@@ -6130,10 +6191,11 @@ async def handle_wa_live_chart(request):
     is_dv = cfg.get("entry_mode") == "dollar701"
     is_tfl = cfg.get("entry_mode") == "trendfolge"
     is_rlm = cfg.get("entry_mode") == "rlm"
+    is_vc = cfg.get("entry_mode") == "vwap_cross"
     tf = request.query.get("tf", "")
     SUBMIN = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
-        tf = cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
+        tf = cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
             tf = "5m"
     if tf in SUBMIN:
@@ -6149,7 +6211,10 @@ async def handle_wa_live_chart(request):
     if len(c) < n1 + n2 + sl + 21:
         return web.json_response({"ok": False, "reason": "lädt noch … (zu wenig Kerzen)"})
     payload = None
-    if is_rlm:
+    if is_vc:
+        from vwap_cross import vc_chart_payload
+        payload = await vc_chart_payload(symbol, cfg, ts, o, h, l, c, tf)
+    elif is_rlm:
         from rlm import rlm_chart_payload
         payload = await asyncio.to_thread(rlm_chart_payload, ts, o, h, l, c, cfg, 1000)
     elif is_tfl:
@@ -6174,7 +6239,7 @@ async def handle_wa_live_chart(request):
         sl_usd = float(cfg.get("wa_sl_usd", 5.0))
         d = (sl_usd / size) if size else 0
         pos = {"dir": st["position"], "avg": avg, "size": size, "pnl": ((st.get("last_price") or avg) - avg) * size * (1 if st["position"] == "long" else -1),
-               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else None),
+               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else None),
                "tps": (st.get("rlm_tps") or []) if is_rlm else []}
     gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
     grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
