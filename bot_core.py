@@ -162,7 +162,7 @@ async def basic_auth_middleware(request, handler):
 
 # ========== WELCHE COINS LAUFEN SOLLEN ==========
 # Komma-getrennt, z.B. GRID_SYMBOLS="BTC,SOL,ETH". Default: nur BTC (abwaertskompatibel).
-SYMBOLS = [s.strip().upper() for s in os.getenv("GRID_SYMBOLS", os.getenv("GRID_SYMBOL", "BTC")).split(",") if s.strip()]
+SYMBOLS = [s.strip().upper() for s in (os.getenv("GRID_SYMBOLS") or os.getenv("GRID_SYMBOL") or "BTC").split(",") if s.strip()] or ["BTC"]
 for _s in SYMBOLS:
     if _s not in MARKET_INDICES:
         raise ValueError(f"Symbol {_s} nicht in MARKET_INDICES - hier ergänzen")
@@ -177,7 +177,8 @@ def default_config():
         # Binance USD-M Perpetual (fapi.binance.com) statt Spot - dieselben Symbolnamen, aber
         # eigener (leicht abweichender) Kurs. Wichtig zum 1:1-Vergleich mit TradingView-Charts
         # auf ".P"-Symbolen (z.B. "BTCUSDT.P"), die selbst auf dem Perpetual-Kurs basieren.
-        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "obi_scalp", "oms_scalp", "fib_reversal", "halftrend"
+        "trade_account": os.getenv("TRADE_ACCOUNT", "main"),   # "main" = Hauptkonto, "sub" = Unterkonto (GRID_ACCOUNT_INDEX/GRID_PRIVATE_KEY wie beim Grid)
+        "entry_mode": os.getenv("ENTRY_MODE", "grid"),  # "grid", "grid_v2", "grid_scalp", "ab_breakout" (weitere folgen bei Bedarf)
         "margin": float(os.getenv("GRID_MARGIN", "20")),
         "leverage": int(os.getenv("GRID_LEVERAGE", "3")),
         "grid_mode": os.getenv("GRID_MODE", "pct"),  # "pct" oder "usd"
@@ -207,6 +208,98 @@ def default_config():
         "gs_requote_ticks": int(os.getenv("GS_REQUOTE_TICKS", "2")),
         "gs_max_open_orders": int(os.getenv("GS_MAX_OPEN_ORDERS", "8")),
         "gs_poll_seconds": float(os.getenv("GS_POLL_SECONDS", "2.0")),
+        # ===== Klassischer Grid-Bot (entry_mode "grid_classic") =====
+        "gc_direction": "long", "gc_lower": 0.0, "gc_upper": 0.0, "gc_auto_pct": 5.0, "gc_levels": 20,
+        "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6, "gc_exit_orders": 15,
+        "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0,
+        "gc_trend_mode": "off", "gc_trend_tf": "1h", "gc_trend_ilen": 4, "gc_trend_slen": 50, "gc_trend_on_flip": "wait",
+        # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
+        # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
+        # Grid/AB-Breakout/RSI/MVWAP) - kein eigenes scalp_position_size_usd noetig.
+        "scalp_timeframe": os.getenv("SCALP_TIMEFRAME", "5m"),
+        "scalp_vwap_length": int(os.getenv("SCALP_VWAP_LENGTH", "60")),
+        "scalp_rsi_length": int(os.getenv("SCALP_RSI_LENGTH", "5")),
+        "scalp_rsi_upper": float(os.getenv("SCALP_RSI_UPPER", "70")),
+        "scalp_rsi_lower": float(os.getenv("SCALP_RSI_LOWER", "30")),
+        "scalp_docht_threshold": float(os.getenv("SCALP_DOCHT_THRESHOLD", "0.5")),
+        "scalp_sl_mode": os.getenv("SCALP_SL_MODE", "pct"),  # "pct" (Standard) oder "usd"
+        "scalp_sl_pct": float(os.getenv("SCALP_SL_PCT", "0.6")),  # SL in % ab Ø-Einstieg, Standard 0.6%, einstellbar
+        "scalp_sl_usd": float(os.getenv("SCALP_SL_USD", "5.0")),  # SL in $ Verlust ab Ø-Einstieg, falls scalp_sl_mode="usd"
+        "scalp_max_nachkauf": int(os.getenv("SCALP_MAX_NACHKAUF", "3")),  # bis zu 3 Nachkaeufe, wie im MVWAP-Skript
+        "scalp_nachkauf_min_abstand_usd": float(os.getenv("SCALP_NACHKAUF_MIN_ABSTAND_USD", "0.0")),
+        "scalp_nachkauf_min_candles": int(os.getenv("SCALP_NACHKAUF_MIN_CANDLES", "10")),  # Mindestabstand zum letzten Fill in Kerzen, Standard 10
+        "scalp_nachkauf_require_reversal": os.getenv("SCALP_NACHKAUF_REQUIRE_REVERSAL", "true").lower() == "true",  # Nachkauf nur, wenn die
+        # neu geschlossene Kerze selbst wie eine Trendwende aussieht (Kerzenfarbe in Richtung Mittellinie UND
+        # Schlusskurs jenseits des letzten Schlusskurses in dieselbe Richtung) - verhindert, dass bei einem
+        # laengeren durchlaufenden Trend JEDE weitere Kerze im Band automatisch nachkauft, obwohl der Kurs
+        # einfach nur weiter in dieselbe Richtung durchlaeuft statt sich der Mittellinie wieder anzunaehern.
+        "scalp_tp1_full_close": os.getenv("SCALP_TP1_FULL_CLOSE", "false").lower() == "true",  # true = TP1 schliesst 100% statt 50% (dann kein TP2 mehr)
+        "scalp_tp1_require_profit": os.getenv("SCALP_TP1_REQUIRE_PROFIT", "true").lower() == "true",  # TP1 nur ausloesen,
+        # wenn die (bei jeder Kerze neu berechnete) Mittellinie noch auf der profitablen Seite des
+        # Ø-Einstiegs liegt - sonst warten (SL bleibt aktiv) statt mit kleinem Verlust bei "TP1" rauszugehen
+        "scalp_halfway_sl_enabled": os.getenv("SCALP_HALFWAY_SL_ENABLED", "true").lower() == "true",  # nach TP1: auf halbem Weg zu TP2 den SL zusaetzlich auf die Mittellinie nachziehen
+        "scalp_supertrend_filter_enabled": os.getenv("SCALP_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",  # uebergeordneter SuperTrend-Trendfilter (hoehere Zeiteinheit)
+        "scalp_supertrend_filter_resolution": os.getenv("SCALP_SUPERTREND_FILTER_RESOLUTION", "15m"),
+        "scalp_supertrend_filter_multiplier": float(os.getenv("SCALP_SUPERTREND_FILTER_MULTIPLIER", "3.0")),
+        "scalp_supertrend_filter_atr_period": int(os.getenv("SCALP_SUPERTREND_FILTER_ATR_PERIOD", "10")),
+        "scalp_ms_trend_mode": os.getenv("SCALP_MS_TREND_MODE", "off"),   # Marktstruktur-Filter: off / intern / swing
+        "scalp_ms_trend_tf": os.getenv("SCALP_MS_TREND_TF", "5m"),        # 10s/30s/1m/5m/15m/30m/1h/4h
+        "scalp_ms_trend_ilen": int(os.getenv("SCALP_MS_TREND_ILEN", "4")),
+        "scalp_ms_trend_slen": int(os.getenv("SCALP_MS_TREND_SLEN", "50")),
+        # ===== Liquidity Waves (Nachbau des gleichnamigen Pine-Script-Indikators) =====
+        # Markiert Kerzen mit kleinem Koerper (relativ zur Kerzenspanne) als "Sweep"-Kerzen: eine
+        # bearische Sweep-Kerze setzt ein Level am HOCH (Short/Sell-Level), eine bullische am TIEF
+        # (Long/Buy-Level). Von den neuesten "liq_max_levels" Levels zaehlen nur die "gueltigen"
+        # (Short-Level noch UEBER dem Kurs, Long-Level noch UNTER dem Kurs, falls liq_side_filter an) -
+        # daraus ergibt sich Buyers% (Anteil gueltiger Long-Level) und Sellers% (Anteil gueltiger
+        # Short-Level). Long-Einstieg wenn Buyers% unter liq_entry_threshold_pct faellt (Kontra-
+        # Signal: kaum noch Kauf-Liquiditaet uebrig), Short spiegelbildlich mit Sellers%. TP1 (50%
+        # der Position) sobald der jeweilige Prozentwert wieder auf liq_tp1_pct steht, TP2 (Rest)
+        # bei liq_tp2_pct. SL ist ein fester $-Verlust ab Ø-Einstieg (kein Nachkauf/DCA).
+        "liq_timeframe": os.getenv("LIQ_TIMEFRAME", "5m"),
+        "liq_body_max_pct": float(os.getenv("LIQ_BODY_MAX_PCT", "50.0")),  # max. Koerper in % der Kerzenspanne, um als Sweep-Kerze zu zaehlen
+        "liq_max_levels": int(os.getenv("LIQ_MAX_LEVELS", "50")),  # wie viele der neuesten Level insgesamt betrachtet werden
+        "liq_side_filter": os.getenv("LIQ_SIDE_FILTER", "true").lower() == "true",  # nur Short-Level ueber / Long-Level unter dem Kurs zaehlen
+        "liq_dup_remove": os.getenv("LIQ_DUP_REMOVE", "true").lower() == "true",  # aelteres Level derselben Art ungueltig, wenn ein spaeteres auf (fast) gleicher Hoehe liegt
+        "liq_dup_tolerance_usd": float(os.getenv("LIQ_DUP_TOLERANCE_USD", "0.0")),  # Toleranz fuer "gleiche Hoehe" in $ (Ersatz fuer "Ticks" aus dem Original, da wir keine Tick-Groesse pro Symbol fuehren)
+        "liq_entry_threshold_pct": float(os.getenv("LIQ_ENTRY_THRESHOLD_PCT", "5.0")),  # Long wenn Buyers% < das, Short wenn Sellers% < das
+        "liq_tp1_pct": float(os.getenv("LIQ_TP1_PCT", "50.0")),  # TP1 (50% Teil-Exit, SL -> Einstieg) sobald Buyers%/Sellers% wieder hier steht
+        "liq_tp2_pct": float(os.getenv("LIQ_TP2_PCT", "85.0")),  # TP2 (Rest-Exit) sobald Buyers%/Sellers% hier steht
+        "liq_sl_usd": float(os.getenv("LIQ_SL_USD", "5.0")),  # fester $-Verlust ab Ø-Einstieg
+        "liq_tp1_require_profit": os.getenv("LIQ_TP1_REQUIRE_PROFIT", "true").lower() == "true",  # TP1 haengt am Imbalance-%, nicht am Preis - kann sonst im Minus feuern; wenn an, wird dann bis TP2/SL gewartet
+        "liq_max_nachkauf": int(os.getenv("LIQ_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X Nachkaeufe
+        "liq_nachkauf_progress_pct": float(os.getenv("LIQ_NACHKAUF_PROGRESS_PCT", "30.0")),  # Nachkauf nur, wenn Buyers%/Sellers% seit Einstieg mind. hierhin gestiegen war, TP1 aber nicht erreicht wurde, und dann wieder unter die Einstiegs-Schwelle faellt (erneutes Einstiegssignal)
+        # ===== Wellenanker (WaveTrend-Punkte, siehe compute_wavetrend_series in strategies.py) =====
+        # Long-Punkt: WaveTrend-Welle (wt1) kreuzt die Signallinie (wt2) von unten, waehrend wt2
+        # unter -wa_zone1 steht (ueberverkauft) - Short-Punkt spiegelbildlich ueber +wa_zone1.
+        # TP ueber wa_tp_mode waehlbar: "gegentrade" (Exit bei entgegengesetztem Punkt), "ueberlauf"
+        # (Exit sobald wt2 wieder bis wa_ueberlauf_level zurueckgelaufen ist) oder "fester_betrag"
+        # ($-Gewinn). SL ist immer ein fester $-Verlust (wa_sl_usd). Nachkauf: bis zu wa_max_nachkauf
+        # (0-4) weitere Einstiege bei jedem weiteren Punkt in dieselbe Richtung.
+        "wa_timeframe": os.getenv("WA_TIMEFRAME", "15m"),
+        "wa_src": os.getenv("WA_SRC", "close"),  # close/hlc3/ohlc4/hl2 - Quelle der Welle
+        "wa_n1": int(os.getenv("WA_N1", "10")),  # Kanal-Laenge
+        "wa_n2": int(os.getenv("WA_N2", "21")),  # Durchschnitt-Laenge
+        "wa_sig_len": int(os.getenv("WA_SIG_LEN", "4")),  # Signallinien-Glaettung
+        "wa_wave_scale": float(os.getenv("WA_WAVE_SCALE", "1.35")),  # streckt die Welle (wt1 *= wave_scale), damit sie die Zonen so oft erreicht wie im Original-Indikator
+        "wa_zone1": float(os.getenv("WA_ZONE1", "53.0")),  # Zone: Long-Punkt wenn wt2 < -zone1, Short wenn wt2 > zone1
+        "wa_entry_mode": os.getenv("WA_ENTRY_MODE", "zone"),  # "zone" = Kreuzung ausserhalb der Zone, "level" = Durchbruch durch +-wa_level
+        "wa_level": float(os.getenv("WA_LEVEL", "10")),  # Level-Modus: Long beim Durchbruch von -X nach oben, Short bei +X nach unten (0-30)
+        "wa_open_every": 1,                                   # nur jedes N-te Signal (je Richtung) oeffnet eine Position; Schliessen bleibt beim ersten Gegensignal
+        "wa_trend_mode": os.getenv("WA_TREND_MODE", "off"),   # Trendfilter: off / intern / swing (Marktstruktur BOS/CHoCH)
+        "wa_trend_tf": os.getenv("WA_TREND_TF", "1h"),        # Zeitebene des Trends
+        "wa_trend_ilen": 4, "wa_trend_slen": 50,              # Pivot-Laengen (intern / swing)
+        "wa_tp_cross_zero": os.getenv("WA_TP_CROSS_ZERO", "off"),  # TP 'Gegenkreuzung': off | reversal (Long nur ueber 0, Short nur unter 0 schliessen) | trend
+        "wa_signal_timing": os.getenv("WA_SIGNAL_TIMING", "live"),   # live = sofort beim Kreis (laufende Kerze) | close = erst bei Kerzenschluss (voller Punkt)
+        "wa_cross_zero": os.getenv("WA_CROSS_ZERO", "off"),    # Kreuzung zu Kreuzung: off | reversal (Long nur unter 0, Short nur ueber 0) | trend (umgekehrt)
+        "wa_level_line": os.getenv("WA_LEVEL_LINE", "signal"),  # Level-Modus: signal / wave / both
+        "wa_max_nachkauf": int(os.getenv("WA_MAX_NACHKAUF", "0")),  # 0 = kein Nachkauf, sonst bis zu X (max. 20)
+        "wa_reverse_only_profit": os.getenv("WA_REVERSE_ONLY_PROFIT", "false").lower() == "true",  # Gegentrade/Wechsel nur, wenn die laufende Position im Plus liegt (nie mit Verlust drehen)
+        "wa_nachkauf_min_pct": float(os.getenv("WA_NACHKAUF_MIN_PCT", "0")),  # Nachkauf nur, wenn der Kurs mind. X % vom letzten Einstieg entfernt ist (0 = aus)
+        "wa_tp_mode": os.getenv("WA_TP_MODE", "gegentrade"),  # gegentrade / ueberlauf / fester_betrag
+        "wa_ueberlauf_level": float(os.getenv("WA_UEBERLAUF_LEVEL", "45.0")),  # nur Modus "ueberlauf" - entspricht "Überlauf" im Original
+        "wa_tp_usd": float(os.getenv("WA_TP_USD", "10.0")),  # nur Modus "fester_betrag"
+        "wa_sl_usd": float(os.getenv("WA_SL_USD", "5.0")),  # fester $-Verlust ab Ø-Einstieg
         "bot_active": True,
         "auto_reverse": os.getenv("AUTO_REVERSE", "true").lower() == "true",
         # ===== Grid 2 (zweite, unabhaengige Grid-Strategie mit Revisit- und Verdopplungs-Option) =====
@@ -229,422 +322,300 @@ def default_config():
         "g2_double_enabled": os.getenv("G2_DOUBLE_ENABLED", "false").lower() == "true",  # jede Nachkauf-Stufe verdoppelt die Positionsgroesse der vorherigen (1x, 2x, 4x, 8x, ...)
         "g2_size_multiplier": float(os.getenv("G2_SIZE_MULTIPLIER", "1.0")),  # Alternative zu g2_double_enabled: frei waehlbarer Faktor statt fixer Verdopplung (1.0 = aus, greift nur wenn g2_double_enabled=false)
         "g2_deviation_multiplier": float(os.getenv("G2_DEVIATION_MULTIPLIER", "1.0")),  # jeder weitere Nachkauf braucht einen groesseren Abstand als der vorherige (1.0 = fix wie bisher)
-        "obi_threshold": float(os.getenv("OBI_THRESHOLD", "0.30")),
-        "obi_mode": os.getenv("OBI_MODE", "momentum"),  # "momentum" (mit dem Ungleichgewicht), "mean_reversion" (dagegen) oder "reversal" (separater Long/Short-Einstieg bei Umkehr aus Extremzone)
-        "obi_long_threshold": float(os.getenv("OBI_LONG_THRESHOLD", "0.20")),  # nur Reversal-Modus: Long-Zone ab OBI <= -Wert
-        "obi_short_threshold": float(os.getenv("OBI_SHORT_THRESHOLD", "0.30")),  # nur Reversal-Modus: Short-Zone ab OBI >= +Wert
-        "obi_reversal_min_bounce": float(os.getenv("OBI_REVERSAL_MIN_BOUNCE", "0.05")),
-        "obi_window_fast_seconds": float(os.getenv("OBI_WINDOW_FAST_SECONDS", "5")),
-        "obi_window_medium_seconds": float(os.getenv("OBI_WINDOW_MEDIUM_SECONDS", "20")),
-        "obi_window_slow_seconds": float(os.getenv("OBI_WINDOW_SLOW_SECONDS", "60")),
-        "obi_levels": int(os.getenv("OBI_LEVELS", "15")),
-        "obi_depth_weighting_enabled": os.getenv("OBI_DEPTH_WEIGHTING_ENABLED", "false").lower() == "true",
-        "obi_use_median": os.getenv("OBI_USE_MEDIAN", "false").lower() == "true",
-        "obi_min_liquidity": float(os.getenv("OBI_MIN_LIQUIDITY", "0")),
-        "obi_breakeven_enabled": os.getenv("OBI_BREAKEVEN_ENABLED", "false").lower() == "true",
-        "obi_breakeven_trigger_ratio": float(os.getenv("OBI_BREAKEVEN_TRIGGER_RATIO", "0.5")),
-        "obi_breakeven_lock_usd": float(os.getenv("OBI_BREAKEVEN_LOCK_USD", "0.1")),
-        "obi_breakeven_lock_pct": float(os.getenv("OBI_BREAKEVEN_LOCK_PCT", "0.1")),
-        "obi_instant_reset_ratio": float(os.getenv("OBI_INSTANT_RESET_RATIO", "0.5")),
-        "obi_tp_sl_mode": os.getenv("OBI_TP_SL_MODE", "pct"),  # "pct" oder "usd"
-        "obi_tp_pct": float(os.getenv("OBI_TP_PCT", "0.15")),
-        "obi_sl_pct": float(os.getenv("OBI_SL_PCT", "0.15")),
-        "obi_tp_usd": float(os.getenv("OBI_TP_USD", "1")),
-        "obi_sl_usd": float(os.getenv("OBI_SL_USD", "1")),
-        "obi_cooldown_seconds": float(os.getenv("OBI_COOLDOWN_SECONDS", "7")),
-        "obi_trend_filter": os.getenv("OBI_TREND_FILTER", "false").lower() == "true",
-        "obi_trend_ema_length": int(os.getenv("OBI_TREND_EMA_LENGTH", "300")),
-        # Spread-Filter: verwirft Signale bei ungewoehnlich weitem Bid/Ask-Spread (Prozent vom Mid-Preis).
-        # Ein weiter Spread bedeutet duennes/chaotisches Buch - genau dort ist OBI am unzuverlaessigsten
-        # (Microstructure-Forschung: hoher Spread korreliert mit hoeheren Handelskosten und weniger
-        # verlaesslichem Orderbuch-Signal).
-        "obi_spread_filter_enabled": os.getenv("OBI_SPREAD_FILTER_ENABLED", "false").lower() == "true",
-        "obi_max_spread_pct": float(os.getenv("OBI_MAX_SPREAD_PCT", "0.05")),
-        # Volatilitaets-Regime-Filter: verwirft Signale, wenn die kurzfristige Preis-Schwankung (Hoch-Tief-
-        # Spanne der letzten Ticks in % vom Durchschnittspreis) ausserhalb eines Normalbands liegt.
-        # Zu niedrig = totes/seitwaertsrauschendes Buch (OBI-Zittern ohne Fortsetzung), zu hoch = News-Spike/
-        # Wick-Risiko (OBI kann in Sekunden komplett drehen). Beide Enden erzeugen erfahrungsgemaess
-        # ueberproportional viele Fehlsignale.
-        "obi_vol_filter_enabled": os.getenv("OBI_VOL_FILTER_ENABLED", "false").lower() == "true",
-        "obi_vol_window_seconds": float(os.getenv("OBI_VOL_WINDOW_SECONDS", "30")),
-        "obi_vol_min_pct": float(os.getenv("OBI_VOL_MIN_PCT", "0.0")),
-        "obi_vol_max_pct": float(os.getenv("OBI_VOL_MAX_PCT", "1.0")),
-        # OBI-Momentum-Scalp (oms_): eigenstaendige neue Strategie - OBI (3-Fenster) + CVD-
-        # Bestaetigung (echtes Trade-Tape) + optionaler Funding-Filter. Exit: TP1 (Teilverkauf)
-        # + Trailing-Stop auf Rest, SL von Anfang an fester $-Betrag (NICHT die Liquidation).
-        "oms_levels": int(os.getenv("OMS_LEVELS", "10")),
-        "oms_obi_threshold": float(os.getenv("OMS_OBI_THRESHOLD", "0.35")),
-        "oms_window_fast_seconds": float(os.getenv("OMS_WINDOW_FAST_SECONDS", "3")),
-        "oms_window_medium_seconds": float(os.getenv("OMS_WINDOW_MEDIUM_SECONDS", "10")),
-        "oms_window_slow_seconds": float(os.getenv("OMS_WINDOW_SLOW_SECONDS", "30")),
-        "oms_cvd_confirm_enabled": os.getenv("OMS_CVD_CONFIRM_ENABLED", "true").lower() == "true",
-        "oms_cvd_window_seconds": float(os.getenv("OMS_CVD_WINDOW_SECONDS", "10")),
-        "oms_cvd_min_ratio": float(os.getenv("OMS_CVD_MIN_RATIO", "0.15")),
-        "oms_funding_filter_enabled": os.getenv("OMS_FUNDING_FILTER_ENABLED", "true").lower() == "true",
-        "oms_funding_max_abs": float(os.getenv("OMS_FUNDING_MAX_ABS", "0.0005")),
-        "oms_cooldown_seconds": float(os.getenv("OMS_COOLDOWN_SECONDS", "5")),
-        "oms_tp1_usd": float(os.getenv("OMS_TP1_USD", "2.5")),
-        "oms_exit_mode": os.getenv("OMS_EXIT_MODE", "tp1_trail"),  # "tp1_trail" oder "single_tp"
-        "oms_tp1_close_pct": float(os.getenv("OMS_TP1_CLOSE_PCT", "50")),
-        "oms_sl_usd": float(os.getenv("OMS_SL_USD", "3.5")),
-        "oms_trail_distance_usd": float(os.getenv("OMS_TRAIL_DISTANCE_USD", "1.5")),
-        "oms_dca_enabled": os.getenv("OMS_DCA_ENABLED", "true").lower() == "true",
-        "oms_dca_max_entries": int(os.getenv("OMS_DCA_MAX_ENTRIES", "2")),
-        "oms_dca_size_fraction": float(os.getenv("OMS_DCA_SIZE_FRACTION", "0.6")),
-        "oms_dca_min_pullback_usd": float(os.getenv("OMS_DCA_MIN_PULLBACK_USD", "1.0")),
-        "oms_reverse_on_signal": os.getenv("OMS_REVERSE_ON_SIGNAL", "false").lower() == "true",
-        "oms_rsi_filter_enabled": os.getenv("OMS_RSI_FILTER_ENABLED", "false").lower() == "true",
-        "oms_rsi_resolution": os.getenv("OMS_RSI_RESOLUTION", "1m"),
-        "oms_rsi_period": int(os.getenv("OMS_RSI_PERIOD", "14")),
-        "oms_rsi_midline": float(os.getenv("OMS_RSI_MIDLINE", "50")),
-        "oms_oi_filter_enabled": os.getenv("OMS_OI_FILTER_ENABLED", "false").lower() == "true",
-        "oms_oi_window_seconds": float(os.getenv("OMS_OI_WINDOW_SECONDS", "30")),
-        "oms_oi_min_change_pct": float(os.getenv("OMS_OI_MIN_CHANGE_PCT", "0.001")),
-        "oms_oi_min_score": float(os.getenv("OMS_OI_MIN_SCORE", "0.3")),
-        "oms_liq_filter_enabled": os.getenv("OMS_LIQ_FILTER_ENABLED", "false").lower() == "true",
-        "oms_liq_window_seconds": float(os.getenv("OMS_LIQ_WINDOW_SECONDS", "60")),
-        "oms_liq_min_ratio": float(os.getenv("OMS_LIQ_MIN_RATIO", "0.2")),
-        "quad_stoch_resolution": os.getenv("QUAD_STOCH_RESOLUTION", "1m"),
-        "fib_resolution": os.getenv("FIB_RESOLUTION", "1h"),  # "1h" oder "4h"
-        "fib_lookback_candles": int(os.getenv("FIB_LOOKBACK_CANDLES", "100")),
-        "fib_entry1_level": float(os.getenv("FIB_ENTRY1_LEVEL", "0.882")),
-        "fib_entry2_level": float(os.getenv("FIB_ENTRY2_LEVEL", "0.941")),
-        "fib_tp1_level": float(os.getenv("FIB_TP1_LEVEL", "0.786")),
-        "fib_tp2_level": float(os.getenv("FIB_TP2_LEVEL", "0.667")),
-        "fib_sl_level": float(os.getenv("FIB_SL_LEVEL", "1.0")),
-        "fib_tp1_close_pct": float(os.getenv("FIB_TP1_CLOSE_PCT", "50")),
-        "fib_cooldown_seconds": float(os.getenv("FIB_COOLDOWN_SECONDS", "300")),
         # HalfTrend (portiert aus "HalfTrend Long/Short Signal Engine [BigBeluga]", Basis:
         # everget's HalfTrend-Indikator): ATR-Periode ist im Original fest auf 100. Channel-
         # Deviation und Base-Risk-Multiplikator sind hier (anders als im rein optischen Original)
         # echte SL-/TP-Abstands-Multiplikatoren (in ATR2-Vielfachen), damit beide Parameter
         # tatsaechlich das Backtest-/Sweep-Ergebnis beeinflussen:
-        "ht_resolution": os.getenv("HT_RESOLUTION", "5m"),
-        "ht_amplitude": int(os.getenv("HT_AMPLITUDE", "20")),
-        "ht_channel_deviation": float(os.getenv("HT_CHANNEL_DEVIATION", "2.0")),
-        "ht_base_risk_mult": float(os.getenv("HT_BASE_RISK_MULT", "3.0")),
-        "ht_entry_trigger": os.getenv("HT_ENTRY_TRIGGER", "candle_close"),
-        "ht_exit_trigger": os.getenv("HT_EXIT_TRIGGER", "candle_close"),
-        "ht_invert_direction": os.getenv("HT_INVERT_DIRECTION", "false").lower() == "true",
-        "ht_tp_enabled": os.getenv("HT_TP_ENABLED", "true").lower() == "true",
-        "ht_tp1_close_pct": float(os.getenv("HT_TP1_CLOSE_PCT", "33")),
-        "ht_tp2_close_pct": float(os.getenv("HT_TP2_CLOSE_PCT", "50")),
-        "ht_sl_enabled": os.getenv("HT_SL_ENABLED", "true").lower() == "true",
-        "ht_sl_cooldown_seconds": float(os.getenv("HT_SL_COOLDOWN_SECONDS", "30")),
+        # Al-Shatri Breakout (portiert aus Pine-Script "Al-Shatri | Arabic Breakout • Entry &
+        # 3 Targets (Presets)"): Range-Breakout + EMA-Trend + RSI + optionaler Volumen-Filter.
+        # Preset uebernimmt die Original-Presets 1:1, "custom" nutzt die ab_*-Werte direkt.
+        # Ausstieg: Wechsel-System (Gegen-Signal schliesst die Position und oeffnet die Gegenrichtung,
+        # immer im Markt) + optionaler fester Dollar-SL. KEIN ATR-SL, keine Targets/Teilverkaeufe.
+        "ab_resolution": os.getenv("AB_RESOLUTION", "1m"),
+        "ab_preset": os.getenv("AB_PRESET", "intraday"),  # scalping/intraday/swing/custom
+        "ab_lookback": int(os.getenv("AB_LOOKBACK", "20")),
+        "ab_fast_len": int(os.getenv("AB_FAST_LEN", "20")),
+        "ab_slow_len": int(os.getenv("AB_SLOW_LEN", "50")),
+        "ab_rsi_len": int(os.getenv("AB_RSI_LEN", "14")),
+        "ab_rsi_gate": float(os.getenv("AB_RSI_GATE", "55")),
+        "ab_use_volume": os.getenv("AB_USE_VOLUME", "false").lower() == "true",
+        "ab_vol_mult": float(os.getenv("AB_VOL_MULT", "1.5")),
+        "ab_atr_len": int(os.getenv("AB_ATR_LEN", "14")),
+        "ab_direction_mode": os.getenv("AB_DIRECTION_MODE", "both"),
+        "ab_sl_cooldown_seconds": float(os.getenv("AB_SL_COOLDOWN_SECONDS", "30")),
+        # Signal (Range/EMA/RSI, plus der ATR fuer den Plan-Modus) auf Heikin-Ashi-Kerzen statt
+        # normalen Kerzen berechnen - wie bei Diamond Algo/UT Bot/Candle DNA. Ein-/Ausstieg loest
+        # weiterhin am ECHTEN Marktpreis aus.
+        "ab_use_heikin_ashi": os.getenv("AB_USE_HEIKIN_ASHI", "false").lower() == "true",
+
+        # ================= EMA + RSI (Smart Money Zone Tracker, portiert aus Pine v6) =================
+        # Long: Schluss > EMA und RSI > Mittellinie (Short umgekehrt), Trigger nur auf der Flanke,
+        # auf geschlossenen Kerzen. SL = Tief/Hoch der letzten N Kerzen VOR der Signal-Kerze.
+        # TP1/2/3 = 1x/2x/3x Schritt (fester Preisabstand oder ATR-Vielfaches). Ausstieg "plan"
+        # (SL + Teilverkaeufe) oder "flip" (Gegen-Signal dreht, SL bleibt). Immer nur eine Position je Coin.
+        "er_resolution": os.getenv("ER_RESOLUTION", "1m"),
+        "er_ema_len": int(os.getenv("ER_EMA_LEN", "9")),
+        "er_rsi_len": int(os.getenv("ER_RSI_LEN", "14")),
+        "er_rsi_mid": float(os.getenv("ER_RSI_MID", "50")),
+        "er_invert": os.getenv("ER_INVERT", "false").lower() == "true",
+        "er_direction_mode": os.getenv("ER_DIRECTION_MODE", "both"),
+        "er_exit_mode": os.getenv("ER_EXIT_MODE", "plan"),
+        "er_sl_lookback": int(os.getenv("ER_SL_LOOKBACK", "4")),
+        "er_sl_buffer_pct": float(os.getenv("ER_SL_BUFFER_PCT", "0.0")),
+        "er_tp_mode": os.getenv("ER_TP_MODE", "atr"),  # "atr" (ATR-Vielfaches) oder "fixed" (fester Preisabstand)
+        "er_tp_step_usd": float(os.getenv("ER_TP_STEP_USD", "10.0")),
+        "er_tp_step_atr_mult": float(os.getenv("ER_TP_STEP_ATR_MULT", "1.0")),
+        "er_atr_len": int(os.getenv("ER_ATR_LEN", "14")),
+        "er_tp1_close_pct": float(os.getenv("ER_TP1_CLOSE_PCT", "33")),
+        "er_tp2_close_pct": float(os.getenv("ER_TP2_CLOSE_PCT", "50")),
+        "er_sl_to_breakeven_on_tp1": os.getenv("ER_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
+        "er_sl_to_tp1_on_tp2": os.getenv("ER_SL_TO_TP1_ON_TP2", "true").lower() == "true",
+        "er_sl_cooldown_seconds": float(os.getenv("ER_SL_COOLDOWN_SECONDS", "30")),
+        # ===== Wellenanker MTF Spread Trend (entry_mode mtf_spread) =====
+        "mt_resolution": os.getenv("MT_RESOLUTION", "5m"),
+        "mt_use_b1": os.getenv("MT_USE_B1", "true").lower() == "true",
+        "mt_block1": os.getenv("MT_BLOCK1", "1m,3m,5m"),
+        "mt_use_b2": os.getenv("MT_USE_B2", "true").lower() == "true",
+        "mt_block2": os.getenv("MT_BLOCK2", "15m,30m,45m"),
+        "mt_use_b3": os.getenv("MT_USE_B3", "true").lower() == "true",
+        "mt_block3": os.getenv("MT_BLOCK3", "1h,2h,4h"),
+        "mt_n1": int(os.getenv("MT_N1", "10")),
+        "mt_n2": int(os.getenv("MT_N2", "21")),
+        "mt_sig": int(os.getenv("MT_SIG", "4")),
+        "mt_scale": float(os.getenv("MT_SCALE", "1.35")),
+        "mt_src": os.getenv("MT_SRC", "close"),
+        "mt_spread_full": float(os.getenv("MT_SPREAD_FULL", "15.0")),
+        "mt_signal_mode": os.getenv("MT_SIGNAL_MODE", "zone"),   # zone = gruener/roter Hintergrund, cross = Dreh durch Level
+        "mt_confirm_bars": int(os.getenv("MT_CONFIRM_BARS", "3")),   # Zone muss so viele Kerzen halten, bevor das Signal gilt
+        "mt_red_below": float(os.getenv("MT_RED_BELOW", "-20.0")),
+        "mt_green_above": float(os.getenv("MT_GREEN_ABOVE", "20.0")),
+        "mt_buy_level": float(os.getenv("MT_BUY_LEVEL", "-40.0")),
+        "mt_sell_level": float(os.getenv("MT_SELL_LEVEL", "40.0")),
+        "mt_lookback": int(os.getenv("MT_LOOKBACK", "2")),
+        "mt_use_limit_filter": os.getenv("MT_USE_LIMIT_FILTER", "true").lower() == "true",
+        "mt_long_limit": float(os.getenv("MT_LONG_LIMIT", "-20.0")),
+        "mt_short_limit": float(os.getenv("MT_SHORT_LIMIT", "20.0")),
+        "mt_use_accel": os.getenv("MT_USE_ACCEL", "true").lower() == "true",
+        "mt_accel": float(os.getenv("MT_ACCEL", "0.5")),
+        "mt_force_change": os.getenv("MT_FORCE_CHANGE", "true").lower() == "true",
+        "mt_direction_mode": os.getenv("MT_DIRECTION_MODE", "both"),
+        "mt_exit_mode": os.getenv("MT_EXIT_MODE", "flip"),
+        "mt_sl_usd": float(os.getenv("MT_SL_USD", "5.0")),   # fester SL: Verlust der Position in $ (0 = aus)
+        "mt_tp_usd": float(os.getenv("MT_TP_USD", "5.0")),   # fester TP: Gewinn der Position in $ (0 = aus); im Plan-Modus = Schritt (TP1 = 1x, TP2 = 2x, TP3 = 3x)
+        "mt_tp1_close_pct": float(os.getenv("MT_TP1_CLOSE_PCT", "33.0")),
+        "mt_tp2_close_pct": float(os.getenv("MT_TP2_CLOSE_PCT", "50.0")),
+        "mt_sl_to_breakeven_on_tp1": os.getenv("MT_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
+        "mt_sl_to_tp1_on_tp2": os.getenv("MT_SL_TO_TP1_ON_TP2", "true").lower() == "true",
+        "mt_sl_cooldown_seconds": float(os.getenv("MT_SL_COOLDOWN_SECONDS", "30.0")),
+
+        # ===== Pure Momentum Oscillator (entry_mode pure_momentum) =====
+        "pm_resolution": os.getenv("PM_RESOLUTION", "5m"),
+        "pm_len": int(os.getenv("PM_LEN", "45")),
+        "pm_long": float(os.getenv("PM_LONG", "0.05")),
+        "pm_short": float(os.getenv("PM_SHORT", "-0.05")),
+        "pm_direction_mode": os.getenv("PM_DIRECTION_MODE", "both"),
+        "pm_sl_usd": float(os.getenv("PM_SL_USD", "5.0")),   # fester SL: Verlust der Position in $ (0 = aus)
+        "pm_tp_usd": float(os.getenv("PM_TP_USD", "5.0")),   # fester TP: Gewinn der Position in $ (0 = aus)
+        "pm_trail_usd": float(os.getenv("PM_TRAIL_USD", "0")),   # Trailing-Stop-Abstand in $ (0 = aus)
+        "pm_sl_cooldown_seconds": float(os.getenv("PM_SL_COOLDOWN_SECONDS", "30.0")),
+
+        # ===== Dollar701 SuperTrend (entry_mode dollar701) =====
+        "dv_resolution": os.getenv("DV_RESOLUTION", "5m"),
+        "dv_sens": float(os.getenv("DV_SENS", "7.0")),   # Sensitivity 1-15, 2 Nachkommastellen (Perioden=(S+1)*10, Multiplikator=(S+1)/2)
+        "dv_direction_mode": os.getenv("DV_DIRECTION_MODE", "both"),
+        "dv_exit_mode": os.getenv("DV_EXIT_MODE", "sltp"),   # sltp = SL/TP/Trail | reverse = immer im Trade, Gegen-Signal dreht sofort
+        "dv_sl_usd": float(os.getenv("DV_SL_USD", "5.0")),
+        "dv_tp_usd": float(os.getenv("DV_TP_USD", "5.0")),
+        "dv_trail_usd": float(os.getenv("DV_TRAIL_USD", "0")),   # Trailing-Stop-Abstand in $ (0 = aus)
+        "dv_sl_cooldown_seconds": float(os.getenv("DV_SL_COOLDOWN_SECONDS", "30.0")),
+
+        # ===== Trendfolge (entry_mode trendfolge): Marktstruktur-Trend + rote/gruene Kerzen =====
+        "tfl_resolution": os.getenv("TFL_RESOLUTION", "1m"),        # Kerzen-Zeitebene (rot/gruen), ab 10s
+        "tfl_trend_tf": os.getenv("TFL_TREND_TF", "5m"),            # Trend-Zeitebene, ab 10s
+        "tfl_trend_mode": os.getenv("TFL_TREND_MODE", "swing"),     # swing | intern
+        "tfl_trend_ilen": 4, "tfl_trend_slen": 50,
+        "tfl_direction_mode": os.getenv("TFL_DIRECTION_MODE", "both"),
+        "tfl_tp_usd": float(os.getenv("TFL_TP_USD", "3.0")),        # fester TP: Gewinn der GESAMTEN Position in $ (0 = aus)
+        "tfl_sl_usd": float(os.getenv("TFL_SL_USD", "0")),          # optionaler fester SL: Verlust der Position in $ (0 = aus)
+        "tfl_max_entries": int(os.getenv("TFL_MAX_ENTRIES", "10")), # max. Kaeufe/Nachkaeufe je Position (0 = unbegrenzt)
+        "tfl_flip_mode": os.getenv("TFL_FLIP_MODE", "reverse"),     # reverse = bei Trendwechsel drehen + neu einsteigen | close = nur schliessen
+
+        # ===== Reaction Level Matrix (entry_mode rlm): Swing-Level + Ablehnung (Rejection) an Unterstuetzung/Widerstand =====
+        "vc_resolution": os.getenv("VC_RESOLUTION", "15m"),
+        "vc_ema_len": int(os.getenv("VC_EMA_LEN", "9")),
+        "vc_use_day": os.getenv("VC_USE_DAY", "true").lower() == "true",
+        "vc_use_week": os.getenv("VC_USE_WEEK", "false").lower() == "true",
+        "vc_use_month": os.getenv("VC_USE_MONTH", "false").lower() == "true",
+        "vc_skip_first": os.getenv("VC_SKIP_FIRST", "true").lower() == "true",   # ersten echten Cross nach Tag-/Wochen-/Monatsstart nicht handeln
+        "vc_direction_mode": os.getenv("VC_DIRECTION_MODE", "both"),
+        "vc_sl_mode": os.getenv("VC_SL_MODE", "kerze"),                # kerze = hinter der letzten ganzen Kerze auf der falschen VWAP-Seite | usd = fester $-Betrag
+        "vc_sl_candle_rule": os.getenv("VC_SL_CANDLE_RULE", "whole"),  # whole = ganze Kerze (Hoch<VWAP bzw. Tief>VWAP) | close = Schluss auf der falschen Seite
+        "vc_sl_buffer_pct": float(os.getenv("VC_SL_BUFFER_PCT", "0.0")),
+        "vc_sl_usd": float(os.getenv("VC_SL_USD", "5.0")),             # fester SL bzw. $-Limit bei Kerzen-SL (0 = kein Limit)
+        "vc_tp_mode": os.getenv("VC_TP_MODE", "kreuzung"),             # kreuzung | fester_betrag | gegentrade | aus
+        "vc_tp_usd": float(os.getenv("VC_TP_USD", "5.0")),
+        "vc_tp_vwap": os.getenv("VC_TP_VWAP", "d"),                    # welcher VWAP bei TP "kreuzung" zaehlt
+        "rlm_resolution": os.getenv("RLM_RESOLUTION", "5m"),
+        "rlm_swing_len": int(os.getenv("RLM_SWING_LEN", "6")),         # Balken links/rechts, die einen Swing bestaetigen
+        "rlm_level_tol": float(os.getenv("RLM_LEVEL_TOL", "0.6")),     # Level-Toleranz in x ATR(34)
+        "rlm_min_touches": int(os.getenv("RLM_MIN_TOUCHES", "2")),     # Swings, bis ein Level aktiv ist
+        "rlm_half_life": int(os.getenv("RLM_HALF_LIFE", "500")),       # Halbwertszeit der Level-Staerke in Kerzen
+        "rlm_levels_per_side": int(os.getenv("RLM_LEVELS_PER_SIDE", "3")),
+        "rlm_min_score": float(os.getenv("RLM_MIN_SCORE", "50")),      # Mindest-Score (0-100) eines Levels fuer Signale
+        "rlm_reject_clv": float(os.getenv("RLM_REJECT_CLV", "0.6")),   # Schluss im oberen/unteren Teil der Kerzenspanne
+        "rlm_cooldown": int(os.getenv("RLM_COOLDOWN", "10")),          # Kerzen Pause je Level zwischen zwei Signalen
+        "rlm_direction_mode": os.getenv("RLM_DIRECTION_MODE", "both"),
+        "rlm_sl_mode": os.getenv("RLM_SL_MODE", "usd"),                # usd = fester $-SL | wick = hinter dem Docht der Signalkerze (ATR-Puffer wie im Original)
+        "rlm_sl_usd": float(os.getenv("RLM_SL_USD", "5.0")),           # fester SL: Verlust der Position in $ (0 = kein SL)
+        "rlm_tp_usd": float(os.getenv("RLM_TP_USD", "5.0")),           # TP-Schritt in $ Gewinn: TP1 = 1x, TP2 = 2x, TP3 = 3x
+        "rlm_atr_len": int(os.getenv("RLM_ATR_LEN", "14")),            # nur fuer den Docht-SL
+        "rlm_tp1_r": float(os.getenv("RLM_TP1_R", "1.0")), "rlm_tp2_r": float(os.getenv("RLM_TP2_R", "2.0")), "rlm_tp3_r": float(os.getenv("RLM_TP3_R", "3.0")),   # nur Docht-SL: TPs als Vielfache des Risikos
+        "rlm_tp1_close_pct": float(os.getenv("RLM_TP1_CLOSE_PCT", "33")),   # 100 = TP1 schliesst alles
+        "rlm_tp2_close_pct": float(os.getenv("RLM_TP2_CLOSE_PCT", "50")),
+        "rlm_be_after_tp1": os.getenv("RLM_BE_AFTER_TP1", "true").lower() == "true",
+        "rlm_reverse": os.getenv("RLM_REVERSE", "true").lower() == "true",   # Gegen-Signal dreht die offene Position
+        "rlm_candle_type": os.getenv("RLM_CANDLE_TYPE", "normal"),   # normal | heikin (Signale auf Heikin-Ashi-Kerzen)
+        "rlm_trend_filter": os.getenv("RLM_TREND_FILTER", "off"),   # off | entry (nur Signale in Trendrichtung) | entry_close (zusaetzlich Position bei Trendwechsel schliessen)
+        "rlm_trend_tf": os.getenv("RLM_TREND_TF", "15m"),
+        "rlm_trend_mode": os.getenv("RLM_TREND_MODE", "swing"),      # swing | intern
+        "rlm_trend_ilen": 4, "rlm_trend_slen": 50,
+
+        # ================= RSI Signal =================
+        # Reine Handelsidee: RSI < oversold -> long, RSI > overbought -> short. Ausstieg identisch
+        # zu Al-Shatris Wechsel-System (Gegen-Signal dreht die Position, optionaler $-SL,
+        # optionales "SL auf Einstieg"). Trendfilter kommen aus dem generischen Filter-Baukasten -
+        # SuperTrend (eigene, meist hoehere Zeiteinheit), ADX (Trendstaerke/-richtung), MACD
+        # (bullisch/baerisch) - jeder einzeln zu- und abschaltbar.
+        "rsi_resolution": os.getenv("RSI_RESOLUTION", "5m"),
+        "rsi_length": int(os.getenv("RSI_LENGTH", "14")),
+        "rsi_oversold": float(os.getenv("RSI_OVERSOLD", "30")),
+        "rsi_overbought": float(os.getenv("RSI_OVERBOUGHT", "70")),
+        "rsi_direction_mode": os.getenv("RSI_DIRECTION_MODE", "both"),
+        "rsi_sl_enabled": os.getenv("RSI_SL_ENABLED", "true").lower() == "true",
+        "rsi_sl_manual_usd": float(os.getenv("RSI_SL_MANUAL_USD", "5.0")),
+        "rsi_be_enabled": os.getenv("RSI_BE_ENABLED", "false").lower() == "true",
+        "rsi_be_trigger_usd": float(os.getenv("RSI_BE_TRIGGER_USD", "5.0")),
+        "rsi_tp_enabled": os.getenv("RSI_TP_ENABLED", "false").lower() == "true",
+        "rsi_tp_manual_usd": float(os.getenv("RSI_TP_MANUAL_USD", "10.0")),
+        "rsi_sl_cooldown_seconds": float(os.getenv("RSI_SL_COOLDOWN_SECONDS", "30")),
+        "rsi_supertrend_filter_enabled": os.getenv("RSI_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",
+        "rsi_supertrend_filter_resolution": os.getenv("RSI_SUPERTREND_FILTER_RESOLUTION", "15m"),
+        "rsi_supertrend_filter_multiplier": float(os.getenv("RSI_SUPERTREND_FILTER_MULTIPLIER", "3.0")),
+        "rsi_supertrend_filter_atr_period": int(os.getenv("RSI_SUPERTREND_FILTER_ATR_PERIOD", "10")),
+        "rsi_adx_filter_enabled": os.getenv("RSI_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "rsi_adx_filter_length": int(os.getenv("RSI_ADX_FILTER_LENGTH", "14")),
+        "rsi_adx_filter_threshold": float(os.getenv("RSI_ADX_FILTER_THRESHOLD", "20")),
+        "rsi_adx_filter_directional": os.getenv("RSI_ADX_FILTER_DIRECTIONAL", "true").lower() == "true",
+        "rsi_macd_filter_enabled": os.getenv("RSI_MACD_FILTER_ENABLED", "false").lower() == "true",
+        "rsi_macd_filter_fast": int(os.getenv("RSI_MACD_FILTER_FAST", "12")),
+        "rsi_macd_filter_slow": int(os.getenv("RSI_MACD_FILTER_SLOW", "26")),
+        "rsi_macd_filter_signal": int(os.getenv("RSI_MACD_FILTER_SIGNAL", "9")),
+
+        # ================= Multi-VWAP Money-Flow Signal =================
+        # Composite-Oszillator aus Daily/Weekly/Monthly-VWAP-Abweichung + MFI/CMF (Original-
+        # Pine-Skript), EMA-geglaettet. Buy/Sell = der Oszillator dreht die Richtung. Ausstieg/
+        # Filter identisch zu RSI Signal (Wechsel-System, $-SL/-TP, Break-Even, SuperTrend/ADX/MACD).
+        "mvwap_resolution": os.getenv("MVWAP_RESOLUTION", "5m"),
+        "mvwap_use_daily": os.getenv("MVWAP_USE_DAILY", "true").lower() == "true",
+        "mvwap_use_weekly": os.getenv("MVWAP_USE_WEEKLY", "true").lower() == "true",
+        "mvwap_use_monthly": os.getenv("MVWAP_USE_MONTHLY", "true").lower() == "true",
+        "mvwap_w_daily": float(os.getenv("MVWAP_W_DAILY", "0.5")),
+        "mvwap_w_weekly": float(os.getenv("MVWAP_W_WEEKLY", "0.3")),
+        "mvwap_w_monthly": float(os.getenv("MVWAP_W_MONTHLY", "0.2")),
+        "mvwap_mf_source": os.getenv("MVWAP_MF_SOURCE", "MFI"),
+        "mvwap_mf_length": int(os.getenv("MVWAP_MF_LENGTH", "14")),
+        "mvwap_cmf_length": int(os.getenv("MVWAP_CMF_LENGTH", "20")),
+        "mvwap_mf_weight": float(os.getenv("MVWAP_MF_WEIGHT", "0.35")),
+        "mvwap_smooth_len": int(os.getenv("MVWAP_SMOOTH_LEN", "3")),
+        "mvwap_use_zone_filter": os.getenv("MVWAP_USE_ZONE_FILTER", "false").lower() == "true",
+        "mvwap_ob_level": float(os.getenv("MVWAP_OB_LEVEL", "2.0")),
+        "mvwap_os_level": float(os.getenv("MVWAP_OS_LEVEL", "-2.0")),
+        "mvwap_direction_mode": os.getenv("MVWAP_DIRECTION_MODE", "both"),
+        "mvwap_max_entries": int(os.getenv("MVWAP_MAX_ENTRIES", "1")),
+        "mvwap_nachkauf_min_abstand_usd": float(os.getenv("MVWAP_NACHKAUF_MIN_ABSTAND_USD", "0")),  # 0 = aus
+        "mvwap_sl_enabled": os.getenv("MVWAP_SL_ENABLED", "true").lower() == "true",
+        "mvwap_sl_manual_usd": float(os.getenv("MVWAP_SL_MANUAL_USD", "5.0")),
+        "mvwap_tp_enabled": os.getenv("MVWAP_TP_ENABLED", "false").lower() == "true",
+        "mvwap_tp_manual_usd": float(os.getenv("MVWAP_TP_MANUAL_USD", "10.0")),
+        "mvwap_be_enabled": os.getenv("MVWAP_BE_ENABLED", "false").lower() == "true",
+        "mvwap_be_trigger_usd": float(os.getenv("MVWAP_BE_TRIGGER_USD", "5.0")),
+        "mvwap_sl_cooldown_seconds": float(os.getenv("MVWAP_SL_COOLDOWN_SECONDS", "30")),
+        "mvwap_supertrend_filter_enabled": os.getenv("MVWAP_SUPERTREND_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_supertrend_filter_resolution": os.getenv("MVWAP_SUPERTREND_FILTER_RESOLUTION", "15m"),
+        "mvwap_supertrend_filter_multiplier": float(os.getenv("MVWAP_SUPERTREND_FILTER_MULTIPLIER", "3.0")),
+        "mvwap_supertrend_filter_atr_period": int(os.getenv("MVWAP_SUPERTREND_FILTER_ATR_PERIOD", "10")),
+        "mvwap_adx_filter_enabled": os.getenv("MVWAP_ADX_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_adx_filter_length": int(os.getenv("MVWAP_ADX_FILTER_LENGTH", "14")),
+        "mvwap_adx_filter_threshold": float(os.getenv("MVWAP_ADX_FILTER_THRESHOLD", "20")),
+        "mvwap_adx_filter_directional": os.getenv("MVWAP_ADX_FILTER_DIRECTIONAL", "true").lower() == "true",
+        "mvwap_adx_filter_mode": os.getenv("MVWAP_ADX_FILTER_MODE", "require_trend"),  # "require_trend" (Standard, alt) oder "avoid_trend" (neu - pausiert bei starkem Trend)
+        "mvwap_macd_filter_enabled": os.getenv("MVWAP_MACD_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_macd_filter_fast": int(os.getenv("MVWAP_MACD_FILTER_FAST", "12")),
+        "mvwap_macd_filter_slow": int(os.getenv("MVWAP_MACD_FILTER_SLOW", "26")),
+        "mvwap_macd_filter_signal": int(os.getenv("MVWAP_MACD_FILTER_SIGNAL", "9")),
+        # RSI-Ueberdehnungsfilter (aus dem Pine-Skript "MVWAP-MF Osc" portiert): Long erst wenn RSI
+        # unter os_level, Short erst wenn RSI ueber ob_level - zusaetzlich zur bestehenden OB/OS-
+        # Zone auf dem Oszillator selbst (mvwap_use_zone_filter), unabhaengig davon an/abschaltbar.
+        "mvwap_rsi_filter_enabled": os.getenv("MVWAP_RSI_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_rsi_filter_length": int(os.getenv("MVWAP_RSI_FILTER_LENGTH", "14")),
+        "mvwap_rsi_filter_os_level": float(os.getenv("MVWAP_RSI_FILTER_OS_LEVEL", "30")),
+        "mvwap_rsi_filter_ob_level": float(os.getenv("MVWAP_RSI_FILTER_OB_LEVEL", "70")),
+        # Cloud-Filter (VWAP-Deviation-Baender, aus dem "[Hoss] VWAP+RSI+Hull+DI System"-Skript
+        # portiert): Short erst wenn der Kurs zuvor das obere Band beruehrt hat, Long erst nach
+        # Beruehrung des unteren Bandes - bleibt scharf geschaltet bis zur jeweiligen Gegenseite.
+        "mvwap_cloud_filter_enabled": os.getenv("MVWAP_CLOUD_FILTER_ENABLED", "false").lower() == "true",
+        "mvwap_cloud_filter_length": int(os.getenv("MVWAP_CLOUD_FILTER_LENGTH", "60")),
+        "mvwap_cloud_filter_dev_mult": float(os.getenv("MVWAP_CLOUD_FILTER_DEV_MULT", "2.0")),
+        "mvwap_cloud_filter_touch_arm": os.getenv("MVWAP_CLOUD_FILTER_TOUCH_ARM", "false").lower() == "true",
+        # Ausstiegs-Modus: "flip" = Wechsel bei Gegen-Signal (immer im Markt) + optionaler fester
+        # Dollar-SL; "plan" = wie das Original-Skript (ATR-SL + TP1/TP2/TP3 mit Teilverkaeufen).
+        "ab_exit_mode": os.getenv("AB_EXIT_MODE", "flip"),
+        # flip-Modus: fester Dollar-SL, abschaltbar (Verlust der Position in USD beim SL, Preisabstand =
+        # Betrag / Positionsgroesse, wie bei MO7/UTB u.a.). Aus = Ausstieg nur per Gegen-Signal.
+        "ab_sl_enabled": os.getenv("AB_SL_ENABLED", "true").lower() == "true",
+        "ab_sl_manual_usd": float(os.getenv("AB_SL_MANUAL_USD", "5.0")),
+        # flip-Modus: sobald die Position um diesen Dollar-Betrag im Gewinn ist, wird der SL auf den
+        # Einstiegskurs gesetzt (Break-Even). Auch ohne festen $-SL nutzbar.
+        "ab_be_enabled": os.getenv("AB_BE_ENABLED", "false").lower() == "true",
+        "ab_be_trigger_usd": float(os.getenv("AB_BE_TRIGGER_USD", "5.0")),
+        # plan-Modus: SL = ATR x Multiplikator, TP1/TP2/TP3 = Risiko x r1/r2/r3 (bei Preset "custom" frei
+        # einstellbar, sonst aus dem Preset). TP1/TP2 = echte Teilverkaeufe, beide Prozentsaetze sowie die
+        # zwei SL-Nachzieh-Stufen (Break-Even bei TP1, SL-auf-TP1 bei TP2) einzeln abschaltbar.
+        "ab_atr_mult": float(os.getenv("AB_ATR_MULT", "1.5")),
+        "ab_r1": float(os.getenv("AB_R1", "1.0")),
+        "ab_r2": float(os.getenv("AB_R2", "2.0")),
+        "ab_r3": float(os.getenv("AB_R3", "3.0")),
+        "ab_tp1_close_pct": float(os.getenv("AB_TP1_CLOSE_PCT", "33")),
+        "ab_tp2_close_pct": float(os.getenv("AB_TP2_CLOSE_PCT", "50")),
+        "ab_sl_to_breakeven_on_tp1": os.getenv("AB_SL_TO_BREAKEVEN_ON_TP1", "true").lower() == "true",
+        "ab_sl_to_tp1_on_tp2": os.getenv("AB_SL_TO_TP1_ON_TP2", "true").lower() == "true",
+        # Optionaler uebergeordneter SuperTrend-Trendfilter (eigene, hoehere Zeiteinheit) - wie bei
+        # [Hoss] VWAP+RSI+Hull+DI: Long nur wenn SuperTrend dort bullisch, Short nur wenn baerisch.
+        "ab_trend_filter_enabled": os.getenv("AB_TREND_FILTER_ENABLED", "false").lower() == "true",
+        "ab_trend_filter_resolution": os.getenv("AB_TREND_FILTER_RESOLUTION", "15m"),
+        "ab_trend_filter_atr_period": int(os.getenv("AB_TREND_FILTER_ATR_PERIOD", "10")),
+        "ab_trend_filter_multiplier": float(os.getenv("AB_TREND_FILTER_MULTIPLIER", "3.0")),
+        # Optionaler ASO-Sentiment-Filter (Nutzer-eigener "Average Sentiment Oscillator"-Pine-
+        # Indikator, siehe compute_aso_filter) - Long nur wenn ASOBulls>ASOBears, Short umgekehrt.
+        "ab_aso_filter_enabled": os.getenv("AB_ASO_FILTER_ENABLED", "false").lower() == "true",
+        "ab_aso_filter_length": int(os.getenv("AB_ASO_FILTER_LENGTH", "10")),
+        "ab_aso_filter_mode": int(os.getenv("AB_ASO_FILTER_MODE", "0")),
+        "ab_aso_filter_confirm_bars": int(os.getenv("AB_ASO_FILTER_CONFIRM_BARS", "1")),
         # Diamond Algo (portiert aus dem gleichnamigen Pine-v5-Indikator) - nur der Signal-Kern:
         # SuperTrend(Sensitivity*2, ATR-Periode) + SMA-Filter, optionaler 200er-EMA-Trendfilter
         # fuer "Smart"-Signale (im Original nur Label-Text, hier ein echter Filter). SL/TP
         # ATR-basiert wie im Original (atrBand = ta.atr(atrLen) * atrRisk), TP als R:R-Vielfaches:
-        "da_resolution": os.getenv("DA_RESOLUTION", "5m"),
-        "da_atr_period": int(os.getenv("DA_ATR_PERIOD", "11")),
-        "da_sensitivity": float(os.getenv("DA_SENSITIVITY", "2.0")),
-        "da_sma_period": int(os.getenv("DA_SMA_PERIOD", "13")),
-        "da_ema_trend_period": int(os.getenv("DA_EMA_TREND_PERIOD", "200")),
-        "da_signal_mode": os.getenv("DA_SIGNAL_MODE", "all"),  # "all" oder "smart_only"
-        "da_entry_trigger": os.getenv("DA_ENTRY_TRIGGER", "candle_close"),
-        "da_exit_trigger": os.getenv("DA_EXIT_TRIGGER", "candle_close"),
-        "da_invert_direction": os.getenv("DA_INVERT_DIRECTION", "false").lower() == "true",
-        "da_sl_enabled": os.getenv("DA_SL_ENABLED", "true").lower() == "true",
-        "da_tp_enabled": os.getenv("DA_TP_ENABLED", "true").lower() == "true",
-        "da_risk_atr_period": int(os.getenv("DA_RISK_ATR_PERIOD", "14")),
-        "da_risk_mult": float(os.getenv("DA_RISK_MULT", "1.0")),
-        "da_tp_rr": float(os.getenv("DA_TP_RR", "2.0")),
-        "da_sl_cooldown_seconds": float(os.getenv("DA_SL_COOLDOWN_SECONDS", "30")),
-        "da_use_heikin_ashi": os.getenv("DA_USE_HEIKIN_ASHI", "false").lower() == "true",
         # ELTE Smart (portiert aus dem gleichnamigen Pine-v5-Indikator, nur "Normal"-Modus):
         # SuperTrend(ohlc4) mit automatisch aus der Marktvolatilitaet abgeleiteter Sensitivity.
         # TP1(50%)->Break-Even, TP2(50% vom Rest=25% gesamt)->SL auf TP1, TP3(Rest):
-        "es_resolution": os.getenv("ES_RESOLUTION", "5m"),
-        "es_atr_period": int(os.getenv("ES_ATR_PERIOD", "10")),
-        "es_auto_sensitivity": os.getenv("ES_AUTO_SENSITIVITY", "true").lower() == "true",
-        "es_sensitivity": float(os.getenv("ES_SENSITIVITY", "3.0")),
-        "es_vol_period": int(os.getenv("ES_VOL_PERIOD", "10")),
-        "es_vol_ma_len": int(os.getenv("ES_VOL_MA_LEN", "55")),
-        "es_entry_trigger": os.getenv("ES_ENTRY_TRIGGER", "candle_close"),
-        "es_exit_trigger": os.getenv("ES_EXIT_TRIGGER", "candle_close"),
-        "es_invert_direction": os.getenv("ES_INVERT_DIRECTION", "false").lower() == "true",
-        "es_risk_atr_period": int(os.getenv("ES_RISK_ATR_PERIOD", "14")),
-        "es_risk_mult": float(os.getenv("ES_RISK_MULT", "2.2")),
-        "es_tp1_close_pct": float(os.getenv("ES_TP1_CLOSE_PCT", "50")),
-        "es_tp2_close_pct": float(os.getenv("ES_TP2_CLOSE_PCT", "50")),
-        "es_tp1_rr": float(os.getenv("ES_TP1_RR", "1.0")),
-        "es_tp2_rr": float(os.getenv("ES_TP2_RR", "2.0")),
-        "es_tp3_rr": float(os.getenv("ES_TP3_RR", "3.0")),
-        "es_sl_cooldown_seconds": float(os.getenv("ES_SL_COOLDOWN_SECONDS", "30")),
-        "es_reenter_on_flip": os.getenv("ES_REENTER_ON_FLIP", "false").lower() == "true",
-        "es_sl_enabled": os.getenv("ES_SL_ENABLED", "true").lower() == "true",
-        "es_tp_enabled": os.getenv("ES_TP_ENABLED", "true").lower() == "true",
-        "es_sl_mode": os.getenv("ES_SL_MODE", "atr"),  # "atr" oder "manual"
-        "es_sl_manual_usd": float(os.getenv("ES_SL_MANUAL_USD", "5.0")),
-        "es_tp_mode": os.getenv("ES_TP_MODE", "atr"),  # "atr" (TP1/TP2/TP3-Stufen) oder "manual" (ein einzelnes festes $-Ziel)
-        "es_tp_manual_usd": float(os.getenv("ES_TP_MANUAL_USD", "5.0")),
-        "es_breakeven_pct_enabled": os.getenv("ES_BREAKEVEN_PCT_ENABLED", "false").lower() == "true",
-        "es_breakeven_trigger_pct": float(os.getenv("ES_BREAKEVEN_TRIGGER_PCT", "0.1")),
-        "cp_resolution": os.getenv("CP_RESOLUTION", "5m"),
-        "cp_signal_source": os.getenv("CP_SIGNAL_SOURCE", "three_line_strike"),  # "three_line_strike" | "engulfing" | "both"
-        "cp_three_line_strict": os.getenv("CP_THREE_LINE_STRICT", "true").lower() == "true",
-        "cp_engulfing_strict": os.getenv("CP_ENGULFING_STRICT", "true").lower() == "true",
-        "cp_direction_mode": os.getenv("CP_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
-        "cp_flip_exit_enabled": os.getenv("CP_FLIP_EXIT_ENABLED", "true").lower() == "true",
-        "cp_risk_atr_period": int(os.getenv("CP_RISK_ATR_PERIOD", "14")),
-        "cp_risk_mult": float(os.getenv("CP_RISK_MULT", "1.5")),
-        "cp_tp_rr": float(os.getenv("CP_TP_RR", "1.0")),
-        "cp_sl_enabled": os.getenv("CP_SL_ENABLED", "true").lower() == "true",
-        "cp_sl_mode": os.getenv("CP_SL_MODE", "atr"),  # "atr" oder "manual"
-        "cp_sl_manual_usd": float(os.getenv("CP_SL_MANUAL_USD", "5.0")),
-        "cp_tp_enabled": os.getenv("CP_TP_ENABLED", "true").lower() == "true",
-        "cp_tp_mode": os.getenv("CP_TP_MODE", "atr"),  # "atr" oder "manual"
-        "cp_tp_manual_usd": float(os.getenv("CP_TP_MANUAL_USD", "5.0")),
-        "cp_sl_cooldown_seconds": float(os.getenv("CP_SL_COOLDOWN_SECONDS", "30")),
-        "cp_breakeven_enabled": os.getenv("CP_BREAKEVEN_ENABLED", "true").lower() == "true",
-        "cp_breakeven_trigger_mult": float(os.getenv("CP_BREAKEVEN_TRIGGER_MULT", "0.5")),
-        "mo7_resolution": os.getenv("MO7_RESOLUTION", "5m"),
-        "mo7_entry_mode": os.getenv("MO7_ENTRY_MODE", "threshold_cross"),  # "threshold_cross" | "five_candle_sum"
-        "mo7_rsi_len": int(os.getenv("MO7_RSI_LEN", "14")),
-        "mo7_stoch_len": int(os.getenv("MO7_STOCH_LEN", "14")),
-        "mo7_wpr_len": int(os.getenv("MO7_WPR_LEN", "14")),
-        "mo7_mfi_len": int(os.getenv("MO7_MFI_LEN", "14")),
-        "mo7_macd_fast": int(os.getenv("MO7_MACD_FAST", "12")),
-        "mo7_macd_slow": int(os.getenv("MO7_MACD_SLOW", "26")),
-        "mo7_buy_threshold": float(os.getenv("MO7_BUY_THRESHOLD", "20")),
-        "mo7_sell_threshold": float(os.getenv("MO7_SELL_THRESHOLD", "85")),
-        "mo7_sum_low": float(os.getenv("MO7_SUM_LOW", "100")),
-        "mo7_sum_high": float(os.getenv("MO7_SUM_HIGH", "400")),
-        "mo7_trend_threshold": float(os.getenv("MO7_TREND_THRESHOLD", "55")),
-        "mo7_trend_deadband": float(os.getenv("MO7_TREND_DEADBAND", "0")),
-        "mo7_direction_mode": os.getenv("MO7_DIRECTION_MODE", "both"),
-        "mo7_flip_exit_enabled": os.getenv("MO7_FLIP_EXIT_ENABLED", "true").lower() == "true",
-        "mo7_sl_enabled": os.getenv("MO7_SL_ENABLED", "true").lower() == "true",
-        "mo7_sl_manual_usd": float(os.getenv("MO7_SL_MANUAL_USD", "5.0")),
-        "mo7_tp_enabled": os.getenv("MO7_TP_ENABLED", "true").lower() == "true",
-        "mo7_tp_manual_usd": float(os.getenv("MO7_TP_MANUAL_USD", "5.0")),
-        "mo7_sl_cooldown_seconds": float(os.getenv("MO7_SL_COOLDOWN_SECONDS", "30")),
-        "utb_resolution": os.getenv("UTB_RESOLUTION", "5m"),
-        "utb_atr_period": int(os.getenv("UTB_ATR_PERIOD", "1")),
-        "utb_sensitivity": float(os.getenv("UTB_SENSITIVITY", "1.0")),
-        "utb_heikin_ashi": os.getenv("UTB_HEIKIN_ASHI", "false").lower() == "true",
-        "utb_hull_period": int(os.getenv("UTB_HULL_PERIOD", "31")),
-        "utb_flip_trigger": os.getenv("UTB_FLIP_TRIGGER", "hull_color"),  # "hull_color" | "hull_and_signal" | "opposite_signal" | "signal_only"
-        "utb_direction_mode": os.getenv("UTB_DIRECTION_MODE", "both"),
-        "utb_sl_enabled": os.getenv("UTB_SL_ENABLED", "false").lower() == "true",
-        "utb_sl_manual_usd": float(os.getenv("UTB_SL_MANUAL_USD", "5.0")),
-        "utb_sl_cooldown_seconds": float(os.getenv("UTB_SL_COOLDOWN_SECONDS", "30")),
-        "utb_tp_enabled": os.getenv("UTB_TP_ENABLED", "false").lower() == "true",
-        "utb_tp_manual_usd": float(os.getenv("UTB_TP_MANUAL_USD", "10.0")),
-        "utb_trail_tp_enabled": os.getenv("UTB_TRAIL_TP_ENABLED", "false").lower() == "true",
-        "utb_trail_tp_activation_pct": float(os.getenv("UTB_TRAIL_TP_ACTIVATION_PCT", "0.5")),
-        "utb_trail_tp_step_pct": float(os.getenv("UTB_TRAIL_TP_STEP_PCT", "0.3")),
-        "utb_mtf_filter_enabled": os.getenv("UTB_MTF_FILTER_ENABLED", "false").lower() == "true",
-        "utb_mtf_tf1": os.getenv("UTB_MTF_TF1", "1m"),  # wie bei Pieki Algo: bis zu 3 Zeiteinheiten gemittelt
-        "utb_mtf_tf2": os.getenv("UTB_MTF_TF2", "2m"),
-        "utb_mtf_tf3": os.getenv("UTB_MTF_TF3", "3m"),  # "off" = diese TF nicht mit einbeziehen
-        "utb_mtf_fast_len": int(os.getenv("UTB_MTF_FAST_LEN", "5")),
-        "utb_mtf_slow_len": int(os.getenv("UTB_MTF_SLOW_LEN", "9")),
-        "utb_mtf_atr_len": int(os.getenv("UTB_MTF_ATR_LEN", "14")),
-        "utb_mtf_long_threshold": float(os.getenv("UTB_MTF_LONG_THRESHOLD", "0.5")),
-        "utb_mtf_short_threshold": float(os.getenv("UTB_MTF_SHORT_THRESHOLD", "-0.5")),
-        "utb_instant_trigger_enabled": os.getenv("UTB_INSTANT_TRIGGER_ENABLED", "false").lower() == "true",  # feuert sofort bei einem Flip in der noch laufenden Kerze, statt bis zum Kerzenschluss zu warten (nur bei normalen Minuten-Aufloesungen, nicht bei Sekunden-Zeitrahmen)
-        "utb_zscore_filter_enabled": os.getenv("UTB_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
-        "utb_zscore_resolution": os.getenv("UTB_ZSCORE_RESOLUTION", "same"),
-        "utb_zscore_lookback": int(os.getenv("UTB_ZSCORE_LOOKBACK", "20")),
-        "utb_zscore_smooth": int(os.getenv("UTB_ZSCORE_SMOOTH", "3")),
-        "utb_rsi_filter_enabled": os.getenv("UTB_RSI_FILTER_ENABLED", "false").lower() == "true",
-        "utb_rsi_length": int(os.getenv("UTB_RSI_LENGTH", "14")),
-        "utb_rsi_midline": float(os.getenv("UTB_RSI_MIDLINE", "50")),
-        "utb_adx_filter_enabled": os.getenv("UTB_ADX_FILTER_ENABLED", "false").lower() == "true",
-        "utb_adx_length": int(os.getenv("UTB_ADX_LENGTH", "14")),
-        "utb_adx_threshold": float(os.getenv("UTB_ADX_THRESHOLD", "20")),
-        "wtc_resolution": os.getenv("WTC_RESOLUTION", "5m"),
-        "wtc_channel_len": int(os.getenv("WTC_CHANNEL_LEN", "9")),
-        "wtc_average_len": int(os.getenv("WTC_AVERAGE_LEN", "12")),
-        "wtc_ma_len": int(os.getenv("WTC_MA_LEN", "3")),
-        "wtc_os_level": float(os.getenv("WTC_OS_LEVEL", "-53")),
-        "wtc_ob_level": float(os.getenv("WTC_OB_LEVEL", "53")),
-        "wtc_require_zone": os.getenv("WTC_REQUIRE_ZONE", "true").lower() == "true",
-        "wtc_direction_mode": os.getenv("WTC_DIRECTION_MODE", "both"),
-        "wtc_always_in_market": os.getenv("WTC_ALWAYS_IN_MARKET", "false").lower() == "true",
-        "wtc_flip_exit_enabled": os.getenv("WTC_FLIP_EXIT_ENABLED", "true").lower() == "true",
-        "wtc_sl_enabled": os.getenv("WTC_SL_ENABLED", "true").lower() == "true",
-        "wtc_sl_manual_usd": float(os.getenv("WTC_SL_MANUAL_USD", "5.0")),
-        "wtc_tp_enabled": os.getenv("WTC_TP_ENABLED", "true").lower() == "true",
-        "wtc_tp_manual_usd": float(os.getenv("WTC_TP_MANUAL_USD", "5.0")),
-        "wtc_sl_cooldown_seconds": float(os.getenv("WTC_SL_COOLDOWN_SECONDS", "30")),
-        "pk_resolution": os.getenv("PK_RESOLUTION", "5m"),
-        "pk_sensitivity": float(os.getenv("PK_SENSITIVITY", "3.0")),  # Original-Pine-Default "Sensivity" (Faktor = sensitivity*2)
-        "pk_atr_period": int(os.getenv("PK_ATR_PERIOD", "11")),  # Original fest auf 11 verdrahtet, hier einstellbar
-        "pk_sma_period": int(os.getenv("PK_SMA_PERIOD", "13")),  # sma9 im Original (13-Perioden-SMA trotz des Namens)
-        "pk_direction_mode": os.getenv("PK_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
-        "pk_exit_mode": os.getenv("PK_EXIT_MODE", "flip"),  # "flip" (immer im Markt, Wechsel bei Gegen-Signal) | "fixed_tp_sl"
-        "pk_sl_enabled": os.getenv("PK_SL_ENABLED", "true").lower() == "true",
-        "pk_sl_manual_usd": float(os.getenv("PK_SL_MANUAL_USD", "5.0")),
-        "pk_tp_enabled": os.getenv("PK_TP_ENABLED", "true").lower() == "true",
-        "pk_tp_manual_usd": float(os.getenv("PK_TP_MANUAL_USD", "10.0")),
-        "pk_sl_cooldown_seconds": float(os.getenv("PK_SL_COOLDOWN_SECONDS", "30")),
-        "pk_trailing_enabled": os.getenv("PK_TRAILING_ENABLED", "false").lower() == "true",
-        "pk_trailing_activation_pct": float(os.getenv("PK_TRAILING_ACTIVATION_PCT", "0.2")),  # Trade muss um X% im Profit sein, bevor Trailing aktiviert (SL -> Breakeven)
-        "pk_trailing_step_pct": float(os.getenv("PK_TRAILING_STEP_PCT", "0.2")),  # danach wird der SL im Abstand von X% zum bisherigen Best-Preis nachgezogen
-        "pk_mtf_filter_enabled": os.getenv("PK_MTF_FILTER_ENABLED", "false").lower() == "true",
-        "pk_mtf_tf1": os.getenv("PK_MTF_TF1", "1m"),  # bis zu 3 Zeiteinheiten, wie "Block 1" im Original (avgB1 = Durchschnitt aus 3 TFs)
-        "pk_mtf_tf2": os.getenv("PK_MTF_TF2", "2m"),
-        "pk_mtf_tf3": os.getenv("PK_MTF_TF3", "3m"),  # "off" = diese TF nicht mit einbeziehen
-        "pk_mtf_fast_len": int(os.getenv("PK_MTF_FAST_LEN", "5")),
-        "pk_mtf_slow_len": int(os.getenv("PK_MTF_SLOW_LEN", "9")),
-        "pk_mtf_atr_len": int(os.getenv("PK_MTF_ATR_LEN", "14")),
-        "pk_mtf_long_threshold": float(os.getenv("PK_MTF_LONG_THRESHOLD", "0.5")),
-        "pk_mtf_short_threshold": float(os.getenv("PK_MTF_SHORT_THRESHOLD", "-0.5")),
-        "fr_resolution": os.getenv("FR_RESOLUTION", "5m"),
-        "fr_periods": int(os.getenv("FR_PERIODS", "2")),  # "n" im Original-Pine-Script (Kerzen links+rechts fuer die Fraktal-Bestaetigung)
-        "fr_direction_mode": os.getenv("FR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
-        "fr_invert_direction": os.getenv("FR_INVERT_DIRECTION", "false").lower() == "true",  # Tief-Fraktal=Verkauf, Hoch-Fraktal=Kauf statt umgekehrt
-        "fr_zscore_filter_enabled": os.getenv("FR_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
-        "fr_zscore_resolution": os.getenv("FR_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
-        "fr_zscore_lookback": int(os.getenv("FR_ZSCORE_LOOKBACK", "20")),
-        "fr_zscore_smooth": int(os.getenv("FR_ZSCORE_SMOOTH", "3")),
-        "fr_sl_enabled": os.getenv("FR_SL_ENABLED", "false").lower() == "true",
-        "fr_sl_manual_usd": float(os.getenv("FR_SL_MANUAL_USD", "5.0")),
-        "fr_sl_cooldown_seconds": float(os.getenv("FR_SL_COOLDOWN_SECONDS", "30")),
-        "fr_tp_enabled": os.getenv("FR_TP_ENABLED", "false").lower() == "true",
-        "fr_tp_manual_usd": float(os.getenv("FR_TP_MANUAL_USD", "10.0")),
-        "fr_adx_filter_enabled": os.getenv("FR_ADX_FILTER_ENABLED", "false").lower() == "true",
-        "fr_adx_resolution": os.getenv("FR_ADX_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "3m"/"1h" - gröberer Zeitrahmen als der Handels-Zeitrahmen ergibt einen stabileren Trendfilter
-        "fr_adx_length": int(os.getenv("FR_ADX_LENGTH", "14")),
-        "fr_adx_threshold": float(os.getenv("FR_ADX_THRESHOLD", "20")),
-        "fr_adx_invert_enabled": os.getenv("FR_ADX_INVERT_ENABLED", "false").lower() == "true",  # tauscht +DI/-DI: normal = +DI>-DI erlaubt Long, invertiert = -DI>+DI erlaubt Long
-        "fr_mtf_filter_enabled": os.getenv("FR_MTF_FILTER_ENABLED", "false").lower() == "true",
-        "fr_mtf_tf1": os.getenv("FR_MTF_TF1", "off"),  # uebergeordneter Zeitrahmen, "off" = kein Filter
-        "fr_mtf_fast_len": int(os.getenv("FR_MTF_FAST_LEN", "5")),
-        "fr_mtf_slow_len": int(os.getenv("FR_MTF_SLOW_LEN", "9")),
-        "fr_mtf_atr_len": int(os.getenv("FR_MTF_ATR_LEN", "14")),
-        "fr_mtf_long_threshold": float(os.getenv("FR_MTF_LONG_THRESHOLD", "0.5")),
-        "fr_mtf_short_threshold": float(os.getenv("FR_MTF_SHORT_THRESHOLD", "-0.5")),
-        "fr_flatten_on_block_enabled": os.getenv("FR_FLATTEN_ON_BLOCK_ENABLED", "true").lower() == "true",  # AN (Standard) = Position bei blockiertem Flip glattstellen. AUS = Signal ignorieren, Position bleibt offen bis ein Flip moeglich ist
-        "fr_dca_enabled": os.getenv("FR_DCA_ENABLED", "false").lower() == "true",  # Nachkauf bei weiterem Signal in DERSELBEN Richtung waehrend die Position noch offen ist
-        "fr_dca_max_entries": int(os.getenv("FR_DCA_MAX_ENTRIES", "3")),
-        "fr_dca_step_usd": float(os.getenv("FR_DCA_STEP_USD", "250.0")),  # Mindest-$-Preisabstand zum aktuellen Durchschnitt, bevor die naechste Nachkauf-Stufe erlaubt ist (0 = kein Mindestabstand)
-        "cd_resolution": os.getenv("CD_RESOLUTION", "1m"),
-        "cd_threshold": float(os.getenv("CD_THRESHOLD", "50")),  # Konviktions-Score (-100..100) muss diese Schwelle kreuzen
-        "cd_rejection_mult": float(os.getenv("CD_REJECTION_MULT", "1.5")),  # Docht muss X-mal so lang wie der Koerper sein, um als Ablehnung (Hammer/Shooting-Star) zu zaehlen
-        "cd_direction_mode": os.getenv("CD_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
-        "cd_invert_direction": os.getenv("CD_INVERT_DIRECTION", "false").lower() == "true",  # Kontra-Modus wie bei ELTE Smart: vertauscht buy_signal/sell_signal komplett (bullische Kerze -> Short, bearische Kerze -> Long)
-        "cd_zscore_filter_enabled": os.getenv("CD_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
-        "cd_zscore_resolution": os.getenv("CD_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
-        "cd_zscore_lookback": int(os.getenv("CD_ZSCORE_LOOKBACK", "20")),
-        "cd_zscore_smooth": int(os.getenv("CD_ZSCORE_SMOOTH", "3")),
-        "cd_rsi_filter_enabled": os.getenv("CD_RSI_FILTER_ENABLED", "false").lower() == "true",  # RSI-Regime-Filter: RSI > Mittellinie -> nur Long, RSI < Mittellinie -> nur Short (auf demselben Zeitrahmen wie das Kerzen-DNA-Signal)
-        "cd_rsi_length": int(os.getenv("CD_RSI_LENGTH", "14")),
-        "cd_rsi_midline": float(os.getenv("CD_RSI_MIDLINE", "50")),
-        "cd_adx_filter_enabled": os.getenv("CD_ADX_FILTER_ENABLED", "false").lower() == "true",  # ADX/DI-Trendfilter: ADX > Schwelle UND +DI>-DI -> nur Long, ADX > Schwelle UND -DI>+DI -> nur Short (sonst, inkl. ADX unter Schwelle = kein klarer Trend, BEIDE Richtungen gesperrt)
-        "cd_adx_length": int(os.getenv("CD_ADX_LENGTH", "14")),
-        "cd_adx_threshold": float(os.getenv("CD_ADX_THRESHOLD", "20")),
-        "cd_sl_enabled": os.getenv("CD_SL_ENABLED", "false").lower() == "true",
-        "cd_sl_manual_usd": float(os.getenv("CD_SL_MANUAL_USD", "5.0")),
-        "cd_sl_cooldown_seconds": float(os.getenv("CD_SL_COOLDOWN_SECONDS", "30")),
-        "cd_tp_enabled": os.getenv("CD_TP_ENABLED", "false").lower() == "true",  # ohne TP ist der einzige Ausstieg die naechste GEGENSAETZLICHE Extrem-Kerze - ein bereits profitabler Trade kann komplett zurücklaufen, bevor ein Gegensignal kommt
-        "cd_tp_manual_usd": float(os.getenv("CD_TP_MANUAL_USD", "10.0")),
-        "cd_use_heikin_ashi": os.getenv("CD_USE_HEIKIN_ASHI", "false").lower() == "true",  # Score wird auf HA-Kerzen berechnet, Ein-/Ausstieg trotzdem immer zum echten Kurs
-        "rf_resolution": os.getenv("RF_RESOLUTION", "5m"),
-        "rf_period": int(os.getenv("RF_PERIOD", "20")),  # "Swing Period" (n) im Original-Pine-Script
-        "rf_qty": float(os.getenv("RF_QTY", "3.5")),  # "Swing Multiplier" (qty) im Original-Pine-Script
-        "rf_direction_mode": os.getenv("RF_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
-        "rf_zscore_filter_enabled": os.getenv("RF_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
-        "rf_zscore_resolution": os.getenv("RF_ZSCORE_RESOLUTION", "same"),  # "same" = eigener Handels-Zeitrahmen, sonst z.B. "15m"/"1h"
-        "rf_zscore_lookback": int(os.getenv("RF_ZSCORE_LOOKBACK", "20")),
-        "rf_zscore_smooth": int(os.getenv("RF_ZSCORE_SMOOTH", "3")),
-        "rf_rsi_filter_enabled": os.getenv("RF_RSI_FILTER_ENABLED", "false").lower() == "true",
-        "rf_rsi_length": int(os.getenv("RF_RSI_LENGTH", "14")),
-        "rf_rsi_midline": float(os.getenv("RF_RSI_MIDLINE", "50")),
-        "rf_adx_filter_enabled": os.getenv("RF_ADX_FILTER_ENABLED", "false").lower() == "true",
-        "rf_adx_length": int(os.getenv("RF_ADX_LENGTH", "14")),
-        "rf_adx_threshold": float(os.getenv("RF_ADX_THRESHOLD", "20")),
-        "rf_sl_enabled": os.getenv("RF_SL_ENABLED", "false").lower() == "true",
-        "rf_sl_manual_usd": float(os.getenv("RF_SL_MANUAL_USD", "5.0")),
-        "rf_sl_cooldown_seconds": float(os.getenv("RF_SL_COOLDOWN_SECONDS", "30")),
-        "rf_tp_enabled": os.getenv("RF_TP_ENABLED", "false").lower() == "true",
-        "rf_tp_manual_usd": float(os.getenv("RF_TP_MANUAL_USD", "10.0")),
-        "mv_resolution": os.getenv("MV_RESOLUTION", "5m"),
-        "mv_fast_len": int(os.getenv("MV_FAST_LEN", "9")),
-        "mv_slow_len": int(os.getenv("MV_SLOW_LEN", "21")),
-        "mv_guide_len": int(os.getenv("MV_GUIDE_LEN", "34")),
-        "mv_atr_len": int(os.getenv("MV_ATR_LEN", "14")),
-        "mv_strong_mult": float(os.getenv("MV_STRONG_MULT", "1.5")),
-        "mv_use_volume_enabled": os.getenv("MV_USE_VOLUME_ENABLED", "true").lower() == "true",
-        "mv_vol_len": int(os.getenv("MV_VOL_LEN", "20")),
-        "mv_vol_mult": float(os.getenv("MV_VOL_MULT", "1.3")),
-        "mv_direction_mode": os.getenv("MV_DIRECTION_MODE", "both"),
-        "mv_invert_direction": os.getenv("MV_INVERT_DIRECTION", "false").lower() == "true",  # tauscht Long/Short-Signal komplett
-        "mv_sl_mode": os.getenv("MV_SL_MODE", "fixed"),  # "fixed" | "guide_trail"
-        "mv_sl_enabled": os.getenv("MV_SL_ENABLED", "true").lower() == "true",  # nur relevant bei sl_mode="fixed"
-        "mv_sl_manual_usd": float(os.getenv("MV_SL_MANUAL_USD", "5.0")),
-        "mv_sl_cooldown_seconds": float(os.getenv("MV_SL_COOLDOWN_SECONDS", "30")),
-        "mv_tp_enabled": os.getenv("MV_TP_ENABLED", "false").lower() == "true",
-        "mv_tp_manual_usd": float(os.getenv("MV_TP_MANUAL_USD", "10.0")),
-        "sr_resolution": os.getenv("SR_RESOLUTION", "5m"),
-        "sr_st_atr_period": int(os.getenv("SR_ST_ATR_PERIOD", "10")),
-        "sr_st_multiplier": float(os.getenv("SR_ST_MULTIPLIER", "2.0")),
-        "sr_rsi_period": int(os.getenv("SR_RSI_PERIOD", "9")),
-        "sr_rsi_midline": float(os.getenv("SR_RSI_MIDLINE", "50")),
-        "sr_rsi_mode": os.getenv("SR_RSI_MODE", "midline"),  # "midline" | "extreme_arm"
-        "sr_rsi_overbought": float(os.getenv("SR_RSI_OVERBOUGHT", "70")),
-        "sr_rsi_oversold": float(os.getenv("SR_RSI_OVERSOLD", "30")),
-        "sr_ema_filter_enabled": os.getenv("SR_EMA_FILTER_ENABLED", "false").lower() == "true",
-        "sr_ema_length": int(os.getenv("SR_EMA_LENGTH", "200")),
-        "sr_ema_resolution": os.getenv("SR_EMA_RESOLUTION", "same"),
-        "sr_direction_mode": os.getenv("SR_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
-        "sr_adx_filter_enabled": os.getenv("SR_ADX_FILTER_ENABLED", "false").lower() == "true",
-        "sr_adx_length": int(os.getenv("SR_ADX_LENGTH", "14")),
-        "sr_adx_threshold": float(os.getenv("SR_ADX_THRESHOLD", "20")),
-        "sr_adx_resolution": os.getenv("SR_ADX_RESOLUTION", "same"),
-        "sr_adx_invert_enabled": os.getenv("SR_ADX_INVERT_ENABLED", "false").lower() == "true",  # normal: ADX ueber Schwelle noetig (starker Trend). Invertiert: ADX UNTER Schwelle noetig (schwacher Trend/Seitwaerts)
-        "sr_immediate_signal_enabled": os.getenv("SR_IMMEDIATE_SIGNAL_ENABLED", "false").lower() == "true",  # Kernsignal+SuperTrend-Band-SL reagieren live auf die laufende Kerze statt erst beim Kerzenschluss
-        "sr_zscore_filter_enabled": os.getenv("SR_ZSCORE_FILTER_ENABLED", "false").lower() == "true",
-        "sr_zscore_lookback": int(os.getenv("SR_ZSCORE_LOOKBACK", "20")),
-        "sr_zscore_smooth": int(os.getenv("SR_ZSCORE_SMOOTH", "3")),
-        "sr_sl_tp_mode": os.getenv("SR_SL_TP_MODE", "fixed"),  # "fixed" | "vwap_cloud"
-        "sr_sl_enabled": os.getenv("SR_SL_ENABLED", "true").lower() == "true",
-        "sr_sl_manual_usd": float(os.getenv("SR_SL_MANUAL_USD", "5.0")),
-        "sr_tp_enabled": os.getenv("SR_TP_ENABLED", "true").lower() == "true",
-        "sr_tp_manual_usd": float(os.getenv("SR_TP_MANUAL_USD", "10.0")),
-        "sr_sl_cooldown_seconds": float(os.getenv("SR_SL_COOLDOWN_SECONDS", "30")),
-        "sr_vwap_dev_filter_enabled": os.getenv("SR_VWAP_DEV_FILTER_ENABLED", "false").lower() == "true",
-        "sr_vwap_dev_length": int(os.getenv("SR_VWAP_DEV_LENGTH", "60")),
-        "sr_vwap_dev_mult": float(os.getenv("SR_VWAP_DEV_MULT", "2.0")),
-        "sr_vwap_midline_filter_enabled": os.getenv("SR_VWAP_MIDLINE_FILTER_ENABLED", "false").lower() == "true",
-        "sr_vwap_midline_mult": float(os.getenv("SR_VWAP_MIDLINE_MULT", "0.3")),  # Mindestabstand von der VWAP-Basislinie (Vielfaches der Abweichung), sonst zaehlt der Einstieg nicht
-        "sr_vwap_midline_breakeven_enabled": os.getenv("SR_VWAP_MIDLINE_BREAKEVEN_ENABLED", "false").lower() == "true",
-        "sr_mo7_filter_enabled": os.getenv("SR_MO7_FILTER_ENABLED", "false").lower() == "true",
-        "sr_mo7_mode": os.getenv("SR_MO7_MODE", "arm"),  # "arm" (empfohlen) | "instant"
-        "sr_mo7_buy_threshold": float(os.getenv("SR_MO7_BUY_THRESHOLD", "35")),  # MO7 muss darunter liegen fuer Long
-        "sr_mo7_sell_threshold": float(os.getenv("SR_MO7_SELL_THRESHOLD", "75")),  # MO7 muss darueber liegen fuer Short
-        "sr_vwap_sl_mult": float(os.getenv("SR_VWAP_SL_MULT", "3.0")),  # "Ende der Wolke" - aeusserer Rand fuer den SL bei sl_tp_mode="vwap_cloud"
-        "sr_vwap_tp_rr": float(os.getenv("SR_VWAP_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands (1.0 = 1:1, 1.5 = 1:1,5, ...)
-        "sr_st_tp_rr": float(os.getenv("SR_ST_TP_RR", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands bei sl_tp_mode="supertrend"
-        "sr_st_sl_buffer_usd": float(os.getenv("SR_ST_SL_BUFFER_USD", "0.0")),  # zusaetzlicher $-Puffer auf den SuperTrend-Band-SL (mehr Abstand/Sicherheitsmarge)
-        "hvd_resolution": os.getenv("HVD_RESOLUTION", "1m"),
-        "hvd_hull_length": int(os.getenv("HVD_HULL_LENGTH", "88")),
-        "hvd_vwap_length": int(os.getenv("HVD_VWAP_LENGTH", "60")),
-        "hvd_vwap_dev_mult": float(os.getenv("HVD_VWAP_DEV_MULT", "2.0")),
-        "hvd_rsi_length": int(os.getenv("HVD_RSI_LENGTH", "5")),
-        "hvd_rsi_overbought": float(os.getenv("HVD_RSI_OVERBOUGHT", "70")),
-        "hvd_rsi_oversold": float(os.getenv("HVD_RSI_OVERSOLD", "30")),
-        "hvd_adx_length": int(os.getenv("HVD_ADX_LENGTH", "14")),
-        "hvd_direction_mode": os.getenv("HVD_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
-        "hvd_atr_period": int(os.getenv("HVD_ATR_PERIOD", "14")),
-        "hvd_atr_min_mult": float(os.getenv("HVD_ATR_MIN_MULT", "1.0")),  # Mindestabstand fuer den SL (ATR * Multiplikator), falls Hull naeher am Kurs liegt
-        "hvd_risk_reward": float(os.getenv("HVD_RISK_REWARD", "1.5")),  # TP als Risk-Reward-Vielfaches des SL-Abstands
-        "hvd_sl_cooldown_seconds": float(os.getenv("HVD_SL_COOLDOWN_SECONDS", "30")),
-        "hvd_immediate_signal_enabled": os.getenv("HVD_IMMEDIATE_SIGNAL_ENABLED", "false").lower() == "true",  # Hull-Flip+DI reagieren live auf die laufende Kerze statt erst beim Kerzenschluss
-        "hvd_flip_exit_enabled": os.getenv("HVD_FLIP_EXIT_ENABLED", "false").lower() == "true",  # optional: Hull-Farbwechsel GEGEN die Positionsrichtung beendet die Position sofort (unabhaengig von Arm/DI)
-        "hvd_touch_arm_enabled": os.getenv("HVD_TOUCH_ARM_ENABLED", "false").lower() == "true",  # optional: Docht-Beruehrung (high/low) reicht zur Band-Scharfschaltung, statt Kerzenschluss (close) ueber/unter dem Band zu verlangen
-        "hvd_arm_flip_exit_enabled": os.getenv("HVD_ARM_FLIP_EXIT_ENABLED", "false").lower() == "true",  # optional: aktiviert sich waehrend einer offenen Position eine NEUE Gegen-Konfirmation (Arm wechselt Richtung), wird sofort glatt gestellt
-        "hvd_adx_filter_enabled": os.getenv("HVD_ADX_FILTER_ENABLED", "false").lower() == "true",  # optionaler Seitwaerts-Filter: eigener ADX-Wert (eigene Laenge/Zeiteinheit) muss ueber der Schwelle liegen, sonst kein Einstieg
-        "hvd_adx_filter_length": int(os.getenv("HVD_ADX_FILTER_LENGTH", "14")),
-        "hvd_adx_filter_threshold": float(os.getenv("HVD_ADX_FILTER_THRESHOLD", "20")),
-        "hvd_adx_filter_resolution": os.getenv("HVD_ADX_FILTER_RESOLUTION", "same"),
-        "hvd_trend_filter_enabled": os.getenv("HVD_TREND_FILTER_ENABLED", "false").lower() == "true",  # optionaler uebergeordneter SuperTrend-Filter (eigene, hoehere Zeiteinheit) - Long nur wenn Trend bullisch, Short nur wenn baerisch
-        "hvd_trend_filter_resolution": os.getenv("HVD_TREND_FILTER_RESOLUTION", "15m"),  # "1m" | "2m" | "5m" | "15m" | "1h"
-        "hvd_trend_filter_atr_period": int(os.getenv("HVD_TREND_FILTER_ATR_PERIOD", "10")),
-        "hvd_trend_filter_multiplier": float(os.getenv("HVD_TREND_FILTER_MULTIPLIER", "3.0")),
-        "hvd_trend_filter_signal_window_candles": int(os.getenv("HVD_TREND_FILTER_SIGNAL_WINDOW_CANDLES", "10")),  # Signal wartet bis zu X Kerzen auf SuperTrend-Bestaetigung, statt sofort zu verfallen (0 = aus, muss exakt zusammenfallen wie bisher)
+        # Optionaler ASO-Sentiment-Filter (Nutzer-eigener "Average Sentiment Oscillator"-Pine-
+        # Indikator, siehe compute_aso_filter) - Long nur wenn ASOBulls>ASOBears, Short umgekehrt.
+        # Optionaler ASO-Sentiment-Filter (Nutzer-eigener "Average Sentiment Oscillator"-Pine-
+        # Indikator, siehe compute_aso_filter) - Long nur wenn ASOBulls>ASOBears, Short umgekehrt.
+        # Wird intern in denselben trend_filter_long_ok/short_ok-Slot eingehaengt wie der
+        # SuperTrend-Filter oben (siehe hvd_poll_loop/backtest_hvd_signal), nutzt also automatisch
+        # dasselbe hvd_trend_filter_signal_window_candles-Wartefenster mit.
     }
 
 
@@ -655,60 +626,53 @@ def default_state():
         "current_position_entries": [],
         "price_history": [],
         "position_opened_at": None,
-        "obi_book": {"bids": {}, "asks": {}}, "obi_avg_buffer": [], "obi_last_signal_direction": None,
-        "obi_breakeven_triggered": False,
-        "obi_instant_armed_short": True, "obi_instant_armed_long": True,
-        "obi_fast": None, "obi_medium": None, "obi_slow": None, "obi_history": [],
         "last_entry_price": None,
         "gs_anchor": None, "gs_cooldown_until": 0.0, "gs_tag_map": {},
         "gs_last_error": None, "gs_open_orders": 0,
+        "gc_lots": [], "gc_prev": {}, "gc_range": None, "gc_sig": None, "gc_realized": 0.0, "gc_cycles": 0, "gc_stopped": None, "gc_view": None,
         "grid_sl_cooldown_until": 0.0,
-        "obi_last_trade_time": 0.0, "obi_trend_ema": None, "obi_current": None,
-        "obi_extreme_zone": None, "obi_extreme_value": None, "obi_prev_fast": None,
-        "obi_spread_pct": None, "obi_recent_vol_pct": None,
-        "oms_obi_buffer": [], "oms_obi_fast": None, "oms_obi_medium": None, "oms_obi_slow": None,
-        "oms_cvd_buffer": [], "oms_cvd_ratio": None,
-        "oms_funding_rate": None, "oms_last_signal_direction": None, "oms_last_trade_time": 0.0,
-        "oms_signal": None, "oms_obi_direction": None, "oms_cvd_ok": None, "oms_funding_ok": None, "oms_rsi_ok": None, "oms_rsi": None,
-        "oms_liq_buffer": [], "oms_liq_ratio": None, "oms_liq_count": 0, "oms_liq_ok": None,
-        "scalp_board": {},
-        "quad_stoch_history": [],
-        "da_opens": [], "da_highs": [], "da_lows": [], "da_closes": [], "da_direction": None,
-        "da_atr_risk_last": None, "da_sl_price": None, "da_tp_price": None, "da_sl_cooldown_until": 0.0,
-        "es_opens": [], "es_highs": [], "es_lows": [], "es_closes": [], "es_direction": None,
-        "es_sensitivity_last": None, "es_risk_atr_last": None, "es_sl_cooldown_until": 0.0,
-        "es_sl_price": None, "es_tp1_price": None, "es_tp2_price": None, "es_tp3_price": None,
-        "es_tp1_done": False, "es_tp2_done": False, "es_breakeven_pct_done": False,
-        "cp_opens": [], "cp_highs": [], "cp_lows": [], "cp_closes": [], "cp_last_signal": None,
-        "cp_risk_atr_last": None, "cp_sl_cooldown_until": 0.0,
-        "cp_sl_price": None, "cp_tp_price": None, "cp_breakeven_done": False,
-        "mo7_last_value": None, "mo7_sl_cooldown_until": 0.0,
-        "mo7_sl_price": None, "mo7_tp_price": None,
-        "utb_last_hull_green": None,
-        "utb_sl_price": None, "utb_sl_cooldown_until": 0.0, "utb_instant_fired_ts": None,
-        "fr_sl_price": None, "fr_tp_price": None, "fr_sl_cooldown_until": 0.0,
-        "cd_sl_price": None, "cd_sl_cooldown_until": 0.0,
-        "rf_sl_price": None, "rf_tp_price": None, "rf_sl_cooldown_until": 0.0,
-        "mv_sl_price": None, "mv_tp_price": None, "mv_sl_cooldown_until": 0.0,
-        "utb_trend_pct_last": None,
-        "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
-        "wtc_sl_price": None, "wtc_tp_price": None,
-        "pk_sl_price": None, "pk_tp_price": None, "pk_sl_cooldown_until": 0.0,
-        "pk_trail_active": False, "pk_trail_best_price": None,
-        "pk_trend_pct_last": None,
-        "oms_oi_history": [], "oms_oi_score": None, "oms_oi_ok": None, "oms_open_interest": None,
-        "oms_obi_history": [],
-        "oms_tp1_done": False, "oms_trail_price": None,
-        "oms_dca_count": 0, "oms_last_entry_price": None,
-        "oms_price_history": [], "oms_markers": [],
-        "fib": None, "fib_entry1_done": False, "fib_entry2_done": False, "fib_tp1_done": False,
-        "fib_sl_active_price": None, "fib_last_trade_time": 0.0,
         "binance_1s_buffer": [],
         "local_1s_bucket_start": None, "local_1s_candle_open": None,
         "local_1s_candle_high": None, "local_1s_candle_low": None, "local_1s_candle_last": None,
         "local_1s_buffer": [],
         "stats": {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0},
         "trade_log": [],
+        # ===== Scalp VWAP OBV RSI State =====
+        # Position/Ø-Einstieg/Groesse/Stats/Trade-Log laufen ueber die gemeinsamen Felder oben
+        # (position, avg_entry_price, total_coin_size, entry_count, stats, trade_log) - wie bei
+        # allen anderen Strategien. Hier nur das Strategie-eigene: SL-Preis, TP1-Flag, die
+        # zuletzt berechneten Baender + OBV-RSI (fuers Dashboard).
+        "scalp_sl_price": None,
+        "scalp_tp1_done": False,
+        "scalp_mean_price": None,
+        "scalp_upper_band": None,
+        "scalp_lower_band": None,
+        "scalp_obv_rsi": None,
+        "scalp_candle_seq": 0,  # zaehlt bei JEDER neu geschlossenen Kerze hoch (fuer den Kerzen-Mindestabstand beim Nachkauf)
+        "scalp_last_entry_seq": None,  # scalp_candle_seq-Stand beim letzten Erst-/Nachkauf
+        "scalp_halfway_lock_done": False,  # true sobald der SL nach TP1 auf halbem Weg zu TP2 auf die Mittellinie nachgezogen wurde
+        "scalp_left_band_since_fill": False,  # siehe scalp_nachkauf_require_reversal: wird True, sobald seit dem
+        # letzten Einstieg/Nachkauf eine Kerze NICHT im Band geschlossen hat - erst dann darf die naechste
+        # Kerze, die wieder im Band schliesst UND den RSI erfuellt, einen weiteren Nachkauf ausloesen.
+        "scalp_band_history": [],  # Verlauf von Mittellinie/Baendern ueber Zeit, NUR fuers Dashboard-Chart
+        # (Zeitpunkt + mean/upper/lower je neu geschlossener Kerze) - unabhaengig von den "scalp_*"-
+        # Einzelwerten oben, die immer nur den JEWEILS AKTUELLEN Stand halten.
+        "scalp_price_history": [],  # Verlauf des tatsaechlichen TRIGGER-Preises (Binance-Live, siehe
+        # scalp_poll_loop) ueber Zeit - NUR fuers Dashboard-Chart. Wichtig, weil der normale
+        # "Preis"-Chart den Lighter-Tick-Preis zeigt, SL/TP aber am Binance-Preis ausgeloest werden -
+        # ohne diese zweite Linie sieht ein TP/SL-Trigger im Chart aus wie "hat die Linie gar nicht
+        # beruehrt", obwohl Binance sie zum Ausloese-Zeitpunkt sehr wohl beruehrt/durchbrochen hat.
+        # ===== Liquidity Waves State =====
+        "liq_sl_price": None,
+        "liq_tp1_done": False,
+        "liq_buyers_pct": None,  # zuletzt berechneter Wert, nur fuers Dashboard
+        "liq_sellers_pct": None,
+        "liq_peak_pct": None,  # hoechster Buyers%/Sellers%-Wert seit Einstieg/letztem Nachkauf (Nachkauf-Trigger)
+        "liq_nachkauf_count": 0,
+        # ===== Wellenanker State =====
+        "wa_sl_price": None,
+        "wa_tp_price": None,
+        "wa_wt2_last": None,  # zuletzt berechneter WaveTrend-Signalwert, nur fuers Dashboard
     }
 
 
@@ -718,6 +682,14 @@ BOTS = {s: {"config": default_config(), "state": default_state()} for s in SYMBO
 # ========== REDIS-PERSISTENZ (Grid-Bot-Configs) ==========
 REDIS_URL = os.getenv("REDIS_URL", "").strip().strip('"').strip("'")
 _redis_client = None
+
+
+# Hartes Zeitlimit fuer JEDEN einzelnen Redis-Call (Connect, Ping, Get, Set). Ohne das kann ein
+# haengendes/totes Redis (z.B. kurzer Netzwerk-Hänger bei Render) den einen globalen, von ALLEN
+# Coins geteilten Redis-Client fuer immer blockieren - da save_bot_state() nach JEDEM Trade-Close
+# UND alle 60s im state_persist_loop aufgerufen wird, reisst ein haengender Call so nach und nach
+# ALLE Coins mit in den Stillstand, obwohl das Trading selbst nichts mit Redis zu tun hat.
+REDIS_TIMEOUT_SECONDS = 5
 
 
 async def get_redis():
@@ -731,8 +703,18 @@ async def get_redis():
                 "beginnt_mit": REDIS_URL[:12] + "...",
                 "startet_korrekt_mit_redis://": REDIS_URL.startswith("redis://"),
             })
-            _redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
-            await _redis_client.ping()
+            # Begrenzter Pool: viele Stellen (WS-Cache-Snapshots, Configs ...) greifen gleichzeitig zu. Ohne Limit oeffnet jede
+            # Anfrage eine eigene Verbindung -> "max number of clients reached" beim Redis-Anbieter. Wartet jetzt stattdessen.
+            _pool = redis_lib.BlockingConnectionPool.from_url(
+                REDIS_URL,
+                max_connections=int(os.getenv("REDIS_MAX_CONNECTIONS", "8")),
+                timeout=20,
+                decode_responses=True,
+                socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
+                socket_timeout=REDIS_TIMEOUT_SECONDS,
+            )
+            _redis_client = redis_lib.Redis(connection_pool=_pool)
+            await asyncio.wait_for(_redis_client.ping(), timeout=REDIS_TIMEOUT_SECONDS)
             debug_log("✅ Redis verbunden - Einstellungen werden ab jetzt gespeichert")
         except Exception as e:
             debug_log("⚠️ Redis-Verbindung fehlgeschlagen - läuft ohne Persistenz weiter", {"error": str(e)})
@@ -746,7 +728,7 @@ async def save_bot_configs():
         return
     try:
         data = {s: BOTS[s]["config"] for s in SYMBOLS}
-        await r.set("gridbot:configs", json.dumps(data))
+        await asyncio.wait_for(r.set("gridbot:configs", json.dumps(data)), timeout=REDIS_TIMEOUT_SECONDS)
     except Exception as e:
         debug_log("⚠️ Speichern der Grid-Bot-Configs fehlgeschlagen", {"error": str(e)})
 
@@ -754,7 +736,6 @@ async def save_bot_configs():
 # Globale Schalter, unabhaengig von einzelnen Coins - z.B. um bei knappen Server-Ressourcen
 # (siehe Render Memory/CPU-Limit) Last komplett abzuschalten, ohne jeden Coin einzeln umzustellen.
 GLOBAL_SETTINGS = {
-    "scalp_board_enabled": True,   # Scalp-Board-Berechnung (RSI/Stoch/MACD/MO7/OBI auf 10-60s) fuer ALLE Coins
     "copytrading_enabled": True,   # Copytrading vom Hyperliquid-Leaderboard komplett an/aus
 }
 
@@ -764,7 +745,7 @@ async def save_global_settings():
     if r is None:
         return
     try:
-        await r.set("gridbot:global_settings", json.dumps(GLOBAL_SETTINGS))
+        await asyncio.wait_for(r.set("gridbot:global_settings", json.dumps(GLOBAL_SETTINGS)), timeout=REDIS_TIMEOUT_SECONDS)
     except Exception as e:
         debug_log("⚠️ Speichern der globalen Einstellungen fehlgeschlagen", {"error": str(e)})
 
@@ -774,7 +755,7 @@ async def load_global_settings():
     if r is None:
         return
     try:
-        raw = await r.get("gridbot:global_settings")
+        raw = await asyncio.wait_for(r.get("gridbot:global_settings"), timeout=REDIS_TIMEOUT_SECONDS)
         if raw:
             GLOBAL_SETTINGS.update(json.loads(raw))
             debug_log("✅ Globale Einstellungen aus Redis geladen", GLOBAL_SETTINGS)
@@ -789,7 +770,7 @@ async def handle_global_settings_get(request):
 async def handle_global_settings_update(request):
     body = await request.json()
     changed = False
-    for key in ("scalp_board_enabled", "copytrading_enabled"):
+    for key in ("copytrading_enabled",):
         if key in body:
             GLOBAL_SETTINGS[key] = bool(body[key])
             changed = True
@@ -807,7 +788,7 @@ async def load_bot_configs():
     if r is None:
         return
     try:
-        raw_configs = await r.get("gridbot:configs")
+        raw_configs = await asyncio.wait_for(r.get("gridbot:configs"), timeout=REDIS_TIMEOUT_SECONDS)
         if raw_configs:
             saved = json.loads(raw_configs)
             for s in SYMBOLS:
@@ -827,12 +808,31 @@ async def load_bot_configs():
 PERSISTED_STATE_KEYS = [
     "position", "avg_entry_price", "total_coin_size", "entry_count", "anchor_price",
     "position_opened_at", "last_entry_price", "stats", "trade_log",
+    # current_position_entries MUSS persistiert werden: sonst zeigt die Tabelle "Laufende
+    # Nachkäufe" nach einem Neustart/Redeploy faelschlich "keine offene Position", OBWOHL
+    # Position/Ø-Einstieg/Groesse (siehe oben) ganz normal wiederhergestellt wurden - genau
+    # dieser Widerspruch (oben "short" + Verlust, unten leere Tabelle) wurde live beobachtet.
+    "current_position_entries",
     # gs_tag_map MUSS persistiert werden: sonst weiss der Bot nach einem Redeploy nicht
     # mehr, welche offenen Orders im Buch seine eigenen sind, und cancelt sie als fremd.
-    "gs_anchor", "gs_cooldown_until", "gs_tag_map", "grid_sl_cooldown_until",
-    "fib", "fib_entry1_done", "fib_entry2_done", "fib_tp1_done", "fib_sl_active_price",
-    "obi_breakeven_triggered",
-    "ht_sl_price", "ht_tp1_price", "ht_tp2_price", "ht_tp3_price", "ht_tp1_done", "ht_tp2_done",
+    "gs_anchor", "gs_cooldown_until", "gs_tag_map",
+    "gc_lots", "gc_prev", "gc_range", "gc_sig", "gc_realized", "gc_cycles", "gc_stopped", "gc_sim", "grid_sl_cooldown_until",
+    "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
+    "er_sl_price", "er_tp1_price", "er_tp2_price", "er_tp3_price", "er_tp1_done", "er_tp2_done", "er_sl_cooldown_until",
+    "pm_sl_price", "pm_tp_price", "pm_trail_extreme", "pm_sl_cooldown_until",
+    "dv_sl_price", "dv_tp_price", "dv_trail_extreme", "dv_sl_cooldown_until",
+    "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
+    "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
+    "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
+    # Scalp VWAP OBV RSI: fehlte hier komplett (anders als bei allen anderen Strategien oben) -
+    # nach jedem Neustart waren SL-Preis, TP1-Done und der Halfway-Lock-Status einer offenen
+    # Scalp-Position weg, d.h. der Stop-Loss war bis zur naechsten geschlossenen Kerze faktisch
+    # nicht mehr aktiv (check_scalp_sl braucht "scalp_sl_price" != None).
+    "scalp_sl_price", "scalp_tp1_done", "scalp_mean_price", "scalp_upper_band", "scalp_lower_band",
+    "scalp_obv_rsi", "scalp_candle_seq", "scalp_last_entry_seq", "scalp_halfway_lock_done",
+    "scalp_left_band_since_fill",
+    "liq_sl_price", "liq_tp1_done", "liq_peak_pct", "liq_nachkauf_count",
+    "wa_sl_price", "wa_tp_price",
 ]
 
 
@@ -848,7 +848,7 @@ async def save_bot_state():
             if "trade_log" in entry:
                 entry["trade_log"] = entry["trade_log"][-200:]  # nicht unbegrenzt wachsen lassen
             data[s] = entry
-        await r.set("gridbot:state", json.dumps(data, default=str))
+        await asyncio.wait_for(r.set("gridbot:state", json.dumps(data, default=str)), timeout=REDIS_TIMEOUT_SECONDS)
     except Exception as e:
         debug_log("⚠️ Speichern des Bot-States fehlgeschlagen", {"error": str(e)})
 
@@ -858,7 +858,7 @@ async def load_bot_state():
     if r is None:
         return
     try:
-        raw_state = await r.get("gridbot:state")
+        raw_state = await asyncio.wait_for(r.get("gridbot:state"), timeout=REDIS_TIMEOUT_SECONDS)
         if raw_state:
             saved = json.loads(raw_state)
             for s in SYMBOLS:
@@ -878,12 +878,31 @@ async def state_persist_loop():
 
 
 # ========== LIGHTER CLIENT ==========
-def get_lighter_client():
+def account_role(cfg):
+    """Config 'trade_account' -> role fuer get_lighter_client: 'sub' (Unterkonto) oder None (Hauptkonto)."""
+    return "sub" if (cfg or {}).get("trade_account") == "sub" else None
+
+
+def get_lighter_client(role=None):
+    """role="grid": Grid-Bot-Loop (grid_scalp/maker_scalp/grid_classic) laeuft auf einem Unterkonto, wenn
+    GRID_ACCOUNT_INDEX + GRID_PRIVATE_KEY (+ GRID_API_KEY_INDEX) gesetzt sind. Sonst Hauptkonto wie bisher."""
     try:
         import lighter
         API_KEY_INDEX = int(os.getenv("API_KEY_INDEX", "5"))
         PRIVATE_KEY = os.getenv("PRIVATE_KEY")
         ACCOUNT_INDEX = int(os.getenv("ACCOUNT_INDEX", "50960"))
+        if role == "sub":
+            # Unterkonto ausdruecklich gewaehlt: NIEMALS stillschweigend auf das Hauptkonto ausweichen
+            if not (os.getenv("GRID_ACCOUNT_INDEX") and os.getenv("GRID_PRIVATE_KEY")):
+                debug_log("❌ Unterkonto gewählt, aber GRID_ACCOUNT_INDEX / GRID_PRIVATE_KEY sind nicht gesetzt - keine Order (Hauptkonto wird bewusst NICHT genutzt)")
+                return None
+            ACCOUNT_INDEX = int(os.getenv("GRID_ACCOUNT_INDEX"))
+            PRIVATE_KEY = os.getenv("GRID_PRIVATE_KEY")
+            API_KEY_INDEX = int(os.getenv("GRID_API_KEY_INDEX", str(API_KEY_INDEX)))
+        elif role == "grid" and os.getenv("GRID_ACCOUNT_INDEX") and os.getenv("GRID_PRIVATE_KEY"):
+            ACCOUNT_INDEX = int(os.getenv("GRID_ACCOUNT_INDEX"))
+            PRIVATE_KEY = os.getenv("GRID_PRIVATE_KEY")
+            API_KEY_INDEX = int(os.getenv("GRID_API_KEY_INDEX", str(API_KEY_INDEX)))
         return lighter.SignerClient(
             url=BASE_URL,
             api_private_keys={API_KEY_INDEX: PRIVATE_KEY},
@@ -894,17 +913,43 @@ def get_lighter_client():
         return None
 
 
+# Hartes Zeitlimit fuer JEDEN einzelnen Aufruf an den Lighter-Exchange-Client (Order platzieren,
+# Positionsdaten abfragen, Client schliessen). BEGRUENDUNG: trading_loop() (siehe strategies.py)
+# ist der EINE geteilte Task, der Preis-Ticks fuer ALLE Coins sequenziell ueber eine einzige
+# WebSocket-Verbindung verarbeitet ('async for raw in ws: ... await on_price_update(...)'). Haengt
+# die Boerse/Chain auch nur bei EINER einzigen Order fuer EINEN Coin (kein Timeout = kein Fehler,
+# der Await kehrt einfach nie zurueck), blockiert das denselben einen Task fuer IMMER - und damit
+# JEDEN anderen Coin gleich mit, weil dessen naechster Tick nie mehr verarbeitet wird. Exakt dasselbe
+# Fehlerbild wie der bereits gefixte globale Redis-Client, nur zentraler (sitzt direkt im Live-
+# Trading-Pfad). Nach Ablauf des Timeouts wird der jeweilige Aufruf als fehlgeschlagen behandelt
+# (wie ein normaler Boersen-Fehler) statt den Bot fuer immer einzufrieren.
+EXCHANGE_CALL_TIMEOUT_SECONDS = 15
+
+
+async def _safe_close_client(client):
+    """client.close() mit Timeout - schlaegt das Schliessen selbst fehl/haengt, darf das trading_loop
+    trotzdem nicht fuer immer blockieren (siehe EXCHANGE_CALL_TIMEOUT_SECONDS oben)."""
+    try:
+        await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    except Exception as e:
+        debug_log("⚠️ Lighter-Client schliessen fehlgeschlagen/Timeout (ignoriert)", {"error": str(e)})
+
+
 async def place_market_order(client, market_index, symbol, is_ask, base_amount, reference_price, reduce_only=False):
     price_decimals = get_price_decimals(symbol)
     adjusted_price = reference_price * 0.98 if is_ask else reference_price * 1.02
     price_scaled = int(adjusted_price * (10 ** price_decimals))
-    tx, tx_hash, err = await client.create_order(
-        market_index=market_index, client_order_index=int(time.time() * 1000),
-        base_amount=base_amount, price=price_scaled, is_ask=is_ask,
-        order_type=client.ORDER_TYPE_MARKET,
-        time_in_force=client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL, reduce_only=reduce_only,
-        order_expiry=client.DEFAULT_IOC_EXPIRY,
-    )
+    try:
+        tx, tx_hash, err = await asyncio.wait_for(client.create_order(
+            market_index=market_index, client_order_index=int(time.time() * 1000),
+            base_amount=base_amount, price=price_scaled, is_ask=is_ask,
+            order_type=client.ORDER_TYPE_MARKET,
+            time_in_force=client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL, reduce_only=reduce_only,
+            order_expiry=client.DEFAULT_IOC_EXPIRY,
+        ), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        debug_log(f"⚠️ [{symbol}] Order-Aufruf nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s abgebrochen (Timeout) - Boerse/Chain hat nicht rechtzeitig geantwortet")
+        return None, None, f"Timeout nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s"
     return tx, tx_hash, err
 
 
@@ -915,13 +960,18 @@ async def get_account_position_from_exchange(client, market_index, retries=5, de
     on-chain Verbuchung nach einer Order minimal verzoegert sein kann. Gibt None zurueck, wenn die
     Position nicht gefunden wird oder die Abfrage fehlschlaegt - der Aufrufer MUSS in diesem Fall
     auf die bisherige (theoretische) Berechnung zurueckfallen, damit ein API-Hakler niemals einen
-    Trade blockiert oder falsche Daten erzwingt."""
+    Trade blockiert oder falsche Daten erzwingt. Jeder einzelne Abfrage-Versuch hat ein hartes
+    Zeitlimit (EXCHANGE_CALL_TIMEOUT_SECONDS) - ohne das wuerde schon der ERSTE haengende Versuch
+    die komplette Retry-Schleife (und damit das trading_loop) fuer immer blockieren, statt nach
+    einem Fehlversuch weiterzumachen."""
     try:
         import lighter
         account_api = lighter.AccountApi(client.api_client)
         for attempt in range(retries):
             try:
-                resp = await account_api.account(by="index", value=str(client.account_index))
+                resp = await asyncio.wait_for(
+                    account_api.account(by="index", value=str(client.account_index)),
+                    timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
                 if resp and resp.accounts:
                     for pos in (resp.accounts[0].positions or []):
                         if pos.market_id == market_index:
@@ -1058,19 +1108,19 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
     avg_entry_before = st["avg_entry_price"] if is_add_on else None  # siehe Nachkauf-Bug unten
 
     if not cfg["dry_run"]:
-        client = get_lighter_client()
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
         if client is None:
             debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Order übersprungen")
             return False
         min_base = get_min_base_amount(symbol)
         if base_amount * (1 / precision) < min_base:
             debug_log(f"⚠️ [{symbol}] Order-Größe unter Mindestgröße")
-            await client.close()
+            await _safe_close_client(client)
             return False
         is_ask = direction == "short"
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=False)
         if err:
-            await client.close()
+            await _safe_close_client(client)
             debug_log(f"⚠️ [{symbol}] Entry-Order fehlgeschlagen", {"error": str(err)})
             return False
         debug_log(f"✅ [{symbol}] ECHTE Order ausgeführt: {direction.upper()} @ ~{price}", {"tx_hash": str(tx_hash)})
@@ -1117,7 +1167,7 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
             real_pos = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
             real_price = _extract_valid_price(real_pos)
             extra_attempts += 1
-        await client.close()
+        await _safe_close_client(client)
         if real_price is not None:
             if price and abs(real_price - price) / price > 0.0005:
                 debug_log(f"🎯 [{symbol}] Echter Fill-Preis von der Börse: {real_price} (Ziel war {price}, Abweichung {round((real_price-price)/price*100,3)}%)")
@@ -1173,6 +1223,117 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
     return True
 
 
+async def execute_reverse(symbol, price, reason, size_multiplier=None):
+    """SCHNELLER WECHSEL Long <-> Short mit EINER einzigen Market-Order (wie der "Reverse"-Knopf bei Lighter):
+    die Order ist so gross wie die alte Position PLUS die neue Position, in Gegenrichtung und OHNE reduce_only -
+    die Boerse dreht die Position dadurch in einem Schritt. Das ist viel schneller als execute_exit (wartet auf
+    Bestaetigung des realisierten PnL) + execute_entry (wartet auf den Fill-Preis).
+    size_multiplier=None -> neue Position gleich gross (USDC-Wert) wie die alte; sonst margin*leverage*size_multiplier.
+    Der Bot-State wird sofort mit dem Zielpreis umgestellt, der ECHTE Einstiegspreis wird danach im Hintergrund
+    von der Boerse geholt und nachgetragen (_reverse_confirm). Gibt True zurueck, wenn die Position gedreht wurde."""
+    async with _get_symbol_lock(symbol):
+        return await _execute_reverse_locked(symbol, price, reason, size_multiplier)
+
+
+async def _execute_reverse_locked(symbol, price, reason, size_multiplier=None):
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    market_index = MARKET_INDICES[symbol]
+    if st["position"] is None or not st.get("total_coin_size") or not st.get("avg_entry_price") or not price:
+        return False
+
+    _t0 = time.time()
+    closing_side = st["position"]
+    target = "short" if closing_side == "long" else "long"
+    old_size = st["total_coin_size"]
+    avg_old = st["avg_entry_price"]
+    pnl_usd = (price - avg_old) * old_size if closing_side == "long" else (avg_old - price) * old_size
+
+    precision = get_precision(symbol)
+    new_usdc = old_size * price if size_multiplier is None else cfg["margin"] * cfg["leverage"] * size_multiplier
+    new_base = int((new_usdc / price) * precision)
+    new_units = new_base / precision
+    old_base = int(round(old_size * precision))
+
+    if not cfg["dry_run"]:
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
+        if client is None:
+            debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Reverse übersprungen (Position bleibt wie sie ist!)")
+            return False
+        if new_base * (1 / precision) < get_min_base_amount(symbol):
+            await _safe_close_client(client)
+            debug_log(f"⚠️ [{symbol}] Reverse: neue Position unter Mindestgröße - abgebrochen")
+            return False
+        is_ask = closing_side == "long"   # Long wird verkauft (is_ask), Short wird gekauft
+        tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, old_base + new_base, price, reduce_only=False)
+        await _safe_close_client(client)
+        if err:
+            debug_log(f"⚠️ [{symbol}] Reverse-Order fehlgeschlagen - Position bleibt unverändert", {"error": str(err)})
+            return False
+        debug_log(f"⚡ [{symbol}] REVERSE ausgeführt (1 Order, {round((time.time() - _t0) * 1000)} ms): {closing_side.upper()} -> {target.upper()} @ ~{price}", {"tx_hash": str(tx_hash)})
+
+    stats = st["stats"]
+    stats["trades"] += 1
+    stats["total_pnl_usd"] += pnl_usd
+    stats["wins" if pnl_usd > 0 else "losses"] += 1
+    st["trade_log"].append({
+        "side": closing_side, "avg_entry": round(avg_old, 2), "exit": price,
+        "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3),
+        "opened_at": st.get("position_opened_at"), "closed_at": now_local().isoformat(), "reason": reason,
+    })
+    debug_log(f"🏁 [{symbol}] Position gedreht ({reason}): {closing_side.upper()} Ø{round(avg_old,2)} -> {price} | PnL ${round(pnl_usd,3)} (Schätzung)")
+
+    st["position"] = target
+    st["avg_entry_price"] = price
+    st["total_coin_size"] = new_units
+    st["position_opened_at"] = now_local().isoformat()
+    st["last_entry_price"] = price
+    st["entry_count"] = 1
+    st["anchor_price"] = price
+    st["g2_trigger_armed"] = True
+    st["g2_levels"] = None
+    st["current_position_entries"] = [{"time": now_local().isoformat(), "price": round(price, 6), "size": round(new_units, 8),
+                                       "stufe": 1, "is_add_on": False}]
+    debug_log(f"📈 [{symbol}] Neue Position: {target.upper()} @ {price} | Stufe 1")
+    await save_bot_state()
+    if not cfg["dry_run"]:
+        asyncio.create_task(_reverse_confirm(symbol, target, avg_old))
+    return True
+
+
+async def _reverse_confirm(symbol, target, avg_old):
+    """Hintergrund nach einem Reverse: den ECHTEN Ø-Einstiegspreis der neuen Position von der Boerse holen und im
+    Bot-State nachtragen (der Zielpreis war nur eine Schaetzung). Schlaegt das fehl, bleibt der Zielpreis stehen."""
+    try:
+        await asyncio.sleep(1.0)
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
+        if client is None:
+            return
+        try:
+            for _ in range(6):
+                pos = await get_account_position_from_exchange(client, MARKET_INDICES[symbol], retries=1, delay=0)
+                try:
+                    real = float(pos.avg_entry_price) if pos is not None and pos.avg_entry_price is not None else None
+                except (TypeError, ValueError):
+                    real = None
+                if real and real > 0 and abs(real - avg_old) > 1e-9:
+                    st = BOTS[symbol]["state"]
+                    if st.get("position") == target and st.get("entry_count") == 1:
+                        old = st["avg_entry_price"]
+                        st["avg_entry_price"] = real
+                        st["last_entry_price"] = real
+                        if st.get("current_position_entries"):
+                            st["current_position_entries"][0]["price"] = round(real, 6)
+                        debug_log(f"🎯 [{symbol}] Reverse: echter Einstiegspreis von der Börse {real} (Ziel war {round(old, 6)})")
+                        await save_bot_state()
+                    return
+                await asyncio.sleep(0.7)
+        finally:
+            await _safe_close_client(client)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Reverse-Bestätigung fehlgeschlagen (ignoriert)", {"error": str(e)})
+
+
 async def execute_partial_exit(symbol, price, fraction, reason):
     async with _get_symbol_lock(symbol):
         return await _execute_partial_exit_locked(symbol, price, fraction, reason)
@@ -1195,7 +1356,7 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
     exit_price_for_log = price
 
     if not cfg["dry_run"]:
-        client = get_lighter_client()
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
         if client is None:
             debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Teil-Exit übersprungen")
             return False
@@ -1204,7 +1365,7 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
         min_base = get_min_base_amount(symbol)
         if base_amount * (1 / precision) < min_base:
             debug_log(f"⚠️ [{symbol}] Teil-Exit-Größe unter Mindestgröße - übersprungen")
-            await client.close()
+            await _safe_close_client(client)
             return False
         is_ask = position_side == "long"
 
@@ -1213,7 +1374,7 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
 
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
         if err:
-            await client.close()
+            await _safe_close_client(client)
             debug_log(f"⚠️ [{symbol}] Teil-Exit-Order fehlgeschlagen", {"error": str(err)})
             return False
 
@@ -1235,7 +1396,7 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
                 if real_pnl_usd is None:
                     await asyncio.sleep(0.6)
                 extra_attempts += 1
-        await client.close()
+        await _safe_close_client(client)
         if real_pnl_usd is not None:
             if abs(real_pnl_usd - pnl_usd) > 0.01:
                 debug_log(f"🎯 [{symbol}] Echter realisierter Teil-PnL von der Börse: ${round(real_pnl_usd,3)} (Schätzung war ${round(pnl_usd,3)})")
@@ -1274,7 +1435,7 @@ async def _execute_exit_locked(symbol, price, reason):
     exit_price_for_log = price
 
     if not cfg["dry_run"]:
-        client = get_lighter_client()
+        client = get_lighter_client(account_role(BOTS[symbol]["config"]))
         if client is None:
             debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Exit übersprungen (Position bleibt offen!)")
             return
@@ -1289,7 +1450,7 @@ async def _execute_exit_locked(symbol, price, reason):
 
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
         if err:
-            await client.close()
+            await _safe_close_client(client)
             debug_log(f"⚠️ [{symbol}] Exit-Order fehlgeschlagen - Position bleibt offen!", {"error": str(err)})
             return
 
@@ -1323,7 +1484,7 @@ async def _execute_exit_locked(symbol, price, reason):
                 if real_pnl_usd is None:
                     await asyncio.sleep(0.6)
                 extra_attempts += 1
-        await client.close()
+        await _safe_close_client(client)
         if real_pnl_usd is not None:
             if abs(real_pnl_usd - pnl_usd) > 0.01:
                 debug_log(f"🎯 [{symbol}] Echter realisierter PnL von der Börse: ${round(real_pnl_usd,3)} (Schätzung war ${round(pnl_usd,3)})")
@@ -1377,61 +1538,66 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="UTF-8"><title>Grid-Bot Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<link href="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack.min.css" rel="stylesheet"/>
-<script src="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack-all.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
-    --bg: #060a18;
-    --panel: #0e1526;
-    --panel-border: rgba(96, 165, 250, 0.14);
+    --bg: #07080b;
+    --panel: #14171d;
+    --panel-border: #242932;
     --accent: #3b82f6;
-    --accent2: #8b5cf6;
-    --text: #e8ecf5;
-    --text-dim: #7c8aa8;
-    --green: #22c55e;
-    --red: #f0526b;
+    --accent2: #3b82f6;
+    --text: #e9ecf1;
+    --text-dim: #7d8696;
+    --green: #1fcf6e;
+    --red: #f0354b;
+    --yellow: #f5b83d;
   }
   * { box-sizing: border-box; }
   body {
-    font-family: -apple-system, "Segoe UI", sans-serif;
-    background:
-      radial-gradient(ellipse 800px 500px at 90% -5%, rgba(59,130,246,0.16), transparent 60%),
-      radial-gradient(ellipse 700px 500px at -5% 15%, rgba(139,92,246,0.12), transparent 60%),
-      var(--bg);
+    font-family: 'Inter', -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
     color: var(--text);
     margin: 0;
     padding: 0 0 40px 0;
     min-height: 100vh;
   }
+  .value, td, input, .mono { font-variant-numeric: tabular-nums; }
+  .value, input[type=number] { font-family: 'JetBrains Mono', monospace; }
   .topbar {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 16px 28px; background: rgba(10,14,28,0.85); backdrop-filter: blur(8px);
+    padding: 14px 24px; background: rgba(7,8,11,0.9); backdrop-filter: blur(8px);
     border-bottom: 1px solid var(--panel-border); margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
   }
   .brand { display:flex; align-items:center; gap:10px; font-size:19px; font-weight:700; color:#fff; }
-  .brand .dot { width:10px; height:10px; border-radius:50%; background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 0 12px var(--accent); }
+  .brand .dot { width:10px; height:10px; border-radius:50%; background:var(--green); box-shadow:0 0 12px rgba(31,207,110,.6); }
   .topbar-right { display:flex; align-items:center; gap:10px; flex-wrap: wrap; }
   select#symbol-select {
     font-size:14px; font-weight:600; padding:8px 16px; background:var(--panel); color:var(--text);
     border:1px solid var(--panel-border); border-radius:10px; cursor:pointer;
   }
-  .container { padding: 0 28px; }
-  h2.section-title { font-size: 13px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 28px 0 12px; font-weight: 600; }
+  .container { padding: 0 24px; max-width:1600px; margin:0 auto; }
+  h2.section-title { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.1em; margin: 28px 0 12px; font-weight: 600; }
   .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap:14px; margin-bottom:18px; }
   .card {
-    background: var(--panel); border: 1px solid var(--panel-border); border-radius: 18px;
-    padding: 18px 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    background: linear-gradient(180deg,#171a21,#12151b); border: 1px solid var(--panel-border); border-radius: 16px;
+    padding: 16px;
   }
   .card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
   .card .value { font-size: 22px; font-weight: 700; margin-top: 6px; color: #fff; }
-  .green { color: var(--green) !important; } .red { color: var(--red) !important; } .yellow { color: #fbbf24 !important; }
+  .green { color: var(--green) !important; } .red { color: var(--red) !important; } .yellow { color: var(--yellow) !important; }
   .badge { display:inline-block; padding:4px 14px; border-radius:20px; font-size:12px; font-weight:700; letter-spacing:0.03em; }
   .badge.dry { background:rgba(99,102,241,0.18); color:#a5b4fc; border:1px solid rgba(99,102,241,0.35); }
   .badge.live { background:rgba(240,82,107,0.15); color:#fca5b1; border:1px solid rgba(240,82,107,0.4); }
   .badge.active { background:rgba(34,197,94,0.15); color:#86efac; border:1px solid rgba(34,197,94,0.35); }
   .badge.paused { background:rgba(251,191,36,0.15); color:#fde68a; border:1px solid rgba(251,191,36,0.35); }
-  .panel-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 20px; padding: 22px; margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
+  .badge.pending { background:rgba(240,82,107,0.18); color:#fecdd3; border:1px solid rgba(240,82,107,0.55); animation: pendingPulse 1.6s ease-in-out infinite; }
+  @keyframes pendingPulse { 0%,100% { box-shadow:0 0 0 0 rgba(240,82,107,0.45); } 50% { box-shadow:0 0 0 6px rgba(240,82,107,0); } }
+  .start-banner { flex:1 1 100%; background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.5); color:#fecdd3; border-radius:12px; padding:10px 16px; font-size:13px; line-height:1.5; }
+  .coin-pill.pending { border-color:rgba(240,82,107,0.6); }
+  .panel-card { background: linear-gradient(180deg,#171a21,#12151b); border: 1px solid var(--panel-border); border-radius: 16px; padding: 16px; margin-bottom: 16px; }
   .grid-stack-item-content { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
   .widget-drag-handle { cursor: move; padding: 8px 12px; font-size: 12px; font-weight: 700; color: var(--text-dim); background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--panel-border); user-select: none; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .widget-drag-handle::before { content: "⠿"; opacity: 0.5; }
@@ -1441,64 +1607,84 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   form { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap:14px; align-items:end; }
   label { display:block; font-size:11px; color: var(--text-dim); text-transform:uppercase; letter-spacing:0.03em; margin-bottom:6px; }
   input, select.cfg {
-    width:100%; padding:9px 10px; background:#080d1c; border:1px solid var(--panel-border);
-    border-radius:8px; color:var(--text); box-sizing:border-box; font-size:13px;
+    width:100%; padding:9px 10px; background:#0d1015; border:1px solid var(--panel-border);
+    border-radius:10px; color:var(--text); box-sizing:border-box; font-size:13px; color-scheme:dark;
   }
   input:focus, select.cfg:focus { outline:none; border-color: var(--accent); }
   button {
-    padding:10px 20px; background:linear-gradient(135deg,var(--accent),#2563eb); color:white; border:none;
-    border-radius:10px; cursor:pointer; font-weight:700; font-size:13px; transition: transform 0.1s;
+    padding:10px 18px; background:#1d2128; color:#e9ecf1; border:1px solid #2a303a; font-family:inherit;
+    border-radius:12px; cursor:pointer; font-weight:700; font-size:13px; transition: transform 0.1s; min-height:40px;
   }
   button:hover { transform: translateY(-1px); filter: brightness(1.1); }
-  button.stop { background:linear-gradient(135deg,#f0526b,#dc2626); }
-  button.start { background:linear-gradient(135deg,#22c55e,#15803d); }
-  button.danger { background:linear-gradient(135deg,#ef4444,#b91c1c); }
-  button.neutral { background:linear-gradient(135deg,#475569,#334155); }
+  button.stop { background:linear-gradient(180deg,#f2475b,#c42a40); color:#fff; border:0; }
+  button.start { background:linear-gradient(180deg,#22d27a,#16a85a); color:#07080b; border:0; }
+  button.danger { background:transparent; color:var(--red); border:1px solid var(--red); }
+  button.neutral { background:#1d2128; }
+  .chart-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .ov-box { margin:0 0 8px; font-size:12px; color:var(--text-dim); }
+  .ov-box summary { cursor:pointer; padding:4px 0; }
+  #ov-list { display:flex; flex-wrap:wrap; gap:8px 14px; padding:8px 0; }
+  #ov-list label { display:flex; align-items:center; gap:6px; margin:0; text-transform:none; letter-spacing:0; font-size:12px; color:var(--text); }
+  #ov-list input[type=color] { width:28px; height:22px; padding:0; border:0; background:none; }
+  #ov-list input[type=checkbox] { width:auto; }
+  .chart-info { font-size:12px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+  button.pill { padding:0 14px; min-height:36px; border-radius:20px; background:#0d1015; color:var(--text-dim); border:1px solid #2a303a; font-size:12px; }
+  button.pill.on { background:rgba(31,207,110,.12); border-color:var(--green); color:#fff; }
+  select.pill-select { width:auto; min-height:36px; padding:0 12px; border-radius:20px; background:#0d1015; color:var(--text); border:1px solid #2a303a; font-size:12px; font-weight:600; }
   table { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
+  #wac-price canvas, #wac-wt canvas { background:transparent; border:0; border-radius:0; padding:0; box-shadow:none; }
+  #wac-price table, #wac-wt table { width:auto; margin:0; font-size:inherit; }
+  #wac-price td, #wac-wt td, #wac-price tr:hover td, #wac-wt tr:hover td { padding:0; border:0; background:transparent; }
   th.sortable { cursor:pointer; user-select:none; }
   th.sortable:hover { color:var(--accent); }
   th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--panel-border); }
   th { color: var(--text-dim); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.03em; }
-  tr:hover td { background: rgba(59,130,246,0.05); }
+  tr:hover td { background: rgba(255,255,255,0.03); }
   .warn { background:rgba(240,82,107,0.12); border:1px solid rgba(240,82,107,0.35); color:#fca5b1; padding:10px 14px; border-radius:10px; font-size:13px; margin-top:10px; display:none; }
-  canvas { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 18px; padding: 14px; box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
-  #priceChart { max-height: 420px; }
+  canvas { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 16px; padding: 14px; }
   .coin-overview { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
   .coin-pill { background: var(--panel); border:1px solid var(--panel-border); border-radius:20px; padding:6px 16px; font-size:13px; cursor:pointer; transition: border-color 0.15s; }
   .coin-pill:hover { border-color: rgba(96,165,250,0.4); }
-  .coin-pill.selected { border-color: var(--accent); background: rgba(59,130,246,0.12); }
+  .coin-pill.selected { border-color: var(--green); background: rgba(31,207,110,0.1); }
+  @media (max-width:760px){ .container{padding:0 12px;} .topbar{padding:10px 12px;} .panel-card{padding:12px;border-radius:14px;} #wac-price{height:320px !important;} form{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));} }
 </style>
 </head>
 <body>
 <div class="topbar">
   <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select></div>
   <div class="topbar-right">
-    <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Scalp-Board-Berechnung (RSI/Stoch/MACD/MO7/OBI) für ALLE Coins global an/aus - spart CPU/RAM, wenn du gerade nicht manuell scalpst">
-      <input type="checkbox" id="toggle-scalp-board-global" style="cursor:pointer;"> ⚡ Scalp-Details
-    </label>
     <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
       <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
     </label>
-    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><span id="mode-badge"></span><span id="active-badge"></span>
+    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
 </div>
 <div class="container">
 
 <div class="coin-overview" id="coin-overview"></div>
 
-<details id="widget-grid-section" open style="margin-top:8px;">
-<summary style="cursor:pointer; font-size:18px; font-weight:700; padding:10px 0; color:var(--text);">📊 Live-Kacheln (Pocket-Trading, Scalp-Board, Gauges, ...) (aufklappen/einklappen)</summary>
-<div id="oms-grid-header" style="display:none; margin-bottom:8px;">
-  <button id="btn-reset-layout" type="button">↺ Layout zurücksetzen</button>
-  <div style="font-size:11px; color:var(--text-dim); padding-top:8px;">Ziehe an der Titelleiste eines Kachel, um sie zu verschieben - an der unteren rechten Ecke ziehen, um die Größe zu ändern.</div>
+<div class="panel-card" id="main-chart-card" style="margin-top:8px;">
+  <div class="chart-head">
+    <button type="button" id="wac-tab-live" class="pill on">🔴 Live</button>
+    <button type="button" id="wac-tab-bt" class="pill">📊 Backtest-Trades</button>
+    <select id="wac-tf" class="pill-select" title="Zeitrahmen">
+      <option value="">TF: Strategie</option><option value="10s">10s</option><option value="15s">15s</option><option value="30s">30s</option><option value="45s">45s</option><option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option>
+    </select>
+    <button type="button" id="wac-center" class="pill" title="Aktuelle Kerze in die Mitte des Charts setzen">🎯 Mitte</button>
+    <button type="button" id="wac-fit" class="pill" title="Gesamten Verlauf einpassen">⤢ Alles</button>
+    <span id="wac-info" class="chart-info"></span>
+  </div>
+  <details id="ov-box" class="ov-box"><summary>📐 Linien &amp; Farben</summary><div id="ov-list"></div></details>
+  <div id="wac-price" style="height:420px;"></div>
+  <div id="wac-wtbox" style="display:none;">
+    <div style="font-size:12px; color:var(--text-dim); margin:8px 0 4px;">WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels</div>
+    <div id="wac-wt" style="height:180px;"></div>
+  </div>
+  <div id="wac-trend" style="display:none; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; font-size:12px;"></div>
+  <div style="font-size:12px; color:var(--text-dim); margin-top:6px;" id="wac-legend">Kleine Pfeile = Signale · gelbe Pfeile „Einstieg“ = echte Einstiege des Bots, Kreise = Ausstiege mit PnL · Linien = Position / SL / Grid-Level · Backtest: ▲/▼ Einstieg, ● Ausstieg mit PnL – Klick auf Trade in der Tabelle zoomt hin.</div>
 </div>
-<div class="grid-stack" id="oms-grid" style="margin-bottom:12px;"></div>
-</details>
 
-<div id="generic-chart-wrap">
-  <h2 class="section-title">Kursverlauf</h2>
-  <div style="position:relative; height:400px;"><canvas id="priceChart"></canvas></div>
-</div>
+<div id="scalp-trend" style="display:none; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0; font-size:12px;"></div>
 
 <details id="zone-settings" open style="margin-top:8px;">
 <summary style="cursor:pointer; font-size:18px; font-weight:700; padding:10px 0; color:var(--text);">⚙️ Steuerung &amp; Einstellungen (aufklappen/einklappen)</summary>
@@ -1507,6 +1693,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <button id="btn-start" class="start">▶️ Start</button>
   <button id="btn-stop" class="stop">⏸️ Stop</button>
   <button id="btn-close" class="danger">✖️ Position jetzt schließen</button>
+  <button id="btn-reverse" class="neutral" style="border-color:#3b82f6;color:#9db8ff;" title="Position mit einer einzigen Order in die Gegenrichtung drehen (gleiche Größe)">⇄ Reverse (Long ↔ Short)</button>
   <button id="btn-reset" class="neutral">🔄 Reset (Statistik)</button>
 </div>
 
@@ -1519,227 +1706,57 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div><label>Margin (USDC)</label><input type="number" step="any" id="margin"></div>
 
   <div><label>Hebel</label><input type="number" step="1" id="leverage"></div>
+  <div><label>Konto (für Signal-Strategien; das Grid hat seine eigene Einstellung)</label>
+    <select class="cfg" id="trade_account"><option value="main">Hauptkonto</option><option value="sub">Unterkonto (GRID_ACCOUNT_INDEX / GRID_PRIVATE_KEY aus Render)</option></select>
+  </div>
   <div><label>Strategie</label>
     <select class="cfg" id="entry_mode">
       <option value="grid">Neutrales Grid (Ø-Einstieg/Nachkauf/TP)</option>
       <option value="grid_v2">Grid 2 (wie Grid, optional wiederkehrende Nachkauf-Level + Verdopplung)</option>
       <option value="grid_scalp">Grid-Scalp (Maker-Only, Post-Only-Quotes, TP in $, Notausstieg)</option>
-      <option value="obi_scalp">OBI-Scalp (Orderbuch-Ungleichgewicht, symmetrisches TP/SL)</option>
-      <option value="oms_scalp">OBI-Momentum-Scalp (OBI + CVD-Bestätigung + Funding-Filter, TP1+Trailing, Nachkauf)</option>
-      <option value="fib_reversal">Fibonacci-Reversal (Einstieg 0.882/0.941, TP 0.786/0.667, SL 1.0)</option>
-      <option value="halftrend">HalfTrend (Swing-Hoch/-Tief-Trendwechsel, optional ATR2-basiertes SL+TP, invertierbar)</option>
-      <option value="diamond_algo">Diamond Algo (SuperTrend+SMA-Signal, optional 200-EMA-Smart-Filter, ATR-basiertes SL+TP)</option>
-      <option value="elte_smart">ELTE Smart (SuperTrend auf ohlc4 mit Auto-Sensitivity, TP1/TP2/TP3 gestufte Teilverkäufe mit nachziehendem SL)</option>
-      <option value="candle_patterns">Candle Patterns (3 Line Strike / Engulfing, SL+TP fest oder ATR-basiert, ATR-Breakeven)</option>
-      <option value="mo7_scalp">MO7 Scalp (Composite-Oszillator aus 7 Indikatoren, Schwellenwert-Cross oder 5-Kerzen-Summe, fester SL+TP)</option>
-      <option value="ut_bot_hull">UT Bot + Hull Flip (ATR-Trailing-Stop, immer im Markt, Flip-Trigger wählbar, Sofort-Trigger optional, Z-Score/RSI/ADX-Filter + MTF-Trend%-Filter, fester SL/TP + Trailing-TP)</option>
-      <option value="wavetrend_cross">WaveTrend Cross (Cipher-B-Kernsignal, Zonenfilter wählbar, immer im Markt oder normal, fester SL+TP)</option>
-      <option value="pieki_algo">Pieki Algo (SuperTrend+SMA9-Signal, Flip oder fester SL+TP, optionaler MTF-Trend%-Filter)</option>
-      <option value="fractals_flip">Williams Fractals (Swing-High/Low-Umkehrpunkte, immer im Markt, nur Buy/Sell-Wechsel)</option>
-      <option value="candle_dna">Kerzen-DNA (eigener Konviktions-Score aus Körper+Docht je Kerze, immer im Markt, nur Buy/Sell-Wechsel)</option>
-      <option value="range_filter">Range Filter (DonovanWall, nachziehende Glättungslinie, immer im Markt, optionaler fester SL/TP)</option>
-      <option value="maverick_edge">Maverick Edge (Trend-EMA + Guide-Linie + Kerzenstärke, reiner Signal-Einstieg, SL fest oder Guide-Linie als Trail-Stop, fester TP)</option>
-      <option value="st_rsi_signal">SuperTrend+RSI (SuperTrend 10/2-Flip + RSI 9-Bestätigung, immer Flip bei Gegensignal, optional ADX/Volumen/MTF%/Z-Score-Filter, fester SL+TP)</option>
-      <option value="hvd_signal">[Hoss] VWAP+RSI+Hull+DI (Hull-Farbwechsel + DI-Bestätigung, scharf durch VWAP-Band+OBV-RSI-Extrem am selben Balken, SL=Hull mit ATR-Mindestabstand, TP=Risk-Reward, kein Flip-Exit)</option>
+      <option value="grid_classic">Grid-Bot (klassisch: festes Preisgitter, Stufengewinn, läuft nach Deploy weiter)</option>
+      <option value="scalp_vwap_obv_rsi">Scalp VWAP OBV RSI (Mean-Reversion, VWAP-Bänder + OBV RSI, TP1/TP2)</option>
+      <option value="liquidity_waves">Liquidity Waves (Sweep-Level Buyers%/Sellers%, Kontra-Einstieg, TP1/TP2, $-SL)</option>
+      <option value="wellenanker">Wellenanker (WaveTrend-Punkte, Nachkauf, TP Gegentrade/Überlauf/Fest, $-SL)</option>
+      <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
+      <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + fester $-SL/TP)</option>
+      <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
+      <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
+      <option value="vwap_cross">EMA 9 + VWAP (Einstieg bei Kreuzung EMA9 / Day-Week-Month-VWAP, SL hinter letzter Kerze, TP Kreuzung/Fest/Gegentrade, Backtest)</option>
+      <option value="rlm">Reaction Level Matrix (Swing-Level mit Score, Einstieg bei Ablehnung an Unterstützung/Widerstand, SL/TP1-TP3 mit Teilverkäufen, Gegen-Signal dreht)</option>
+      <option value="trendfolge">Trendfolge (Marktstruktur-Trend: im Aufwärtstrend bei jeder roten Kerze kaufen, im Abwärtstrend bei jeder grünen shorten, fester $-TP, Trendwechsel = schließen)</option>
+      <option value="ema_rsi">EMA + RSI (Smart Money Zone Tracker: Schluss über/unter EMA + RSI über/unter Mittellinie, Swing-SL, TP1/TP2/TP3 mit Teilverkäufen)</option>
+      <option value="rsi_signal">RSI Signal (überverkauft/überkauft, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
+      <option value="mvwap_mf_signal">Multi-VWAP Money-Flow Signal (VWAP+MFI/CMF-Oszillator dreht Richtung, Wechsel-System, optional SuperTrend-/ADX-/MACD-Filter)</option>
     </select>
-  </div>
-  <div data-mode="obi_scalp"><label>OBI Schwelle</label><input type="number" step="0.01" id="obi_threshold"></div>
-  <div data-mode="obi_scalp"><label>OBI Modus</label>
-    <select class="cfg" id="obi_mode">
-      <option value="momentum">Momentum (mit dem Ungleichgewicht - empfohlen)</option>
-      <option value="mean_reversion">Mean-Reversion (dagegen, wie RSI)</option>
-      <option value="reversal">Reversal (separater Long/Short-Einstieg bei Umkehr aus Extremzone)</option>
-      <option value="reversal_instant">Reversal-Sofort (getrennte Long/Short-Schwellen, sofort bei Durchbruch, ohne Rückprall-Wartezeit)</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>OBI-Fenster (Sek.)</label><input type="number" step="1" id="obi_window_fast_seconds"></div>
-  <div data-mode="obi_scalp"><label>Orderbuch-Level (Empfehlung: oberste 5-10)</label><input type="number" step="1" id="obi_levels"></div>
-  <div data-mode="obi_scalp"><label>TP (%)</label><input type="number" step="any" id="obi_tp_pct"></div>
-  <div data-mode="obi_scalp"><label>SL (%)</label><input type="number" step="any" id="obi_sl_pct"></div>
-  <div data-mode="obi_scalp"><label>Cooldown (Sek.)</label><input type="number" step="1" id="obi_cooldown_seconds"></div>
-  <div data-mode="obi_scalp" style="grid-column:1/-1;">
-    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:400;">
-      <input type="checkbox" id="obi-advanced-toggle" style="width:auto;">
-      ⚙️ Erweiterte OBI-Einstellungen anzeigen (Reversal-Feinjustierung, Filter, Breakeven - für die meisten nicht nötig)
-    </label>
-  </div>
-  <div id="obi-advanced-fields" style="display:none; grid-column:1/-1; grid-template-columns: repeat(auto-fit, minmax(170px,1fr)); gap:14px; align-items:end;">
-  <div data-mode="obi_scalp"><label>Reversal OBI-Wert Long (überverkauft, negativ)</label><input type="number" step="0.01" id="obi_long_threshold"></div>
-  <div data-mode="obi_scalp"><label>Reversal OBI-Wert Short (überkauft, positiv)</label><input type="number" step="0.01" id="obi_short_threshold"></div>
-  <div data-mode="obi_scalp"><label>Reversal Rückprall-Schwelle</label><input type="number" step="0.01" id="obi_reversal_min_bounce"></div>
-  <div data-mode="obi_scalp"><label>Reversal-Sofort: Reset-Verhältnis (Anteil der Schwelle, z.B. 0.5 = 50%)</label><input type="number" step="0.05" id="obi_instant_reset_ratio"></div>
-  <div data-mode="obi_scalp"><label>OBI mittel (Sek.)</label><input type="number" step="1" id="obi_window_medium_seconds"></div>
-  <div data-mode="obi_scalp"><label>OBI langsam (Sek.)</label><input type="number" step="1" id="obi_window_slow_seconds"></div>
-  <div data-mode="obi_scalp"><label>Tiefen-Gewichtung (nahe Level zählen mehr)</label>
-    <select class="cfg" id="obi_depth_weighting_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>Median statt Durchschnitt (robuster gegen Ausreißer)</label>
-    <select class="cfg" id="obi_use_median">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>Mindest-Liquidität (Buch-Gesamtvolumen, 0 = aus)</label><input type="number" step="any" id="obi_min_liquidity"></div>
-  <div data-mode="obi_scalp"><label>Gewinn absichern (SL springt bei X% vom TP auf kleinen Gewinn)</label>
-    <select class="cfg" id="obi_breakeven_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>Auslöser (Anteil vom TP, z.B. 0.5 = 50%)</label><input type="number" step="0.05" id="obi_breakeven_trigger_ratio"></div>
-  <div data-mode="obi_scalp"><label>Abgesicherter Gewinn ($, nur $-Modus)</label><input type="number" step="any" id="obi_breakeven_lock_usd"></div>
-  <div data-mode="obi_scalp"><label>Abgesicherter Gewinn (%, nur %-Modus)</label><input type="number" step="0.01" id="obi_breakeven_lock_pct"></div>
-  <div data-mode="obi_scalp"><label>TP/SL Modus</label>
-    <select class="cfg" id="obi_tp_sl_mode">
-      <option value="pct">Prozent (%)</option>
-      <option value="usd">Fester $-Betrag</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp"><label>TP ($)</label><input type="number" step="any" id="obi_tp_usd"></div>
-  <div data-mode="obi_scalp"><label>SL ($)</label><input type="number" step="any" id="obi_sl_usd"></div>
-  <div data-mode="obi_scalp"><label>Trendfilter (EMA)</label>
-    <select class="cfg" id="obi_trend_filter">
-      <option value="false">Aus</option>
-      <option value="true">An - nur Longs über/Shorts unter EMA</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp" data-requires="obi_trend_filter"><label>Trend-EMA Länge (Trades)</label><input type="number" step="1" id="obi_trend_ema_length"></div>
-  <div data-mode="obi_scalp"><label>Spread-Filter (verwirft Signale bei zu weitem Bid/Ask-Spread)</label>
-    <select class="cfg" id="obi_spread_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp" data-requires="obi_spread_filter_enabled"><label>Max. Spread (% vom Mid-Preis)</label><input type="number" step="0.0001" id="obi_max_spread_pct"></div>
-  <div data-mode="obi_scalp"><label>Volatilitäts-Regime-Filter (verwirft Signale außerhalb Normalband)</label>
-    <select class="cfg" id="obi_vol_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="obi_scalp" data-requires="obi_vol_filter_enabled"><label>Volatilitäts-Fenster (Sek.)</label><input type="number" step="1" id="obi_vol_window_seconds"></div>
-  <div data-mode="obi_scalp" data-requires="obi_vol_filter_enabled"><label>Min. Volatilität (% Hoch-Tief-Spanne, darunter = zu ruhig)</label><input type="number" step="0.0001" id="obi_vol_min_pct"></div>
-  <div data-mode="obi_scalp" data-requires="obi_vol_filter_enabled"><label>Max. Volatilität (% Hoch-Tief-Spanne, darüber = zu wild)</label><input type="number" step="0.0001" id="obi_vol_max_pct"></div>
   </div>
 
-  <div data-mode="oms_scalp" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    📡 <b>Einstieg</b> nur wenn Orderbuch (OBI) UND echte Trades (CVD) übereinstimmend in dieselbe Richtung zeigen.
-    🎯 <b>Ausstieg</b>: erst Teilgewinn (TP1), Rest wird eng nachgezogen (Trailing). SL ist ein fester $-Betrag von Anfang an.
-    ➕ <b>Nachkauf</b>: nur wenn Signal nach Rücksetzer erneut bestätigt, mit fallender Größe.
-  </div>
-  <div data-mode="oms_scalp"><label>Orderbuch-Tiefe (Preisstufen)</label><input type="number" step="1" id="oms_levels"></div>
-  <div data-mode="oms_scalp"><label>OBI-Schwelle (0-1, höher = strenger)</label><input type="number" step="0.01" id="oms_obi_threshold"></div>
-  <div data-mode="oms_scalp"><label>OBI Zeitfenster schnell (Sek.)</label><input type="number" step="1" id="oms_window_fast_seconds"></div>
-  <div data-mode="oms_scalp"><label>OBI Zeitfenster mittel (Sek.)</label><input type="number" step="1" id="oms_window_medium_seconds"></div>
-  <div data-mode="oms_scalp"><label>OBI Zeitfenster langsam (Sek.)</label><input type="number" step="1" id="oms_window_slow_seconds"></div>
-  <div data-mode="oms_scalp"><label>CVD-Bestätigung (echte Trade-Richtung muss zustimmen)</label>
-    <select class="cfg" id="oms_cvd_confirm_enabled">
-      <option value="true">An (empfohlen)</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp"><label>CVD Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_cvd_window_seconds"></div>
-  <div data-mode="oms_scalp"><label>CVD Mindest-Verhältnis (0-1)</label><input type="number" step="0.01" id="oms_cvd_min_ratio"></div>
-  <div data-mode="oms_scalp"><label>Funding-Filter (nicht in überfüllte Richtung nachlegen)</label>
-    <select class="cfg" id="oms_funding_filter_enabled">
-      <option value="true">An (empfohlen)</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_funding_filter_enabled"><label>Funding-Grenze (absolut, z.B. 0.0005 = 0.05%)</label><input type="number" step="0.0001" id="oms_funding_max_abs"></div>
-  <div data-mode="oms_scalp"><label>Cooldown zwischen Signalen (Sek.)</label><input type="number" step="1" id="oms_cooldown_seconds"></div>
-  <div data-mode="oms_scalp"><label>Exit-Modus</label>
-    <select class="cfg" id="oms_exit_mode">
-      <option value="tp1_trail">TP1 + Trailing (Teilverkauf, Rest wird nachgezogen)</option>
-      <option value="single_tp">Nur TP (kompletter Ausstieg bei Zielerreichung, kein Teilverkauf/Trailing)</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp"><label id="oms_tp1_usd_label">TP1 Ziel ($, Teilverkauf)</label><input type="number" step="0.1" id="oms_tp1_usd"></div>
-  <div data-mode="oms_scalp" data-oms-exit-mode="tp1_trail"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" id="oms_tp1_close_pct"></div>
-  <div data-mode="oms_scalp"><label>Stop-Loss ($, gesamte Position - NICHT die Liquidation)</label><input type="number" step="0.1" id="oms_sl_usd"></div>
-  <div data-mode="oms_scalp" data-oms-exit-mode="tp1_trail"><label>Trailing-Abstand nach TP1 ($)</label><input type="number" step="0.1" id="oms_trail_distance_usd"></div>
-  <div data-mode="oms_scalp"><label>Nachkauf (DCA)</label>
-    <select class="cfg" id="oms_dca_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp"><label>Nachkauf: max. Stufen</label><input type="number" step="1" id="oms_dca_max_entries"></div>
-  <div data-mode="oms_scalp"><label>Nachkauf: Größen-Faktor je Stufe (0-1, fallend)</label><input type="number" step="0.05" id="oms_dca_size_fraction"></div>
-  <div data-mode="oms_scalp"><label>Nachkauf: Mindest-Rücksetzer ($, bevor nachgekauft wird)</label><input type="number" step="0.1" id="oms_dca_min_pullback_usd"></div>
-  <div data-mode="oms_scalp"><label>Bei Gegen-Signal sofort umdrehen (Reverse) statt auf SL/TP1/Trail zu warten</label>
-    <select class="cfg" id="oms_reverse_on_signal">
-      <option value="false">Aus (nur SL/TP1/Trail schließt die Position)</option>
-      <option value="true">An (bestätigtes Gegen-Signal dreht sofort um)</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp"><label>RSI-Regime-Filter (RSI &lt; Mittellinie → nur Short, RSI &gt; Mittellinie → nur Long)</label>
-    <select class="cfg" id="oms_rsi_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_rsi_filter_enabled"><label>RSI Zeitrahmen</label>
-    <select class="cfg" id="oms_rsi_resolution">
-      <option value="10s">10 Sekunden</option>
-      <option value="15s">15 Sekunden</option>
-      <option value="30s">30 Sekunden</option>
-      <option value="45s">45 Sekunden</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_rsi_filter_enabled"><label>RSI Periode</label><input type="number" step="1" id="oms_rsi_period"></div>
-  <div data-mode="oms_scalp" data-requires="oms_rsi_filter_enabled"><label>RSI Mittellinie</label><input type="number" step="1" id="oms_rsi_midline"></div>
-  <div data-mode="oms_scalp"><label>Open-Interest-Filter (Preis+OI kombiniert muss Richtung stützen)</label>
-    <select class="cfg" id="oms_oi_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_oi_filter_enabled"><label>OI Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_oi_window_seconds"></div>
-  <div data-mode="oms_scalp" data-requires="oms_oi_filter_enabled"><label>OI Mindest-Änderung (%, z.B. 0.001 = 0.1%)</label><input type="number" step="0.0001" id="oms_oi_min_change_pct"></div>
-  <div data-mode="oms_scalp" data-requires="oms_oi_filter_enabled"><label>OI Mindest-Score (0-1)</label><input type="number" step="0.05" id="oms_oi_min_score"></div>
-  <div data-mode="oms_scalp"><label>Liquidations-Filter (Zwangsliquidationen müssen Richtung stützen)</label>
-    <select class="cfg" id="oms_liq_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="oms_scalp" data-requires="oms_liq_filter_enabled"><label>Liquidations Zeitfenster (Sek.)</label><input type="number" step="1" id="oms_liq_window_seconds"></div>
-  <div data-mode="oms_scalp" data-requires="oms_liq_filter_enabled"><label>Liquidations Mindest-Verhältnis (0-1)</label><input type="number" step="0.05" id="oms_liq_min_ratio"></div>
 
-  <div data-mode="fib_reversal"><label>Zeitrahmen</label>
-    <select class="cfg" id="fib_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
+
+  <div data-mode="ab_breakout" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📡 <b>Signal</b>: Kerzenschluss bricht über/unter das Hoch/Tief der letzten "Breakout-Kerzen" (ohne die aktuelle Kerze) aus, schnelle EMA über/unter langsamer EMA bestätigt den Trend, RSI muss die Schwelle erreichen, optional zusätzlich ein Volumen-Filter.
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    🔄 <b>Wechsel</b>: Immer im Markt - der erste Buy bleibt offen, bis das erste Sell kommt; das Sell schließt ihn und öffnet direkt einen Sell (und umgekehrt). Keine Targets. Optional ein <b>fester Dollar-SL</b> (Verlust der Position in $) - ohne SL ist das Risiko pro Position unbegrenzt. Optional <b>SL auf Einstieg</b>: sobald die Position den eingestellten Dollar-Betrag im Gewinn ist, wird der SL auf den Einstiegskurs gesetzt.
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    🎯 <b>Plan (wie Original-Skript)</b>: SL = ATR × Multiplikator, TP1/TP2/TP3 = Risiko × 1x/2x/3x (Werte je Preset; bei "Custom" frei einstellbar). Solange ein Plan läuft (bis SL oder TP3), wird kein neues Signal angenommen; ein Gegen-Signal schließt nichts.
+  </div>
+  <div data-mode="ab_breakout"><label>Preset</label>
+    <select class="cfg" id="ab_preset">
+      <option value="scalping">Scalping</option>
+      <option value="intraday">Intraday</option>
+      <option value="swing">Swing</option>
+      <option value="custom">Custom (eigene Werte unten)</option>
     </select>
   </div>
-  <div data-mode="fib_reversal"><label>Lookback (Kerzen für Swing-High/Low)</label><input type="number" step="1" id="fib_lookback_candles"></div>
-  <div data-mode="fib_reversal"><label>Einstieg 1 (Fib-Level)</label><input type="number" step="0.001" id="fib_entry1_level"></div>
-  <div data-mode="fib_reversal"><label>Einstieg 2 / Nachkauf (Fib-Level)</label><input type="number" step="0.001" id="fib_entry2_level"></div>
-  <div data-mode="fib_reversal"><label>TP1 (Fib-Level)</label><input type="number" step="0.001" id="fib_tp1_level"></div>
-  <div data-mode="fib_reversal"><label>TP1 Teilverkauf (%)</label><input type="number" step="1" id="fib_tp1_close_pct"></div>
-  <div data-mode="fib_reversal"><label>TP2 (Fib-Level, Rest schließen)</label><input type="number" step="0.001" id="fib_tp2_level"></div>
-  <div data-mode="fib_reversal"><label>Stop-Loss (Fib-Level)</label><input type="number" step="0.001" id="fib_sl_level"></div>
-  <div data-mode="fib_reversal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="fib_cooldown_seconds"></div>
-  <div data-mode="halftrend"><label>Zeitrahmen</label>
-    <select class="cfg" id="ht_resolution">
+  <div data-mode="ab_breakout"><label>Zeitrahmen</label>
+    <select class="cfg" id="ab_resolution">
       <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
@@ -1747,1660 +1764,916 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="4h">4 Stunden</option>
       <option value="custom">Eigene Minuten...</option>
     </select>
-    <input type="number" step="1" min="1" id="ht_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+    <input type="number" step="1" min="1" id="ab_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="halftrend"><label>Amplitude (Swing-Lookback)</label><input type="number" step="1" id="ht_amplitude"></div>
-  <div data-mode="halftrend"><label>Channel Deviation (SL-Abstand in ATR2-Vielfachen)</label><input type="number" step="0.1" id="ht_channel_deviation"></div>
-  <div data-mode="halftrend"><label>Base Risk (TP-Abstand in ATR2-Vielfachen)</label><input type="number" step="0.1" id="ht_base_risk_mult"></div>
-  <div data-mode="halftrend"><label>Einstieg auslösen</label>
-    <select class="cfg" id="ht_entry_trigger">
-      <option value="candle_close">Bei Kerzenschluss</option>
-      <option value="tick">Sofort bei jedem Preis-Tick</option>
-    </select>
-  </div>
-  <div data-mode="halftrend"><label>Ausstieg auslösen</label>
-    <select class="cfg" id="ht_exit_trigger">
-      <option value="candle_close">Bei Kerzenschluss</option>
-      <option value="tick">Sofort bei jedem Preis-Tick</option>
-    </select>
-  </div>
-  <div data-mode="halftrend"><label>Richtung invertieren (Kontra-Modus)</label>
-    <select class="cfg" id="ht_invert_direction">
-      <option value="false">Aus (normal)</option>
-      <option value="true">An (invertiert)</option>
-    </select>
-  </div>
-  <div data-mode="halftrend"><label>Take-Profit-Stufen (TP1/TP2/TP3, ATR2 × Base Risk 1x/2x/3x)</label>
-    <select class="cfg" id="ht_tp_enabled">
-      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="halftrend"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" id="ht_tp1_close_pct"></div>
-  <div data-mode="halftrend"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" id="ht_tp2_close_pct"></div>
-  <div data-mode="halftrend"><label>Stop-Loss (ATR2 × Channel Deviation, springt nach TP1 auf Break-Even)</label>
-    <select class="cfg" id="ht_sl_enabled">
-      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="halftrend"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ht_sl_cooldown_seconds"></div>
-
-  <div data-mode="diamond_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    📡 <b>Signal</b>: SuperTrend (Sensitivity×2 als ATR-Multiplikator) kreuzt den Kurs + SMA-Filter bestätigt.
-    💎 <b>Smart</b>: zusätzlich muss der 200er-EMA-Trend zustimmen (Original-Skript nennt das nur so, hier ein echter Filter).
-    🎯 <b>SL/TP</b> optional, ATR-basiert wie im Original.
-  </div>
-  <div data-mode="diamond_algo"><label>Zeitrahmen</label>
-    <select class="cfg" id="da_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="da_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="diamond_algo"><label>ATR-Periode (SuperTrend-Kern)</label><input type="number" step="1" id="da_atr_period"></div>
-  <div data-mode="diamond_algo"><label>Sensitivity (ATR-Multiplikator = Sensitivity × 2 - höher = weniger empfindlich!)</label><input type="number" step="0.01" id="da_sensitivity"></div>
-  <div data-mode="diamond_algo"><label>SMA-Filter-Periode</label><input type="number" step="1" id="da_sma_period"></div>
-  <div data-mode="diamond_algo"><label>EMA-Trendfilter-Periode (für Smart-Signale)</label><input type="number" step="1" id="da_ema_trend_period"></div>
-  <div data-mode="diamond_algo"><label>Signal-Auswahl</label>
-    <select class="cfg" id="da_signal_mode">
-      <option value="all">Alle Signale (Buy/Sell)</option>
-      <option value="smart_only">Nur Smart-Signale (200-EMA-bestätigt)</option>
-    </select>
-  </div>
-  <div data-mode="diamond_algo"><label>Einstieg auslösen</label>
-    <select class="cfg" id="da_entry_trigger">
-      <option value="candle_close">Bei Kerzenschluss</option>
-      <option value="tick">Sofort bei jedem Preis-Tick</option>
-    </select>
-  </div>
-  <div data-mode="diamond_algo"><label>Ausstieg auslösen</label>
-    <select class="cfg" id="da_exit_trigger">
-      <option value="candle_close">Bei Kerzenschluss</option>
-      <option value="tick">Sofort bei jedem Preis-Tick</option>
-    </select>
-  </div>
-  <div data-mode="diamond_algo"><label>Richtung invertieren (Kontra-Modus)</label>
-    <select class="cfg" id="da_invert_direction">
-      <option value="false">Aus (normal)</option>
-      <option value="true">An (invertiert)</option>
-    </select>
-  </div>
-  <div data-mode="diamond_algo"><label>Stop-Loss (ATR(Risk-Periode) × Risk-Multiplikator)</label>
-    <select class="cfg" id="da_sl_enabled">
-      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="diamond_algo"><label>Take-Profit (SL-Abstand × R:R-Multiplikator)</label>
-    <select class="cfg" id="da_tp_enabled">
-      <option value="false">Aus (nur Gegen-Signal-Exit)</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="diamond_algo"><label>Risiko-ATR-Periode (separat vom Signal-ATR, Original-Default 14)</label><input type="number" step="1" id="da_risk_atr_period"></div>
-  <div data-mode="diamond_algo"><label>Risiko-Multiplikator (Original: "Risk %", Default 1)</label><input type="number" step="0.1" id="da_risk_mult"></div>
-  <div data-mode="diamond_algo"><label>TP R:R-Multiplikator (Original: TP1=1, TP2=2, TP3=3)</label><input type="number" step="0.5" id="da_tp_rr"></div>
-  <div data-mode="diamond_algo"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="da_sl_cooldown_seconds"></div>
-  <div data-mode="diamond_algo"><label>Kerzenart für die Signalberechnung</label>
-    <select class="cfg" id="da_use_heikin_ashi">
-      <option value="false">Normale Kerzen</option>
-      <option value="true">Heikin Ashi (wie bei TradingView Chart-Typ-Umschaltung - glättet den Trend, SL/TP lösen trotzdem am echten Kurs aus)</option>
-    </select>
-  </div>
-
-  <div data-mode="elte_smart" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    📡 <b>Signal</b>: SuperTrend auf ohlc4 kreuzt den Kurs - reiner Crossover, kein Zusatzfilter (Original "Normal"-Modus).
-    🎯 <b>Sensitivity</b> standardmäßig automatisch aus der Marktvolatilität abgeleitet (2.85-4.0).
-    💰 <b>TP1 50% → Break-Even, TP2 50% vom Rest (=25% gesamt) → SL auf TP1, TP3 Rest.</b>
-  </div>
-  <div data-mode="elte_smart"><label>Zeitrahmen</label>
-    <select class="cfg" id="es_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="es_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="elte_smart"><label>ATR-Periode (SuperTrend-Kern)</label><input type="number" step="1" id="es_atr_period"></div>
-  <div data-mode="elte_smart"><label>Sensitivity-Modus</label>
-    <select class="cfg" id="es_auto_sensitivity">
-      <option value="true">Automatisch (aus Marktvolatilität abgeleitet)</option>
-      <option value="false">Manuell (fester Wert)</option>
-    </select>
-  </div>
-  <div data-mode="elte_smart"><label>Sensitivity (nur bei manuellem Modus)</label><input type="number" step="0.01" id="es_sensitivity"></div>
-  <div data-mode="elte_smart"><label>Volatilitäts-Periode (EWMA, für Auto-Sensitivity)</label><input type="number" step="1" id="es_vol_period"></div>
-  <div data-mode="elte_smart"><label>Volatilitäts-Durchschnitt-Periode (für Auto-Sensitivity)</label><input type="number" step="1" id="es_vol_ma_len"></div>
-  <div data-mode="elte_smart"><label>Einstieg auslösen</label>
-    <select class="cfg" id="es_entry_trigger">
-      <option value="candle_close">Bei Kerzenschluss</option>
-      <option value="tick">Sofort bei jedem Preis-Tick</option>
-    </select>
-  </div>
-  <div data-mode="elte_smart"><label>Ausstieg auslösen</label>
-    <select class="cfg" id="es_exit_trigger">
-      <option value="candle_close">Bei Kerzenschluss</option>
-      <option value="tick">Sofort bei jedem Preis-Tick</option>
-    </select>
-  </div>
-  <div data-mode="elte_smart"><label>Richtung invertieren (Kontra-Modus)</label>
-    <select class="cfg" id="es_invert_direction">
-      <option value="false">Aus (normal)</option>
-      <option value="true">An (invertiert)</option>
-    </select>
-  </div>
-  <div data-mode="elte_smart"><label>Risiko-ATR-Periode (Original-Default 14)</label><input type="number" step="1" id="es_risk_atr_period"></div>
-  <div data-mode="elte_smart"><label>Risiko-Multiplikator (Original-Default 2.2)</label><input type="number" step="0.1" id="es_risk_mult"></div>
-  <div data-mode="elte_smart"><label>TP1 Teilverkauf (% der Gesamtposition)</label><input type="number" step="1" id="es_tp1_close_pct"></div>
-  <div data-mode="elte_smart"><label>TP2 Teilverkauf (% der VERBLEIBENDEN Position)</label><input type="number" step="1" id="es_tp2_close_pct"></div>
-  <div data-mode="elte_smart"><label>TP1 R:R-Multiplikator</label><input type="number" step="0.5" id="es_tp1_rr"></div>
-  <div data-mode="elte_smart"><label>TP2 R:R-Multiplikator</label><input type="number" step="0.5" id="es_tp2_rr"></div>
-  <div data-mode="elte_smart"><label>TP3 R:R-Multiplikator</label><input type="number" step="0.5" id="es_tp3_rr"></div>
-  <div data-mode="elte_smart"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="es_sl_cooldown_seconds"></div>
-  <div data-mode="elte_smart"><label>Bei Gegen-Signal sofort umdrehen (Reverse)</label>
-    <select class="cfg" id="es_reenter_on_flip">
-      <option value="false">Aus (Standard) - Gegen-Signal schließt nur, neue Position erst bei einem wirklich neuen Signal</option>
-      <option value="true">An - dasselbe Gegen-Signal schließt UND eröffnet sofort die Gegenposition</option>
-    </select>
-  </div>
-  <div data-mode="elte_smart"><label>Stop-Loss</label>
-    <select class="cfg" id="es_sl_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus (nur Gegen-Signal schließt die Position - z.B. für reines Flip-System mit "Sofort umdrehen")</option>
-    </select>
-  </div>
-  <div data-mode="elte_smart"><label>SL-Modus</label>
-    <select class="cfg" id="es_sl_mode">
-      <option value="atr">ATR-basiert (Risiko-ATR × Risiko-Multiplikator, wie TP1/TP2/TP3)</option>
-      <option value="manual">Fester $-Betrag (nur der ANFÄNGLICHE SL vor TP1 - danach übernimmt Break-Even/TP1-Lock wie gehabt)</option>
-    </select>
-  </div>
-  <div data-mode="elte_smart"><label>SL Fester $-Betrag (nur bei SL-Modus "Fest")</label><input type="number" step="0.5" id="es_sl_manual_usd"></div>
-  <div data-mode="elte_smart"><label>Take-Profit (TP1/TP2/TP3)</label>
-    <select class="cfg" id="es_tp_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus (nur Gegen-Signal schließt die Position - z.B. für reines Flip-System mit "Sofort umdrehen")</option>
-    </select>
-  </div>
-  <div data-mode="elte_smart"><label>TP-Modus</label>
-    <select class="cfg" id="es_tp_mode">
-      <option value="atr">ATR-basiert (TP1/TP2/TP3-Stufen mit Teilverkäufen, Original-System)</option>
-      <option value="manual">Fester $-Betrag (EIN einzelnes Ziel, komplette Position schließt dort - kein TP2/TP3)</option>
-    </select>
-  </div>
-  <div data-mode="elte_smart"><label>TP Fester $-Betrag (nur bei TP-Modus "Fest")</label><input type="number" step="0.5" id="es_tp_manual_usd"></div>
-  <div data-mode="elte_smart"><label>Prozent-Break-Even (unabhängig von TP1 - SL sofort auf Einstieg sobald Kurs sich X% bewegt hat)</label>
-    <select class="cfg" id="es_breakeven_pct_enabled">
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Breakout-Range (Kerzen)</label><input type="number" step="1" min="2" id="ab_lookback"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Schnelle EMA</label><input type="number" step="1" min="1" id="ab_fast_len"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Langsame EMA</label><input type="number" step="1" min="2" id="ab_slow_len"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>RSI-Periode</label><input type="number" step="1" min="2" id="ab_rsi_len"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>RSI-Schwelle (Long ab, Short = 100 minus diesem Wert)</label><input type="number" step="1" min="50" max="80" id="ab_rsi_gate"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Volumen-Filter verlangen</label>
+    <select class="cfg" id="ab_use_volume">
       <option value="false">Aus</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="elte_smart"><label>Prozent-Break-Even Auslöse-Schwelle (%)</label><input type="number" step="0.01" id="es_breakeven_trigger_pct"></div>
-
-  <div data-mode="candle_patterns" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🕯️ Signal kommt aus reinen Candlestick-Mustern (aus dem TMA-Overlay-Pine-Script portiert), kein
-    Trend-Indikator. SL/TP je einzeln ATR-basiert oder fester $-Betrag wählbar, dazu optionaler
-    ATR-Breakeven (Stop wandert auf Einstieg) - wie bei ELTE Smart / "The Phoenix".
-  </div>
-  <div data-mode="candle_patterns"><label>Zeitrahmen</label>
-    <select class="cfg" id="cp_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="cp_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="candle_patterns"><label>Signalquelle</label>
-    <select class="cfg" id="cp_signal_source">
-      <option value="three_line_strike">3 Line Strike</option>
-      <option value="engulfing">Engulfing (Big A$$ Candles)</option>
-      <option value="both">Beide (3 Line Strike ODER Engulfing)</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>3 Line Strike "Strict"-Filter (nur bei Signalquelle 3 Line Strike/Beide)</label>
-    <select class="cfg" id="cp_three_line_strict">
-      <option value="true">An - RSI(14) muss zur Signalrichtung passen (bullisch nur wenn RSI &gt; 50, bearisch nur wenn RSI &lt; 50)</option>
-      <option value="false">Aus - reines Kerzenmuster ohne RSI-Filter</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>Engulfing "Strict"-Filter (nur bei Signalquelle Engulfing/Beide)</label>
-    <select class="cfg" id="cp_engulfing_strict">
-      <option value="true">An - Schlusskurs muss zwischen MA1(21, SMMA) und MA4(200, SMMA) liegen (Original-Default)</option>
-      <option value="false">Aus - reines Kerzenmuster ohne MA-Filter</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>Richtung</label>
-    <select class="cfg" id="cp_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>Bei Gegen-Signal sofort schließen (Flip-Exit)</label>
-    <select class="cfg" id="cp_flip_exit_enabled">
-      <option value="true">An - Gegen-Signal schließt die Position sofort, unabhängig von SL/TP</option>
-      <option value="false">Aus - nur SL/TP entscheiden über den Ausstieg</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>Risiko-ATR-Periode</label><input type="number" step="1" id="cp_risk_atr_period"></div>
-  <div data-mode="candle_patterns"><label>Risiko-Multiplikator (ATR-Modus, Default 1.5 wie "The Phoenix")</label><input type="number" step="0.1" id="cp_risk_mult"></div>
-  <div data-mode="candle_patterns"><label>TP R:R-Multiplikator (TP-Abstand = SL-Abstand × dieser Wert, nur ATR-Modus)</label><input type="number" step="0.1" id="cp_tp_rr"></div>
-  <div data-mode="candle_patterns"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="cp_sl_cooldown_seconds"></div>
-  <div data-mode="candle_patterns"><label>Stop-Loss</label>
-    <select class="cfg" id="cp_sl_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus (nur Gegen-Signal/TP schließt die Position)</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>SL-Modus</label>
-    <select class="cfg" id="cp_sl_mode">
-      <option value="atr">ATR-basiert (Risiko-ATR × Risiko-Multiplikator)</option>
-      <option value="manual">Fester $-Betrag</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>SL Fester $-Betrag (nur bei SL-Modus "Fest")</label><input type="number" step="0.5" id="cp_sl_manual_usd"></div>
-  <div data-mode="candle_patterns"><label>Take-Profit</label>
-    <select class="cfg" id="cp_tp_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus (nur Gegen-Signal/SL schließt die Position)</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>TP-Modus</label>
-    <select class="cfg" id="cp_tp_mode">
-      <option value="atr">ATR-basiert (SL-Abstand × TP-R:R-Multiplikator)</option>
-      <option value="manual">Fester $-Betrag</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>TP Fester $-Betrag (nur bei TP-Modus "Fest")</label><input type="number" step="0.5" id="cp_tp_manual_usd"></div>
-  <div data-mode="candle_patterns"><label>ATR-Breakeven (Stop wandert auf Einstieg, sobald Kurs im Gewinn ist - wie "The Phoenix")</label>
-    <select class="cfg" id="cp_breakeven_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="candle_patterns"><label>Breakeven Auslöse-Schwelle (× Risiko-ATR, Default 0.5 wie "The Phoenix")</label><input type="number" step="0.1" id="cp_breakeven_trigger_mult"></div>
-
-  <div data-mode="mo7_scalp" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    📊 MO7 = Mittelwert aus RSI, Stochastic %K, Williams %R, MFI, MACD (normiert), ROC (normiert)
-    und Percent-Rank - alle 0-100 skaliert (portiert aus dem "MO7 Buy/Sell Signal"-Pine-Script).
-    NUR native Binance-Zeitrahmen (1m/3m/5m/15m/30m/1h/2h/4h) - kein 2m/Sekunden/eigene Minuten,
-    weil MFI Handelsvolumen braucht. Nur fester SL/TP (kein ATR-Modus, kein Breakeven).
-  </div>
-  <div data-mode="mo7_scalp"><label>Zeitrahmen</label>
-    <select class="cfg" id="mo7_resolution">
-      <option value="1m">1 Minute</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="2h">2 Stunden</option>
-      <option value="4h">4 Stunden</option>
-    </select>
-  </div>
-  <div data-mode="mo7_scalp"><label>Einstiegsmodus</label>
-    <select class="cfg" id="mo7_entry_mode">
-      <option value="threshold_cross">Schwellenwert-Cross (BUY beim Unterschreiten der Buy-Schwelle, SELL beim Überschreiten der Sell-Schwelle)</option>
-      <option value="five_candle_sum">5-Kerzen-Summe (Summe der letzten 5 MO7-Werte unter/über eigener Schwelle)</option>
-      <option value="trend_state">Trend-Zustand (MO7 über Schwelle = Uptrend/Long, darunter = Downtrend/Short - Bot bleibt immer entsprechend positioniert)</option>
-    </select>
-  </div>
-  <div data-mode="mo7_scalp"><label>Trend-Schwelle (nur bei Trend-Zustand)</label><input type="number" step="1" id="mo7_trend_threshold"></div>
-  <div data-mode="mo7_scalp"><label>Trend-Totzone (± um die Schwelle, reduziert Hin-und-Her bei Werten nahe der Schwelle)</label><input type="number" step="1" id="mo7_trend_deadband"></div>
-  <div data-mode="mo7_scalp"><label>Buy-Schwelle (nur Schwellenwert-Cross, MO7 &lt; Wert)</label><input type="number" step="1" id="mo7_buy_threshold"></div>
-  <div data-mode="mo7_scalp"><label>Sell-Schwelle (nur Schwellenwert-Cross, MO7 &gt; Wert)</label><input type="number" step="1" id="mo7_sell_threshold"></div>
-  <div data-mode="mo7_scalp"><label>5-Kerzen-Summe Long-Schwelle (nur 5-Kerzen-Summe, Summe &lt; Wert)</label><input type="number" step="1" id="mo7_sum_low"></div>
-  <div data-mode="mo7_scalp"><label>5-Kerzen-Summe Short-Schwelle (nur 5-Kerzen-Summe, Summe &gt; Wert)</label><input type="number" step="1" id="mo7_sum_high"></div>
-  <div data-mode="mo7_scalp"><label>Richtung</label>
-    <select class="cfg" id="mo7_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="mo7_scalp"><label>Bei Gegen-Signal sofort schließen (Flip-Exit)</label>
-    <select class="cfg" id="mo7_flip_exit_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus - nur SL/TP entscheiden</option>
-    </select>
-  </div>
-  <div data-mode="mo7_scalp"><label>Stop-Loss</label>
-    <select class="cfg" id="mo7_sl_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="mo7_scalp"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="mo7_sl_manual_usd"></div>
-  <div data-mode="mo7_scalp"><label>Take-Profit</label>
-    <select class="cfg" id="mo7_tp_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="mo7_scalp"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="mo7_tp_manual_usd"></div>
-  <div data-mode="mo7_scalp"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mo7_sl_cooldown_seconds"></div>
-
-  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🌀 UT Bot Alerts (ATR-Trailing-Stop, weit verbreitetes Pine-Script) gefiltert durch die Hull
-    Moving Average-Farbe. IMMER IM MARKT (kein SL/TP, keine flache Position) - die Strategie
-    dreht kontinuierlich zwischen Long/Short. Flip-Trigger wählbar.
-  </div>
-  <div data-mode="ut_bot_hull"><label>Zeitrahmen</label>
-    <select class="cfg" id="utb_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="utb_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="ut_bot_hull"><label>ATR-Periode (UT-Bot, Original-Default 1)</label><input type="number" step="1" id="utb_atr_period"></div>
-  <div data-mode="ut_bot_hull"><label>Sensitivity (ATR-Multiplikator für die Trailing-Stop-Distanz)</label><input type="number" step="0.01" id="utb_sensitivity"></div>
-  <div data-mode="ut_bot_hull"><label>Signalquelle</label>
-    <select class="cfg" id="utb_heikin_ashi">
-      <option value="false">Normale Kerzen</option>
-      <option value="true">Heikin-Ashi-Kerzen</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull"><label>Hull-MA-Periode</label><input type="number" step="1" id="utb_hull_period"></div>
-  <div data-mode="ut_bot_hull"><label>Flip-Trigger</label>
-    <select class="cfg" id="utb_flip_trigger">
-      <option value="hull_color">Nur Hull-Farbwechsel (UT-Bot-Signal nur für Ersteinstieg)</option>
-      <option value="hull_and_signal">Hull-Farbwechsel UND UT-Bot-Gegensignal gleichzeitig</option>
-      <option value="opposite_signal">Nur UT-Bot-Gegensignal (Hull nur für Ersteinstieg)</option>
-      <option value="signal_only">Nur UT-Bot Buy/Sell im Wechsel (Hull komplett ignoriert, auch beim Ersteinstieg)</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull"><label>Richtung</label>
-    <select class="cfg" id="utb_direction_mode">
-      <option value="both">Beide (immer im Markt, dreht zwischen Long/Short)</option>
-      <option value="long_only">Nur Long (bei Gegen-Flip glattstellen statt drehen)</option>
-      <option value="short_only">Nur Short (bei Gegen-Flip glattstellen statt drehen)</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Sofort-Trigger: wertet zusätzlich die noch OFFENE, gerade laufende Kerze mit dem aktuellen
-    Live-Preis aus und feuert sofort bei einem neuen Flip, statt bis zum tatsächlichen
-    Kerzenschluss zu warten. Nur bei normalen Minuten-Zeitrahmen möglich (10s/15s/30s/45s
-    liefern ausschließlich bereits abgeschlossene Kerzen, dort bleibt "Aus" ohne Wirkung).
-  </div>
-  <div data-mode="ut_bot_hull"><label>Sofort-Trigger</label>
-    <select class="cfg" id="utb_instant_trigger_enabled">
-      <option value="false">Aus - wartet auf echten Kerzenschluss</option>
-      <option value="true">An - feuert sofort in der laufenden Kerze</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull"><label>Stop-Loss (fester $-Betrag, optional - durchbricht "immer im Markt" nur im SL-Fall)</label>
-    <select class="cfg" id="utb_sl_enabled">
-      <option value="false">Aus (Standard - reines Flip-System ohne SL)</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull"><label>SL Fester $-Betrag (nur wenn Stop-Loss An)</label><input type="number" step="0.5" id="utb_sl_manual_usd"></div>
-  <div data-mode="ut_bot_hull"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="utb_sl_cooldown_seconds"></div>
-  <div data-mode="ut_bot_hull"><label>Take-Profit (fester $-Betrag)</label>
-    <select class="cfg" id="utb_tp_enabled">
-      <option value="false">Aus (Standard - reines Flip-System ohne TP)</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_tp_enabled"><label>TP Fester $-Betrag (nur wenn Take-Profit An)</label><input type="number" step="0.5" id="utb_tp_manual_usd"></div>
-  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Trailing-TP (unabhängig vom festen TP kombinierbar): sobald der Trade um die Aktivierungs-Schwelle
-    im Profit ist, wird ein Gewinn-Exit im Nachzieh-Abstand zum bisher besten erreichten Preis
-    nachgezogen - schließt die Position, sobald der Kurs um den Nachzieh-Abstand vom Hoch/Tief
-    zurückfällt, statt auf den festen TP oder ein Gegen-Signal zu warten.
-  </div>
-  <div data-mode="ut_bot_hull"><label>Trailing-TP</label>
-    <select class="cfg" id="utb_trail_tp_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_trail_tp_enabled"><label>Aktivierung ab Profit (%)</label><input type="number" step="0.01" id="utb_trail_tp_activation_pct"></div>
-  <div data-mode="ut_bot_hull" data-requires="utb_trail_tp_enabled"><label>Nachzieh-Abstand (%)</label><input type="number" step="0.01" id="utb_trail_tp_step_pct"></div>
-  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    MTF-Trend%-Filter (wie bei Pieki Algo): Trend% wird als Durchschnitt aus bis zu 3
-    Zeiteinheiten berechnet. Gilt für JEDEN Einstieg, auch beim Flip in die Gegenrichtung -
-    Short nur wenn Trend% unter der Short-Schwelle, Long nur wenn über der Long-Schwelle.
-  </div>
-  <div data-mode="ut_bot_hull"><label>MTF-Trend%-Filter</label>
-    <select class="cfg" id="utb_mtf_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - Short nur unter Short-Schwelle, Long nur über Long-Schwelle</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Zeiteinheit 1</label>
-    <select class="cfg" id="utb_mtf_tf1">
-      <option value="off">Aus</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="utb_mtf_tf1_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Zeiteinheit 2</label>
-    <select class="cfg" id="utb_mtf_tf2">
-      <option value="off">Aus</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="utb_mtf_tf2_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Zeiteinheit 3</label>
-    <select class="cfg" id="utb_mtf_tf3">
-      <option value="off">Aus</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="utb_mtf_tf3_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="utb_mtf_long_threshold"></div>
-  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="utb_mtf_short_threshold"></div>
-  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="utb_mtf_fast_len"></div>
-  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="utb_mtf_slow_len"></div>
-  <div data-mode="ut_bot_hull" data-requires="utb_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="utb_mtf_atr_len"></div>
-  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler Z-Score-Filter (portiert aus "Rolling Z-Score Trend [QuantAlgo]"), unabhängig
-    vom MTF-Filter kombinierbar (beide können gleichzeitig an sein - dann müssen beide
-    zustimmen): über 0 = nur Long erlaubt, unter 0 = nur Short erlaubt - gilt für jeden
-    Einstieg, auch beim Flip.
-  </div>
-  <div data-mode="ut_bot_hull"><label>Z-Score-Filter</label>
-    <select class="cfg" id="utb_zscore_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - Long nur über 0, Short nur unter 0</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_zscore_filter_enabled"><label>Z-Score Zeiteinheit</label>
-    <select class="cfg" id="utb_zscore_resolution">
-      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
-      <option value="1m">1 Minute</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="utb_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_zscore_filter_enabled"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="utb_zscore_lookback"></div>
-  <div data-mode="ut_bot_hull" data-requires="utb_zscore_filter_enabled"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="utb_zscore_smooth"></div>
-  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler RSI-Regime-Filter, unabhängig von den anderen Filtern kombinierbar (mehrere
-    gleichzeitig aktiv -> alle müssen zustimmen): RSI über der Mittellinie -> nur Long erlaubt,
-    RSI unter der Mittellinie -> nur Short erlaubt.
-  </div>
-  <div data-mode="ut_bot_hull"><label>RSI-Filter</label>
-    <select class="cfg" id="utb_rsi_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - Long nur über Mittellinie, Short nur darunter</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_rsi_filter_enabled"><label>RSI-Länge</label><input type="number" step="1" min="2" id="utb_rsi_length"></div>
-  <div data-mode="ut_bot_hull" data-requires="utb_rsi_filter_enabled"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="utb_rsi_midline"></div>
-  <div data-mode="ut_bot_hull" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler ADX/DI-Trendfilter, unabhängig von den anderen Filtern kombinierbar: ADX über der
-    Schwelle UND +DI über -DI -> nur Long erlaubt. ADX über der Schwelle UND -DI über +DI -> nur
-    Short erlaubt. Liegt der ADX UNTER der Schwelle (kein klarer Trend), sind BEIDE Richtungen
-    gesperrt.
-  </div>
-  <div data-mode="ut_bot_hull"><label>ADX/DI-Filter</label>
-    <select class="cfg" id="utb_adx_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - nur bei genug Trendstärke und passender Richtung</option>
-    </select>
-  </div>
-  <div data-mode="ut_bot_hull" data-requires="utb_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="utb_adx_length"></div>
-  <div data-mode="ut_bot_hull" data-requires="utb_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="utb_adx_threshold"></div>
-
-  <div data-mode="wavetrend_cross" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🌊 WaveTrend Cross (Kernsignal aus "Cipher B"): wt1 kreuzt wt2 - das sind die grünen/roten
-    Punkte im Oszillator. Zonenfilter wählbar (nur in Überkauft/Überverkauft), Richtung "immer im
-    Markt" (dreht direkt) oder normal (SL/TP/optional Gegen-Signal beendet die Position). Nur
-    fester SL/TP (kein ATR-Modus).
-  </div>
-  <div data-mode="wavetrend_cross"><label>Zeitrahmen</label>
-    <select class="cfg" id="wtc_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="wtc_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="wavetrend_cross"><label>WT Channel-Länge</label><input type="number" step="1" id="wtc_channel_len"></div>
-  <div data-mode="wavetrend_cross"><label>WT Average-Länge</label><input type="number" step="1" id="wtc_average_len"></div>
-  <div data-mode="wavetrend_cross"><label>WT MA-Länge</label><input type="number" step="1" id="wtc_ma_len"></div>
-  <div data-mode="wavetrend_cross"><label>Zonenfilter (nur in Überkauft/Überverkauft signalisieren)</label>
-    <select class="cfg" id="wtc_require_zone">
-      <option value="true">An (Original-Verhalten)</option>
-      <option value="false">Aus - jeder Cross zählt</option>
-    </select>
-  </div>
-  <div data-mode="wavetrend_cross"><label>Überverkauft-Schwelle (nur bei Zonenfilter An)</label><input type="number" step="1" id="wtc_os_level"></div>
-  <div data-mode="wavetrend_cross"><label>Überkauft-Schwelle (nur bei Zonenfilter An)</label><input type="number" step="1" id="wtc_ob_level"></div>
-  <div data-mode="wavetrend_cross"><label>Richtung</label>
-    <select class="cfg" id="wtc_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="wavetrend_cross"><label>Immer im Markt (Buy/Sell im direkten Wechsel, wie UT Bot + Hull)</label>
-    <select class="cfg" id="wtc_always_in_market">
-      <option value="false">Aus (Standard) - normaler Ein-/Ausstieg, geht zwischendurch flach</option>
-      <option value="true">An - dreht direkt bei Gegen-Signal, nie flach außer bei SL/TP</option>
-    </select>
-  </div>
-  <div data-mode="wavetrend_cross"><label>Bei Gegen-Signal sofort schließen (nur relevant wenn "Immer im Markt" Aus)</label>
-    <select class="cfg" id="wtc_flip_exit_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus - nur SL/TP entscheiden</option>
-    </select>
-  </div>
-  <div data-mode="wavetrend_cross"><label>Stop-Loss</label>
-    <select class="cfg" id="wtc_sl_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="wavetrend_cross"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="wtc_sl_manual_usd"></div>
-  <div data-mode="wavetrend_cross"><label>Take-Profit</label>
-    <select class="cfg" id="wtc_tp_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="wavetrend_cross"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="wtc_tp_manual_usd"></div>
-  <div data-mode="wavetrend_cross"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="wtc_sl_cooldown_seconds"></div>
-
-  <div data-mode="pieki_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🎯 Pieki Algo (portiert aus "Pieki Algo | Signals &amp; Overlays"): SuperTrend (ATR-Periode × Sensitivity,
-    Faktor = Sensitivity×2, wie im Original) kreuzt den Kurs UND SMA9 bestätigt gleichzeitig - erst dann
-    zählt das Signal. Exit wählbar: Flip (immer im Markt, dreht direkt) oder fester SL/TP. Optionaler
-    MTF-Trend%-Filter: Short nur erlaubt wenn Trend% unter der Short-Schwelle, Long nur wenn über der
-    Long-Schwelle (vereinfachte Version des EMA-Spread-Trend% aus deinem MTF-Dashboard-Indikator - hier auf
-    EINEM Zeitrahmen berechnet, nicht auf den vollen 9 Timeframes des Original-Scripts).
-  </div>
-  <div data-mode="pieki_algo"><label>Zeitrahmen</label>
-    <select class="cfg" id="pk_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="pk_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="pieki_algo"><label>Sensitivity (0.01-Schritte, Original-Default 3)</label><input type="number" step="0.01" id="pk_sensitivity"></div>
-  <div data-mode="pieki_algo"><label>ATR-Periode (SuperTrend, Original fest 11)</label><input type="number" step="1" id="pk_atr_period"></div>
-  <div data-mode="pieki_algo"><label>SMA-Periode (Bestätigungsfilter, Original sma9 = 13)</label><input type="number" step="1" id="pk_sma_period"></div>
-  <div data-mode="pieki_algo"><label>Richtung</label>
-    <select class="cfg" id="pk_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="pieki_algo"><label>Exit-Modus</label>
-    <select class="cfg" id="pk_exit_mode">
-      <option value="flip">Wechsel (immer im Markt, Flip beim Gegen-Signal)</option>
-      <option value="fixed_tp_sl">Fester SL/TP (geht bei Treffer flach, wartet auf nächstes Ersteinstiegs-Signal)</option>
-    </select>
-  </div>
-  <div data-mode="pieki_algo"><label>Stop-Loss (nur bei Exit-Modus "Fester SL/TP")</label>
-    <select class="cfg" id="pk_sl_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="pieki_algo"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="pk_sl_manual_usd"></div>
-  <div data-mode="pieki_algo"><label>Take-Profit (nur bei Exit-Modus "Fester SL/TP")</label>
-    <select class="cfg" id="pk_tp_enabled">
-      <option value="true">An</option>
-      <option value="false">Aus</option>
-    </select>
-  </div>
-  <div data-mode="pieki_algo"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="pk_tp_manual_usd"></div>
-  <div data-mode="pieki_algo"><label>Cooldown nach SL (Sek., nur bei Exit-Modus "Fester SL/TP")</label><input type="number" step="1" id="pk_sl_cooldown_seconds"></div>
-  <div data-mode="pieki_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Trailing-Stop funktioniert in BEIDEN Exit-Modi: sobald der Trade um die Aktivierungs-Schwelle
-    im Profit ist, springt der SL auf Breakeven (Einstiegspreis) und wird danach immer im
-    gewählten Prozent-Abstand zum bisherigen besten Preis nachgezogen (nie zurück, nur in die
-    profitable Richtung). Bei "Fester SL/TP" überschreibt es den festen SL, sobald aktiv. Bei
-    "Wechsel" (immer im Markt) unterbricht ein Trailing-Treffer das Prinzip NUR in diesem einen
-    Fall - die Position geht dann glatt (inkl. Cooldown) statt auf ein Gegen-Signal zu warten.
-  </div>
-  <div data-mode="pieki_algo"><label>Trailing-Stop</label>
-    <select class="cfg" id="pk_trailing_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="pieki_algo"><label>Aktivierung ab Profit (%)</label><input type="number" step="0.01" id="pk_trailing_activation_pct"></div>
-  <div data-mode="pieki_algo"><label>Nachzieh-Abstand (%)</label><input type="number" step="0.01" id="pk_trailing_step_pct"></div>
-  <div data-mode="pieki_algo"><label>MTF-Trend%-Filter</label>
-    <select class="cfg" id="pk_mtf_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - Short nur unter Short-Schwelle, Long nur über Long-Schwelle</option>
-    </select>
-  </div>
-  <div data-mode="pieki_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Trend% wird - wie "Block 1" im Original-Indikator - als Durchschnitt aus bis zu 3 Zeiteinheiten
-    berechnet. Eine TF auf "Aus" stellen, um sie aus dem Durchschnitt rauszunehmen (z.B. nur 1
-    oder 2 TFs statt 3 nutzen).
-  </div>
-  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Zeiteinheit 1</label>
-    <select class="cfg" id="pk_mtf_tf1">
-      <option value="off">Aus</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="pk_mtf_tf1_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Zeiteinheit 2</label>
-    <select class="cfg" id="pk_mtf_tf2">
-      <option value="off">Aus</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="pk_mtf_tf2_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Zeiteinheit 3</label>
-    <select class="cfg" id="pk_mtf_tf3">
-      <option value="off">Aus</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="pk_mtf_tf3_custom_minutes" placeholder="z.B. 8" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="pk_mtf_long_threshold"></div>
-  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="pk_mtf_short_threshold"></div>
-  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="pk_mtf_fast_len"></div>
-  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="pk_mtf_slow_len"></div>
-  <div data-mode="pieki_algo" data-requires="pk_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="pk_mtf_atr_len"></div>
-
-  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🔺 Williams Fractals: eine Kerze ist ein "Hoch-Fraktal", wenn sie hoeher ist als die
-    "Perioden" Kerzen davor UND danach (analog fuer "Tief-Fraktal" beim Tief) - wie im
-    Original-Pine-Script, aber vereinfacht (ohne die Gleichstand-Sonderfaelle des Originals,
-    die bei fast identischen Hochs/Tiefs noch mehr Fraktale zulassen). Ein Fraktal wird erst
-    "Perioden" Kerzen im Nachhinein bestaetigt, kein Echtzeit-Signal. Tief-Fraktal = Kauf-Signal,
-    Hoch-Fraktal = Verkauf-Signal. Immer im Markt: dreht direkt beim jeweils naechsten
-    Gegen-Signal, keine Filter, kein SL/TP - reiner Buy/Sell-Wechsel.
-  </div>
-  <div data-mode="fractals_flip"><label>Zeitrahmen</label>
-    <select class="cfg" id="fr_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="fr_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="fractals_flip"><label>Perioden (links+rechts für die Fraktal-Bestätigung)</label><input type="number" step="1" id="fr_periods"></div>
-  <div data-mode="fractals_flip"><label>Richtung</label>
-    <select class="cfg" id="fr_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip"><label>Invertiert-Modus</label>
-    <select class="cfg" id="fr_invert_direction">
-      <option value="false">Aus - Tief-Fraktal=Kauf, Hoch-Fraktal=Verkauf</option>
-      <option value="true">An - Tief-Fraktal=Verkauf, Hoch-Fraktal=Kauf</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler Z-Score-Filter (portiert aus "Rolling Z-Score Trend [QuantAlgo]"): misst, wie
-    viele Standardabweichungen der Kurs vom gleitenden Durchschnitt entfernt ist. Über 0 = nur
-    Long erlaubt, unter 0 = nur Short erlaubt - gilt für jeden Einstieg, auch beim Flip.
-  </div>
-  <div data-mode="fractals_flip"><label>Z-Score-Filter</label>
-    <select class="cfg" id="fr_zscore_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - Long nur über 0, Short nur unter 0</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip" data-requires="fr_zscore_filter_enabled"><label>Z-Score Zeiteinheit</label>
-    <select class="cfg" id="fr_zscore_resolution">
-      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
-      <option value="1m">1 Minute</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="fr_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="fractals_flip" data-requires="fr_zscore_filter_enabled"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="fr_zscore_lookback"></div>
-  <div data-mode="fractals_flip" data-requires="fr_zscore_filter_enabled"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="fr_zscore_smooth"></div>
-  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler fester Stop-Loss (fester $-Betrag, wie bei UT-Bot+Hull): durchbricht "immer im
-    Markt" NUR im SL-Fall - die Position geht dann glatt (statt zu drehen) und wartet nach einem
-    Cooldown auf das nächste gültige Ersteinstiegs-Signal.
-  </div>
-  <div data-mode="fractals_flip"><label>Stop-Loss</label>
-    <select class="cfg" id="fr_sl_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="fr_sl_manual_usd"></div>
-  <div data-mode="fractals_flip"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="fr_sl_cooldown_seconds"></div>
-  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler fester Take-Profit (fester $-Betrag): ohne TP ist der einzige Ausstieg das nächste
-    GEGENSÄTZLICHE Fraktal - ein bereits profitabler Trade kann dabei komplett wieder
-    zurücklaufen, bevor überhaupt ein Gegensignal kommt.
-  </div>
-  <div data-mode="fractals_flip"><label>Take-Profit</label>
-    <select class="cfg" id="fr_tp_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip" data-requires="fr_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="fr_tp_manual_usd"></div>
-  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler ADX/DI-Trendfilter: Fractals baut auf echten Swing-Bewegungen auf - in totem
-    Seitwärts-Markt entstehen sonst nur Rausch-Fraktale. ADX über der Schwelle UND +DI über -DI
-    -> nur Long erlaubt. ADX über der Schwelle UND -DI über +DI -> nur Short erlaubt. Liegt der
-    ADX UNTER der Schwelle (kein klarer Trend), sind BEIDE Richtungen gesperrt.
-  </div>
-  <div data-mode="fractals_flip"><label>ADX/DI-Filter</label>
-    <select class="cfg" id="fr_adx_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - nur bei genug Trendstärke und passender Richtung</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Zeiteinheit</label>
-    <select class="cfg" id="fr_adx_resolution">
-      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
-      <option value="1m">1 Minute</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="fr_adx_resolution_custom_minutes" placeholder="z.B. 3" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="fr_adx_length"></div>
-  <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="fr_adx_threshold"></div>
-  <div data-mode="fractals_flip" data-requires="fr_adx_filter_enabled"><label>ADX/DI Invertiert</label>
-    <select class="cfg" id="fr_adx_invert_enabled">
-      <option value="false">Aus (normal: +DI über -DI = Long, -DI über +DI = Short)</option>
-      <option value="true">An (vertauscht: -DI über +DI = Long, +DI über -DI = Short)</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler MTF-Trend%-Filter (übergeordneter Zeitrahmen, wie bei Pieki Algo/UT-Bot+Hull):
-    filtert Fraktal-Signale gegen den größeren Trend raus - Long nur wenn der übergeordnete
-    Zeitrahmen über der Long-Schwelle liegt, Short nur wenn darunter. Unabhängig von Z-Score-
-    und ADX-Filter kombinierbar.
-  </div>
-  <div data-mode="fractals_flip"><label>MTF-Filter</label>
-    <select class="cfg" id="fr_mtf_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Übergeordneter Zeitrahmen</label>
-    <select class="cfg" id="fr_mtf_tf1">
-      <option value="off">Aus (kein übergeordneter Zeitrahmen)</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="fr_mtf_tf1_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Long-Schwelle (Trend% muss darüber liegen)</label><input type="number" step="0.1" id="fr_mtf_long_threshold"></div>
-  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Short-Schwelle (Trend% muss darunter liegen)</label><input type="number" step="0.1" id="fr_mtf_short_threshold"></div>
-  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% Fast-EMA-Länge</label><input type="number" step="1" id="fr_mtf_fast_len"></div>
-  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% Slow-EMA-Länge</label><input type="number" step="1" id="fr_mtf_slow_len"></div>
-  <div data-mode="fractals_flip" data-requires="fr_mtf_filter_enabled"><label>Trend% ATR-Länge (Normierung)</label><input type="number" step="1" id="fr_mtf_atr_len"></div>
-  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Was passiert, wenn ein Gegen-Fraktal kommt, aber Richtung/ein Filter das Drehen verbietet?
-    "Glattstellen" (Standard) schließt die Position sofort und wartet auf das nächste
-    Ersteinstiegs-Signal. "Signal ignorieren" lässt die Position stattdessen einfach unangetastet
-    offen (nur SL/TP können sie noch beenden) - bis irgendwann ein Gegen-Fraktal kommt, bei dem
-    ALLE Bedingungen für die neue Richtung gleichzeitig erfüllt sind und tatsächlich geflippt
-    werden kann.
-  </div>
-  <div data-mode="fractals_flip"><label>Bei blockiertem Flip</label>
-    <select class="cfg" id="fr_flatten_on_block_enabled">
-      <option value="true">Glattstellen (Standard)</option>
-      <option value="false">Signal ignorieren - Position bleibt offen</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Nachkauf/DCA: kommt WÄHREND einer offenen Position ein weiteres Signal in DERSELBEN Richtung
-    (z.B. noch ein Tief-Fraktal während Long), wird nachgekauft statt das Signal zu ignorieren -
-    bis zu der eingestellten Anzahl mal. Nach jedem Nachkauf werden SL/TP auf Basis des NEUEN
-    Durchschnittspreises neu gesetzt - kombiniere das mit dem Take-Profit oben, dann verkauft der
-    Bot effektiv "sobald die Gesamtposition im Plus ist", je mehr nachgekauft wurde, desto näher
-    liegt das TP am aktuellen Kurs. Nachkäufe respektieren dieselben Filter wie Ersteinstiege.
-  </div>
-  <div data-mode="fractals_flip"><label>Nachkauf/DCA</label>
-    <select class="cfg" id="fr_dca_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="fractals_flip" data-requires="fr_dca_enabled"><label>Max. Nachkäufe (zusätzlich zum Ersteinstieg)</label><input type="number" step="1" min="1" id="fr_dca_max_entries"></div>
-  <div data-mode="fractals_flip" data-requires="fr_dca_enabled"><label>Mindest-$-Abstand zum Ø-Einstieg (0 = kein Mindestabstand)</label><input type="number" step="1" min="0" id="fr_dca_step_usd"></div>
-
-  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🧬 Kerzen-DNA (eigene Entwicklung, kein Port eines bestehenden Scripts): jede Kerze bekommt
-    einen Konviktions-Score von -100 (voll bearisch) bis +100 (voll bullisch) - Basis ist, wie
-    groß der Kerzenkörper im Verhältnis zur gesamten Hoch-Tief-Spanne ist (Marubozu-artige Kerzen
-    = nah an ±100, Doji-artige Kerzen = nah an 0), plus ein Bonus/Abzug, wenn ein langer Docht auf
-    der Gegenseite eine Ablehnung zeigt (Hammer/Shooting-Star). Kreuzt der Score die Schwelle nach
-    oben → Kauf, nach unten → Verkauf. Immer im Markt, reiner Buy/Sell-Wechsel - kein Filter, kein
-    SL/TP.
-  </div>
-  <div data-mode="candle_dna"><label>Zeitrahmen</label>
-    <select class="cfg" id="cd_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="cd_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="candle_dna"><label>Konviktions-Schwelle (0-100)</label><input type="number" step="1" id="cd_threshold"></div>
-  <div data-mode="candle_dna"><label>Docht-Ablehnung-Faktor (Docht muss X-mal so lang wie der Körper sein)</label><input type="number" step="0.1" id="cd_rejection_mult"></div>
-  <div data-mode="candle_dna"><label>Richtung</label>
-    <select class="cfg" id="cd_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="candle_dna"><label>Richtung invertieren (Kontra-Modus)</label>
-    <select class="cfg" id="cd_invert_direction">
-      <option value="false">Aus (normal)</option>
-      <option value="true">An (invertiert)</option>
-    </select>
-  </div>
-  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Wie bei ELTE Smart: vertauscht Long/Short komplett. Normal löst eine bullische Extrem-Kerze
-    (Score über der Schwelle) einen Long-Impuls aus und eine bearische einen Short-Impuls. Im
-    Kontra-Modus ist es umgekehrt - eine bullische Kerze wird als Short-Signal gewertet und eine
-    bearische als Long-Signal. Alle anderen Einstellungen (Richtungssperre, Filter, SL/TP)
-    wirken unverändert auf die (dann vertauschten) Signale.
-  </div>
-  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler Z-Score-Filter (portiert aus "Rolling Z-Score Trend [QuantAlgo]"): misst, wie
-    viele Standardabweichungen der Kurs vom gleitenden Durchschnitt entfernt ist. Über 0 = nur
-    Long erlaubt, unter 0 = nur Short erlaubt - gilt für jeden Einstieg, auch beim Flip.
-  </div>
-  <div data-mode="candle_dna"><label>Z-Score-Filter</label>
-    <select class="cfg" id="cd_zscore_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - Long nur über 0, Short nur unter 0</option>
-    </select>
-  </div>
-  <div data-mode="candle_dna" data-requires="cd_zscore_filter_enabled"><label>Z-Score Zeiteinheit</label>
-    <select class="cfg" id="cd_zscore_resolution">
-      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
-      <option value="1m">1 Minute</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="cd_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="candle_dna" data-requires="cd_zscore_filter_enabled"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="cd_zscore_lookback"></div>
-  <div data-mode="candle_dna" data-requires="cd_zscore_filter_enabled"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="cd_zscore_smooth"></div>
-  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler RSI-Regime-Filter, unabhängig vom Z-Score-Filter kombinierbar (beide können
-    gleichzeitig an sein - dann müssen beide zustimmen): RSI über der Mittellinie -> nur Long
-    erlaubt, RSI unter der Mittellinie -> nur Short erlaubt. Läuft auf demselben Zeitrahmen wie
-    das Kerzen-DNA-Signal selbst.
-  </div>
-  <div data-mode="candle_dna"><label>RSI-Filter</label>
-    <select class="cfg" id="cd_rsi_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - Long nur über Mittellinie, Short nur darunter</option>
-    </select>
-  </div>
-  <div data-mode="candle_dna" data-requires="cd_rsi_filter_enabled"><label>RSI-Länge</label><input type="number" step="1" min="2" id="cd_rsi_length"></div>
-  <div data-mode="candle_dna" data-requires="cd_rsi_filter_enabled"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="cd_rsi_midline"></div>
-  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler ADX/DI-Trendfilter, unabhängig von Z-Score- und RSI-Filter kombinierbar (mehrere
-    gleichzeitig aktiv -> alle müssen zustimmen): ADX über der Schwelle UND +DI über -DI -> nur
-    Long erlaubt. ADX über der Schwelle UND -DI über +DI -> nur Short erlaubt. Liegt der ADX
-    UNTER der Schwelle (kein klarer Trend), sind BEIDE Richtungen gesperrt. Läuft auf demselben
-    Zeitrahmen und derselben Kerzenbasis (Heikin-Ashi ja/nein) wie das Kerzen-DNA-Signal selbst.
-  </div>
-  <div data-mode="candle_dna"><label>ADX/DI-Filter</label>
-    <select class="cfg" id="cd_adx_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - nur bei genug Trendstärke und passender Richtung</option>
-    </select>
-  </div>
-  <div data-mode="candle_dna" data-requires="cd_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="cd_adx_length"></div>
-  <div data-mode="candle_dna" data-requires="cd_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="cd_adx_threshold"></div>
-  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler fester Stop-Loss (fester $-Betrag, wie bei UT-Bot+Hull): durchbricht "immer im
-    Markt" NUR im SL-Fall - die Position geht dann glatt (statt zu drehen) und wartet nach einem
-    Cooldown auf das nächste gültige Ersteinstiegs-Signal.
-  </div>
-  <div data-mode="candle_dna"><label>Stop-Loss</label>
-    <select class="cfg" id="cd_sl_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="candle_dna"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="cd_sl_manual_usd"></div>
-  <div data-mode="candle_dna"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="cd_sl_cooldown_seconds"></div>
-  <div data-mode="candle_dna" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler fester Take-Profit (fester $-Betrag): ohne TP ist der einzige Ausstieg die naechste
-    GEGENSAETZLICHE Extrem-Kerze - ein bereits profitabler Trade kann dabei komplett wieder
-    zurücklaufen, bevor überhaupt ein Gegensignal kommt. Der TP realisiert Gewinne sofort bei
-    Zielerreichung, unabhängig vom nächsten Signal. Bricht "immer im Markt" NUR im TP-Fall
-    (kein Cooldown danach - der Bot wartet direkt auf das nächste Ersteinstiegs-Signal).
-  </div>
-  <div data-mode="candle_dna"><label>Take-Profit</label>
-    <select class="cfg" id="cd_tp_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="candle_dna"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="cd_tp_manual_usd"></div>
-  <div data-mode="candle_dna"><label>Heikin-Ashi für Score-Berechnung</label>
-    <select class="cfg" id="cd_use_heikin_ashi">
-      <option value="false">Aus - normale Kerzen</option>
-      <option value="true">An - Score wird auf geglätteten HA-Kerzen berechnet (Ein-/Ausstieg trotzdem immer zum echten Kurs)</option>
-    </select>
-  </div>
-
-  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    📶 Range Filter (Port von "Range Filter - B&S Signals", DonovanWall): eine nachziehende
-    Glättungslinie, die sich nur bewegt, wenn der Kurs eine Bandbreite (aus doppelt geglätteter
-    EMA der Kursänderung) verlässt. Kauf/Verkauf beim ersten qualifizierten Richtungswechsel,
-    NACHDEM zuvor der jeweils andere Zustand aktiv war - kein wiederholtes Feuern in dieselbe
-    Richtung. Immer im Markt, reiner Buy/Sell-Wechsel wie bei Kerzen-DNA/Fractals.
-  </div>
-  <div data-mode="range_filter"><label>Zeitrahmen</label>
-    <select class="cfg" id="rf_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="rf_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="range_filter"><label>Swing-Periode (n)</label><input type="number" step="1" min="1" id="rf_period"></div>
-  <div data-mode="range_filter"><label>Swing-Multiplikator (qty)</label><input type="number" step="0.1" min="0.01" id="rf_qty"></div>
-  <div data-mode="range_filter"><label>Richtung</label>
-    <select class="cfg" id="rf_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler Z-Score-Filter (portiert aus "Rolling Z-Score Trend [QuantAlgo]"): misst, wie
-    viele Standardabweichungen der Kurs vom gleitenden Durchschnitt entfernt ist. Über 0 = nur
-    Long erlaubt, unter 0 = nur Short erlaubt - gilt für jeden Einstieg, auch beim Flip.
-  </div>
-  <div data-mode="range_filter"><label>Z-Score-Filter</label>
-    <select class="cfg" id="rf_zscore_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - Long nur über 0, Short nur unter 0</option>
-    </select>
-  </div>
-  <div data-mode="range_filter" data-requires="rf_zscore_filter_enabled"><label>Z-Score Zeiteinheit</label>
-    <select class="cfg" id="rf_zscore_resolution">
-      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
-      <option value="1m">1 Minute</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="rf_zscore_resolution_custom_minutes" placeholder="z.B. 120" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="range_filter" data-requires="rf_zscore_filter_enabled"><label>Z-Score Lookback (Kerzen)</label><input type="number" step="1" id="rf_zscore_lookback"></div>
-  <div data-mode="range_filter" data-requires="rf_zscore_filter_enabled"><label>Z-Score Glättung (EMA)</label><input type="number" step="1" id="rf_zscore_smooth"></div>
-  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler RSI-Regime-Filter, unabhängig vom Z-Score-Filter kombinierbar (beide können
-    gleichzeitig an sein - dann müssen beide zustimmen): RSI über der Mittellinie -> nur Long
-    erlaubt, RSI unter der Mittellinie -> nur Short erlaubt.
-  </div>
-  <div data-mode="range_filter"><label>RSI-Filter</label>
-    <select class="cfg" id="rf_rsi_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - Long nur über Mittellinie, Short nur darunter</option>
-    </select>
-  </div>
-  <div data-mode="range_filter" data-requires="rf_rsi_filter_enabled"><label>RSI-Länge</label><input type="number" step="1" min="2" id="rf_rsi_length"></div>
-  <div data-mode="range_filter" data-requires="rf_rsi_filter_enabled"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="rf_rsi_midline"></div>
-  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler ADX/DI-Trendfilter, unabhängig von Z-Score- und RSI-Filter kombinierbar (mehrere
-    gleichzeitig aktiv -> alle müssen zustimmen): ADX über der Schwelle UND +DI über -DI -> nur
-    Long erlaubt. ADX über der Schwelle UND -DI über +DI -> nur Short erlaubt. Liegt der ADX
-    UNTER der Schwelle (kein klarer Trend), sind BEIDE Richtungen gesperrt.
-  </div>
-  <div data-mode="range_filter"><label>ADX/DI-Filter</label>
-    <select class="cfg" id="rf_adx_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An - nur bei genug Trendstärke und passender Richtung</option>
-    </select>
-  </div>
-  <div data-mode="range_filter" data-requires="rf_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="2" id="rf_adx_length"></div>
-  <div data-mode="range_filter" data-requires="rf_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="0" max="100" id="rf_adx_threshold"></div>
-  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler fester Stop-Loss (fester $-Betrag): durchbricht "immer im Markt" NUR im SL-Fall -
-    die Position geht dann glatt (statt zu drehen) und wartet nach einem Cooldown auf das
-    nächste gültige Ersteinstiegs-Signal.
-  </div>
-  <div data-mode="range_filter"><label>Stop-Loss</label>
-    <select class="cfg" id="rf_sl_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="range_filter" data-requires="rf_sl_enabled"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="rf_sl_manual_usd"></div>
-  <div data-mode="range_filter" data-requires="rf_sl_enabled"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="rf_sl_cooldown_seconds"></div>
-  <div data-mode="range_filter" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Optionaler fester Take-Profit (fester $-Betrag): ohne TP ist der einzige Ausstieg der nächste
-    GEGENSÄTZLICHE Richtungswechsel - ein bereits profitabler Trade kann dabei komplett wieder
-    zurücklaufen, bevor überhaupt ein Gegensignal kommt.
-  </div>
-  <div data-mode="range_filter"><label>Take-Profit</label>
-    <select class="cfg" id="rf_tp_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="range_filter" data-requires="rf_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="rf_tp_manual_usd"></div>
-
-  <div data-mode="maverick_edge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🗺️ Maverick Edge (Port von "Maverick Edge Style - Modul 1"): Trend-Kontrolle aus zwei EMAs
-    (schneller EMA über/unter langsamem UND steigend/fallend), eine "Guide-Linie" (EMA) als
-    Richtungs-Schwelle, und eine Kerzenstärke-Prüfung (Körper im Verhältnis zum ATR, optional
-    zusätzlich Mindest-Volumen). Reiner Signal-Einstieg, KEIN Flip - Ausstieg ausschließlich über
-    SL/TP. Braucht Handelsvolumen, deshalb nur normale Binance-Minuten-Zeitrahmen (kein
-    Sekunden-Zeitrahmen möglich).
-  </div>
-  <div data-mode="maverick_edge"><label>Zeitrahmen</label>
-    <select class="cfg" id="mv_resolution">
-      <option value="1m">1 Minute</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="2h">2 Stunden</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-    </select>
-  </div>
-  <div data-mode="maverick_edge"><label>Schneller EMA (Trendrichtung)</label><input type="number" step="1" min="1" id="mv_fast_len"></div>
-  <div data-mode="maverick_edge"><label>Langsamer EMA (Trendrichtung)</label><input type="number" step="1" min="1" id="mv_slow_len"></div>
-  <div data-mode="maverick_edge"><label>Guide-Linie Länge (EMA)</label><input type="number" step="1" min="1" id="mv_guide_len"></div>
-  <div data-mode="maverick_edge"><label>ATR-Länge (für Kerzenstärke)</label><input type="number" step="1" min="1" id="mv_atr_len"></div>
-  <div data-mode="maverick_edge"><label>Schwelle: starke Kerze (x ATR)</label><input type="number" step="0.1" min="0.1" id="mv_strong_mult"></div>
-  <div data-mode="maverick_edge"><label>Volumen zusätzlich berücksichtigen</label>
-    <select class="cfg" id="mv_use_volume_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="maverick_edge" data-requires="mv_use_volume_enabled"><label>Volumen-Durchschnitt Länge</label><input type="number" step="1" min="1" id="mv_vol_len"></div>
-  <div data-mode="maverick_edge" data-requires="mv_use_volume_enabled"><label>Volumen-Schwelle (x Durchschnitt)</label><input type="number" step="0.1" min="0.1" id="mv_vol_mult"></div>
-  <div data-mode="maverick_edge"><label>Richtung</label>
-    <select class="cfg" id="mv_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="maverick_edge"><label>Invertiert</label>
-    <select class="cfg" id="mv_invert_direction">
-      <option value="false">Aus (normal: Long-Setup = Long, Short-Setup = Short)</option>
-      <option value="true">An (vertauscht: Long-Setup = Short, Short-Setup = Long)</option>
-    </select>
-  </div>
-  <div data-mode="maverick_edge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Stop-Loss: entweder ein fester $-Betrag (wie bei den anderen Strategien), ODER die
-    Guide-Linie selbst als Trail-Stop - dann wird der SL bei jeder neuen Kerze auf den aktuellen
-    Guide-Linien-Wert nachgezogen, die Position schließt automatisch, sobald der Kurs die
-    Guide-Linie durchbricht.
-  </div>
-  <div data-mode="maverick_edge"><label>Stop-Loss-Modus</label>
-    <select class="cfg" id="mv_sl_mode">
-      <option value="fixed">Fester $-Betrag</option>
-      <option value="guide_trail">Guide-Linie als Trail-Stop</option>
-    </select>
-  </div>
-  <div data-mode="maverick_edge" data-requires="mv_sl_mode" data-requires-value="fixed"><label>SL Fester $-Betrag (nur bei Modus "Fest")</label><input type="number" step="0.5" id="mv_sl_manual_usd"></div>
-  <div data-mode="maverick_edge" data-requires="mv_sl_mode" data-requires-value="fixed"><label>Cooldown nach SL (Sek., nur bei Modus "Fest")</label><input type="number" step="1" id="mv_sl_cooldown_seconds"></div>
-  <div data-mode="maverick_edge"><label>Take-Profit (fester $-Betrag)</label>
-    <select class="cfg" id="mv_tp_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="maverick_edge" data-requires="mv_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="mv_tp_manual_usd"></div>
-
-  <div data-mode="st_rsi_signal"><label>Zeiteinheit</label>
-    <select class="cfg" id="sr_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="sr_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="st_rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    ⚠️ Die VWAP-Deviation-Bestätigung und die VWAP-Wolken-SL/TP-Variante (weiter unten) brauchen
-    echtes Handelsvolumen, das gibt es nur für normale Binance-Minuten-/Stunden-Kerzen - bei
-    Sekunden-Auflösungen oder "Eigene Minuten" bleiben sie dann wirkungslos (keine Kerzen
-    erhalten, Bot bleibt inaktiv).
-  </div>
-  <div data-mode="st_rsi_signal"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="sr_st_atr_period"></div>
-  <div data-mode="st_rsi_signal"><label>SuperTrend Multiplikator</label><input type="number" step="0.1" min="0.1" id="sr_st_multiplier"></div>
-  <div data-mode="st_rsi_signal"><label>RSI-Periode</label><input type="number" step="1" min="1" id="sr_rsi_period"></div>
-  <div data-mode="st_rsi_signal"><label>RSI-Modus</label>
-    <select class="cfg" id="sr_rsi_mode">
-      <option value="midline">Mittellinie (RSI über/unter Wert AN dieser Kerze)</option>
-      <option value="extreme_arm">Extremwert vorher (RSI muss vorher über/unter Schwelle gewesen sein)</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_rsi_mode" data-requires-value="midline"><label>RSI-Mittellinie (Long über / Short unter diesem Wert)</label><input type="number" step="1" id="sr_rsi_midline"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_rsi_mode" data-requires-value="extreme_arm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    RSI steigt über die Überkauft-Schwelle -> Short ab jetzt erlaubt (Long gesperrt), bis RSI
-    unter die Überverkauft-Schwelle fällt - das hebt den Short-Zustand sofort auf und erlaubt
-    stattdessen Long. Ohne neuen Extremwert-Kontakt bleibt der letzte Zustand unbegrenzt bestehen
-    (kein fester Lookback, identisches Prinzip wie die VWAP-Deviation-Bestätigung unten).
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_rsi_mode" data-requires-value="extreme_arm"><label>Überkauft-Schwelle (für Short)</label><input type="number" step="1" id="sr_rsi_overbought"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_rsi_mode" data-requires-value="extreme_arm"><label>Überverkauft-Schwelle (für Long)</label><input type="number" step="1" id="sr_rsi_oversold"></div>
-  <div data-mode="st_rsi_signal"><label>Richtung</label>
-    <select class="cfg" id="sr_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Bei offener Position dreht ein Gegen-Signal (SuperTrend-Flip) die Position immer (Flip) -
-    außer Richtung oder ein aktiver Filter unten blockiert die Gegenrichtung, dann wird nur
-    glattgestellt statt gedreht.
-  </div>
-
-  <div data-mode="st_rsi_signal"><label>Sofort auslösen (nicht erst bei Kerzenschluss)</label>
-    <select class="cfg" id="sr_immediate_signal_enabled">
-      <option value="false">Aus (Standard: nur abgeschlossene Kerzen)</option>
-      <option value="true">An (reagiert live auf die laufende Kerze)</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_immediate_signal_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Standardmäßig wertet der Bot das Signal erst aus, wenn die Kerze fertig geschlossen ist -
-    das kostet bis zu eine Kerzenlänge Reaktionszeit. Mit dieser Option prüft der Bot zusätzlich
-    bei jedem Durchlauf (alle 5 Sek.) die GERADE LAUFENDE Kerze: SuperTrend-Flip+RSI und der
-    SuperTrend-Band-SL reagieren dann sofort auf den aktuellen Kurs. Die anderen Filter
-    (ADX/EMA/VWAP) nutzen dabei noch den Stand der letzten abgeschlossenen Kerze. Bei
-    Sekunden-Auflösungen nicht verfügbar.
-  </div>
-
-  <div data-mode="st_rsi_signal"><label>EMA-Trendfilter</label>
-    <select class="cfg" id="sr_ema_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_ema_filter_enabled"><label>EMA-Länge</label><input type="number" step="1" min="1" id="sr_ema_length"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_ema_filter_enabled"><label>EMA-Zeiteinheit</label>
-    <select class="cfg" id="sr_ema_resolution">
-      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
-      <option value="1m">1 Minute</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="sr_ema_resolution_custom_minutes" placeholder="z.B. 3" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_ema_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Long nur, wenn der Kurs ÜBER der EMA liegt - Short nur, wenn er DARUNTER liegt (Standard 200,
-    klassischer Trendfilter).
-  </div>
-
-  <div data-mode="st_rsi_signal"><label>ADX/DI-Trendfilter</label>
-    <select class="cfg" id="sr_adx_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX-Länge</label><input type="number" step="1" min="1" id="sr_adx_length"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX-Zeiteinheit</label>
-    <select class="cfg" id="sr_adx_resolution">
-      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
-      <option value="1m">1 Minute</option>
-      <option value="3m">3 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="sr_adx_resolution_custom_minutes" placeholder="z.B. 3" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX-Schwelle (Trendstärke)</label><input type="number" step="1" min="0" id="sr_adx_threshold"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_adx_filter_enabled"><label>ADX invertiert</label>
-    <select class="cfg" id="sr_adx_invert_enabled">
-      <option value="false">Aus (normal: ADX über Schwelle nötig - starker Trend)</option>
-      <option value="true">An (invertiert: ADX unter Schwelle nötig - schwacher Trend/Seitwärts)</option>
-    </select>
-  </div>
-
-  <div data-mode="st_rsi_signal"><label>VWAP-Deviation-Bestätigung (nach "[Hoss] VWAP Deviation")</label>
-    <select class="cfg" id="sr_vwap_dev_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_vwap_dev_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Schließt eine Kerze ÜBER dem oberen Band (rote Wolke) -> Short ab jetzt erlaubt (Long
-    gesperrt), bis eine Kerze UNTER dem unteren Band (grüne Wolke) schließt - das hebt den
-    Short-Zustand sofort auf und erlaubt stattdessen Long. Ohne neuen Bandkontakt bleibt der
-    letzte Zustand unbegrenzt bestehen (kein fester Lookback).
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_vwap_dev_filter_enabled"><label>VWAP-Deviation Länge</label><input type="number" step="1" min="2" id="sr_vwap_dev_length"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_vwap_dev_filter_enabled"><label>Bestätigungs-Band-Multiplikator (2 = "dev 2"-Linie, innerer Rand der Wolke)</label><input type="number" step="0.1" min="0.1" id="sr_vwap_dev_mult"></div>
-
-  <div data-mode="st_rsi_signal"><label>VWAP-Mittellinien-Totzone</label>
-    <select class="cfg" id="sr_vwap_midline_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_vwap_midline_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Ein Long oder Short zählt NICHT, wenn der Kurs zu nah an der VWAP-Basislinie (graue Mittellinie,
-    Mittelwert) liegt - blockiert BEIDE Richtungen gleichermaßen, egal ob RSI/SuperTrend sonst
-    passen würden. Nutzt dieselbe VWAP-Deviation-Länge wie die Bestätigung oben.
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_vwap_midline_filter_enabled"><label>Mindestabstand von der Basislinie (Vielfaches der Abweichung, z.B. 0.3)</label><input type="number" step="0.05" min="0" id="sr_vwap_midline_mult"></div>
-
-  <div data-mode="st_rsi_signal"><label>SL auf Einstieg bei Mittellinien-Berührung (Breakeven)</label>
-    <select class="cfg" id="sr_vwap_midline_breakeven_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_vwap_midline_breakeven_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Sobald der Kurs die VWAP-Basislinie erreicht (bei Long: Kurs steigt bis zur/über die
-    Mittellinie, bei Short: fällt bis zur/unter die Mittellinie), wird der SL auf den
-    Einstiegspreis gezogen - einmalig pro Position, unabhängig von der gewählten SL/TP-Variante
-    oben (Fest/VWAP-Wolke/SuperTrend-Band) nutzbar. Verbessert den SL nur, verschlechtert ihn nie.
-  </div>
-
-  <div data-mode="st_rsi_signal"><label>Z-Score-Filter</label>
-    <select class="cfg" id="sr_zscore_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_zscore_filter_enabled"><label>Z-Score Lookback</label><input type="number" step="1" min="2" id="sr_zscore_lookback"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_zscore_filter_enabled"><label>Z-Score Glättung</label><input type="number" step="1" min="1" id="sr_zscore_smooth"></div>
-
-  <div data-mode="st_rsi_signal"><label>MO7-Extremwert-Filter (Pullback-/Erschöpfungsfilter)</label>
-    <select class="cfg" id="sr_mo7_filter_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_mo7_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    MO7 ist ein Composite-Oszillator aus RSI, Stochastic, Williams %R, MACD, ROC und Percent-Rank
-    (0-100, wie beim MO7-Scalp). Nutzt dieselben MO7-Unterparameter (RSI-/Stoch-/WPR-/MFI-Länge,
-    MACD) wie die MO7-Strategie selbst.
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_mo7_filter_enabled"><label>MO7-Modus</label>
-    <select class="cfg" id="sr_mo7_mode">
-      <option value="arm">Vorher erreicht (empfohlen - wie RSI-Extremwert-Modus)</option>
-      <option value="instant">Genau an dieser Kerze</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_mo7_mode" data-requires-value="arm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    MO7 muss VORHER unter die Kauf-Schwelle gefallen sein (Pullback/Überverkauft) -> Long ab jetzt
-    erlaubt, bis MO7 über die Verkauf-Schwelle steigt - das hebt den Long-Zustand sofort auf und
-    erlaubt Short. Kein fester Lookback, identisches Prinzip wie beim RSI-Extremwert-Modus.
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_mo7_mode" data-requires-value="instant" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    ⚠️ MO7 muss GENAU an der Signal-Kerze unter/über der Schwelle liegen. Das trifft mit einem
-    frischen SuperTrend-Flip fast nie gleichzeitig zu (ein Flip passiert meist schon bei stärkerem
-    Momentum) - kann in der Praxis zu sehr wenigen oder gar keinen Trades führen.
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_mo7_filter_enabled"><label>Kauf-Schwelle (Long nur darunter/vorher darunter)</label><input type="number" step="1" min="0" max="100" id="sr_mo7_buy_threshold"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_mo7_filter_enabled"><label>Verkauf-Schwelle (Short nur darüber/vorher darüber)</label><input type="number" step="1" min="0" max="100" id="sr_mo7_sell_threshold"></div>
-
-  <div data-mode="st_rsi_signal"><label>SL/TP-Variante</label>
-    <select class="cfg" id="sr_sl_tp_mode">
-      <option value="fixed">Fest ($-Betrag)</option>
-      <option value="vwap_cloud">VWAP-Wolke (SL = Ende der Wolke, TP = Risk-Reward)</option>
-      <option value="supertrend">SuperTrend-Band (SL = ST-Linie bei Einstieg, TP = Risk-Reward)</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="sr_sl_cooldown_seconds"></div>
-
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="fixed"><label>Stop-Loss (fester $-Betrag)</label>
-    <select class="cfg" id="sr_sl_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="fixed"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="sr_sl_manual_usd"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="fixed"><label>Take-Profit (fester $-Betrag)</label>
-    <select class="cfg" id="sr_tp_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="fixed"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="sr_tp_manual_usd"></div>
-
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="vwap_cloud" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    SL sitzt am ÄUSSEREN Rand der VWAP-Wolke ("Ende der Wolke" - bei Long unter dem aktuellen
-    Kurs, bei Short darüber). TP ist ein einstellbares Risk-Reward-Vielfaches des SL-Abstands
-    vom Einstieg (z.B. 1.0 = 1:1, 1.5 = 1:1,5, 2.0 = 1:2). Nutzt dieselbe VWAP-Deviation-Länge
-    wie die Bestätigung oben, aber einen eigenen (größeren) Band-Multiplikator für den äußeren
-    Wolkenrand.
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="vwap_cloud"><label>SL-Band-Multiplikator (3 = "dev 3"-Linie, äußerer Rand der Wolke)</label><input type="number" step="0.1" min="0.1" id="sr_vwap_sl_mult"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="vwap_cloud"><label>TP Risk-Reward (1 zu X, z.B. 1.5 = 1:1,5)</label><input type="number" step="0.1" min="0.1" id="sr_vwap_tp_rr"></div>
-
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="supertrend" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    SL sitzt genau auf der SuperTrend-Linie zum Zeitpunkt des Einstiegs (bei Long als Unterstützung
-    unter dem Kurs, bei Short als Widerstand darüber - dort wo der Einstieg ja gerade ausgelöst
-    wurde) PLUS optional einem zusätzlichen $-Puffer für mehr Abstand/Sicherheitsmarge. TP ist ein
-    einstellbares Risk-Reward-Vielfaches des daraus resultierenden SL-Abstands vom Einstieg.
-  </div>
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="supertrend"><label>Zusätzlicher SL-Puffer ($, 0 = genau auf der Linie)</label><input type="number" step="0.5" min="0" id="sr_st_sl_buffer_usd"></div>
-  <div data-mode="st_rsi_signal" data-requires="sr_sl_tp_mode" data-requires-value="supertrend"><label>TP Risk-Reward (1 zu X, z.B. 1.5 = 1:1,5)</label><input type="number" step="0.1" min="0.1" id="sr_st_tp_rr"></div>
-
-  <div data-mode="hvd_signal"><label>Zeiteinheit</label>
-    <select class="cfg" id="hvd_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="hvd_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="hvd_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Portiert aus dem eigenen Pine-Script "[Hoss] VWAP+RSI+Hull+DI System": scharf geschaltet wird,
-    sobald eine Kerze über dem oberen VWAP-Band UND der OBV-RSI über der Überkauft-Schwelle
-    AM SELBEN Balken geschlossen hat (nur Short erlaubt) - bzw. unter dem unteren Band UND
-    OBV-RSI unter der Überverkauft-Schwelle (nur Long erlaubt). Das bleibt so bestehen, bis die
-    jeweils andere Bedingung eintritt (kein Reset nach einem Trade). Ausgelöst wird beim nächsten
-    Hull-Farbwechsel UND passender DI+/DI--Bestätigung. Kein Flip-Exit und kein Nachkauf - eine
-    offene Position wird ausschließlich von SL/TP beendet.
-  </div>
-  <div data-mode="hvd_signal"><label>Hull-Länge</label><input type="number" step="1" min="2" id="hvd_hull_length"></div>
-  <div data-mode="hvd_signal"><label>VWAP-Deviation Länge</label><input type="number" step="1" min="2" id="hvd_vwap_length"></div>
-  <div data-mode="hvd_signal"><label>VWAP-Band-Multiplikator (2 = "dev 2"-Linie)</label><input type="number" step="0.1" min="0.1" id="hvd_vwap_dev_mult"></div>
-  <div data-mode="hvd_signal"><label>OBV-RSI-Länge</label><input type="number" step="1" min="1" id="hvd_rsi_length"></div>
-  <div data-mode="hvd_signal"><label>Überkauft-Schwelle (Short-Scharfschaltung)</label><input type="number" step="1" id="hvd_rsi_overbought"></div>
-  <div data-mode="hvd_signal"><label>Überverkauft-Schwelle (Long-Scharfschaltung)</label><input type="number" step="1" id="hvd_rsi_oversold"></div>
-  <div data-mode="hvd_signal"><label>DI-Länge (ADX/DI-Bestätigung)</label><input type="number" step="1" min="1" id="hvd_adx_length"></div>
-  <div data-mode="hvd_signal"><label>Richtung</label>
-    <select class="cfg" id="hvd_direction_mode">
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>Volumen vs. 20er-Durchschnitt (Vielfaches)</label><input type="number" step="0.1" min="0.1" id="ab_vol_mult"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom"><label>ATR-Periode</label><input type="number" step="1" min="1" id="ab_atr_len"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom" data-requires-also="ab_exit_mode=plan"><label>SL-Abstand (ATR-Multiplikator)</label><input type="number" step="0.1" min="0.1" id="ab_atr_mult"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom" data-requires-also="ab_exit_mode=plan"><label>Target 1 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r1"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom" data-requires-also="ab_exit_mode=plan"><label>Target 2 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r2"></div>
+  <div data-mode="ab_breakout" data-requires="ab_preset" data-requires-value="custom" data-requires-also="ab_exit_mode=plan"><label>Target 3 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="ab_r3"></div>
+  <div data-mode="ab_breakout"><label>Richtung</label>
+    <select class="cfg" id="ab_direction_mode">
       <option value="both">Beide</option>
       <option value="long_only">Nur Long</option>
       <option value="short_only">Nur Short</option>
     </select>
   </div>
-  <div data-mode="hvd_signal"><label>ATR-Periode (Mindestabstand für SL)</label><input type="number" step="1" min="1" id="hvd_atr_period"></div>
-  <div data-mode="hvd_signal"><label>ATR-Multiplikator (Mindestabstand für SL)</label><input type="number" step="0.1" min="0" id="hvd_atr_min_mult"></div>
-  <div data-mode="hvd_signal"><label>Risk:Reward (1 zu X, z.B. 1.5 = 1:1,5)</label><input type="number" step="0.1" min="0.1" id="hvd_risk_reward"></div>
-  <div data-mode="hvd_signal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="hvd_sl_cooldown_seconds"></div>
-  <div data-mode="hvd_signal"><label>Sofort auslösen (Hull-Flip+DI reagieren live auf die laufende Kerze)</label>
-    <select class="cfg" id="hvd_immediate_signal_enabled">
-      <option value="false">Aus (erst bei Kerzenschluss)</option>
-      <option value="true">An (sofort auf der laufenden Kerze)</option>
+  <div data-mode="ab_breakout"><label>Ausstieg</label>
+    <select class="cfg" id="ab_exit_mode">
+      <option value="flip">Wechsel bei Gegen-Signal (+ optionaler fester $-SL)</option>
+      <option value="plan">Plan wie Original-Skript (ATR-SL + TP1/TP2/TP3)</option>
     </select>
   </div>
-  <div data-mode="hvd_signal"><label>Flip-Exit bei Hull-Farbwechsel (optional, sonst nur SL/TP)</label>
-    <select class="cfg" id="hvd_flip_exit_enabled">
-      <option value="false">Aus (nur SL/TP beendet die Position)</option>
-      <option value="true">An (Hull-Farbwechsel gegen die Position beendet sie sofort)</option>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="flip"><label>Stop-Loss (fester Dollar-Betrag)</label>
+    <select class="cfg" id="ab_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus (Ausstieg nur per Gegen-Signal)</option>
     </select>
   </div>
-  <div data-mode="hvd_signal"><label>Band-Scharfschaltung bei Docht-Berührung (statt Kerzenschluss)</label>
-    <select class="cfg" id="hvd_touch_arm_enabled">
-      <option value="false">Aus (Kerze muss über/unter dem Band schließen)</option>
-      <option value="true">An (Docht-Berührung reicht schon)</option>
-    </select>
-  </div>
-  <div data-mode="hvd_signal"><label>Position schließen bei neuer Gegen-Konfirmation (Arm wechselt Richtung)</label>
-    <select class="cfg" id="hvd_arm_flip_exit_enabled">
-      <option value="false">Aus (nur SL/TP/Hull-Flip-Exit beenden die Position)</option>
-      <option value="true">An (neue Gegen-Konfirmation beendet die Position sofort)</option>
-    </select>
-  </div>
-  <div data-mode="hvd_signal"><label>Seitwärts-Filter (ADX-Trendfilter)</label>
-    <select class="cfg" id="hvd_adx_filter_enabled">
+  <div data-mode="ab_breakout" data-requires="ab_sl_enabled" data-requires-also="ab_exit_mode=flip"><label>SL-Betrag ($ Verlust der Position)</label><input type="number" step="0.1" min="0.1" id="ab_sl_manual_usd"></div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="flip"><label>SL auf Einstieg bei Gewinn (Break-Even)</label>
+    <select class="cfg" id="ab_be_enabled">
       <option value="false">Aus</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="hvd_signal" data-requires="hvd_adx_filter_enabled"><label>ADX-Filter-Länge</label><input type="number" step="1" min="1" id="hvd_adx_filter_length"></div>
-  <div data-mode="hvd_signal" data-requires="hvd_adx_filter_enabled"><label>ADX-Filter-Zeiteinheit</label>
-    <select class="cfg" id="hvd_adx_filter_resolution">
-      <option value="same">Eigener Handels-Zeitrahmen (siehe oben)</option>
+  <div data-mode="ab_breakout" data-requires="ab_be_enabled" data-requires-also="ab_exit_mode=flip"><label>Gewinn-Schwelle ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="ab_be_trigger_usd"></div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp1_close_pct"></div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="ab_tp2_close_pct"></div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>SL auf Break-Even bei TP1</label>
+    <select class="cfg" id="ab_sl_to_breakeven_on_tp1">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_exit_mode" data-requires-value="plan"><label>SL auf TP1 bei TP2</label>
+    <select class="cfg" id="ab_sl_to_tp1_on_tp2">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ab_sl_cooldown_seconds"></div>
+  <div data-mode="ab_breakout"><label>Kerzenart für die Signalberechnung</label>
+    <select class="cfg" id="ab_use_heikin_ashi">
+      <option value="false">Normale Kerzen</option>
+      <option value="true">Heikin Ashi (wie bei TradingView Chart-Typ-Umschaltung - glättet den Trend, Ein-/Ausstieg löst trotzdem am echten Kurs aus)</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
+    <select class="cfg" id="ab_trend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
+    <select class="cfg" id="ab_trend_filter_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="1m">1 Minute</option>
-      <option value="3m">3 Minuten</option>
       <option value="5m">5 Minuten</option>
       <option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option>
       <option value="1h">1 Stunde</option>
       <option value="4h">4 Stunden</option>
-      <option value="1d">1 Tag</option>
       <option value="custom">Eigene Minuten...</option>
     </select>
-    <input type="number" step="1" min="1" id="hvd_adx_filter_resolution_custom_minutes" placeholder="z.B. 3" style="display:none; margin-top:6px; width:140px;">
+    <input type="number" step="1" min="1" id="ab_trend_filter_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
-  <div data-mode="hvd_signal" data-requires="hvd_adx_filter_enabled"><label>ADX-Schwelle (Trendstärke, sonst Seitwärts = kein Einstieg)</label><input type="number" step="1" min="0" id="hvd_adx_filter_threshold"></div>
-
-  <div data-mode="hvd_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Übergeordneter SuperTrend-Filter (eigene, höhere Zeiteinheit): Long-Einstiege nur, wenn der
-    SuperTrend auf dieser höheren Zeiteinheit gerade bullisch ist (Kurs über der SuperTrend-Linie),
-    Short-Einstiege nur, wenn bärisch (Kurs darunter). Soll das häufige Gegentrend-Flackern der
-    kurzfristigen VWAP+RSI+Hull+DI-Signale reduzieren.
+  <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter ATR-Periode</label><input type="number" step="1" min="1" id="ab_trend_filter_atr_period"></div>
+  <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter Multiplikator</label><input type="number" step="0.1" min="0.1" id="ab_trend_filter_multiplier"></div>
+  <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    📈 Long-Einstiege nur, wenn der SuperTrend auf der Trendfilter-Zeiteinheit bullisch ist (Kurs über der Linie), Short-Einstiege nur bei bärischem SuperTrend. Wie bei [Hoss] VWAP+RSI+Hull+DI, hier ohne das dortige Wartefenster - ein Signal, das der Trendfilter im selben Moment nicht bestätigt, verfällt einfach.
   </div>
-  <div data-mode="hvd_signal"><label>SuperTrend-Trendfilter</label>
-    <select class="cfg" id="hvd_trend_filter_enabled">
+  <div data-mode="ab_breakout"><label>ASO-Sentiment-Filter</label>
+    <select class="cfg" id="ab_aso_filter_enabled">
       <option value="false">Aus</option>
       <option value="true">An</option>
     </select>
   </div>
-  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
-    <select class="cfg" id="hvd_trend_filter_resolution">
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="1h">1 Stunde</option>
+  <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled"><label>ASO-Periode</label><input type="number" step="1" min="1" id="ab_aso_filter_length"></div>
+  <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled"><label>ASO-Berechnung</label>
+    <select class="cfg" id="ab_aso_filter_mode">
+      <option value="0">Mittel aus Intrabar+Gruppe</option>
+      <option value="1">Nur Intrabar</option>
+      <option value="2">Nur Gruppe</option>
     </select>
   </div>
-  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter ATR-Periode</label><input type="number" step="1" min="1" id="hvd_trend_filter_atr_period"></div>
-  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Trendfilter Multiplikator</label><input type="number" step="0.1" min="0.1" id="hvd_trend_filter_multiplier"></div>
-  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled"><label>Signal-Wartefenster (Kerzen, 0 = muss exakt zusammenfallen)</label><input type="number" step="1" min="0" id="hvd_trend_filter_signal_window_candles"></div>
-  <div data-mode="hvd_signal" data-requires="hvd_trend_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
-    Bestätigt der SuperTrend-Trendfilter ein Hull+DI-Signal nicht SOFORT auf derselben Kerze,
-    verfällt es bei 0 sofort. Größer als 0: das Signal "wartet" bis zu so viele Kerzen auf eine
-    SuperTrend-Bestätigung in dieselbe Richtung - kommt sie rechtzeitig, wird dann erst eingestiegen
-    (zum dann aktuellen Kurs). Ein neues Gegensignal während der Wartezeit ersetzt das alte.
+  <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled"><label>Bestätigungs-Kerzen</label><input type="number" step="1" min="1" id="ab_aso_filter_confirm_bars"></div>
+  <div data-mode="ab_breakout" data-requires="ab_aso_filter_enabled" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">
+    🎭 Eigener Average-Sentiment-Oscillator-Filter (aus deinem Pine-Script): Long-Einstiege nur, wenn ASOBulls&gt;ASOBears auf derselben Zeiteinheit, Short nur umgekehrt. Bestätigungs-Kerzen &gt;1 verlangt, dass mehrere Kerzen hintereinander in dieselbe Richtung zeigen, bevor der Filter kippt.
   </div>
+
+  <div data-mode="ema_rsi" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📡 <b>Signal</b>: Long, sobald der Kerzenschluss über der EMA liegt UND der RSI über der Mittellinie (Short umgekehrt) - nur auf der Flanke (Bedingung jetzt erfüllt, auf der Kerze davor nicht), nur auf geschlossenen Kerzen. <b>SL</b> = Tief (Long) bzw. Hoch (Short) der letzten N Kerzen vor der Signal-Kerze. <b>TP1/TP2/TP3</b> = Einstieg ± 1×/2×/3× Schritt. Es läuft immer nur <b>eine</b> Position je Coin; die Order-Block-/FVG-Zonen des Original-Indikators sind reine Dekoration und nicht enthalten.
+  </div>
+  <div data-mode="ema_rsi"><label>Zeitrahmen</label>
+    <select class="cfg" id="er_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="er_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="ema_rsi"><label>EMA-Länge</label><input type="number" step="1" min="1" id="er_ema_len"></div>
+  <div data-mode="ema_rsi"><label>RSI-Länge</label><input type="number" step="1" min="2" id="er_rsi_len"></div>
+  <div data-mode="ema_rsi"><label>RSI-Mittellinie</label><input type="number" step="1" min="1" max="99" id="er_rsi_mid"></div>
+  <div data-mode="ema_rsi"><label>Signale umkehren (Long &lt;-&gt; Short)</label>
+    <select class="cfg" id="er_invert">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi"><label>Richtung</label>
+    <select class="cfg" id="er_direction_mode">
+      <option value="both">Beide</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi"><label>Ausstieg</label>
+    <select class="cfg" id="er_exit_mode">
+      <option value="plan">Plan (SL + TP1/TP2/TP3 mit Teilverkäufen, Gegen-Signal ignoriert)</option>
+      <option value="flip">Wechsel (Gegen-Signal dreht die Position, Swing-SL bleibt aktiv, keine TPs)</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi"><label>SL: Kerzen zurück (Tief/Hoch der letzten N vor dem Signal)</label><input type="number" step="1" min="1" id="er_sl_lookback"></div>
+  <div data-mode="ema_rsi"><label>SL-Puffer (% vom Extrem)</label><input type="number" step="0.01" min="0" id="er_sl_buffer_pct"></div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>TP-Schritt</label>
+    <select class="cfg" id="er_tp_mode">
+      <option value="atr">ATR-Vielfaches (passt sich dem Coin an)</option>
+      <option value="fixed">Fester Preisabstand ($ je Coin-Kurs)</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi" data-requires="er_tp_mode" data-requires-value="fixed" data-requires-also="er_exit_mode=plan"><label>Schritt: fester Preisabstand (z.B. 10 = Kurs ± 10 $)</label><input type="number" step="any" min="0" id="er_tp_step_usd"></div>
+  <div data-mode="ema_rsi" data-requires="er_tp_mode" data-requires-value="atr" data-requires-also="er_exit_mode=plan"><label>Schritt: ATR-Multiplikator</label><input type="number" step="0.1" min="0.1" id="er_tp_step_atr_mult"></div>
+  <div data-mode="ema_rsi" data-requires="er_tp_mode" data-requires-value="atr" data-requires-also="er_exit_mode=plan"><label>ATR-Periode</label><input type="number" step="1" min="1" id="er_atr_len"></div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="er_tp1_close_pct"></div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="er_tp2_close_pct"></div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>SL auf Break-Even bei TP1</label>
+    <select class="cfg" id="er_sl_to_breakeven_on_tp1">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi" data-requires="er_exit_mode" data-requires-value="plan"><label>SL auf TP1 bei TP2</label>
+    <select class="cfg" id="er_sl_to_tp1_on_tp2">
+      <option value="false">Aus (SL bleibt unverändert)</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="ema_rsi"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="er_sl_cooldown_seconds"></div>
+
+  <div data-mode="mtf_spread" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌊 <b>Wellenanker MTF Spread Trend</b>: Je Zeitebene Spread % = (WT1−WT2)/„Spread = 100 %“, begrenzt auf ±100; je Block der Mittelwert, TREND % = Mittel der Blöcke (nur geschlossene Kerzen höherer Zeitebenen). <b>Long</b>, wenn der Trend % in den letzten N Kerzen ≤ Buy-Level war und jetzt wieder darüber liegt (Short spiegelbildlich); dazu Limit-/Acceleration-Filter und Richtungswechsel wie im Pine-Skript. Ausstieg: Gegen-Signal dreht (dazu fester $-SL/$-TP) oder Plan mit TP1/TP2/TP3.
+  </div>
+  <div data-mode="mtf_spread"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="mt_resolution">
+      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="45s">45 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="mt_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="mtf_spread"><label>Block 1 (Micro) aktiv</label>
+    <select class="cfg" id="mt_use_b1"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Block 1 Zeitebenen (kommagetrennt, z.B. 1m,3m,5m)</label><input type="text" id="mt_block1"></div>
+  <div data-mode="mtf_spread"><label>Block 2 (Medium) aktiv</label>
+    <select class="cfg" id="mt_use_b2"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Block 2 Zeitebenen</label><input type="text" id="mt_block2"></div>
+  <div data-mode="mtf_spread"><label>Block 3 (Macro) aktiv</label>
+    <select class="cfg" id="mt_use_b3"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Block 3 Zeitebenen</label><input type="text" id="mt_block3"></div>
+  <div data-mode="mtf_spread"><label>Kanal-Länge</label><input type="number" step="1" min="2" id="mt_n1"></div>
+  <div data-mode="mtf_spread"><label>Durchschnitt-Länge</label><input type="number" step="1" min="2" id="mt_n2"></div>
+  <div data-mode="mtf_spread"><label>Signallinie (SMA von WT1)</label><input type="number" step="1" min="1" id="mt_sig"></div>
+  <div data-mode="mtf_spread"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" id="mt_scale"></div>
+  <div data-mode="mtf_spread"><label>Quelle der Welle</label>
+    <select class="cfg" id="mt_src"><option value="close">close</option><option value="hlc3">hlc3</option><option value="ohlc4">ohlc4</option><option value="hl2">hl2</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Spread in Punkten = 100 %</label><input type="number" step="0.5" min="0.1" id="mt_spread_full"></div>
+  <div data-mode="mtf_spread"><label>Signal</label>
+    <select class="cfg" id="mt_signal_mode"><option value="zone">Zonen: Wechsel in grünen/roten Hintergrund</option><option value="cross">Dreh durch Buy-/Sell-Level</option></select>
+  </div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="zone"><label>Bestätigung: neue Zone muss so viele Kerzen halten (1 = sofort)</label><input type="number" step="1" min="1" id="mt_confirm_bars"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="zone"><label>Schwelle Rot (Trend % darunter = rot = Short)</label><input type="number" step="1" id="mt_red_below"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="zone"><label>Schwelle Grün (Trend % darüber = grün = Long)</label><input type="number" step="1" id="mt_green_above"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Buy-Level (Trend % dreht von darunter nach oben)</label><input type="number" step="1" id="mt_buy_level"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Sell-Level (Trend % dreht von darüber nach unten)</label><input type="number" step="1" id="mt_sell_level"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Lookback-Kerzen</label><input type="number" step="1" min="1" id="mt_lookback"></div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Acceleration-Filter aktiv</label>
+    <select class="cfg" id="mt_use_accel"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread" data-requires="mt_signal_mode" data-requires-value="cross"><label>Min. Acceleration-Stärke</label><input type="number" step="0.1" id="mt_accel"></div>
+  <div data-mode="mtf_spread"><label>Richtungswechsel erzwingen (erst BUY, dann SELL)</label>
+    <select class="cfg" id="mt_force_change"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Richtung</label>
+    <select class="cfg" id="mt_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Ausstieg</label>
+    <select class="cfg" id="mt_exit_mode"><option value="flip">Wechsel (Gegen-Signal dreht die Position, fester $-SL und $-TP optional)</option><option value="plan">Plan (fester $-SL + TP1/TP2/TP3 mit Teilverkäufen, Gegen-Signal ignoriert)</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Fester SL: Verlust der Position in $ (0 = kein SL, nur im Wechsel-Modus erlaubt)</label><input type="number" step="any" min="0" id="mt_sl_usd"></div>
+  <div data-mode="mtf_spread"><label>Fester TP: Gewinn der Position in $ (0 = kein TP; im Plan-Modus = Schritt: TP1 = 1×, TP2 = 2×, TP3 = 3×)</label><input type="number" step="any" min="0" id="mt_tp_usd"></div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="99" id="mt_tp1_close_pct"></div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="99" id="mt_tp2_close_pct"></div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>SL auf Break-Even bei TP1</label>
+    <select class="cfg" id="mt_sl_to_breakeven_on_tp1"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread" data-requires="mt_exit_mode" data-requires-value="plan"><label>SL auf TP1 bei TP2</label>
+    <select class="cfg" id="mt_sl_to_tp1_on_tp2"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mtf_spread"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mt_sl_cooldown_seconds"></div>
+
+  <div data-mode="pure_momentum" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🟢🔴 <b>Pure Momentum Oscillator</b>: Momentum = Änderung der geglätteten Linie geteilt durch den ATR. Über der Long-Schwelle werden die Kerzen <b>grün</b>, unter der Short-Schwelle <b>rot</b>, dazwischen bleibt die letzte Farbe. <b>Signal bei jedem Farbwechsel</b> (rot→grün = Long, grün→rot = Short) auf der geschlossenen Kerze. Ausstieg: Gegen-Signal (Farbwechsel) dreht die Position, dazu optional fester $-SL und fester $-TP.
+  </div>
+  <div data-mode="pure_momentum"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="pm_resolution">
+      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="45s">45 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="pm_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="pure_momentum"><label>Lookback</label><input type="number" step="1" min="2" id="pm_len"></div>
+  <div data-mode="pure_momentum"><label>Long-Schwelle (Momentum darüber = grün = BUY)</label><input type="number" step="0.001" id="pm_long"></div>
+  <div data-mode="pure_momentum"><label>Short-Schwelle (Momentum darunter = rot = SELL)</label><input type="number" step="0.001" id="pm_short"></div>
+  <div data-mode="pure_momentum"><label>Richtung</label>
+    <select class="cfg" id="pm_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
+  </div>
+  <div data-mode="pure_momentum"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="pm_sl_usd"></div>
+  <div data-mode="pure_momentum"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="pm_tp_usd"></div>
+  <div data-mode="pure_momentum"><label>Trailing-Stop (Abstand in $ hinter dem besten Kurs, laeuft mit; 0 = aus)</label><input type="number" step="0.1" min="0" id="pm_trail_usd"></div>
+  <div data-mode="pure_momentum"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="pm_sl_cooldown_seconds"></div>
+
+  <div data-mode="dollar701" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📈 <b>Dollar701 SuperTrend</b>: Buy/Sell-Signal des Dollar701-Indikators. SuperTrend auf hl2 mit ATR-Länge = (Sensitivity+1)×10 und Multiplikator = (Sensitivity+1)/2. <b>Signal bei jedem Trendwechsel</b> (rot→grün = Long, grün→rot = Short) auf der geschlossenen Kerze. Ausstieg: Gegen-Signal dreht die Position, dazu optional fester $-SL und fester $-TP. Unten im Backtest-Bereich: Monte-Carlo-Test über Sensitivity × SL × TP.
+  </div>
+  <div data-mode="dollar701"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="dv_resolution">
+      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="45s">45 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="dv_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="dollar701"><label>Sensitivity (1,00 - 15,00)</label><input type="number" step="0.01" min="1" max="15" id="dv_sens"></div>
+  <div data-mode="dollar701"><label>Richtung</label>
+    <select class="cfg" id="dv_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
+  </div>
+  <div data-mode="dollar701"><label>Ausstieg</label>
+    <select class="cfg" id="dv_exit_mode"><option value="sltp">SL / TP / Trailing</option><option value="reverse">Reverse (immer im Trade, Gegen-Signal dreht sofort)</option></select>
+  </div>
+  <div data-mode="dollar701"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="dv_sl_usd"></div>
+  <div data-mode="dollar701"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="dv_tp_usd"></div>
+  <div data-mode="dollar701"><label>Trailing-Stop (Abstand in $ hinter dem besten Kurs, laeuft mit; 0 = aus)</label><input type="number" step="0.1" min="0" id="dv_trail_usd"></div>
+  <div data-mode="dollar701"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="dv_sl_cooldown_seconds"></div>
+
+  <div data-mode="trendfolge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🧭 <b>Trendfolge</b>: Der Trend kommt aus der Marktstruktur (BOS/CHoCH). <b>Aufwärtstrend: bei jeder roten Kerze Kauf</b> (Nachkauf, solange die Position läuft), <b>Abwärtstrend: bei jeder grünen Kerze Short</b>. Ausstieg: fester $-TP auf die gesamte Position, optional fester $-SL. <b>Trendwechsel = Position drehen</b> (beenden und sofort im neuen Trend einsteigen, oder nur schließen). Kerzen- und Trend-Zeitebene sind getrennt wählbar (ab 10 Sekunden).
+  </div>
+  <div data-mode="trendfolge"><label>Kerzen-Zeitebene (rot/grün wird hier gezählt)</label><select class="cfg" id="tfl_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
+  <div data-mode="trendfolge"><label>Trend-Zeitebene (Marktstruktur)</label><select class="cfg" id="tfl_trend_tf"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
+  <div data-mode="trendfolge"><label>Trend-Art</label><select class="cfg" id="tfl_trend_mode"><option value="swing">Swing-Struktur (größere Wellen)</option><option value="intern">Interne Struktur (kleinere Wellen)</option></select></div>
+  <div data-mode="trendfolge"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="tfl_trend_ilen"></div>
+  <div data-mode="trendfolge"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="tfl_trend_slen"></div>
+  <div data-mode="trendfolge"><label>Richtung</label><select class="cfg" id="tfl_direction_mode"><option value="both">Beide (Trend bestimmt)</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="trendfolge"><label>Take-Profit (fester $-Gewinn der Gesamtposition, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="tfl_tp_usd"></div>
+  <div data-mode="trendfolge"><label>Stop-Loss (fester $-Verlust der Gesamtposition, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="tfl_sl_usd"></div>
+  <div data-mode="trendfolge"><label>Bei Trendwechsel</label><select class="cfg" id="tfl_flip_mode"><option value="reverse">Drehen: Position beenden und sofort im neuen Trend einsteigen (eine Order)</option><option value="close">Nur schließen (neuer Einstieg bei der nächsten passenden Kerze)</option></select></div>
+  <div data-mode="trendfolge"><label>Max. Käufe pro Position (0 = unbegrenzt)</label><input type="number" step="1" min="0" id="tfl_max_entries"></div>
+
+  <div data-mode="vwap_cross" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📈 <b>EMA 9 + VWAP</b>: <b>Long</b>, wenn die EMA den gewählten VWAP (Day / Week / Month, UTC, Woche ab Montag) nach oben kreuzt, <b>Short</b> bei Kreuzung nach unten – Signal bei Kerzenschluss. Der Sprung des VWAP beim Start einer neuen Periode zählt nie als Kreuzung. Mit „Ersten Cross überspringen“ wird zusätzlich der erste echte Cross nach jedem Tag-/Wochen-/Monatsstart nicht gehandelt. Daten: Binance (Spot/Futures laut Einstellung), nur Coins mit Binance-Paar.
+  </div>
+  <div data-mode="vwap_cross"><label>Zeitebene (Signal bei Kerzenschluss)</label><select class="cfg" id="vc_resolution"><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option></select></div>
+  <div data-mode="vwap_cross"><label>EMA-Länge</label><input type="number" step="1" min="2" max="200" id="vc_ema_len"></div>
+  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_use_day" style="width:auto; vertical-align:middle;"> Day-VWAP verwenden</label></div>
+  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_use_week" style="width:auto; vertical-align:middle;"> Week-VWAP verwenden</label></div>
+  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_use_month" style="width:auto; vertical-align:middle;"> Month-VWAP verwenden</label></div>
+  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_skip_first" style="width:auto; vertical-align:middle;"> Ersten Cross nach Tag-/Wochen-/Monatsstart überspringen (je VWAP)</label></div>
+  <div data-mode="vwap_cross"><label>Richtung</label><select class="cfg" id="vc_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="vwap_cross"><label>Stop-Loss</label><select class="cfg" id="vc_sl_mode"><option value="kerze">Hinter der letzten Kerze auf der falschen VWAP-Seite (Long: unter ihrem Tief, Short: über ihrem Hoch)</option><option value="usd">Fester $-Betrag (Verlust der Position)</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_sl_mode" data-requires-value="kerze"><label>Welche Kerze zählt</label><select class="cfg" id="vc_sl_candle_rule"><option value="whole">Ganze Kerze unter dem VWAP (Long) / über dem VWAP (Short)</option><option value="close">Kerze mit Schluss auf der falschen Seite</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_sl_mode" data-requires-value="kerze"><label>Puffer hinter der Kerze (%)</label><input type="number" step="0.01" min="0" id="vc_sl_buffer_pct"></div>
+  <div data-mode="vwap_cross"><label>SL in $ Verlust der Position (bei „Kerze“ als Begrenzung/Ersatz, 0 = keine)</label><input type="number" step="any" min="0" id="vc_sl_usd"></div>
+  <div data-mode="vwap_cross"><label>Take-Profit</label><select class="cfg" id="vc_tp_mode"><option value="kreuzung">Kreuzung der EMA mit einem VWAP in Gegenrichtung (Long: nach unten, Short: nach oben)</option><option value="fester_betrag">Fester $-Gewinn</option><option value="gegentrade">Gegentrade (Gegen-Signal dreht die Position)</option><option value="aus">Kein TP (nur SL)</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="kreuzung"><label>Welcher VWAP für die TP-Kreuzung</label><select class="cfg" id="vc_tp_vwap"><option value="d">Day-VWAP</option><option value="w">Week-VWAP</option><option value="m">Month-VWAP</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="fester_betrag"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="any" min="0" id="vc_tp_usd"></div>
+
+  <div data-mode="rlm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📐 <b>Reaction Level Matrix</b>: Aus bestätigten Swing-Hochs/-Tiefs entstehen Preis-Level (Bänder) mit Score 0–100 (mehr Berührungen = stärker, alte Level verblassen). <b>Long</b>, wenn eine Kerze in eine Unterstützung eintaucht, wieder darüber schließt und im oberen Teil ihrer Spanne endet; <b>Short</b> spiegelbildlich am Widerstand. Signal erst bei Kerzenschluss. Ausstieg: SL, TP1/TP2/TP3 mit Teilverkäufen, Break-Even nach TP1; ein Gegen-Signal dreht die Position.
+  </div>
+  <div data-mode="rlm"><label>Kerzen-Zeitebene (Signal bei Kerzenschluss)</label><select class="cfg" id="rlm_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option></select></div>
+  <div data-mode="rlm"><label>Kerzenart (Signale berechnen auf …)</label><select class="cfg" id="rlm_candle_type"><option value="normal">Normale Kerzen</option><option value="heikin">Heikin-Ashi-Kerzen (geglättet; Ein-/Ausstiege, SL und TP laufen auf echten Kursen)</option></select></div>
+  <div data-mode="rlm"><label>Swing-Länge (Kerzen links/rechts, 2–30)</label><input type="number" step="1" min="2" max="30" id="rlm_swing_len"></div>
+  <div data-mode="rlm"><label>Level-Toleranz (× ATR, 0.2–2)</label><input type="number" step="0.05" min="0.2" max="2" id="rlm_level_tol"></div>
+  <div data-mode="rlm"><label>Berührungen bis ein Level aktiv ist</label><input type="number" step="1" min="2" max="10" id="rlm_min_touches"></div>
+  <div data-mode="rlm"><label>Halbwertszeit der Level (Kerzen)</label><input type="number" step="50" min="50" max="5000" id="rlm_half_life"></div>
+  <div data-mode="rlm"><label>Level je Seite (nächste über / unter dem Kurs)</label><input type="number" step="1" min="1" max="8" id="rlm_levels_per_side"></div>
+  <div data-mode="rlm"><label>Mindest-Score eines Levels für Signale (0–100)</label><input type="number" step="1" min="0" max="100" id="rlm_min_score"></div>
+  <div data-mode="rlm"><label>Ablehnungs-Stärke des Schlusses (0.5–0.9)</label><input type="number" step="0.05" min="0.5" max="0.9" id="rlm_reject_clv"></div>
+  <div data-mode="rlm"><label>Pause je Level nach einem Signal (Kerzen)</label><input type="number" step="1" min="0" id="rlm_cooldown"></div>
+  <div data-mode="rlm"><label>Richtung</label><select class="cfg" id="rlm_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="rlm"><label>Stop-Loss</label><select class="cfg" id="rlm_sl_mode"><option value="usd">Fester $-Betrag (Verlust der Position)</option><option value="wick">Hinter dem Docht der Signalkerze (ATR-Puffer wie im Original)</option></select></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="usd"><label>Fester SL: Verlust der Position in $ (0 = kein SL)</label><input type="number" step="any" min="0" id="rlm_sl_usd"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="usd"><label>TP-Schritt: Gewinn der Position in $ (TP1 = 1×, TP2 = 2×, TP3 = 3×)</label><input type="number" step="any" min="0" id="rlm_tp_usd"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="wick"><label>ATR-Länge (nur Docht-SL)</label><input type="number" step="1" min="5" max="50" id="rlm_atr_len"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="wick"><label>TP1 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="rlm_tp1_r"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="wick"><label>TP2 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="rlm_tp2_r"></div>
+  <div data-mode="rlm" data-requires="rlm_sl_mode" data-requires-value="wick"><label>TP3 (× Risiko)</label><input type="number" step="0.1" min="0.1" id="rlm_tp3_r"></div>
+  <div data-mode="rlm"><label>TP1 Teilverkauf (% der Position, 100 = alles)</label><input type="number" step="1" min="1" max="100" id="rlm_tp1_close_pct"></div>
+  <div data-mode="rlm"><label>TP2 Teilverkauf (% der verbleibenden Position, 100 = alles)</label><input type="number" step="1" min="1" max="100" id="rlm_tp2_close_pct"></div>
+  <div data-mode="rlm"><label>SL auf Break-Even nach TP1</label><select class="cfg" id="rlm_be_after_tp1"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="rlm"><label>Trend-Filter (Marktstruktur BOS/CHoCH)</label><select class="cfg" id="rlm_trend_filter"><option value="off">Aus</option><option value="entry">Nur Signale in Trendrichtung (Long nur im Aufwärtstrend, Short nur im Abwärtstrend)</option><option value="entry_close">Wie oben + Position schließen, wenn die Struktur dagegen dreht</option></select></div>
+  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Trend-Zeitebene</label><select class="cfg" id="rlm_trend_tf"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
+  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Trend-Art</label><select class="cfg" id="rlm_trend_mode"><option value="swing">Swing-Struktur (größere Wellen)</option><option value="intern">Interne Struktur (kleinere Wellen)</option></select></div>
+  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="rlm_trend_ilen"></div>
+  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="rlm_trend_slen"></div>
+  <div data-mode="rlm"><label>Gegen-Signal dreht die Position</label><select class="cfg" id="rlm_reverse"><option value="true">Ja (wie im Original)</option><option value="false">Nein (Position bleibt bis SL/TP)</option></select></div>
+
+  <div data-mode="rsi_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📶 <b>RSI Signal</b>: Long, sobald der RSI unter die Überverkauft-Schwelle fällt, Short sobald er über die Überkauft-Schwelle steigt. Ausstieg wie bei Al-Shatris Wechsel-Modus - der erste Long bleibt offen, bis das Gegen-Signal kommt, das dreht dann direkt. Optional ein fester Dollar-SL und "SL auf Einstieg bei Gewinn". Darunter drei unabhängig zuschaltbare Filter aus dem gemeinsamen Filter-Baukasten (auch für künftige Strategien wiederverwendbar).
+  </div>
+  <div data-mode="rsi_signal"><label>Zeitrahmen</label>
+    <select class="cfg" id="rsi_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="rsi_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="rsi_signal"><label>RSI-Periode</label><input type="number" step="1" min="2" id="rsi_length"></div>
+  <div data-mode="rsi_signal"><label>Überverkauft (Long-Schwelle)</label><input type="number" step="1" min="1" max="49" id="rsi_oversold"></div>
+  <div data-mode="rsi_signal"><label>Überkauft (Short-Schwelle)</label><input type="number" step="1" min="51" max="99" id="rsi_overbought"></div>
+  <div data-mode="rsi_signal"><label>Richtung</label>
+    <select class="cfg" id="rsi_direction_mode">
+      <option value="both">Beide</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal"><label>Stop-Loss (fester Dollar-Betrag)</label>
+    <select class="cfg" id="rsi_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus (Ausstieg nur per Gegen-Signal)</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_sl_enabled"><label>SL-Betrag ($ Verlust der Position)</label><input type="number" step="0.1" min="0.1" id="rsi_sl_manual_usd"></div>
+  <div data-mode="rsi_signal"><label>SL auf Einstieg bei Gewinn (Break-Even)</label>
+    <select class="cfg" id="rsi_be_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_be_enabled"><label>Gewinn-Schwelle ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="rsi_be_trigger_usd"></div>
+  <div data-mode="rsi_signal"><label>Take-Profit (fester Dollar-Betrag)</label>
+    <select class="cfg" id="rsi_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_tp_enabled"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="rsi_tp_manual_usd"></div>
+  <div data-mode="rsi_signal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="rsi_sl_cooldown_seconds"></div>
+
+  <div data-mode="rsi_signal"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
+    <select class="cfg" id="rsi_supertrend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
+    <select class="cfg" id="rsi_supertrend_filter_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="rsi_supertrend_filter_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>SuperTrend-Multiplikator</label><input type="number" step="0.1" min="0.1" id="rsi_supertrend_filter_multiplier"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="rsi_supertrend_filter_atr_period"></div>
+
+  <div data-mode="rsi_signal"><label>ADX-Trendfilter</label>
+    <select class="cfg" id="rsi_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_adx_filter_enabled"><label>ADX-Periode</label><input type="number" step="1" min="1" id="rsi_adx_filter_length"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="1" id="rsi_adx_filter_threshold"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_adx_filter_enabled"><label>Mit Richtung (+DI/-DI)</label>
+    <select class="cfg" id="rsi_adx_filter_directional">
+      <option value="true">An (Long nur bei +DI&gt;-DI, Short umgekehrt)</option>
+      <option value="false">Aus (nur Trendstärke, Richtung egal)</option>
+    </select>
+  </div>
+
+  <div data-mode="rsi_signal"><label>MACD-Trendfilter</label>
+    <select class="cfg" id="rsi_macd_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="rsi_signal" data-requires="rsi_macd_filter_enabled"><label>MACD schnell</label><input type="number" step="1" min="1" id="rsi_macd_filter_fast"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_macd_filter_enabled"><label>MACD langsam</label><input type="number" step="1" min="1" id="rsi_macd_filter_slow"></div>
+  <div data-mode="rsi_signal" data-requires="rsi_macd_filter_enabled"><label>MACD-Signal</label><input type="number" step="1" min="1" id="rsi_macd_filter_signal"></div>
+
+  <div data-mode="mvwap_mf_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌊 <b>Multi-VWAP Money-Flow Signal</b>: Long, sobald der Oszillator (gewichteter Daily/Weekly/Monthly-VWAP-Verbund + MFI/CMF) von fallend auf steigend dreht, Short umgekehrt. Ausstieg wie bei RSI - Wechsel-System, optionaler fester $-SL/$-TP, "SL auf Einstieg bei Gewinn". Darunter dieselben drei Filter aus dem Baukasten.
+  </div>
+  <div data-mode="mvwap_mf_signal"><label>Zeitrahmen</label>
+    <select class="cfg" id="mvwap_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="mvwap_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="mvwap_mf_signal"><label>Richtung</label>
+    <select class="cfg" id="mvwap_direction_mode">
+      <option value="both">Beide</option>
+      <option value="long_only">Nur Long</option>
+      <option value="short_only">Nur Short</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal"><label>Max. Nachkäufe pro Position (1 = kein Nachkauf)</label><input type="number" step="1" min="1" max="50" id="mvwap_max_entries"></div>
+  <div data-mode="mvwap_mf_signal"><label>Mindestabstand zum letzten Einstieg/Nachkauf ($, 0 = aus)</label>
+    <input type="number" step="0.01" min="0" id="mvwap_nachkauf_min_abstand_usd">
+    <div style="font-size:12px; color:var(--text-dim); margin-top:4px;">
+      Ein weiterer Nachkauf zaehlt nur, wenn sich der Kurs seit dem letzten Fill um mindestens
+      diesen $-Betrag bewegt hat (egal in welche Richtung) - verhindert viele Nachkaeufe dicht
+      hintereinander bei schnellen Kursbewegungen.
+    </div>
+  </div>
+  <div data-mode="mvwap_mf_signal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0;">VWAP-Ebenen (Gewichte sollten zusammen ~1.0 ergeben)</div>
+  <div data-mode="mvwap_mf_signal"><label>Daily VWAP</label>
+    <select class="cfg" id="mvwap_use_daily"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_daily"><label>Gewicht Daily</label><input type="number" step="0.05" min="0" max="1" id="mvwap_w_daily"></div>
+  <div data-mode="mvwap_mf_signal"><label>Weekly VWAP</label>
+    <select class="cfg" id="mvwap_use_weekly"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_weekly"><label>Gewicht Weekly</label><input type="number" step="0.05" min="0" max="1" id="mvwap_w_weekly"></div>
+  <div data-mode="mvwap_mf_signal"><label>Monthly VWAP</label>
+    <select class="cfg" id="mvwap_use_monthly"><option value="true">An</option><option value="false">Aus</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_monthly"><label>Gewicht Monthly</label><input type="number" step="0.05" min="0" max="1" id="mvwap_w_monthly"></div>
+  <div data-mode="mvwap_mf_signal"><label>Money-Flow-Typ</label>
+    <select class="cfg" id="mvwap_mf_source"><option value="MFI">MFI</option><option value="CMF">CMF</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal"><label>MFI-Länge</label><input type="number" step="1" min="2" id="mvwap_mf_length"></div>
+  <div data-mode="mvwap_mf_signal"><label>CMF-Länge</label><input type="number" step="1" min="2" id="mvwap_cmf_length"></div>
+  <div data-mode="mvwap_mf_signal"><label>Money-Flow-Gewicht</label><input type="number" step="0.05" min="0" max="1" id="mvwap_mf_weight"></div>
+  <div data-mode="mvwap_mf_signal"><label>EMA-Glättung Oszillator</label><input type="number" step="1" min="1" id="mvwap_smooth_len"></div>
+  <div data-mode="mvwap_mf_signal"><label>Signal nur außerhalb OB/OS-Zone</label>
+    <select class="cfg" id="mvwap_use_zone_filter"><option value="false">Aus</option><option value="true">An</option></select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_zone_filter"><label>Overbought-Level</label><input type="number" step="0.1" min="0" id="mvwap_ob_level"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_use_zone_filter"><label>Oversold-Level</label><input type="number" step="0.1" max="0" id="mvwap_os_level"></div>
+
+  <div data-mode="mvwap_mf_signal"><label>Stop-Loss (fester Dollar-Betrag)</label>
+    <select class="cfg" id="mvwap_sl_enabled">
+      <option value="true">An</option>
+      <option value="false">Aus (Ausstieg nur per Gegen-Signal)</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_sl_enabled"><label>SL-Betrag ($ Verlust der Position)</label><input type="number" step="0.1" min="0.1" id="mvwap_sl_manual_usd"></div>
+  <div data-mode="mvwap_mf_signal"><label>Take-Profit (fester Dollar-Betrag)</label>
+    <select class="cfg" id="mvwap_tp_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_tp_enabled"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="mvwap_tp_manual_usd"></div>
+  <div data-mode="mvwap_mf_signal"><label>SL auf Einstieg bei Gewinn (Break-Even)</label>
+    <select class="cfg" id="mvwap_be_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_be_enabled"><label>Gewinn-Schwelle ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="mvwap_be_trigger_usd"></div>
+  <div data-mode="mvwap_mf_signal"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mvwap_sl_cooldown_seconds"></div>
+
+  <div data-mode="mvwap_mf_signal"><label>SuperTrend-Trendfilter (höhere Zeiteinheit)</label>
+    <select class="cfg" id="mvwap_supertrend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
+    <select class="cfg" id="mvwap_supertrend_filter_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="mvwap_supertrend_filter_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_supertrend_filter_enabled"><label>SuperTrend-Multiplikator</label><input type="number" step="0.1" min="0.1" id="mvwap_supertrend_filter_multiplier"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_supertrend_filter_enabled"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="mvwap_supertrend_filter_atr_period"></div>
+
+  <div data-mode="mvwap_mf_signal"><label>ADX-Trendfilter</label>
+    <select class="cfg" id="mvwap_adx_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled"><label>ADX-Periode</label><input type="number" step="1" min="1" id="mvwap_adx_filter_length"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled"><label>ADX-Schwelle</label><input type="number" step="1" min="1" id="mvwap_adx_filter_threshold"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled">
+    <label>Modus</label>
+    <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">
+      "Trend fordern" lässt nur handeln, wenn die Schwelle ÜBERSCHRITTEN wird (starker Trend nötig).
+      "Trend vermeiden" ist für ein Reversal-System wie MVWAP-MF meist die bessere Wahl: er PAUSIERT
+      Einstieg und Nachkauf, solange die Schwelle überschritten ist (starker Auf-/Abwärtstrend),
+      und lässt nur in ruhigeren/Seitwärts-Phasen handeln - verhindert genau das "in einen starken
+      Trend hinein nachkaufen und im Minus verkaufen".
+    </div>
+    <select class="cfg" id="mvwap_adx_filter_mode">
+      <option value="require_trend">Trend fordern (ADX &gt; Schwelle nötig)</option>
+      <option value="avoid_trend">Trend vermeiden (pausiert wenn ADX &gt; Schwelle)</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_adx_filter_enabled" id="mvwap_adx_filter_directional_wrap"><label>Mit Richtung (+DI/-DI)</label>
+    <select class="cfg" id="mvwap_adx_filter_directional">
+      <option value="true">An (Long nur bei +DI&gt;-DI, Short umgekehrt)</option>
+      <option value="false">Aus (nur Trendstärke, Richtung egal)</option>
+    </select>
+  </div>
+
+  <div data-mode="mvwap_mf_signal"><label>MACD-Trendfilter</label>
+    <select class="cfg" id="mvwap_macd_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_macd_filter_enabled"><label>MACD schnell</label><input type="number" step="1" min="1" id="mvwap_macd_filter_fast"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_macd_filter_enabled"><label>MACD langsam</label><input type="number" step="1" min="1" id="mvwap_macd_filter_slow"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_macd_filter_enabled"><label>MACD-Signal</label><input type="number" step="1" min="1" id="mvwap_macd_filter_signal"></div>
+
+  <div data-mode="mvwap_mf_signal"><label>RSI-Überdehnungsfilter</label>
+    <select class="cfg" id="mvwap_rsi_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An (Long erst wenn RSI unter OS, Short erst wenn RSI über OB)</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_rsi_filter_enabled"><label>RSI-Länge</label><input type="number" step="1" min="1" id="mvwap_rsi_filter_length"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_rsi_filter_enabled"><label>RSI Oversold (Long erst darunter)</label><input type="number" step="1" min="1" max="100" id="mvwap_rsi_filter_os_level"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_rsi_filter_enabled"><label>RSI Overbought (Short erst darüber)</label><input type="number" step="1" min="1" max="100" id="mvwap_rsi_filter_ob_level"></div>
+
+  <div data-mode="mvwap_mf_signal"><label>Cloud-Filter (VWAP-Bänder)</label>
+    <select class="cfg" id="mvwap_cloud_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An (Short erst nach Berührung oberes Band, Long erst nach unterem Band)</option>
+    </select>
+  </div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_cloud_filter_enabled"><label>Cloud VWAP-Länge</label><input type="number" step="1" min="1" id="mvwap_cloud_filter_length"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_cloud_filter_enabled"><label>Cloud Band-Multiplikator</label><input type="number" step="0.1" min="0.1" id="mvwap_cloud_filter_dev_mult"></div>
+  <div data-mode="mvwap_mf_signal" data-requires="mvwap_cloud_filter_enabled"><label>Scharfschaltung bei Docht-Berührung</label>
+    <select class="cfg" id="mvwap_cloud_filter_touch_arm">
+      <option value="false">Aus (Kerzenschluss über/unter Band nötig)</option>
+      <option value="true">An (High/Low reicht)</option>
+    </select>
+  </div>
+
+  <div data-mode="scalp_vwap_obv_rsi" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📉 <b>Scalp VWAP OBV RSI</b>: Mean-Reversion. Long, wenn eine Kerze im grünen Band (Dev2-Dev3-Zone) schließt ODER der Docht mind. die Hälfte des Bandes durchbricht UND der OBV-RSI unter dem unteren Schwellenwert liegt (Short spiegelbildlich im roten Band). Solange dasselbe Signal weiter gilt, legt der Bot bis zu "Max. Nachkäufe" weitere Stufen nach. TP1 (50%) am Mittelband zieht den SL auf Einstieg, TP2 (Rest) am Gegenband. SL ist ein fester %-Abstand vom Ø-Einstieg.
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Zeitrahmen</label>
+    <select class="cfg" id="scalp_timeframe">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="scalp_timeframe_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>VWAP-Deviation Länge (Kerzen)</label><input type="number" step="1" min="10" id="scalp_vwap_length"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI Länge</label><input type="number" step="1" min="2" id="scalp_rsi_length"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI oberer Schwellenwert (Short)</label><input type="number" step="1" min="50" max="100" id="scalp_rsi_upper"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>OBV-RSI unterer Schwellenwert (Long)</label><input type="number" step="1" min="0" max="50" id="scalp_rsi_lower"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Docht-Schwelle (Anteil des Bandes, 0.5 = 50%)</label><input type="number" step="0.05" min="0" max="1" id="scalp_docht_threshold"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>SL-Modus</label>
+    <select class="cfg" id="scalp_sl_mode">
+      <option value="pct">Prozent vom Ø-Einstieg</option>
+      <option value="usd">Fester $-Verlust</option>
+    </select>
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Stop-Loss (% vom Ø-Einstieg)</label><input type="number" step="0.05" min="0.05" id="scalp_sl_pct"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="scalp_sl_usd"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Max. Nachkäufe (0 = kein Nachkauf)</label><input type="number" step="1" min="0" max="10" id="scalp_max_nachkauf"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Mindestabstand zum letzten Einstieg/Nachkauf ($, 0 = aus)</label>
+    <input type="number" step="0.01" min="0" id="scalp_nachkauf_min_abstand_usd">
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Mindestabstand zum letzten Einstieg/Nachkauf (Kerzen, 0 = aus)</label>
+    <input type="number" step="1" min="0" id="scalp_nachkauf_min_candles">
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi">
+    <label><input type="checkbox" id="scalp_nachkauf_require_reversal" style="width:auto; vertical-align:middle;"> Nachkauf erst, wenn seit dem letzten Fill eine Kerze NICHT im Band geschlossen hat (statt bei jeder Kerze im Band nachzukaufen, obwohl der Kurs einfach weiter durchläuft)</label>
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi">
+    <label><input type="checkbox" id="scalp_tp1_require_profit" style="width:auto; vertical-align:middle;"> TP1 nur wenn mindestens Breakeven (sonst warten, statt mit kleinem Verlust zu schließen)</label>
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi">
+    <label><input type="checkbox" id="scalp_tp1_full_close" style="width:auto; vertical-align:middle;"> TP1 komplett schließen (100% statt 50%) - danach kein TP2 mehr</label>
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi">
+    <label><input type="checkbox" id="scalp_halfway_sl_enabled" style="width:auto; vertical-align:middle;"> Nach TP1: SL auf halbem Weg zur TP2-Linie auf die Mittellinie nachziehen</label>
+  </div>
+
+  <div data-mode="scalp_vwap_obv_rsi"><label>SuperTrend-Trendfilter (übergeordnete, höhere Zeiteinheit)</label>
+    <select class="cfg" id="scalp_supertrend_filter_enabled">
+      <option value="false">Aus</option>
+      <option value="true">An</option>
+    </select>
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
+    <select class="cfg" id="scalp_supertrend_filter_resolution">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="scalp_supertrend_filter_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>SuperTrend-Multiplikator</label><input type="number" step="0.1" min="0.1" id="scalp_supertrend_filter_multiplier"></div>
+  <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>SuperTrend ATR-Periode</label><input type="number" step="1" min="1" id="scalp_supertrend_filter_atr_period"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>🧭 Marktstruktur-Trend (BOS/CHoCH): Long nur im Aufwärtstrend, Short nur im Abwärtstrend</label>
+    <select class="cfg" id="scalp_ms_trend_mode">
+      <option value="off">Aus</option>
+      <option value="intern">Intern (kurze Pivots)</option>
+      <option value="swing">Swing (lange Pivots)</option>
+    </select></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Trend-Zeitebene</label>
+    <select class="cfg" id="scalp_ms_trend_tf">
+      <option value="10s">10s</option><option value="30s">30s</option><option value="1m">1m</option>
+      <option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option>
+      <option value="1h">1h</option><option value="4h">4h</option>
+    </select></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="scalp_ms_trend_ilen"></div>
+  <div data-mode="scalp_vwap_obv_rsi"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="scalp_ms_trend_slen"></div>
+
+  <div data-mode="liquidity_waves" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌊 <b>Liquidity Waves</b>: Kerzen mit kleinem Körper (relativ zur Spanne) markieren "Sweep"-Level - Hoch bei bärischer, Tief bei bullischer Sweep-Kerze. Von den neuesten "Levels betrachten" zählen nur die noch gültigen (Short-Level über, Long-Level unter dem Kurs) als Buyers%/Sellers%. Long wenn Buyers% unter der Einstiegs-Schwelle fällt (Short spiegelbildlich mit Sellers%). TP1 (50%, SL → Einstieg) sobald der Wert wieder beim TP1-Schwellenwert steht, TP2 (Rest) beim TP2-Schwellenwert. SL ist ein fester $-Verlust ab Ø-Einstieg, kein Nachkauf.
+  </div>
+  <div data-mode="liquidity_waves"><label>Zeitrahmen</label>
+    <select class="cfg" id="liq_timeframe">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="liq_timeframe_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="liquidity_waves"><label>Max. Körper (% der Kerzenspanne) für Sweep-Kerze</label><input type="number" step="1" min="1" max="100" id="liq_body_max_pct"></div>
+  <div data-mode="liquidity_waves"><label>Levels betrachten (neueste N)</label><input type="number" step="1" min="1" max="100" id="liq_max_levels"></div>
+  <div data-mode="liquidity_waves"><label>Long-Sweep nur unter, Short-Sweep nur über dem Kurs zählen</label>
+    <select class="cfg" id="liq_side_filter">
+      <option value="true">An</option>
+      <option value="false">Aus (alle Levels zählen, unabhängig von der Kursrichtung)</option>
+    </select>
+  </div>
+  <div data-mode="liquidity_waves"><label>Älteres Level ungültig bei späterem Sweep auf gleicher Höhe</label>
+    <select class="cfg" id="liq_dup_remove">
+      <option value="true">An</option>
+      <option value="false">Aus</option>
+    </select>
+  </div>
+  <div data-mode="liquidity_waves" data-requires="liq_dup_remove"><label>Toleranz für "gleiche Höhe" ($)</label><input type="number" step="0.01" min="0" id="liq_dup_tolerance_usd"></div>
+  <div data-mode="liquidity_waves"><label>Einstiegs-Schwelle (Buyers%/Sellers% unter diesem Wert)</label><input type="number" step="0.5" min="0" max="49" id="liq_entry_threshold_pct"></div>
+  <div data-mode="liquidity_waves"><label>TP1-Schwelle (%, 50% Teil-Exit, SL → Einstieg)</label><input type="number" step="1" min="1" max="99" id="liq_tp1_pct"></div>
+  <div data-mode="liquidity_waves"><label>TP2-Schwelle (%, Rest-Exit)</label><input type="number" step="1" min="1" max="100" id="liq_tp2_pct"></div>
+  <div data-mode="liquidity_waves"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="liq_sl_usd"></div>
+  <div data-mode="liquidity_waves" style="grid-column:1/-1;">
+    <label><input type="checkbox" id="liq_tp1_require_profit" style="width:auto; vertical-align:middle;"> TP1 nur wenn mindestens Breakeven (sonst warten auf TP2 oder SL, statt mit Verlust zu schließen)</label>
+  </div>
+  <div data-mode="liquidity_waves"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="2" id="liq_max_nachkauf"></div>
+  <div data-mode="liquidity_waves"><label>Nachkauf-Trigger: Fortschritt Richtung TP1 (%), danach zurück unter Einstiegs-Schwelle (nur bei Max. Nachkäufe &gt; 0)</label><input type="number" step="1" min="1" max="99" id="liq_nachkauf_progress_pct"></div>
+
+  <div data-mode="wellenanker" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🌊 <b>Wellenanker</b>: Nachbau der WaveTrend-Punkte (ohne Geldfluss/Divergenzen/Panel). Long-Punkt,
+    wenn die Welle die Signallinie von unten kreuzt, während die Signallinie unter -Zone1 steht
+    (Short spiegelbildlich über +Zone1). TP wählbar: Gegentrade (Exit beim entgegengesetzten Punkt),
+    Überlauflinie (Exit sobald die Signallinie wieder bis dahin zurückgelaufen ist) oder fester
+    $-Betrag. SL ist immer ein fester $-Verlust ab Ø-Einstieg. Nachkauf bei jedem weiteren Punkt in
+    dieselbe Richtung (bis zu 4).
+  </div>
+  <div data-mode="wellenanker"><label>Zeitrahmen</label>
+    <select class="cfg" id="wa_timeframe">
+      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="wa_timeframe_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="wellenanker"><label>Quelle der Welle</label>
+    <select class="cfg" id="wa_src">
+      <option value="close">Close</option>
+      <option value="hlc3">HLC3</option>
+      <option value="ohlc4">OHLC4</option>
+      <option value="hl2">HL2</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker"><label>Kanal-Länge</label><input type="number" step="1" min="1" id="wa_n1"></div>
+  <div data-mode="wellenanker"><label>Durchschnitt-Länge</label><input type="number" step="1" min="1" id="wa_n2"></div>
+  <div data-mode="wellenanker"><label>Signallinien-Glättung</label><input type="number" step="1" min="1" id="wa_sig_len"></div>
+  <div data-mode="wellenanker"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" max="3.0" id="wa_wave_scale"></div>
+  <div data-mode="wellenanker"><label>Einstiegs-Modus</label>
+    <select class="cfg" id="wa_entry_mode">
+      <option value="zone">Zone: Kreuzung der Linien außerhalb ±Zone 1</option>
+      <option value="level">Level: Durchbruch durch −X (Long) / +X (Short)</option>
+      <option value="cross">Kreuzung zu Kreuzung: jede Kreuzung der beiden Linien (egal wo) = Wechsel Long ↔ Short</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker"><label>Signal-Zeitpunkt</label>
+    <select class="cfg" id="wa_signal_timing">
+      <option value="live">Sofort beim Kreis (laufende Kerze, Signal kann wieder verschwinden)</option>
+      <option value="close">Erst bei Kerzenschluss (voller Punkt, kein Zurücknehmen)</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="cross"><label>Nulllinien-Filter für die Kreuzung</label>
+    <select class="cfg" id="wa_cross_zero">
+      <option value="off">Aus: jede Kreuzung zählt</option>
+      <option value="reversal">Long nur wenn die Linien UNTER 0 kreuzen, Short nur ÜBER 0</option>
+      <option value="trend">Long nur wenn die Linien ÜBER 0 kreuzen, Short nur UNTER 0 (Trendfolge)</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="zone"><label>Zone 1 (Long &lt; -X, Short &gt; X)</label><input type="number" step="1" min="1" max="100" id="wa_zone1"></div>
+  <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="level"><label>Level-Abstand ± (0 bis 30): Long bricht −X nach oben durch, Short bricht +X nach unten durch</label><input type="number" step="0.5" min="0" max="30" id="wa_level"></div>
+  <div data-mode="wellenanker" data-requires="wa_entry_mode" data-requires-value="level"><label>Welche Linie zählt</label>
+    <select class="cfg" id="wa_level_line">
+      <option value="signal">Signallinie</option>
+      <option value="wave">Welle</option>
+      <option value="both">Beide (beide müssen durch das Level)</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker"><label>Max. Nachkäufe (0 = aus)</label><input type="number" step="1" min="0" max="20" id="wa_max_nachkauf"></div>
+  <div data-mode="wellenanker"><label><input type="checkbox" id="wa_reverse_only_profit" style="width:auto; vertical-align:middle;"> Gegentrade nur wenn die Position im Plus ist (nie mit Verlust schließen/drehen)</label></div>
+  <div data-mode="wellenanker"><label>Nachkauf-Abstand zum letzten Einstieg (%, 0 = aus) – bei „Kreuzung zu Kreuzung": nachkaufen, wenn der Kurs so viel % GEGEN die Position läuft</label><input type="number" step="0.01" min="0" id="wa_nachkauf_min_pct"></div>
+  <div data-mode="wellenanker"><label>TP-Modus</label>
+    <select class="cfg" id="wa_tp_mode">
+      <option value="gegentrade">Gegentrade (Exit beim entgegengesetzten Punkt)</option>
+      <option value="ueberlauf">Überlauflinie (Exit bei Rücklauf zur Linie)</option>
+      <option value="fester_betrag">Fester $-Betrag</option>
+      <option value="kreuzung">Gegenkreuzung der beiden Linien (egal wo sie sich kreuzen)</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="kreuzung"><label>Nulllinien-Filter für die TP-Kreuzung (gilt nicht bei „Kreuzung zu Kreuzung“ – dort zählt der Filter oben)</label>
+    <select class="cfg" id="wa_tp_cross_zero">
+      <option value="off">Aus: Gegenkreuzung egal wo</option>
+      <option value="reversal">Long schließt nur bei einer Kreuzung ÜBER 0, Short nur UNTER 0</option>
+      <option value="trend">Long schließt nur bei einer Kreuzung UNTER 0, Short nur ÜBER 0</option>
+    </select>
+  </div>
+  <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="ueberlauf"><label>Überlauflinie (±)</label><input type="number" step="1" min="1" max="100" id="wa_ueberlauf_level"></div>
+  <div data-mode="wellenanker" data-requires="wa_tp_mode" data-requires-value="fester_betrag"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="0.1" min="0.1" id="wa_tp_usd"></div>
+  <div data-mode="wellenanker"><label>Stop-Loss ($ Verlust ab Ø-Einstieg)</label><input type="number" step="0.5" min="0.1" id="wa_sl_usd"></div>
+  <div data-mode="wellenanker"><label>🔢 Nur jedes N-te Signal öffnet (1 = jedes; Schließen bleibt beim ersten Gegensignal; Long und Short werden getrennt gezählt)</label><input type="number" step="1" min="1" max="10" id="wa_open_every"></div>
+  <div data-mode="wellenanker"><label>🧭 Trendfilter (Marktstruktur: nur Trades in Trendrichtung)</label>
+    <select class="cfg" id="wa_trend_mode">
+      <option value="off">Aus</option>
+      <option value="intern">Intern (kurze Pivots)</option>
+      <option value="swing">Swing (lange Pivots)</option>
+    </select></div>
+  <div data-mode="wellenanker"><label>Trend-Zeitebene</label>
+    <select class="cfg" id="wa_trend_tf">
+      <option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option>
+      <option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option><option value="1w">1w</option>
+    </select></div>
+  <div data-mode="wellenanker"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="wa_trend_ilen"></div>
+  <div data-mode="wellenanker"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="wa_trend_slen"></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
   <div data-mode="grid"><label>Richtung</label>
     <select class="cfg" id="grid_direction_mode">
@@ -3431,6 +2704,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_scalp"><label>Requote-Drift (Ticks)</label><input type="number" step="1" id="gs_requote_ticks"></div>
   <div data-mode="grid_scalp"><label>Max. offene Orders</label><input type="number" step="1" id="gs_max_open_orders"></div>
   <div data-mode="grid_scalp"><label>Poll-Intervall (Sek.)</label><input type="number" step="any" id="gs_poll_seconds"></div>
+  <div data-mode="grid_classic"><label>Richtung</label><select class="cfg" id="gc_direction"><option value="long">Long-Grid (kauft Dips, verkauft 1 Stufe höher)</option><option value="short">Short-Grid</option></select></div>
+  <div data-mode="grid_classic"><label>Untere Grenze (0 = auto)</label><input type="number" step="any" id="gc_lower"></div>
+  <div data-mode="grid_classic"><label>Obere Grenze (0 = auto)</label><input type="number" step="any" id="gc_upper"></div>
+  <div data-mode="grid_classic"><label>Auto-Spanne &plusmn; % um Startkurs</label><input type="number" step="any" id="gc_auto_pct"></div>
+  <div data-mode="grid_classic"><label>Anzahl Stufen</label><input type="number" step="1" id="gc_levels"></div>
+  <div data-mode="grid_classic"><label>Abstand</label><select class="cfg" id="gc_spacing"><option value="arith">gleiche Abstände ($)</option><option value="geo">gleiche Prozent</option></select></div>
+  <div data-mode="grid_classic"><label>Notional je Stufe ($)</label><input type="number" step="any" id="gc_size_usd"></div>
+  <div data-mode="grid_classic"><label>Max. gleichzeitige Lots</label><input type="number" step="1" id="gc_max_lots"></div>
+  <div data-mode="grid_classic"><label>Einstiegs-Orders im Buch</label><input type="number" step="1" id="gc_open_each_side"></div>
+  <div data-mode="grid_classic"><label>Gegen-Orders im Buch (nur die nächsten Lots, 0 = alle)</label><input type="number" step="1" min="0" id="gc_exit_orders"></div>
+  <div data-mode="grid_classic"><label>Notbremse: % außerhalb (0 = aus)</label><input type="number" step="any" id="gc_stop_pct"></div>
+  <div data-mode="grid_classic"><label>Poll (Sek.)</label><input type="number" step="any" id="gc_poll_seconds"></div>
+  <div data-mode="grid_classic"><label>🧭 Richtung automatisch: Marktstruktur-Trend (BOS/CHoCH) oder Wellenanker-Signal – Aufwärts/Long = Long-Gitter, Abwärts/Short = Short-Gitter</label>
+    <select class="cfg" id="gc_trend_mode"><option value="off">Aus (feste Richtung oben)</option><option value="swing">An – Swing-Struktur (größere Wellen)</option><option value="intern">An – interne Struktur (kleinere Wellen)</option><option value="wave">An – Wellenanker-Signal (Long-/Short-Signal = Richtung, Einstellungen wie Wellenanker)</option></select>
+  </div>
+  <div data-mode="grid_classic"><label>Trend-Zeitebene</label>
+    <select class="cfg" id="gc_trend_tf"><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select>
+  </div>
+  <div data-mode="grid_classic"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="gc_trend_ilen"></div>
+  <div data-mode="grid_classic"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="gc_trend_slen"></div>
+  <div data-mode="grid_classic"><label>Bei Trendwechsel mit offenen Lots</label>
+    <select class="cfg" id="gc_trend_on_flip"><option value="wait">Lots auslaufen lassen (keine neuen Käufe), dann Richtung wechseln</option><option value="close">Sofort alles schließen und Richtung wechseln</option></select>
+  </div>
   <div data-mode="grid"><label>Stop-Loss (fester $-Betrag auf die Gesamtposition, unabhängig von Nachkauf)</label>
     <select class="cfg" id="grid_sl_enabled">
       <option value="false">Aus (Standard)</option>
@@ -3573,18 +2869,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
   </div>
   <button type="submit">Speichern</button>
+  <button type="button" id="btn-reset-defaults" title="Trägt die Grundeinstellungen der gewählten Strategie ins Formular ein (erst nach Klick auf Speichern aktiv). Margin, Hebel, Strategie-Auswahl, Konto und Datenquelle bleiben unverändert." style="margin-left:8px; background:transparent; border:1px solid var(--border, #444); color:var(--text-dim);">↺ Auf Standard zurücksetzen</button>
 </form>
 <div class="warn" id="live-warn">⚠️ LIVE-Modus aktiv - echte Orders werden platziert!</div>
 <div style="font-size:12px; color:var(--text-dim); margin-top:8px;" id="abs-distances"></div>
 </div>
 
+<div data-mode-section="grid_classic" style="display:none;">
+<h2 class="section-title">🧱 Grid-Bot</h2>
+<div class="panel-card">
+  <div id="gc-kpis" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-bottom:10px;"></div>
+  <div id="gc-info" style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Warte auf Daten…</div>
+  <div id="gc-trend-box" style="display:none; margin-bottom:10px; padding:10px; border:1px solid var(--panel-border); border-radius:12px;">
+    <div style="font-size:12px; font-weight:700; margin-bottom:6px;">🧭 Richtung · oben intern, mitte swing (Marktstruktur), unten 〰 Wellenanker · <span id="gc-trend-state"></span></div>
+    <div id="gc-trend-tfs" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+  </div>
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+    <button type="button" id="gc-bt">📊 Backtest (14 Tage)</button>
+    <button type="button" id="gc-bt28">📊 Backtest (4 Wochen)</button>
+    <button type="button" id="gc-reset">♻️ Gitter &amp; Lots zurücksetzen</button>
+  </div>
+  <div id="gc-bt-out" style="font-size:12px; white-space:pre-wrap;"></div>
+</div>
+</div>
 <div id="backtest-zone">
 <h2 class="section-title">📊 Backtest (mit den oben gespeicherten Einstellungen)</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
     Testet die aktuell gespeicherten Strategie-Einstellungen gegen echte historische Binance-Kerzen.
-    Nur für Fibonacci-Reversal und HalfTrend (Grid/OBI-Scalp/OBI-Momentum-Scalp brauchen
-    historische Orderbuch-/Tick-Daten, die es nicht gibt). SL/TP werden pro Kerze am Schlusskurs geprüft,
+    Nur für Al-Shatri Breakout und RSI Signal (Grid braucht historische Orderbuch-/Tick-Daten,
+    die es nicht gibt). SL/TP werden pro Kerze am Schlusskurs geprüft,
     nicht Tick-für-Tick wie live. Lighter ist gebührenfrei, es werden also keine Gebühren simuliert.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
@@ -3639,7 +2953,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
     </div>
-    <div class="label" style="margin-top:16px; margin-bottom:8px;">Letzte Trades (max. 50, neueste zuerst)</div>
+    <div class="label" style="margin-top:16px; margin-bottom:8px;">Alle Trades (neueste zuerst)</div>
     <table id="bt-trades-table">
       <thead><tr>
         <th class="sortable" data-key="entry_ts">Start ⇅</th>
@@ -3657,447 +2971,520 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 
 
-<div data-mode-section="halftrend" style="display:none;">
-<h2 class="section-title">🎲 HalfTrend-Parameter-Sweep (Amplitude × Channel Deviation × Base Risk)</h2>
-<div class="panel-card">
-  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet alle Kombinationen aus Amplitude (Swing-Lookback), Channel Deviation (SL-Abstand) und
-    Base Risk (TP-Abstand) im angegebenen Bereich gegeneinander (Kerzen werden nur einmal geladen,
-    Trend/ATR2 nur einmal pro Amplitude neu berechnet) und zeigt die besten zuerst. Ergebnisse mit
-    weniger als 5 Trades sind statistisch kaum aussagekräftig und werden nach unten sortiert, aber
-    nicht versteckt.
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="ht-sweep-days" value="30" style="width:90px;"></div>
-    <div><label>Amplitude von</label><input type="number" step="1" id="ht-sweep-amp-min" value="10" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="1" id="ht-sweep-amp-max" value="40" style="width:80px;"></div>
-    <div><label>Schritt</label><input type="number" step="1" id="ht-sweep-amp-step" value="2" style="width:70px;"></div>
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Channel Dev von</label><input type="number" step="0.1" id="ht-sweep-cd-min" value="1.0" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" id="ht-sweep-cd-max" value="4.0" style="width:80px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.1" id="ht-sweep-cd-step" value="0.5" style="width:70px;"></div>
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Base Risk von</label><input type="number" step="0.1" id="ht-sweep-br-min" value="1.0" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" id="ht-sweep-br-max" value="5.0" style="width:80px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.5" id="ht-sweep-br-step" value="0.5" style="width:70px;"></div>
-    <button id="btn-ht-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
-  </div>
-  <div id="ht-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
-  <table id="ht-sweep-results-table" style="display:none; margin-top:12px;">
-    <thead><tr>
-      <th class="sortable" data-key="ht_amplitude">Amplitude ⇅</th>
-      <th class="sortable" data-key="ht_channel_deviation">Channel Dev ⇅</th>
-      <th class="sortable" data-key="ht_base_risk_mult">Base Risk ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ht-sweep-worst-title">📉 Die 20 schlechtesten Kombinationen (nach PnL, unabhängig von der Trade-Anzahl)</h3>
-  <table id="ht-sweep-worst-table" style="display:none; margin-top:8px;">
-    <thead><tr>
-      <th class="sortable" data-key="ht_amplitude">Amplitude ⇅</th>
-      <th class="sortable" data-key="ht_channel_deviation">Channel Dev ⇅</th>
-      <th class="sortable" data-key="ht_base_risk_mult">Base Risk ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-</div>
-</div>
 
-<div data-mode-section="diamond_algo" style="display:none;">
-<h2 class="section-title">🎲 Diamond-Algo-Parameter-Sweep (ATR-Periode × Sensitivity)</h2>
-<div class="panel-card">
-  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet alle Kombinationen aus ATR-Periode (SuperTrend-Kernbaustein) und Sensitivity (ATR-
-    Multiplikator = Sensitivity × 2) gegeneinander - das sind die beiden Parameter, die im
-    Original tatsächlich das Signal beeinflussen. SMA-/EMA-Perioden bleiben auf den aktuell
-    gespeicherten Werten. Ergebnisse mit weniger als 5 Trades sind statistisch kaum
-    aussagekräftig und werden nach unten sortiert, aber nicht versteckt.
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="da-sweep-days" value="30" style="width:90px;"></div>
-    <div><label>ATR-Periode von</label><input type="number" step="1" id="da-sweep-period-min" value="5" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="1" id="da-sweep-period-max" value="20" style="width:80px;"></div>
-    <div><label>Schritt</label><input type="number" step="1" id="da-sweep-period-step" value="1" style="width:70px;"></div>
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Sensitivity von</label><input type="number" step="0.1" id="da-sweep-sens-min" value="1.0" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" id="da-sweep-sens-max" value="5.0" style="width:80px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.1" id="da-sweep-sens-step" value="0.5" style="width:70px;"></div>
-    <button id="btn-da-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
-  </div>
-  <div id="da-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
-  <table id="da-sweep-results-table" style="display:none; margin-top:12px;">
-    <thead><tr>
-      <th class="sortable" data-key="da_atr_period">ATR-Periode ⇅</th>
-      <th class="sortable" data-key="da_sensitivity">Sensitivity ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="da-sweep-worst-title">📉 Die 20 schlechtesten Kombinationen (nach PnL, unabhängig von der Trade-Anzahl)</h3>
-  <table id="da-sweep-worst-table" style="display:none; margin-top:8px;">
-    <thead><tr>
-      <th class="sortable" data-key="da_atr_period">ATR-Periode ⇅</th>
-      <th class="sortable" data-key="da_sensitivity">Sensitivity ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-</div>
-</div>
 
-<div data-mode-section="elte_smart" style="display:none;">
-<h2 class="section-title">🎲 ELTE-Smart-Sensitivity-Sweep</h2>
-<div class="panel-card">
-  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet nur die manuelle Sensitivity (Auto-Sensitivity wird für den Sweep zwangsweise
-    deaktiviert) über einen Wertebereich - mit 2 Nachkommastellen, genau wie im Original-Skript
-    (Schritt 0,01, Bereich 0,11 bis 20). Alle anderen Einstellungen (ATR-Periode, SL/TP-Modus,
-    R:R usw.) bleiben auf den aktuell gespeicherten Werten. Ergebnisse mit weniger als 5 Trades
-    sind statistisch kaum aussagekräftig und werden nach unten sortiert, aber nicht versteckt.
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="es-sweep-days" value="30" style="width:90px;"></div>
-    <div><label>Sensitivity von</label><input type="number" step="0.01" id="es-sweep-sens-min" value="0.11" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="0.01" id="es-sweep-sens-max" value="5.00" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.01" id="es-sweep-sens-step" value="0.01" style="width:90px;"></div>
-    <button id="btn-es-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
-  </div>
-  <div id="es-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
-  <table id="es-sweep-results-table" style="display:none; margin-top:12px;">
-    <thead><tr>
-      <th class="sortable" data-key="es_sensitivity">Sensitivity ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="es-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
-  <table id="es-sweep-worst-table" style="display:none; margin-top:8px;">
-    <thead><tr>
-      <th class="sortable" data-key="es_sensitivity">Sensitivity ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-</div>
-</div>
 
-<div data-mode-section="pieki_algo" style="display:none;">
-<h2 class="section-title">🎲 Pieki-Algo-Sensitivity-Sweep</h2>
-<div class="panel-card">
-  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet nur die Sensitivity über einen Wertebereich - mit 2 Nachkommastellen wie im Original-
-    Pine-Script (Schritt 0,01). Alle anderen Einstellungen (ATR-Periode, SMA-Periode, Exit-Modus,
-    SL/TP, MTF-Filter) bleiben auf den aktuell gespeicherten Werten. Ergebnisse mit weniger als 5
-    Trades sind statistisch kaum aussagekräftig und werden nach unten sortiert, aber nicht versteckt.
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="pk-sweep-days" value="30" style="width:90px;"></div>
-    <div><label>Sensitivity von</label><input type="number" step="0.01" id="pk-sweep-sens-min" value="0.50" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="0.01" id="pk-sweep-sens-max" value="8.00" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.01" id="pk-sweep-sens-step" value="0.01" style="width:90px;"></div>
-    <button id="btn-pk-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
-  </div>
-  <div id="pk-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
-  <table id="pk-sweep-results-table" style="display:none; margin-top:12px;">
-    <thead><tr>
-      <th class="sortable" data-key="pk_sensitivity">Sensitivity ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="pk-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
-  <table id="pk-sweep-worst-table" style="display:none; margin-top:8px;">
-    <thead><tr>
-      <th class="sortable" data-key="pk_sensitivity">Sensitivity ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-</div>
-</div>
 
-<div data-mode-section="mo7_scalp" style="display:none;">
-<h2 class="section-title">🎲 MO7-Summenschwellen-Sweep ("5-Kerzen-Summe")</h2>
+
+
+<div data-mode-section="ab_breakout" style="display:none;">
+<h2 class="section-title">🎲 Al-Shatri Breakout Sweep (SuperTrend-Zeiteinheit × Multiplikator)</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet einen Bereich von Long-Summenschwelle (mo7_sum_low) gegen Short-Summenschwelle
-    (mo7_sum_high) - nur relevant im Einstiegsmodus "5-Kerzen-Summe". Der MO7-Score selbst wird
-    nur einmal berechnet und für alle Kombinationen wiederverwendet, deshalb ist der Sweep trotz
-    vieler Kombinationen relativ schnell. Ergebnisse mit weniger als 5 Trades sind statistisch
-    kaum aussagekräftig und werden nach unten sortiert, aber nicht versteckt.
+    Testet den übergeordneten SuperTrend-Trendfilter über alle gewählten Zeiteinheiten und einen Bereich
+    von Multiplikatoren gegeneinander. Der Filter ist dabei für jede Kombination fest eingeschaltet; alles
+    andere (Signal-Parameter, Ausstiegs-Modus mit SL/TP, Richtung, ASO-Filter, ATR-Periode des SuperTrends) kommt aus den
+    Einstellungen oben. Die Roh-Signale werden nur EINMAL berechnet.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="mo7-sweep-days" value="30" style="width:90px;"></div>
-    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="mo7-sweep-exclude-top-n" value="1" style="width:90px;"></div>
-    <div><label>Long-Schwelle von</label><input type="number" step="1" id="mo7-sweep-sumlow-min" value="20" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="1" id="mo7-sweep-sumlow-max" value="200" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="1" id="mo7-sweep-sumlow-step" value="20" style="width:90px;"></div>
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="ab-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="ab-sweep-exclude-top-n" value="1" style="width:90px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Short-Schwelle von</label><input type="number" step="1" id="mo7-sweep-sumhigh-min" value="300" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="1" id="mo7-sweep-sumhigh-max" value="480" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="1" id="mo7-sweep-sumhigh-step" value="20" style="width:90px;"></div>
-    <button id="btn-mo7-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+    <div><label>Multiplikator von</label><input type="number" step="0.1" min="0.1" id="ab-sweep-st-mult-min" value="0.1" style="width:90px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="ab-sweep-st-mult-max" value="3.0" style="width:90px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.01" min="0.01" id="ab-sweep-st-mult-step" value="0.1" style="width:90px;"></div>
   </div>
-  <div id="mo7-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
-  <table id="mo7-sweep-results-table" style="display:none; margin-top:12px;">
+  <div style="margin-bottom:12px;">
+    <label>SuperTrend-Zeiteinheiten (übergeordnet)</label><br>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="1m" checked> 1m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="5m" checked> 5m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="6m"> 6m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="7m"> 7m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="8m"> 8m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="9m"> 9m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="10m"> 10m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="11m"> 11m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="12m"> 12m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="13m"> 13m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="14m"> 14m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="15m" checked> 15m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="16m"> 16m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="17m"> 17m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="18m"> 18m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="19m"> 19m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="20m"> 20m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="30m" checked> 30m</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="1h" checked> 1h</label>
+    <label style="display:inline-flex; gap:4px; align-items:center; margin-right:10px;"><input type="checkbox" class="ab-sweep-tf" value="4h" checked> 4h</label>
+    <div style="margin-top:6px;"><button type="button" id="btn-ab-sweep-tf-6-20" style="padding:4px 10px; font-size:12px;">6–20 min alle an/aus</button></div>
+    <div style="margin-top:6px;"><label>weitere (kommagetrennt, z.B. 3m,8m,2h)</label> <input type="text" id="ab-sweep-tf-extra" placeholder="optional" style="width:180px;"></div>
+  </div>
+  <div style="font-size:12px; color:var(--text-dim); padding:2px 0; margin-bottom:8px;">
+    Minuten-Zeiteinheiten außerhalb von 1/3/5/15/30 Minuten (6–14, 16–20 usw.) setzt der Bot selbst aus 1m-Kerzen
+    zusammen - die 1m-Historie wird dafür nur EINMAL geladen und für alle gewählten Zeiteinheiten wiederverwendet (der erste Lauf
+    lädt bei 30 Tagen etwa 45 Anfragen, danach ist sie im Cache). Alle 20 Boxen × 30 Multiplikatoren = 600 Kombinationen = das Limit.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-ab-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="ab-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:16px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sweep-best-tf-title">🏁 Bester Multiplikator je Zeiteinheit</h3>
+  <table id="ab-sweep-best-tf-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="mo7_sum_low">Long-Schwelle ⇅</th>
-      <th class="sortable" data-key="mo7_sum_high">Short-Schwelle ⇅</th>
+      <th class="sortable" data-key="ab_trend_filter_resolution">ST-Zeiteinheit ⇅</th>
+      <th class="sortable" data-key="ab_trend_filter_multiplier">ST-Multiplikator ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="mo7-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
-  <table id="mo7-sweep-worst-table" style="display:none; margin-top:8px;">
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="ab-sweep-results-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="mo7_sum_low">Long-Schwelle ⇅</th>
-      <th class="sortable" data-key="mo7_sum_high">Short-Schwelle ⇅</th>
+      <th class="sortable" data-key="ab_trend_filter_resolution">ST-Zeiteinheit ⇅</th>
+      <th class="sortable" data-key="ab_trend_filter_multiplier">ST-Multiplikator ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="ab-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="ab_trend_filter_resolution">ST-Zeiteinheit ⇅</th>
+      <th class="sortable" data-key="ab_trend_filter_multiplier">ST-Multiplikator ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
 </div>
 </div>
 
-<div data-mode-section="ut_bot_hull" style="display:none;">
-<h2 class="section-title">🎲 UT-Bot+Hull ATR-Periode/Sensitivity-Sweep</h2>
+<div data-mode-section="ab_breakout" style="display:none;">
+<h2 class="section-title">🎲 Al-Shatri Signal-Sweep (Breakout-Range × EMAs, unabhängig vom SuperTrend)</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet einen Bereich von ATR-Periode und Sensitivity gegeneinander (die zwei Parameter, die im
-    Original-Pine-Script beide irreführend "Period" heißen). Die Hull-MA wird nur einmal berechnet
-    und für alle Kombinationen wiederverwendet.
+    Testet Breakout-Range (Kerzen), schnelle EMA und langsame EMA gegeneinander. Der SuperTrend-
+    Trendfilter wird hier NICHT mitvariiert - er bleibt genau so an oder aus, wie oben im Strategie-
+    Panel eingestellt (für den SuperTrend selbst gibt es den separaten Sweep darüber). RSI, Volumen,
+    ATR-Periode, Ausstiegs-Modus, Richtung und ASO-Filter kommen ebenfalls aus den Einstellungen oben.
+    Kombinationen mit schneller ≥ langsamer EMA werden automatisch übersprungen.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="utb-sweep-days" value="30" style="width:90px;"></div>
-    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="utb-sweep-exclude-top-n" value="1" style="width:90px;"></div>
-    <div><label>ATR-Periode von</label><input type="number" step="1" id="utb-sweep-atrp-min" value="1" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="1" id="utb-sweep-atrp-max" value="20" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="1" id="utb-sweep-atrp-step" value="1" style="width:90px;"></div>
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="ab-sig-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="ab-sig-sweep-exclude-top-n" value="1" style="width:90px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Sensitivity von</label><input type="number" step="0.01" id="utb-sweep-sens-min" value="0.5" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="0.01" id="utb-sweep-sens-max" value="5.0" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.01" id="utb-sweep-sens-step" value="0.5" style="width:90px;"></div>
-  </div>
-  <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">
-    Optional: MTF-Trend%-Schwellen mit sweepen (nur wirksam wenn "MTF-Trend%-Filter" oben auf "An" steht). Von=Bis lässt die Schwelle einfach fest wie eingestellt, keine zusätzlichen Kombinationen.
+    <div><label>Breakout-Range von</label><input type="number" step="1" min="2" id="ab-sig-sweep-lb-min" value="10" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="2" id="ab-sig-sweep-lb-max" value="60" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="ab-sig-sweep-lb-step" value="10" style="width:80px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Long-Schwelle von</label><input type="number" step="0.1" id="utb-sweep-long-min" value="0.5" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" id="utb-sweep-long-max" value="0.5" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.1" id="utb-sweep-long-step" value="0.5" style="width:90px;"></div>
-    <div><label>Short-Schwelle von</label><input type="number" step="0.1" id="utb-sweep-short-min" value="-0.5" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" id="utb-sweep-short-max" value="-0.5" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.1" id="utb-sweep-short-step" value="0.5" style="width:90px;"></div>
-    <button id="btn-utb-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+    <div><label>Schnelle EMA von</label><input type="number" step="1" min="2" id="ab-sig-sweep-fast-min" value="10" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="2" id="ab-sig-sweep-fast-max" value="60" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="ab-sig-sweep-fast-step" value="10" style="width:80px;"></div>
   </div>
-  <div id="utb-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
-  <table id="utb-sweep-results-table" style="display:none; margin-top:12px;">
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Langsame EMA von</label><input type="number" step="1" min="2" id="ab-sig-sweep-slow-min" value="30" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="2" id="ab-sig-sweep-slow-max" value="150" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="ab-sig-sweep-slow-step" value="20" style="width:80px;"></div>
+  </div>
+  <div style="font-size:12px; color:var(--text-dim); padding:2px 0; margin-bottom:8px;">
+    Limit 600 gültige Kombinationen (nur fast &lt; slow zählt). Bei den Standardwerten sind das
+    6 × 6 × 7 = 252 mögliche, davon ein Teil ungültig (fast ≥ slow) und übersprungen.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-ab-sig-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="ab-sig-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sig-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="ab-sig-sweep-results-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="utb_atr_period">ATR-Periode ⇅</th>
-      <th class="sortable" data-key="utb_sensitivity">Sensitivity ⇅</th>
-      <th class="sortable" data-key="utb_mtf_long_threshold">Long-Schwelle ⇅</th>
-      <th class="sortable" data-key="utb_mtf_short_threshold">Short-Schwelle ⇅</th>
+      <th class="sortable" data-key="ab_lookback">Breakout-Range ⇅</th>
+      <th class="sortable" data-key="ab_fast_len">Schnelle EMA ⇅</th>
+      <th class="sortable" data-key="ab_slow_len">Langsame EMA ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="utb-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
-  <table id="utb-sweep-worst-table" style="display:none; margin-top:8px;">
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="ab-sig-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="ab-sig-sweep-worst-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="utb_atr_period">ATR-Periode ⇅</th>
-      <th class="sortable" data-key="utb_sensitivity">Sensitivity ⇅</th>
-      <th class="sortable" data-key="utb_mtf_long_threshold">Long-Schwelle ⇅</th>
-      <th class="sortable" data-key="utb_mtf_short_threshold">Short-Schwelle ⇅</th>
+      <th class="sortable" data-key="ab_lookback">Breakout-Range ⇅</th>
+      <th class="sortable" data-key="ab_fast_len">Schnelle EMA ⇅</th>
+      <th class="sortable" data-key="ab_slow_len">Langsame EMA ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
 </div>
 </div>
 
-<div data-mode-section="hvd_signal" style="display:none;">
-<h2 class="section-title">🎲 [Hoss] VWAP+RSI+Hull+DI Parameter-Sweep (Hull-Länge × Risk:Reward)</h2>
+<div data-mode-section="ema_rsi" style="display:none;">
+<h2 class="section-title">🎲 EMA + RSI Sweep (EMA-Länge × RSI-Länge)</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet alle Kombinationen aus Hull-Länge und Risk:Reward gegeneinander. VWAP-Deviation,
-    OBV-RSI, ADX/DI und ATR hängen nicht von der Hull-Länge ab und werden nur EINMAL berechnet
-    und für alle Kombinationen wiederverwendet - nur die Hull-Linie selbst und die
-    Trade-Simulation laufen pro Kombination neu.
+    Testet EMA-Länge und RSI-Länge gegeneinander. Mittellinie, SL-Kerzen, TP-Schritt, Ausstiegs-Modus und Richtung kommen aus den Einstellungen oben. SL und TP in derselben Kerze: der SL gewinnt.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="hvd-sweep-days" value="30" style="width:90px;"></div>
-    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="hvd-sweep-exclude-top-n" value="1" style="width:90px;"></div>
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="er-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="er-sweep-exclude-top-n" value="1" style="width:90px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Hull-Länge von</label><input type="number" step="1" id="hvd-sweep-hull-min" value="50" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="1" id="hvd-sweep-hull-max" value="150" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="1" id="hvd-sweep-hull-step" value="5" style="width:90px;"></div>
+    <div><label>EMA von</label><input type="number" step="1" min="1" id="er-sweep-ema-min" value="5" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="1" id="er-sweep-ema-max" value="50" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="er-sweep-ema-step" value="5" style="width:80px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Risk:Reward von</label><input type="number" step="0.1" id="hvd-sweep-rr-min" value="1.0" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" id="hvd-sweep-rr-max" value="5.0" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.1" id="hvd-sweep-rr-step" value="0.5" style="width:90px;"></div>
+    <div><label>RSI von</label><input type="number" step="1" min="2" id="er-sweep-rsi-min" value="7" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="2" id="er-sweep-rsi-max" value="28" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="er-sweep-rsi-step" value="7" style="width:80px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label><input type="checkbox" id="hvd-sweep-st-mult-enabled"> SuperTrend-Trendfilter-Multiplikator als 3. Sweep-Dimension</label></div>
+    <button id="btn-er-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
   </div>
-  <div id="hvd-sweep-st-mult-row" style="display:none; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Multiplikator von</label><input type="number" step="0.1" min="0.1" id="hvd-sweep-st-mult-min" value="1.0" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="hvd-sweep-st-mult-max" value="5.0" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.01" min="0.01" id="hvd-sweep-st-mult-step" value="0.1" style="width:90px;"></div>
-  </div>
-  <div style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:2px 0; margin-bottom:8px;">
-    ACHTUNG Laufzeit: aktiviert die dritte Dimension die Kombinationsanzahl (multipliziert sich mit
-    der Anzahl Multiplikator-Werte, Standard 41 bei 1.0-5.0 in 0.1-Schritten) - bei "zu viele
-    Kombinationen"-Fehler Hull-/Risk:Reward-Bereich verkleinern. ATR-Periode/Zeiteinheit des
-    Trendfilters bleiben fest auf dem oben im Strategie-Panel konfigurierten Wert, nur der
-    Multiplikator wird durchprobiert. Setzt außerdem voraus, dass der SuperTrend-Trendfilter oben
-    im Strategie-Panel aktiviert ist - sonst hat diese Sweep-Dimension keine Wirkung.
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <button id="btn-hvd-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
-  </div>
-  <div id="hvd-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
-  <table id="hvd-sweep-results-table" style="display:none; margin-top:12px;">
+  <div id="er-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="er-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="er-sweep-results-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="hvd_hull_length">Hull-Länge ⇅</th>
-      <th class="sortable" data-key="hvd_risk_reward">Risk:Reward ⇅</th>
-      <th class="sortable" data-key="hvd_trend_filter_multiplier">ST-Multiplikator ⇅</th>
+      <th class="sortable" data-key="er_ema_len">EMA-Länge ⇅</th>
+      <th class="sortable" data-key="er_rsi_len">RSI-Länge ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="hvd-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
-  <table id="hvd-sweep-worst-table" style="display:none; margin-top:8px;">
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="er-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="er-sweep-worst-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="hvd_hull_length">Hull-Länge ⇅</th>
-      <th class="sortable" data-key="hvd_risk_reward">Risk:Reward ⇅</th>
-      <th class="sortable" data-key="hvd_trend_filter_multiplier">ST-Multiplikator ⇅</th>
+      <th class="sortable" data-key="er_ema_len">EMA-Länge ⇅</th>
+      <th class="sortable" data-key="er_rsi_len">RSI-Länge ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
       <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
 </div>
 </div>
 
-<div data-mode-section="range_filter" style="display:none;">
-<h2 class="section-title">🎲 Range-Filter-Parameter-Sweep (Swing-Periode × Multiplikator)</h2>
+<div data-mode-section="wellenanker" style="display:none;">
+<h2 class="section-title">🎲 Wellenanker Sweep (Zone 1 × Max. Nachkäufe × Stop-Loss $)</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet alle Kombinationen aus Swing-Periode (n) und Swing-Multiplikator (qty) gegeneinander -
-    das sind die beiden Parameter, die im Original die Bandbreite und damit das Signal bestimmen.
-    Ergebnisse mit weniger als 5 Trades sind statistisch kaum aussagekräftig und werden nach
-    unten sortiert, aber nicht versteckt.
+    Testet Zone 1 gegen Max. Nachkäufe (0-20) und Stop-Loss ($). TP-Modus (samt Überlauflinie/TP-
+    Betrag) sowie die Wellen-Parameter (Kanal-/Durchschnitt-Länge, Signallinien-Glättung, Quelle,
+    Wellen-Skalierung) kommen unverändert aus den Einstellungen oben.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="rf-sweep-days" value="30" style="width:90px;"></div>
-    <div><label>Swing-Periode von</label><input type="number" step="1" id="rf-sweep-period-min" value="10" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="1" id="rf-sweep-period-max" value="50" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="1" id="rf-sweep-period-step" value="5" style="width:80px;"></div>
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="wa-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="wa-sweep-exclude-top-n" value="1" style="width:90px;"></div>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Multiplikator von</label><input type="number" step="0.1" id="rf-sweep-qty-min" value="1.0" style="width:90px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" id="rf-sweep-qty-max" value="6.0" style="width:90px;"></div>
-    <div><label>Schritt</label><input type="number" step="0.1" id="rf-sweep-qty-step" value="0.5" style="width:80px;"></div>
-    <button id="btn-rf-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+    <div><label>Zone 1 von</label><input type="number" step="1" min="1" id="wa-sweep-zone1-min" value="30" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="1" id="wa-sweep-zone1-max" value="80" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="wa-sweep-zone1-step" value="1" style="width:80px;"></div>
   </div>
-  <div id="rf-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
-  <table id="rf-sweep-results-table" style="display:none; margin-top:12px;">
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div style="color:var(--text-dim); font-size:12px; max-width:200px;">Nur im Modus „Level" (statt Zone 1):</div>
+    <div><label>Level-Abstand von</label><input type="number" step="0.5" min="0" max="30" id="wa-sweep-lvl-min" value="0" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.5" min="0" max="30" id="wa-sweep-lvl-max" value="30" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.5" min="0.5" id="wa-sweep-lvl-step" value="2" style="width:80px;"></div>
+    <label style="font-size:13px;"><input type="checkbox" id="wa-sweep-line-signal" checked style="width:auto; vertical-align:middle;"> Signallinie</label>
+    <label style="font-size:13px;"><input type="checkbox" id="wa-sweep-line-wave" checked style="width:auto; vertical-align:middle;"> Welle</label>
+    <label style="font-size:13px;"><input type="checkbox" id="wa-sweep-line-both" checked style="width:auto; vertical-align:middle;"> Beide</label>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Max. Nachkäufe von</label><input type="number" step="1" min="0" max="20" id="wa-sweep-nachkauf-min" value="0" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="0" max="20" id="wa-sweep-nachkauf-max" value="4" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Stop-Loss ($) von</label><input type="number" step="0.5" min="0.1" id="wa-sweep-sl-min" value="5" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.5" min="0.1" id="wa-sweep-sl-max" value="25" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.5" min="0.1" id="wa-sweep-sl-step" value="2" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-wa-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="wa-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="wa-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="wa-sweep-results-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="rf_period">Swing-Periode ⇅</th>
-      <th class="sortable" data-key="rf_qty">Multiplikator ⇅</th>
+      <th class="sortable" data-key="wa_zone1">Zone 1 / Level ⇅</th>
+      <th class="sortable" data-key="wa_level_line">Linie ⇅</th>
+      <th class="sortable" data-key="wa_max_nachkauf">Max. Nachkäufe ⇅</th>
+      <th class="sortable" data-key="wa_sl_usd">SL $ ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="rf-sweep-worst-title">📉 Die 20 schlechtesten Kombinationen (nach PnL, unabhängig von der Trade-Anzahl)</h3>
-  <table id="rf-sweep-worst-table" style="display:none; margin-top:8px;">
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="wa-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="wa-sweep-worst-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="rf_period">Swing-Periode ⇅</th>
-      <th class="sortable" data-key="rf_qty">Multiplikator ⇅</th>
+      <th class="sortable" data-key="wa_zone1">Zone 1 / Level ⇅</th>
+      <th class="sortable" data-key="wa_level_line">Linie ⇅</th>
+      <th class="sortable" data-key="wa_max_nachkauf">Max. Nachkäufe ⇅</th>
+      <th class="sortable" data-key="wa_sl_usd">SL $ ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
       <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
       <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
     </tr></thead>
     <tbody></tbody>
   </table>
 </div>
 </div>
+
+<div data-mode-section="dollar701" style="display:none;">
+<h2 class="section-title">🎲 Dollar701 Monte-Carlo (Sensitivity × Stop-Loss $ × Take-Profit $)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Zieht zufällige Kombinationen aus den Bereichen unten (Sensitivity mit 2 Nachkommastellen, SL/TP in 0,1-$-Schritten) und
+    simuliert jede auf denselben Kerzen. Zeitrahmen, Richtung, Cooldown, Margin und Hebel kommen aus den Einstellungen oben.
+    Wichtig: einen sehr guten Einzelwert nicht blind übernehmen – die Spalte „PnL ohne beste N“ und die Trade-Zahl zeigen, ob er stabil ist.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="dv-mc-days" value="30" style="width:90px;"></div>
+    <div><label>Durchläufe (max. 2000)</label><input type="number" step="50" min="1" max="2000" id="dv-mc-runs" value="300" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="dv-mc-seed" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="dv-mc-exclude-top-n" value="1" style="width:90px;"></div>
+    <div><label>Ausstieg im Test</label><select id="dv-mc-exit-mode"><option value="">wie in den Einstellungen</option><option value="sltp">SL / TP / Trailing</option><option value="reverse">Flip / Reverse (nur Sensitivity)</option></select></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Sensitivity von</label><input type="number" step="0.01" min="1" max="15" id="dv-mc-sens-min" value="3" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.01" min="1" max="15" id="dv-mc-sens-max" value="12" style="width:80px;"></div>
+    <div><label>Stop-Loss ($) von</label><input type="number" step="0.1" min="0.1" id="dv-mc-sl-min" value="1" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="dv-mc-sl-max" value="10" style="width:80px;"></div>
+    <div><label>Take-Profit ($) von</label><input type="number" step="0.1" min="0.1" id="dv-mc-tp-min" value="1" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="dv-mc-tp-max" value="10" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-dv-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="dv-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="dv-mc-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="dv-mc-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="dv_sens">Sensitivity ⇅</th>
+      <th class="sortable" data-key="dv_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="dv_tp_usd">TP $ ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="dv-mc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="dv-mc-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="dv_sens">Sensitivity ⇅</th>
+      <th class="sortable" data-key="dv_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="dv_tp_usd">TP $ ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<div data-mode-section="rlm" style="display:none;">
+<h2 class="section-title">🎲 Reaction Level Matrix Monte-Carlo (Score × Swing × Toleranz × Berührungen × Ablehnung)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Zieht zufällige Kombinationen aus den Bereichen unten und simuliert jede auf denselben Kerzen. Zeitebene, Richtung, SL/TP, Trend-Filter, Margin und Hebel kommen aus den Einstellungen oben.
+    Einen Spitzenwert nicht blind übernehmen: Die Spalte „PnL ohne beste N“, die Trade-Zahl und die Tabelle „Einfluss je Parameter“ zeigen, ob es ein stabiles Plateau gibt.
+    Tipp: auf einem Zeitraum suchen und danach auf einem anderen (z. B. letzte 30 Tage) mit den übernommenen Werten per Backtest gegenprüfen.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="rlm-mc-days" value="30" style="width:90px;"></div>
+    <div><label>Durchläufe (max. 1000)</label><input type="number" step="50" min="1" max="1000" id="rlm-mc-runs" value="150" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="rlm-mc-seed" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="rlm-mc-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Mindest-Score von</label><input type="number" step="1" min="0" max="100" id="rlm-mc-score-min" value="30" style="width:80px;"></div><div><label>bis</label><input type="number" step="1" min="0" max="100" id="rlm-mc-score-max" value="80" style="width:80px;"></div>
+    <div><label>Swing-Länge von</label><input type="number" step="1" min="2" max="30" id="rlm-mc-swing-min" value="3" style="width:80px;"></div><div><label>bis</label><input type="number" step="1" min="2" max="30" id="rlm-mc-swing-max" value="12" style="width:80px;"></div>
+    <div><label>Toleranz von</label><input type="number" step="0.05" min="0.2" max="2" id="rlm-mc-tol-min" value="0.3" style="width:80px;"></div><div><label>bis</label><input type="number" step="0.05" min="0.2" max="2" id="rlm-mc-tol-max" value="1.0" style="width:80px;"></div>
+    <div><label>Berührungen von</label><input type="number" step="1" min="2" max="10" id="rlm-mc-touches-min" value="2" style="width:80px;"></div><div><label>bis</label><input type="number" step="1" min="2" max="10" id="rlm-mc-touches-max" value="4" style="width:80px;"></div>
+    <div><label>Ablehnung von</label><input type="number" step="0.05" min="0.5" max="0.9" id="rlm-mc-clv-min" value="0.55" style="width:80px;"></div><div><label>bis</label><input type="number" step="0.05" min="0.5" max="0.9" id="rlm-mc-clv-max" value="0.8" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label><input type="checkbox" id="rlm-mc-sl-on" style="width:auto; vertical-align:middle;"> Stop-Loss ($) variieren von</label><input type="number" step="0.1" min="0.1" id="rlm-mc-sl-min" value="3" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="rlm-mc-sl-max" value="15" style="width:80px;"></div>
+    <div><label><input type="checkbox" id="rlm-mc-tp-on" style="width:auto; vertical-align:middle;"> TP-Schritt ($) variieren von</label><input type="number" step="0.1" min="0.1" id="rlm-mc-tp-min" value="2" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="rlm-mc-tp-max" value="15" style="width:80px;"></div>
+    <div><label>Kerzenart im Test</label><select id="rlm-mc-candle"><option value="">wie in den Einstellungen</option><option value="normal">Normale Kerzen</option><option value="heikin">Heikin-Ashi</option></select></div>
+  </div>
+  <div style="font-size:12px; color:var(--text-dim); margin-bottom:12px;">Ohne Haken gelten SL und TP-Schritt aus den Einstellungen oben (nur bei SL-Modus „Fester $-Betrag").</div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-rlm-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="rlm-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="rlm-mc-effect-title">🧭 Einfluss je Parameter (Median-PnL im unteren / mittleren / oberen Drittel des Bereichs)</h3>
+  <table id="rlm-mc-effect-table" style="display:none; margin-top:8px;">
+    <thead><tr><th>Parameter</th><th>unteres Drittel</th><th>mittleres Drittel</th><th>oberes Drittel</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="rlm-mc-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="rlm-mc-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="rlm_min_score">Score ⇅</th>
+      <th class="sortable" data-key="rlm_swing_len">Swing ⇅</th>
+      <th class="sortable" data-key="rlm_level_tol">Toleranz ⇅</th>
+      <th class="sortable" data-key="rlm_min_touches">Berührungen ⇅</th>
+      <th class="sortable" data-key="rlm_reject_clv">Ablehnung ⇅</th>
+      <th class="sortable" data-key="rlm_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="rlm_tp_usd">TP-Schritt $ ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="rlm-mc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="rlm-mc-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="rlm_min_score">Score ⇅</th>
+      <th class="sortable" data-key="rlm_swing_len">Swing ⇅</th>
+      <th class="sortable" data-key="rlm_level_tol">Toleranz ⇅</th>
+      <th class="sortable" data-key="rlm_min_touches">Berührungen ⇅</th>
+      <th class="sortable" data-key="rlm_reject_clv">Ablehnung ⇅</th>
+      <th class="sortable" data-key="rlm_sl_usd">SL $ ⇅</th>
+      <th class="sortable" data-key="rlm_tp_usd">TP-Schritt $ ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+<div data-mode-section="liquidity_waves" style="display:none;">
+<h2 class="section-title">🎲 Liquidity Waves Sweep (Einstiegs-Schwelle × Levels keep alive)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet die Einstiegs-Schwelle (Buyers%/Sellers%) gegen "Levels keep alive". TP1/TP2/SL,
+    Nachkauf-Einstellungen, Sweep-Erkennung (max. Körper-%), Side-Filter und Duplikat-Entfernung
+    kommen unverändert aus den Einstellungen oben.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="liq-sweep-days" value="30" style="width:90px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="liq-sweep-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Einstiegs-Schwelle (%) von</label><input type="number" step="0.5" min="0.1" id="liq-sweep-entry-min" value="1" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.5" min="0.1" id="liq-sweep-entry-max" value="10" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.5" min="0.1" id="liq-sweep-entry-step" value="1" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Levels keep alive von</label><input type="number" step="1" min="1" id="liq-sweep-levels-min" value="30" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="1" min="1" id="liq-sweep-levels-max" value="100" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="1" min="1" id="liq-sweep-levels-step" value="5" style="width:80px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <button id="btn-liq-sweep" style="padding:12px 24px;">🎲 Sweep starten</button>
+  </div>
+  <div id="liq-sweep-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="liq-sweep-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="liq-sweep-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="liq_entry_threshold_pct">Einstiegs-Schwelle % ⇅</th>
+      <th class="sortable" data-key="liq_max_levels">Levels keep alive ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="liq-sweep-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="liq-sweep-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="liq_entry_threshold_pct">Einstiegs-Schwelle % ⇅</th>
+      <th class="sortable" data-key="liq_max_levels">Levels keep alive ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
+
 
 
 </div>
@@ -4120,108 +3507,9 @@ let priceChart;
 let obiChart;
 let quadStochChart;
 
-// ===== Verschieb-/größenveränderbares Widget-Dashboard (wie bei Lighter) =====
-// Jede Kachel behält ihre bestehende ID (oms-trend-meter, oms-gauge-wrap, ...) im Inneren -
-// die ganze bisherige Render-Logik funktioniert dadurch unveraendert weiter, nur die AUSSENHUELLE
-// ist jetzt per GridStack frei verschieb-/groessenveraenderbar. Layout wird pro Browser
-// gespeichert (localStorage), nicht auf dem Server - jeder Nutzer kann sein eigenes Layout haben.
-const OMS_WIDGET_DEFS = [
-  { id: "gsi-signal", title: "📡 Signal", x: 0, y: 0, w: 4, h: 3,
-    body: '<div id="oms-trend-meter" style="padding:16px; border-radius:10px; text-align:center; font-weight:800; font-size:20px;"></div><div id="oms-trend-meter-detail" style="margin-top:8px; font-size:11px; color:var(--text-dim); text-align:center;"></div>' },
-  { id: "gsi-gauge", title: "📶 OBI-Gauge", x: 4, y: 0, w: 4, h: 3, body: '<div id="oms-gauge-wrap"></div>' },
-  { id: "gsi-cvd-gauge", title: "💹 CVD-Gauge", x: 8, y: 0, w: 4, h: 3, body: '<div id="oms-cvd-gauge-wrap"></div>' },
-  { id: "gsi-oi-gauge", title: "📊 Open-Interest-Gauge", x: 0, y: 3, w: 4, h: 3, body: '<div id="oms-oi-gauge-wrap"></div>' },
-  { id: "gsi-liq-gauge", title: "💥 Liquidations-Gauge", x: 4, y: 3, w: 4, h: 3, body: '<div id="oms-liq-gauge-wrap"></div>' },
-  { id: "gsi-checklist", title: "✅ Warum feuert's?", x: 8, y: 3, w: 4, h: 3, body: '<div id="oms-checklist-wrap"></div>' },
-  { id: "gsi-pocket", title: "⚡ Pocket-Trading", x: 0, y: 6, w: 4, h: 5, body: `
-    <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; font-size:11px;">
-      <div><div class="label">Margin</div><div class="value" id="pocket-margin" style="font-size:14px;">-</div></div>
-      <div><div class="label">Position</div><div class="value" id="pocket-position" style="font-size:14px;">-</div></div>
-      <div><div class="label">Ø-Einstieg</div><div class="value" id="pocket-entry" style="font-size:14px;">-</div></div>
-      <div><div class="label">Unrealisiert $</div><div class="value" id="pocket-pnl" style="font-size:14px;">-</div></div>
-    </div>
-    <div style="display:flex; gap:8px; margin-bottom:12px;">
-      <button id="btn-manual-buy" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#16a34a; color:white; border:none; border-radius:10px; cursor:pointer;">⬆️ BUY</button>
-      <button id="btn-manual-sell" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#dc2626; color:white; border:none; border-radius:10px; cursor:pointer;">⬇️ SELL</button>
-      <button id="btn-manual-tp" style="flex:1; padding:16px 6px; font-size:15px; font-weight:700; background:#2563eb; color:white; border:none; border-radius:10px; cursor:pointer;">✅ TP</button>
-    </div>
-    <div class="label" style="margin-bottom:4px; font-size:10px;">Letzte 10 Kerzen</div>
-    <div id="mini-candles" style="display:flex; gap:3px; align-items:center; height:60px;"></div>` },
-  { id: "gsi-chart", title: "📈 Preisverlauf", x: 4, y: 6, w: 8, h: 5, body: '<div id="oms-chart-wrap"></div>' },
-  { id: "gsi-obi", title: "〰️ OBI-Verlauf", x: 0, y: 11, w: 12, h: 4, body: '<div style="position:relative; height:100%; min-height:180px;"><canvas id="obiChart"></canvas></div>' },
-  { id: "gsi-scalp-board", title: "⚡ Scalp-Board (30s/45s/60s)", x: 0, y: 15, w: 12, h: 5, body: '<div id="scalp-board-wrap"></div>' },
-  { id: "gsi-quad-stoch", title: "〰️ Quad-Stochastic-Verlauf", x: 0, y: 20, w: 12, h: 5, body: `
-    <div style="display:flex; justify-content:flex-end; margin-bottom:6px;">
-      <select id="quad-stoch-resolution-select" style="font-size:11px; padding:3px 8px; background:var(--panel); color:var(--text); border:1px solid var(--panel-border); border-radius:6px;">
-        <option value="30s">30 Sekunden</option>
-        <option value="1m">1 Minute</option>
-        <option value="2m">2 Minuten</option>
-        <option value="5m">5 Minuten</option>
-      </select>
-    </div>
-    <div style="position:relative; height:calc(100% - 34px); min-height:160px;"><canvas id="quadStochChart"></canvas></div>` },
-];
-
-let omsGrid;
-function initOmsGrid() {
-  const container = document.getElementById('oms-grid');
-  container.innerHTML = OMS_WIDGET_DEFS.map(w => `
-    <div class="grid-stack-item" gs-id="${w.id}" gs-x="${w.x}" gs-y="${w.y}" gs-w="${w.w}" gs-h="${w.h}" id="${w.id}">
-      <div class="grid-stack-item-content">
-        <div class="widget-drag-handle">${w.title}</div>
-        <div class="widget-body">${w.body}</div>
-      </div>
-    </div>`).join('');
-
-  omsGrid = GridStack.init({ cellHeight: 46, margin: 6, float: true, handle: '.widget-drag-handle', animate: true }, container);
-
-  // Gespeichertes Layout mit den AKTUELL bekannten Widgets zusammenfuehren: Kacheln, die der
-  // Nutzer schon verschoben/skaliert hat, behalten seine Position; neu hinzugekommene Kacheln
-  // (die im gespeicherten Layout noch gar nicht existierten) fallen auf ihre Default-Position
-  // zurueck, statt komplett zu verschwinden - das war der Bug, der OI-/Liq-Gauge unsichtbar
-  // gemacht hat, als sie zu einem bereits gespeicherten Layout hinzukamen.
-  let saved = null;
-  try { saved = JSON.parse(localStorage.getItem('oms_dashboard_layout') || 'null'); } catch (e) {}
-  const savedById = {};
-  if (saved && Array.isArray(saved)) {
-    saved.forEach(item => { if (item && item.id) savedById[item.id] = item; });
-  }
-  const merged = OMS_WIDGET_DEFS.map(w => savedById[w.id]
-    ? { id: w.id, x: savedById[w.id].x, y: savedById[w.id].y, w: savedById[w.id].w, h: savedById[w.id].h }
-    : { id: w.id, x: w.x, y: w.y, w: w.w, h: w.h });
-  omsGrid.load(merged);
-
-  omsGrid.on('change', () => {
-    try { localStorage.setItem('oms_dashboard_layout', JSON.stringify(omsGrid.save(false))); } catch (e) {}
-  });
-
-  document.getElementById('btn-reset-layout').addEventListener('click', () => {
-    try { localStorage.removeItem('oms_dashboard_layout'); } catch (e) {}
-    omsGrid.load(OMS_WIDGET_DEFS.map(w => ({ id: w.id, x: w.x, y: w.y, w: w.w, h: w.h })));
-  });
-
-  // Manuelle Buy/Sell/TP-Buttons neu verdrahten, da sie jetzt per innerHTML neu erzeugt wurden
-  document.getElementById('btn-manual-buy').addEventListener('click', () => manualTrade('long'));
-  document.getElementById('btn-manual-sell').addEventListener('click', () => manualTrade('short'));
-  document.getElementById('btn-manual-tp').addEventListener('click', async () => {
-    const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method: 'POST' });
-    const data = await res.json();
-    if (data.error) alert(data.error);
-    refresh();
-  });
-
-  // Quad-Stochastic Zeitrahmen-Dropdown: schreibt direkt (Partial-Update, kein ganzes
-  // Formular noetig) ins Config-Backend und laedt die Anzeige neu
-  document.getElementById('quad-stoch-resolution-select').addEventListener('change', async (e) => {
-    await fetch(`/api/config?symbol=${currentSymbol}`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ quad_stoch_resolution: e.target.value })
-    });
-    refresh();
-  });
-}
-initOmsGrid();
-let currentSymbol = null;
+// Manuelles Trading (BUY/SELL/TP) - fest im Dashboard, nicht mehr Teil eines verschiebbaren
+// Kacheln-Systems (das frueher hier alle Diagnose-Widgets fuer OBI-Momentum-Scalp/Scalp-Board
+// enthielt - mit deren Entfernung ist das jetzt ein einfaches statisches Panel).
 let allSymbols = [];
 
 function computeEMA(values, period) {
@@ -4271,13 +3559,6 @@ function updateModeFields() {
   document.querySelectorAll('[data-mode-section]').forEach(el => {
     el.style.display = (el.dataset.modeSection === mode) ? '' : 'none';
   });
-  // OBI-Momentum-Scalp hat keinen Kerzen-Backtest (braucht Orderbuch/Trade-Tape/Funding, die es
-  // historisch nicht gibt) und der grosse generische Kursverlauf-Chart ist redundant zum
-  // kompakten Mini-Chart oben - beides ausblenden, damit die Seite aufgeraeumt bleibt
-  const isOms = mode === 'oms_scalp';
-  document.getElementById('backtest-zone').style.display = isOms ? 'none' : '';
-  document.getElementById('generic-chart-wrap').style.display = isOms ? 'none' : '';
-  if (isOms) updateOmsExitModeFields();
   applyFilterRequires();
 }
 
@@ -4297,7 +3578,15 @@ function applyFilterRequires() {
     // Mehrwert-Selects (z.B. mv_sl_mode: "fixed"/"guide_trail") - dann zaehlt Gleichheit mit
     // diesem Wert statt 'true'.
     const expected = el.dataset.requiresValue;
-    const active = ctrl && (expected !== undefined ? ctrl.value === expected : ctrl.value === 'true');
+    const notExpected = el.dataset.requiresNot;
+    let active = ctrl && (notExpected !== undefined ? ctrl.value !== notExpected : expected !== undefined ? ctrl.value === expected : ctrl.value === 'true');
+    // Optional zweite Bedingung "data-requires-also=\"id=wert\"" (z.B. Feld gilt nur bei Preset Custom UND
+    // Ausstiegs-Modus Plan) - beide muessen erfuellt sein.
+    if (active && el.dataset.requiresAlso) {
+      const [alsoId, alsoVal] = el.dataset.requiresAlso.split('=');
+      const alsoCtrl = document.getElementById(alsoId);
+      active = !!alsoCtrl && alsoCtrl.value === alsoVal;
+    }
     el.style.display = active ? '' : 'none';
   });
 }
@@ -4305,23 +3594,9 @@ document.getElementById('config-form').addEventListener('change', () => {
   applyFilterRequires();
 });
 
-function updateOmsExitModeFields() {
-  const exitMode = document.getElementById('oms_exit_mode').value;
-  document.querySelectorAll('[data-oms-exit-mode]').forEach(el => {
-    el.style.display = (el.dataset.omsExitMode === exitMode) ? '' : 'none';
-  });
-  document.getElementById('oms_tp1_usd_label').innerText = exitMode === 'single_tp' ? 'TP Ziel ($)' : 'TP1 Ziel ($, Teilverkauf)';
-}
 document.getElementById('entry_mode').addEventListener('change', () => {
   window.formTouched = true;
   updateModeFields();
-});
-document.getElementById('obi-advanced-toggle').addEventListener('change', (e) => {
-  document.getElementById('obi-advanced-fields').style.display = e.target.checked ? 'grid' : 'none';
-});
-document.getElementById('oms_exit_mode').addEventListener('change', () => {
-  window.formTouched = true;
-  updateOmsExitModeFields();
 });
 
 async function loadSymbols() {
@@ -4343,6 +3618,77 @@ async function loadSymbols() {
     refresh();
   });
 }
+
+
+// ===== Grid-Bot Anzeige =====
+async function gcPoll() {
+  try {
+    if (document.getElementById('entry_mode').value !== 'grid_classic') return;
+    const r = await fetch(`/api/status?symbol=${currentSymbol}`); const d = await r.json(); const v = d.gc_view;
+    const k = document.getElementById('gc-kpis'), inf = document.getElementById('gc-info');
+    if (!v) { const ga0 = d.grid_account; inf.textContent = 'Bot gestoppt oder noch kein Gitter. Start drücken.' + (ga0 ? (ga0.sub ? ` · 🟢 Unterkonto ${ga0.index}` : ` · Hauptkonto ${ga0.index}`) : ''); k.innerHTML=''; return; }
+    const c = (x) => x >= 0 ? 'var(--green,#1fcf6e)' : 'var(--red,#f0354b)';
+    const box = (t, val, col) => `<div style="background:rgba(255,255,255,.04);border-radius:12px;padding:8px 10px;"><div style="font-size:11px;opacity:.6">${t}</div><div style="font-size:16px;font-weight:700;${col?'color:'+col:''}">${val}</div></div>`;
+    k.innerHTML = box('Stufengewinn (realisiert)', '$'+v.realized.toFixed(2), c(v.realized)) + box('Stufen', v.cycles) +
+      box('Offene Position (unreal.)', '$'+v.upnl.toFixed(2), c(v.upnl)) + box('Lots', v.lots.length+' / '+v.max_lots) +
+      box('Gewinn je Stufe', '≈ $'+v.step_profit.toFixed(3));
+    const ga = d.grid_account; const acc = ga ? (ga.sub ? ` · 🟢 Unterkonto ${ga.index}` : ` · Hauptkonto ${ga.index}`) : '';
+    inf.textContent = `${v.dir.toUpperCase()}-Gitter ${v.lower.toPrecision(6)} … ${v.upper.toPrecision(6)}, ${v.n} Stufen, ${v.orders.length} Orders im Buch` + acc + (v.stopped ? ' · ⛔ ' + v.stopped : '');
+    const ts_ = document.getElementById('gc-trend-state');
+    if (ts_) {
+      if (v.trend === null || v.trend === undefined) { ts_.textContent = 'Trend-Automatik aus'; }
+      else {
+        const tx = v.trend > 0 ? '▲ AUFWÄRTS' : v.trend < 0 ? '▼ ABWÄRTS' : '– unbekannt';
+        ts_.textContent = `Auswahl: ${v.trend_tf} ${v.trend_mode} → ${tx}` + (v.want_dir && v.want_dir !== v.dir ? ` · wechselt auf ${v.want_dir.toUpperCase()}` + (v.pause ? ' (keine neuen Käufe, Lots laufen aus)' : '') : '');
+        ts_.style.color = v.trend > 0 ? 'var(--green,#1fcf6e)' : v.trend < 0 ? 'var(--red,#f0354b)' : '';
+      }
+    }
+  } catch (e) {}
+}
+setInterval(gcPoll, 3000);
+async function gcTrendPoll() {
+  try {
+    const box = document.getElementById('gc-trend-box');
+    if (document.getElementById('entry_mode').value !== 'grid_classic') return;
+    const r = await fetch(`/api/gc/trend?symbol=${currentSymbol}`); const d = await r.json();
+    if (!d.rows) return;
+    box.style.display = '';
+    const cell = (v) => v === 1 ? '<span style="color:#1fcf6e">▲ BULL</span>' : v === -1 ? '<span style="color:#f0354b">▼ BEAR</span>' : '<span style="color:#7d8696">–</span>';
+    document.getElementById('gc-trend-tfs').innerHTML = d.rows.map(x => {
+      const sel = d.mode !== 'off' && x.tf === d.tf;
+      return `<div style="min-width:78px;padding:6px 8px;border-radius:10px;background:rgba(255,255,255,.04);${sel ? 'outline:2px solid #3b82f6;' : ''}"><div style="font-size:11px;letter-spacing:.08em;opacity:.7">${x.tf}${sel ? ' ★' : ''}</div><div style="font-size:12px;font-weight:700">${cell(x.intern)}</div><div style="font-size:12px;font-weight:700">${cell(x.swing)}</div><div style="font-size:12px;font-weight:700;opacity:.9">〰 ${cell(x.wave)}</div></div>`;
+    }).join('');
+  } catch (e) {}
+}
+setInterval(gcTrendPoll, 15000);
+setTimeout(gcTrendPoll, 1500);
+async function gcRunBacktest(days) {
+  const o = document.getElementById('gc-bt-out'); o.textContent = 'Läuft…';
+  const res = await fetch(`/api/gc/backtest?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({days:days, config: buildConfigPayload()})});
+  const d = await res.json();
+  if (d.error) { o.textContent = '❌ ' + d.error; return; }
+  let t = `${d.direction}-Grid ${d.lower.toPrecision(6)}…${d.upper.toPrecision(6)} · ${d.n} Stufen · ${d.days} Tage\\nStufen: ${d.cycles} → realisiert $${d.realized} ($${d.per_day}/Tag)\\nOffen am Ende: ${d.open_lots} Lots, $${d.open_float}\\nGesamt: $${d.total} · max. Lots ${d.max_lots} (Notional ${d.margin_peak_notional}$) · schlimmster Buchverlust $${d.worst_float}` + (d.stopped_at ? '\\n⛔ Notbremse ausgelöst' : '');
+  if (d.trend_mode && d.trend_mode !== 'off') {
+    t += `\\n🧭 Trend-Automatik (${d.trend_tf}, ${d.trend_mode}): ${d.flips} Richtungswechsel, am Ende ${d.direction.toUpperCase()}`;
+    const fl = d.flip_log || [];
+    if (fl.length) {
+      const f2 = (x) => (x >= 0 ? '+' : '') + x.toFixed(2);
+      t += '\\n\\nWechsel (Ergebnis der beendeten Phase = Stufengewinne + Verlust beim Schließen):';
+      t += '\\n' + fl.map(x => `${new Date(x.ts).toLocaleString('de-DE', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})}  ${x.from.toUpperCase()} → ${x.to.toUpperCase()} @ ${x.price.toPrecision(6)}  Phase: $${f2(x.phase_pnl)} (${x.phase_cycles} Stufen)` + (x.close_loss ? `  · davon Schließen: $${f2(x.close_loss)}` : '') + `  [${x.how}]`).join('\\n');
+      t += `\\nLetzte Phase (läuft noch, ${d.direction.toUpperCase()}): $${f2(d.last_phase_pnl)}`;
+      const sumClose = fl.reduce((a, x) => a + (x.close_loss || 0), 0);
+      if (sumClose) t += `\\nSumme Verluste/Gewinne durch Schließen beim Wechsel: $${f2(sumClose)}`;
+    }
+  }
+  o.textContent = t;
+}
+document.getElementById('gc-bt').addEventListener('click', () => gcRunBacktest(14));
+document.getElementById('gc-bt28').addEventListener('click', () => gcRunBacktest(28));
+document.getElementById('gc-reset').addEventListener('click', async () => {
+  if (!confirm('Gitter und Lot-Buch zurücksetzen? (Bot muss gestoppt sein. Offene Börsen-Position bleibt bestehen und wird NICHT geschlossen.)')) return;
+  const res = await fetch(`/api/gc/reset?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  const d = await res.json(); showToast(d.error ? '❌ ' + d.error : '✅ Zurückgesetzt');
+});
 
 document.getElementById('btn-start').addEventListener('click', async () => {
   // Erst die aktuellen Formular-Einstellungen speichern (Backtest speichert NICHT dauerhaft,
@@ -4372,6 +3718,13 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
 document.getElementById('btn-close').addEventListener('click', async () => {
   if (!confirm(`Position für ${currentSymbol} jetzt zum aktuellen Preis schließen?`)) return;
   const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method:'POST' });
+  const data = await res.json();
+  if (data.error) alert(data.error);
+  refresh();
+});
+document.getElementById('btn-reverse').addEventListener('click', async () => {
+  if (!confirm(`Position für ${currentSymbol} jetzt in die Gegenrichtung drehen (gleiche Größe)?`)) return;
+  const res = await fetch(`/api/reverse?symbol=${currentSymbol}`, { method:'POST' });
   const data = await res.json();
   if (data.error) alert(data.error);
   refresh();
@@ -4448,6 +3801,7 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
       document.getElementById('bt-short-avg').innerText = `${data.stats_short.avg_win_usd} / ${data.stats_short.avg_loss_usd}`;
       window.btTradesData = [...(data.trades || [])].reverse();  // neueste zuerst
       renderBtTrades();
+      if (data.chart) { WAC.bt = data; wacShowBacktest(); } else { WAC.bt = null; }
       resultsEl.style.display = 'block';
     }
   } catch (e) {
@@ -4455,6 +3809,231 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
     statusEl.innerText = `❌ Fehler: ${e}`;
   }
   if (btSymbol === currentSymbol) btn.disabled = false;
+});
+
+// ===== Wellenanker Chart (Live + Backtest) =====
+const WAC = {mode: 'live', price: null, wt: null, cs: null, l1: null, l2: null, lines: [], timer: null, bt: null, inited: false, sym: null, fitted: false};
+function wacInit() {
+  if (WAC.inited || !window.LightweightCharts) return;
+  const LW = window.LightweightCharts;
+  const opt = {layout: {background: {color: 'transparent'}, textColor: '#9aa4bf'}, grid: {vertLines: {color: '#171b22'}, horzLines: {color: '#171b22'}},
+               rightPriceScale: {borderColor: '#242932'},
+               localization: {timeFormatter: t => new Date(t * 1000).toLocaleString('de-DE', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: (WAC.tf && /s$/.test(WAC.tf)) ? '2-digit' : undefined, hour12: false})},
+               timeScale: {borderColor: '#242932', timeVisible: true, secondsVisible: true, rightOffset: 25,
+                 tickMarkFormatter: (t, type) => { const d = new Date(t * 1000); return type <= 1 ? d.toLocaleDateString('de-DE', {month: '2-digit', year: '2-digit'}) : type === 2 ? d.toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'}) : d.toLocaleTimeString('de-DE', type >= 4 ? {hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false} : {hour: '2-digit', minute: '2-digit', hour12: false}); }},
+               crosshair: {mode: 0},
+               handleScroll: {mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true},
+               handleScale: {mouseWheel: true, pinch: true, axisPressedMouseMove: true, axisDoubleClickReset: true}};
+  WAC.price = LW.createChart(document.getElementById('wac-price'), Object.assign({autoSize: true}, opt));
+  WAC.wt = LW.createChart(document.getElementById('wac-wt'), Object.assign({autoSize: true}, opt));
+  WAC.cs = WAC.price.addCandlestickSeries({upColor: '#1fcf6e', downColor: '#f0354b', borderVisible: false, wickUpColor: '#1fcf6e', wickDownColor: '#f0354b'});
+  WAC.l1 = WAC.wt.addLineSeries({color: '#3b82f6', lineWidth: 2, priceLineVisible: false});
+  WAC.l2 = WAC.wt.addLineSeries({color: '#eab308', lineWidth: 1, priceLineVisible: false});
+  let busy = false;
+  const sync = (from, to) => from.timeScale().subscribeVisibleLogicalRangeChange(r => { if (busy || !r) return; busy = true; try { to.timeScale().setVisibleLogicalRange(r); } catch (e) {} busy = false; });
+  sync(WAC.price, WAC.wt); sync(WAC.wt, WAC.price);
+  WAC.inited = true;
+}
+function wacSetLevels(levels) {
+  WAC.lines.forEach(x => WAC.l1.removePriceLine(x)); WAC.lines = [];
+  (levels || []).concat([0]).forEach(v => WAC.lines.push(WAC.l1.createPriceLine({price: v, color: v === 0 ? '#3a4466' : '#6b7280', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: String(v)})));
+}
+
+// ===== Chart-Linien (VWAP / EMA / Swing) - Farben + Sichtbarkeit pro Browser gespeichert =====
+const OV_DEF = [
+  ['vwap_d','VWAP Day','#f5b83d',true], ['vwap_w','VWAP Week','#3b82f6',true], ['vwap_m','VWAP Month','#a855f7',true],
+  ['ema9','9 EMA','#e5e7eb',false], ['ema21','21 EMA','#22d3ee',true], ['ema50','50 EMA','#f97316',true],
+  ['swing_h','Swing High','#f0354b',true], ['swing_l','Swing Low','#1fcf6e',true]];
+let OV = {};
+try { OV = JSON.parse(localStorage.getItem('ov_cfg') || '{}') || {}; } catch (e) { OV = {}; }
+OV_DEF.forEach(([k,,col,on]) => { if (!OV[k]) OV[k] = {c: col, on: on}; });
+function ovSave() { try { localStorage.setItem('ov_cfg', JSON.stringify(OV)); } catch (e) {} }
+(function ovBuild() {
+  const box = document.getElementById('ov-list'); if (!box) return;
+  box.innerHTML = OV_DEF.map(([k, name]) => `<label><input type="checkbox" data-k="${k}" ${OV[k].on ? 'checked' : ''}><input type="color" data-c="${k}" value="${OV[k].c}">${name}</label>`).join('');
+  box.addEventListener('input', ev => {
+    const t = ev.target;
+    if (t.dataset.k) OV[t.dataset.k].on = t.checked;
+    if (t.dataset.c) OV[t.dataset.c].c = t.value;
+    ovSave(); WAC.lastOv && wacSetOverlays(WAC.lastOv);
+  });
+})();
+const wacOvSeries = {};
+function wacSetOverlays(list) {
+  WAC.lastOv = list;
+  const seen = {};
+  (list || []).forEach(o => {
+    const cfg = OV[o.key]; if (!cfg) return;
+    seen[o.key] = 1;
+    let s = wacOvSeries[o.key];
+    if (!s) { s = wacOvSeries[o.key] = WAC.price.addLineSeries({lineWidth: o.key.startsWith('swing') ? 1 : 2, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, lineStyle: o.key.startsWith('swing') ? 2 : 0}); }
+    s.applyOptions({color: cfg.c, visible: cfg.on, title: o.label});
+    s.setData(o.data);
+  });
+  Object.keys(wacOvSeries).forEach(k => { if (!seen[k]) wacOvSeries[k].setData([]); });
+}
+let wacPosLines = [], wacGridLines = [];
+function wacSetPosition(p) {
+  wacPosLines.forEach(x => WAC.cs.removePriceLine(x)); wacPosLines = [];
+  if (!p) return;
+  wacPosLines.push(WAC.cs.createPriceLine({price: p.avg, color: p.dir === 'long' ? '#22c55e' : '#ef4444', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: p.dir.toUpperCase() + ' Ø'}));
+  if (p.sl) wacPosLines.push(WAC.cs.createPriceLine({price: p.sl, color: '#f97316', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL'}));
+  (p.tps || []).forEach((v, i) => wacPosLines.push(WAC.cs.createPriceLine({price: v, color: '#66bb6a', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'TP' + (i + 1)})));
+}
+let wacRlmLines = [];
+function wacSetRlm(list) {
+  wacRlmLines.forEach(x => WAC.cs.removePriceLine(x)); wacRlmLines = [];
+  (list || []).forEach(v => wacRlmLines.push(WAC.cs.createPriceLine({price: v.mid, color: v.side === 'support' ? '#089981' : '#f23645', lineWidth: 1, lineStyle: 0, axisLabelVisible: true, title: v.score + ' · ' + v.touches + 'T' + (v.polar ? ' ⇅' : '')})));
+}
+function wacSetGrid(g) {
+  wacGridLines.forEach(x => WAC.cs.removePriceLine(x)); wacGridLines = [];
+  if (!g) return;
+  const ord = {}; (g.orders || []).forEach(o => { ord[o.tag] = o; });
+  (g.levels || []).forEach((v, i) => wacGridLines.push(WAC.cs.createPriceLine({price: v, color: '#2a3140', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: ''})));
+  (g.orders || []).forEach(o => wacGridLines.push(WAC.cs.createPriceLine({price: o.price, color: o.is_ask ? '#f0354b' : '#1fcf6e', lineWidth: 1, lineStyle: 0, axisLabelVisible: true, title: o.is_ask ? 'Verkauf' : 'Kauf'})));
+  (g.lots || []).forEach(l => wacGridLines.push(WAC.cs.createPriceLine({price: l.px, color: '#f5c542', lineWidth: 2, lineStyle: 3, axisLabelVisible: false, title: 'Lot'})));
+}
+function wacRender(d, markers, keepRange) {
+  WAC.cs.setData(d.candles); WAC.lastN = d.candles.length;
+  // WT-Reihen auf dieselben Kerzen auffuellen (leere Punkte vorne) -> gleiche Indizes = beide Fenster lassen sich frei (auch nach rechts) verschieben
+  const padWt = arr => { const m = {}; (arr || []).forEach(p => { m[p.time] = p.value; }); return d.candles.map(c => (m[c.time] === undefined ? {time: c.time} : {time: c.time, value: m[c.time]})); };
+  WAC.l1.setData(padWt(d.wt1)); WAC.l2.setData(padWt(d.wt2));
+  WAC.cs.setMarkers(markers);
+  wacSetLevels(d.levels);
+}
+function wacSigMarkers(d) {
+  const sig = (d.markers || []).map(m => m.kind === 'long'
+    ? {time: m.time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: ''}
+    : {time: m.time, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: ''});
+  const st = (d.structure || []).map(e => ({time: e.time, position: e.dir > 0 ? 'belowBar' : 'aboveBar', color: e.dir > 0 ? '#1fcf6e' : '#f0354b',
+    shape: e.kind === 'CHoCH' ? 'square' : 'circle', text: e.kind}));
+  const tm = (d.trade_marks || []).map(m => m.kind === 'entry'
+    ? {time: m.time, position: m.dir === 'long' ? 'belowBar' : 'aboveBar', color: '#facc15', shape: m.dir === 'long' ? 'arrowUp' : 'arrowDown', text: 'Einstieg'}
+    : {time: m.time, position: m.dir === 'long' ? 'aboveBar' : 'belowBar', color: (m.pnl || 0) >= 0 ? '#22c55e' : '#ef4444', shape: 'circle', text: ((m.pnl || 0) >= 0 ? '+' : '') + (m.pnl === null || m.pnl === undefined ? '' : Number(m.pnl).toFixed(1)) + (m.reason ? ' ' + m.reason : '')});
+  return sig.concat(st, tm).sort((a, b) => a.time - b.time);
+}
+async function wacPollLive() {
+  if (WAC.mode !== 'live') return;
+  const sec = document.querySelector('#wac-price');
+  if (!sec || sec.offsetParent === null) return;   // nicht sichtbar -> nichts abfragen
+  const isWa = document.getElementById('entry_mode').value === 'wellenanker';
+  const isPm = document.getElementById('entry_mode').value === 'pure_momentum';
+  const isMt = document.getElementById('entry_mode').value === 'mtf_spread' || isPm;
+  document.getElementById('wac-wtbox').style.display = (isWa || isMt) ? '' : 'none';
+  document.getElementById('wac-tab-bt').style.display = isWa ? '' : 'none';
+  const wtLab = document.querySelector('#wac-wtbox > div');
+  if (wtLab) wtLab.textContent = isPm ? 'MOMENTUM (Pure Momentum Oscillator) – gestrichelt: Short-/Long-Schwelle, Pfeil bei jedem Farbwechsel' : isMt ? 'TREND % (Ø der Blöcke, MTF Spread) – gestrichelt: Schwellen Rot/Grün bzw. Buy-/Sell-Level' : 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels';
+  wacInit(); if (!WAC.inited) return;
+  const sym = currentSymbol, tf = document.getElementById('wac-tf').value;
+  try {
+    const r = await fetch(`/api/wa/live_chart?symbol=${sym}` + (tf ? `&tf=${tf}` : ''));
+    const d = await r.json();
+    if (WAC.mode !== 'live' || sym !== currentSymbol) return;
+    const info = document.getElementById('wac-info');
+    if (!d.ok) { info.innerText = d.reason || 'keine Daten'; return; }
+    const first = WAC.sym !== sym || !WAC.fitted || WAC.tf !== d.resolution;
+    WAC.tf = d.resolution;
+    wacRender(d, wacSigMarkers(d));
+    wacSetPosition(d.position);
+    wacSetGrid(d.grid);
+    wacSetRlm(d.rlm_levels);
+    wacSetOverlays(d.overlays);
+    if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
+    const wtTxt = isWa ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
+    const p = d.position;
+    info.innerText = `${sym} ${d.resolution} · Kurs ${d.price ?? '-'}` + wtTxt + (p ? ` · ${p.dir.toUpperCase()} Ø ${p.avg.toFixed(2)} PnL ${p.pnl.toFixed(2)} $` : ' · flat') + (d.active ? '' : ' · Bot nicht aktiv (nur Anzeige)');
+  } catch (e) { /* naechster Versuch */ }
+}
+function wacBtMarkers(trades) {
+  const out = [];
+  (trades || []).forEach(t => {
+    const long = t.dir === 'long';
+    if (t.exit === null || t.exit === undefined) {
+      const ts = t.row_ts || t.entry_ts;
+      if (ts) out.push({time: Math.floor(ts / 1000), position: long ? 'belowBar' : 'aboveBar', color: long ? '#22c55e' : '#ef4444', shape: long ? 'arrowUp' : 'arrowDown', text: t.reason && t.reason.startsWith('NACHKAUF') ? '+' : ''});
+    } else if (t.exit_ts) {
+      const win = t.pnl >= 0;
+      out.push({time: Math.floor(t.exit_ts / 1000), position: long ? 'aboveBar' : 'belowBar', color: win ? '#22c55e' : '#ef4444', shape: 'circle', text: (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(1)});
+    }
+  });
+  out.sort((a, b) => a.time - b.time);
+  return out;
+}
+function wacShowBacktest() {
+  WAC.mode = 'bt';
+  document.getElementById('wac-tab-bt').classList.add('on'); document.getElementById('wac-tab-live').classList.remove('on');
+  wacInit(); if (!WAC.inited) return;
+  wacSetPosition(null); wacSetOverlays([]); wacSetGrid(null);
+  const b = WAC.bt, info = document.getElementById('wac-info');
+  if (!b) { info.innerText = 'Noch kein Backtest – unten „Backtest starten“ klicken.'; return; }
+  wacRender(b.chart, wacBtMarkers(b.trades));
+  WAC.price.timeScale().fitContent();
+  const n = (b.trades || []).filter(t => t.pnl !== null && t.pnl !== undefined).length;
+  info.innerText = `Backtest ${b.symbol} ${b.resolution}: ${n} Trades im Chart (letzte ${b.chart.candles.length} Kerzen)`;
+}
+function wacShowLive() {
+  WAC.mode = 'live'; WAC.fitted = false;
+  document.getElementById('wac-tab-live').classList.add('on'); document.getElementById('wac-tab-bt').classList.remove('on');
+  wacPollLive();
+}
+function wacZoomTrade(t) {
+  if (!WAC.inited || WAC.mode !== 'bt' || !t) return;
+  const a = Math.floor((t.entry_ts || t.row_ts) / 1000), z = Math.floor((t.exit_ts || t.row_ts || t.entry_ts) / 1000);
+  const cc = (WAC.bt && WAC.bt.chart.candles) || [], bar = cc.length > 1 ? cc[1].time - cc[0].time : 60;
+  const pad = Math.max(bar * 20, (z - a) * 0.6);
+  WAC.price.timeScale().setVisibleRange({from: a - pad, to: z + pad});
+  document.getElementById('wac-price').scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+document.getElementById('wac-tab-live').addEventListener('click', wacShowLive);
+function wacCenter() {
+  if (!WAC.inited) return;
+  const n = (WAC.cs.data ? WAC.cs.data().length : 0) || (WAC.lastN || 0); if (!n) return;
+  const r = WAC.price.timeScale().getVisibleLogicalRange(); const w = r ? Math.max(20, r.to - r.from) : 120;
+  WAC.price.timeScale().setVisibleLogicalRange({from: n - 1 - w / 2, to: n - 1 + w / 2});
+  try { WAC.price.priceScale('right').applyOptions({autoScale: true}); } catch (e) {}
+}
+document.getElementById('wac-center').addEventListener('click', wacCenter);
+document.getElementById('wac-fit').addEventListener('click', () => { if (WAC.inited) { WAC.price.timeScale().fitContent(); try { WAC.price.priceScale('right').applyOptions({autoScale: true}); } catch (e) {} } });
+document.getElementById('wac-tf').addEventListener('change', () => { WAC.fitted = false; wacPollLive(); });
+document.getElementById('wac-tab-bt').addEventListener('click', wacShowBacktest);
+async function wacPollTrend() {
+  const box = document.getElementById('wac-trend');
+  const isWa = document.getElementById('entry_mode').value === 'wellenanker';
+  if (box) box.style.display = isWa ? 'flex' : 'none';
+  if (!box || !isWa) return;
+  try {
+    const r = await fetch(`/api/wa/trend?symbol=${currentSymbol}`);
+    const d = await r.json();
+    if (!d.rows) return;
+    const cell = (v) => v === 1 ? '<b style="color:#22c55e">▲ BULLISH</b>' : v === -1 ? '<b style="color:#ef4444">▼ BEARISH</b>' : '<span style="color:#6b7280">–</span>';
+    const pick = d.mode === 'swing' ? 'swing' : 'intern';
+    box.innerHTML = '<span style="color:var(--text-dim)">🧭 Trend (Marktstruktur):</span>' + d.rows.map(x =>
+      `<span style="padding:4px 8px; border:1px solid ${d.mode !== 'off' && x.tf === d.tf ? '#3b82f6' : 'var(--panel-border)'}; border-radius:8px;">${x.tf} · intern ${cell(x.intern)} · swing ${cell(x.swing)}</span>`).join('') +
+      `<span style="color:var(--text-dim)">${d.mode === 'off' ? 'Filter aus' : 'Filter: ' + d.mode + ' ' + d.tf + ' → ' + (d.active === 1 ? 'nur Long' : d.active === -1 ? 'nur Short' : 'beide')}</span>`;
+  } catch (e) {}
+}
+async function scalpPollTrend() {
+  const box = document.getElementById('scalp-trend');
+  const isSc = document.getElementById('entry_mode').value === 'scalp_vwap_obv_rsi';
+  if (box) box.style.display = isSc ? 'flex' : 'none';
+  if (!box || !isSc) return;
+  try {
+    const r = await fetch(`/api/scalp/trend?symbol=${currentSymbol}`);
+    const d = await r.json();
+    if (!d.rows) return;
+    const cell = (v) => v === 1 ? '<b style="color:#22c55e">▲</b>' : v === -1 ? '<b style="color:#ef4444">▼</b>' : '<span style="color:#6b7280">–</span>';
+    box.innerHTML = '<span style="color:var(--text-dim)">🧭 Trend (Marktstruktur):</span>' + d.rows.map(x =>
+      `<span style="padding:4px 8px; border:1px solid ${d.mode !== 'off' && x.tf === d.tf ? '#3b82f6' : 'var(--panel-border)'}; border-radius:8px;">${x.tf} · intern ${cell(x.intern)} · swing ${cell(x.swing)}</span>`).join('') +
+      `<span style="color:var(--text-dim)">${d.mode === 'off' ? 'Filter aus' : 'Filter: ' + d.mode + ' ' + d.tf}</span>`;
+  } catch (e) {}
+}
+setInterval(scalpPollTrend, 10000); setTimeout(scalpPollTrend, 3000);
+setInterval(wacPollLive, 2000);
+setInterval(wacPollTrend, 30000); setTimeout(wacPollTrend, 3000);
+document.getElementById('bt-trades-table').addEventListener('click', ev => {
+  const tr = ev.target.closest('tbody tr'); if (!tr) return;
+  const i = Array.from(tr.parentNode.children).indexOf(tr);
+  if (window.btTradesShown && window.btTradesShown[i]) { if (WAC.mode !== 'bt') wacShowBacktest(); wacZoomTrade(window.btTradesShown[i]); }
 });
 
 function makeSortableTable(tableId, getData, rowHtml) {
@@ -4511,18 +4090,28 @@ function computeBtColorMap(rows) {
   return map;
 }
 const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTradesData, (r, i, allRows) => {
-  if (i === 0) btColorMap = computeBtColorMap(allRows);
+  if (i === 0) { btColorMap = computeBtColorMap(allRows); window.btTradesShown = allRows; }
   const groupColor = btColorMap[String(r.entry_ts)];
-  const pnlClass = r.pnl > 0 ? 'green' : r.pnl < 0 ? 'red' : '';
+  // Ersteinstiegs-/Nachkauf-Zeilen (siehe _bt_record_addon) sind noch offen - kein Exit/PnL
+  // bis die Position tatsaechlich schliesst (eigene Zeile aus _bt_close_trade).
+  const isOpenRow = r.pnl === null || r.pnl === undefined;
+  const pnlClass = isOpenRow ? '' : (r.pnl > 0 ? 'green' : r.pnl < 0 ? 'red' : '');
+  const rowStyle = isOpenRow
+    ? `border-left: 4px solid ${groupColor}; opacity: 0.75;`
+    : `border-left: 4px solid ${groupColor};`;
+  // Bei EINSTIEG/NACHKAUF-Zeilen den TATSAECHLICHEN Kerzenzeitpunkt dieser Stufe zeigen
+  // (row_ts), nicht den urspruenglichen Einstiegszeitpunkt der Position (entry_ts) - sonst
+  // sehen alle Stufen einer Position faelschlich nach demselben Zeitpunkt aus.
+  const startTs = isOpenRow ? r.row_ts : r.entry_ts;
   return `
-  <tr style="border-left: 4px solid ${groupColor};">
-    <td>${fmtTs(r.entry_ts)}</td>
+  <tr style="${rowStyle}; cursor:pointer;" title="Klick: im Chart anzeigen">
+    <td>${fmtTs(startTs)}</td>
     <td>${r.dir === 'long' ? '🟢 Long' : '🔴 Short'}</td>
     <td>${r.entry}</td>
-    <td>${fmtTs(r.exit_ts)}</td>
-    <td>${r.exit}</td>
+    <td>${isOpenRow ? '–' : fmtTs(r.exit_ts)}</td>
+    <td>${isOpenRow ? '–' : r.exit}</td>
     <td>${r.reason}</td>
-    <td class="${pnlClass}">${r.pnl.toFixed(2)}</td>
+    <td class="${pnlClass}">${isOpenRow ? '–' : r.pnl.toFixed(2)}</td>
   </tr>`;
 });
 
@@ -4560,7 +4149,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -4613,35 +4202,46 @@ function resetBacktestUI() {
   document.getElementById('rf-sweep-worst-title').style.display = 'none';
   window.rfSweepResultsData = [];
   window.rfSweepWorstData = [];
+  document.getElementById('liq-sweep-status').innerText = '';
+  document.getElementById('liq-sweep-results-table').style.display = 'none';
+  document.getElementById('liq-sweep-worst-table').style.display = 'none';
+  document.getElementById('liq-sweep-worst-title').style.display = 'none';
+  window.liqSweepResultsData = [];
+  window.liqSweepWorstData = [];
+  document.getElementById('wa-sweep-status').innerText = '';
+  document.getElementById('wa-sweep-results-table').style.display = 'none';
+  document.getElementById('wa-sweep-worst-table').style.display = 'none';
+  document.getElementById('wa-sweep-worst-title').style.display = 'none';
+  window.waSweepResultsData = [];
+  window.waSweepWorstData = [];
 }
 
-document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-ht-sweep');
-  const statusEl = document.getElementById('ht-sweep-status');
-  const tableEl = document.getElementById('ht-sweep-results-table');
-  const worstTableEl = document.getElementById('ht-sweep-worst-table');
-  const worstTitleEl = document.getElementById('ht-sweep-worst-title');
+document.getElementById('btn-ab-sig-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-ab-sig-sweep');
+  const statusEl = document.getElementById('ab-sig-sweep-status');
+  const tables = {top: document.getElementById('ab-sig-sweep-results-table'), worst: document.getElementById('ab-sig-sweep-worst-table')};
+  const titles = {top: document.getElementById('ab-sig-sweep-top-title'), worst: document.getElementById('ab-sig-sweep-worst-title')};
   const sweepSymbol = currentSymbol;
   const payload = {
-    days: parseInt(document.getElementById('ht-sweep-days').value) || 30,
-    amplitude_min: parseInt(document.getElementById('ht-sweep-amp-min').value),
-    amplitude_max: parseInt(document.getElementById('ht-sweep-amp-max').value),
-    amplitude_step: parseInt(document.getElementById('ht-sweep-amp-step').value),
-    channel_dev_min: parseFloat(document.getElementById('ht-sweep-cd-min').value),
-    channel_dev_max: parseFloat(document.getElementById('ht-sweep-cd-max').value),
-    channel_dev_step: parseFloat(document.getElementById('ht-sweep-cd-step').value),
-    base_risk_min: parseFloat(document.getElementById('ht-sweep-br-min').value),
-    base_risk_max: parseFloat(document.getElementById('ht-sweep-br-max').value),
-    base_risk_step: parseFloat(document.getElementById('ht-sweep-br-step').value),
+    days: parseInt(document.getElementById('ab-sig-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('ab-sig-sweep-exclude-top-n').value) || 0,
+    lookback_min: parseInt(document.getElementById('ab-sig-sweep-lb-min').value),
+    lookback_max: parseInt(document.getElementById('ab-sig-sweep-lb-max').value),
+    lookback_step: parseInt(document.getElementById('ab-sig-sweep-lb-step').value),
+    fast_min: parseInt(document.getElementById('ab-sig-sweep-fast-min').value),
+    fast_max: parseInt(document.getElementById('ab-sig-sweep-fast-max').value),
+    fast_step: parseInt(document.getElementById('ab-sig-sweep-fast-step').value),
+    slow_min: parseInt(document.getElementById('ab-sig-sweep-slow-min').value),
+    slow_max: parseInt(document.getElementById('ab-sig-sweep-slow-max').value),
+    slow_step: parseInt(document.getElementById('ab-sig-sweep-slow-step').value),
     config: buildConfigPayload(),
   };
   btn.disabled = true;
-  tableEl.style.display = 'none';
-  worstTableEl.style.display = 'none';
-  worstTitleEl.style.display = 'none';
-  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Kombinationen etwas dauern.`;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen...`;
   try {
-    const res = await fetch(`/api/ht_sweep?symbol=${sweepSymbol}`, {
+    const res = await fetch(`/api/ab_signal_sweep?symbol=${sweepSymbol}`, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -4649,14 +4249,14 @@ document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
-      window.htSweepResultsData = data.results || [];
-      window.htSweepWorstData = data.worst_results || [];
-      renderHtSweepResults();
-      renderHtSweepWorst();
-      tableEl.style.display = '';
-      worstTableEl.style.display = '';
-      worstTitleEl.style.display = '';
+      const tf = data.trend_filter_enabled ? `SuperTrend an (${data.trend_filter_resolution}, unverändert)` : 'SuperTrend aus';
+      statusEl.innerText = `${data.combos_tested} gültige Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}), ${tf}, Ausstieg: ${data.exit_mode === 'plan' ? 'Plan (ATR-SL + TP1/2/3)' : 'Wechsel, SL ' + (data.sl_enabled ? '$' + data.sl_usd : 'aus')} - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.abSigSweepResultsData = data.results || [];
+      window.abSigSweepWorstData = data.worst_results || [];
+      renderAbSigSweepResults();
+      renderAbSigSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
     }
   } catch (e) {
     if (sweepSymbol !== currentSymbol) return;
@@ -4665,357 +4265,388 @@ document.getElementById('btn-ht-sweep').addEventListener('click', async () => {
   if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
-window.htSweepResultsData = [];
-window.htSweepWorstData = [];
-const htSweepRowHtml = (r) => `
+window.abSigSweepResultsData = [];
+window.abSigSweepWorstData = [];
+const abSigSweepRowHtml = (r) => `
   <tr>
-    <td>${r.ht_amplitude}</td>
-    <td>${r.ht_channel_deviation}</td>
-    <td>${r.ht_base_risk_mult}</td>
-    <td>${r.trades}</td>
-    <td>${r.win_rate_pct}%</td>
-    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
-    <td>${r.max_drawdown_usd}</td>
-    <td>${r.avg_bars_held}</td>
-  </tr>`;
-const renderHtSweepResults = makeSortableTable('ht-sweep-results-table', () => window.htSweepResultsData, htSweepRowHtml);
-const renderHtSweepWorst = makeSortableTable('ht-sweep-worst-table', () => window.htSweepWorstData, htSweepRowHtml);
-
-document.getElementById('btn-da-sweep').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-da-sweep');
-  const statusEl = document.getElementById('da-sweep-status');
-  const tableEl = document.getElementById('da-sweep-results-table');
-  const worstTableEl = document.getElementById('da-sweep-worst-table');
-  const worstTitleEl = document.getElementById('da-sweep-worst-title');
-  const sweepSymbol = currentSymbol;
-  const payload = {
-    days: parseInt(document.getElementById('da-sweep-days').value) || 30,
-    atr_period_min: parseInt(document.getElementById('da-sweep-period-min').value),
-    atr_period_max: parseInt(document.getElementById('da-sweep-period-max').value),
-    atr_period_step: parseInt(document.getElementById('da-sweep-period-step').value),
-    sensitivity_min: parseFloat(document.getElementById('da-sweep-sens-min').value),
-    sensitivity_max: parseFloat(document.getElementById('da-sweep-sens-max').value),
-    sensitivity_step: parseFloat(document.getElementById('da-sweep-sens-step').value),
-    config: buildConfigPayload(),
-  };
-  btn.disabled = true;
-  tableEl.style.display = 'none';
-  worstTableEl.style.display = 'none';
-  worstTitleEl.style.display = 'none';
-  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Kombinationen etwas dauern.`;
-  try {
-    const res = await fetch(`/api/da_sweep?symbol=${sweepSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (sweepSymbol !== currentSymbol) return;
-    if (data.error) {
-      statusEl.innerText = `❌ ${data.error}`;
-    } else {
-      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
-      window.daSweepResultsData = data.results || [];
-      window.daSweepWorstData = data.worst_results || [];
-      renderDaSweepResults();
-      renderDaSweepWorst();
-      tableEl.style.display = '';
-      worstTableEl.style.display = '';
-      worstTitleEl.style.display = '';
-    }
-  } catch (e) {
-    if (sweepSymbol !== currentSymbol) return;
-    statusEl.innerText = `❌ Fehler: ${e}`;
-  }
-  if (sweepSymbol === currentSymbol) btn.disabled = false;
-});
-
-window.daSweepResultsData = [];
-window.daSweepWorstData = [];
-const daSweepRowHtml = (r) => `
-  <tr>
-    <td>${r.da_atr_period}</td>
-    <td>${r.da_sensitivity}</td>
-    <td>${r.trades}</td>
-    <td>${r.win_rate_pct}%</td>
-    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
-    <td>${r.max_drawdown_usd}</td>
-    <td>${r.avg_bars_held}</td>
-  </tr>`;
-const renderDaSweepResults = makeSortableTable('da-sweep-results-table', () => window.daSweepResultsData, daSweepRowHtml);
-const renderDaSweepWorst = makeSortableTable('da-sweep-worst-table', () => window.daSweepWorstData, daSweepRowHtml);
-
-document.getElementById('btn-rf-sweep').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-rf-sweep');
-  const statusEl = document.getElementById('rf-sweep-status');
-  const tableEl = document.getElementById('rf-sweep-results-table');
-  const worstTableEl = document.getElementById('rf-sweep-worst-table');
-  const worstTitleEl = document.getElementById('rf-sweep-worst-title');
-  const sweepSymbol = currentSymbol;
-  const payload = {
-    days: parseInt(document.getElementById('rf-sweep-days').value) || 30,
-    period_min: parseInt(document.getElementById('rf-sweep-period-min').value),
-    period_max: parseInt(document.getElementById('rf-sweep-period-max').value),
-    period_step: parseInt(document.getElementById('rf-sweep-period-step').value),
-    qty_min: parseFloat(document.getElementById('rf-sweep-qty-min').value),
-    qty_max: parseFloat(document.getElementById('rf-sweep-qty-max').value),
-    qty_step: parseFloat(document.getElementById('rf-sweep-qty-step').value),
-    config: buildConfigPayload(),
-  };
-  btn.disabled = true;
-  tableEl.style.display = 'none';
-  worstTableEl.style.display = 'none';
-  worstTitleEl.style.display = 'none';
-  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Kombinationen etwas dauern.`;
-  try {
-    const res = await fetch(`/api/rf_sweep?symbol=${sweepSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (sweepSymbol !== currentSymbol) return;
-    if (data.error) {
-      statusEl.innerText = `❌ ${data.error}`;
-    } else {
-      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
-      window.rfSweepResultsData = data.results || [];
-      window.rfSweepWorstData = data.worst_results || [];
-      renderRfSweepResults();
-      renderRfSweepWorst();
-      tableEl.style.display = '';
-      worstTableEl.style.display = '';
-      worstTitleEl.style.display = '';
-    }
-  } catch (e) {
-    if (sweepSymbol !== currentSymbol) return;
-    statusEl.innerText = `❌ Fehler: ${e}`;
-  }
-  if (sweepSymbol === currentSymbol) btn.disabled = false;
-});
-
-window.rfSweepResultsData = [];
-window.rfSweepWorstData = [];
-const rfSweepRowHtml = (r) => `
-  <tr>
-    <td>${r.rf_period}</td>
-    <td>${r.rf_qty}</td>
-    <td>${r.trades}</td>
-    <td>${r.win_rate_pct}%</td>
-    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
-    <td>${r.max_drawdown_usd}</td>
-    <td>${r.avg_bars_held}</td>
-  </tr>`;
-const renderRfSweepResults = makeSortableTable('rf-sweep-results-table', () => window.rfSweepResultsData, rfSweepRowHtml);
-const renderRfSweepWorst = makeSortableTable('rf-sweep-worst-table', () => window.rfSweepWorstData, rfSweepRowHtml);
-
-document.getElementById('btn-es-sweep').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-es-sweep');
-  const statusEl = document.getElementById('es-sweep-status');
-  const tableEl = document.getElementById('es-sweep-results-table');
-  const worstTableEl = document.getElementById('es-sweep-worst-table');
-  const worstTitleEl = document.getElementById('es-sweep-worst-title');
-  const sweepSymbol = currentSymbol;
-  const payload = {
-    days: parseInt(document.getElementById('es-sweep-days').value) || 30,
-    sens_min: parseFloat(document.getElementById('es-sweep-sens-min').value),
-    sens_max: parseFloat(document.getElementById('es-sweep-sens-max').value),
-    sens_step: parseFloat(document.getElementById('es-sweep-sens-step').value),
-    config: buildConfigPayload(),
-  };
-  btn.disabled = true;
-  tableEl.style.display = 'none';
-  worstTableEl.style.display = 'none';
-  worstTitleEl.style.display = 'none';
-  statusEl.innerText = `⏳ Lade Kerzen und teste alle Sensitivity-Werte... kann bei vielen Werten etwas dauern.`;
-  try {
-    const res = await fetch(`/api/es_sensitivity_sweep?symbol=${sweepSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (sweepSymbol !== currentSymbol) return;
-    if (data.error) {
-      statusEl.innerText = `❌ ${data.error}`;
-    } else {
-      statusEl.innerText = `${data.combos_tested} Sensitivity-Werte getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
-      window.esSweepResultsData = data.results || [];
-      window.esSweepWorstData = data.worst_results || [];
-      renderEsSweepResults();
-      renderEsSweepWorst();
-      tableEl.style.display = '';
-      worstTableEl.style.display = '';
-      worstTitleEl.style.display = '';
-    }
-  } catch (e) {
-    if (sweepSymbol !== currentSymbol) return;
-    statusEl.innerText = `❌ Fehler: ${e}`;
-  }
-  if (sweepSymbol === currentSymbol) btn.disabled = false;
-});
-
-window.esSweepResultsData = [];
-window.esSweepWorstData = [];
-const esSweepRowHtml = (r) => `
-  <tr>
-    <td>${r.es_sensitivity.toFixed(2)}</td>
-    <td>${r.trades}</td>
-    <td>${r.win_rate_pct}%</td>
-    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
-    <td>${r.max_drawdown_usd}</td>
-    <td>${r.avg_bars_held}</td>
-  </tr>`;
-const renderEsSweepResults = makeSortableTable('es-sweep-results-table', () => window.esSweepResultsData, esSweepRowHtml);
-const renderEsSweepWorst = makeSortableTable('es-sweep-worst-table', () => window.esSweepWorstData, esSweepRowHtml);
-
-document.getElementById('btn-pk-sweep').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-pk-sweep');
-  const statusEl = document.getElementById('pk-sweep-status');
-  const tableEl = document.getElementById('pk-sweep-results-table');
-  const worstTableEl = document.getElementById('pk-sweep-worst-table');
-  const worstTitleEl = document.getElementById('pk-sweep-worst-title');
-  const sweepSymbol = currentSymbol;
-  const payload = {
-    days: parseInt(document.getElementById('pk-sweep-days').value) || 30,
-    sens_min: parseFloat(document.getElementById('pk-sweep-sens-min').value),
-    sens_max: parseFloat(document.getElementById('pk-sweep-sens-max').value),
-    sens_step: parseFloat(document.getElementById('pk-sweep-sens-step').value),
-    config: buildConfigPayload(),
-  };
-  btn.disabled = true;
-  tableEl.style.display = 'none';
-  worstTableEl.style.display = 'none';
-  worstTitleEl.style.display = 'none';
-  statusEl.innerText = `⏳ Lade Kerzen und teste alle Sensitivity-Werte... kann bei vielen Werten etwas dauern.`;
-  try {
-    const res = await fetch(`/api/pk_sensitivity_sweep?symbol=${sweepSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (sweepSymbol !== currentSymbol) return;
-    if (data.error) {
-      statusEl.innerText = `❌ ${data.error}`;
-    } else {
-      statusEl.innerText = `${data.combos_tested} Sensitivity-Werte getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
-      window.pkSweepResultsData = data.results || [];
-      window.pkSweepWorstData = data.worst_results || [];
-      renderPkSweepResults();
-      renderPkSweepWorst();
-      tableEl.style.display = '';
-      worstTableEl.style.display = '';
-      worstTitleEl.style.display = '';
-    }
-  } catch (e) {
-    if (sweepSymbol !== currentSymbol) return;
-    statusEl.innerText = `❌ Fehler: ${e}`;
-  }
-  if (sweepSymbol === currentSymbol) btn.disabled = false;
-});
-
-window.pkSweepResultsData = [];
-window.pkSweepWorstData = [];
-const pkSweepRowHtml = (r) => `
-  <tr>
-    <td>${r.pk_sensitivity.toFixed(2)}</td>
-    <td>${r.trades}</td>
-    <td>${r.win_rate_pct}%</td>
-    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
-    <td>${r.max_drawdown_usd}</td>
-    <td>${r.avg_bars_held}</td>
-  </tr>`;
-const renderPkSweepResults = makeSortableTable('pk-sweep-results-table', () => window.pkSweepResultsData, pkSweepRowHtml);
-const renderPkSweepWorst = makeSortableTable('pk-sweep-worst-table', () => window.pkSweepWorstData, pkSweepRowHtml);
-
-document.getElementById('btn-mo7-sweep').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-mo7-sweep');
-  const statusEl = document.getElementById('mo7-sweep-status');
-  const tableEl = document.getElementById('mo7-sweep-results-table');
-  const worstTableEl = document.getElementById('mo7-sweep-worst-table');
-  const worstTitleEl = document.getElementById('mo7-sweep-worst-title');
-  const sweepSymbol = currentSymbol;
-  const payload = {
-    days: parseInt(document.getElementById('mo7-sweep-days').value) || 30,
-    sum_low_min: parseFloat(document.getElementById('mo7-sweep-sumlow-min').value),
-    sum_low_max: parseFloat(document.getElementById('mo7-sweep-sumlow-max').value),
-    sum_low_step: parseFloat(document.getElementById('mo7-sweep-sumlow-step').value),
-    sum_high_min: parseFloat(document.getElementById('mo7-sweep-sumhigh-min').value),
-    sum_high_max: parseFloat(document.getElementById('mo7-sweep-sumhigh-max').value),
-    sum_high_step: parseFloat(document.getElementById('mo7-sweep-sumhigh-step').value),
-    exclude_top_n: parseInt(document.getElementById('mo7-sweep-exclude-top-n').value) || 0,
-    config: buildConfigPayload(),
-  };
-  btn.disabled = true;
-  tableEl.style.display = 'none';
-  worstTableEl.style.display = 'none';
-  worstTitleEl.style.display = 'none';
-  statusEl.innerText = `⏳ Lade Kerzen und teste alle Schwellen-Kombinationen... kann bei vielen Werten etwas dauern.`;
-  try {
-    const res = await fetch(`/api/mo7_sum_sweep?symbol=${sweepSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (sweepSymbol !== currentSymbol) return;
-    if (data.error) {
-      statusEl.innerText = `❌ ${data.error}`;
-    } else {
-      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
-      window.mo7SweepResultsData = data.results || [];
-      window.mo7SweepWorstData = data.worst_results || [];
-      renderMo7SweepResults();
-      renderMo7SweepWorst();
-      tableEl.style.display = '';
-      worstTableEl.style.display = '';
-      worstTitleEl.style.display = '';
-    }
-  } catch (e) {
-    if (sweepSymbol !== currentSymbol) return;
-    statusEl.innerText = `❌ Fehler: ${e}`;
-  }
-  if (sweepSymbol === currentSymbol) btn.disabled = false;
-});
-
-window.mo7SweepResultsData = [];
-window.mo7SweepWorstData = [];
-const mo7SweepRowHtml = (r) => `
-  <tr>
-    <td>${r.mo7_sum_low}</td>
-    <td>${r.mo7_sum_high}</td>
+    <td>${r.ab_lookback}</td>
+    <td>${r.ab_fast_len}</td>
+    <td>${r.ab_slow_len}</td>
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
+    ${applyBtn({ab_lookback: r.ab_lookback, ab_fast_len: r.ab_fast_len, ab_slow_len: r.ab_slow_len})}
   </tr>`;
-const renderMo7SweepResults = makeSortableTable('mo7-sweep-results-table', () => window.mo7SweepResultsData, mo7SweepRowHtml);
-const renderMo7SweepWorst = makeSortableTable('mo7-sweep-worst-table', () => window.mo7SweepWorstData, mo7SweepRowHtml);
+const renderAbSigSweepResults = makeSortableTable('ab-sig-sweep-results-table', () => window.abSigSweepResultsData, abSigSweepRowHtml);
+const renderAbSigSweepWorst = makeSortableTable('ab-sig-sweep-worst-table', () => window.abSigSweepWorstData, abSigSweepRowHtml);
 
-document.getElementById('btn-utb-sweep').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-utb-sweep');
-  const statusEl = document.getElementById('utb-sweep-status');
-  const tableEl = document.getElementById('utb-sweep-results-table');
-  const worstTableEl = document.getElementById('utb-sweep-worst-table');
-  const worstTitleEl = document.getElementById('utb-sweep-worst-title');
+document.getElementById('btn-er-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-er-sweep');
+  const statusEl = document.getElementById('er-sweep-status');
+  const tables = {top: document.getElementById('er-sweep-results-table'), worst: document.getElementById('er-sweep-worst-table')};
+  const titles = {top: document.getElementById('er-sweep-top-title'), worst: document.getElementById('er-sweep-worst-title')};
   const sweepSymbol = currentSymbol;
   const payload = {
-    days: parseInt(document.getElementById('utb-sweep-days').value) || 30,
-    atr_period_min: parseInt(document.getElementById('utb-sweep-atrp-min').value),
-    atr_period_max: parseInt(document.getElementById('utb-sweep-atrp-max').value),
-    atr_period_step: parseInt(document.getElementById('utb-sweep-atrp-step').value),
-    sensitivity_min: parseFloat(document.getElementById('utb-sweep-sens-min').value),
-    sensitivity_max: parseFloat(document.getElementById('utb-sweep-sens-max').value),
-    sensitivity_step: parseFloat(document.getElementById('utb-sweep-sens-step').value),
-    long_threshold_min: parseFloat(document.getElementById('utb-sweep-long-min').value),
-    long_threshold_max: parseFloat(document.getElementById('utb-sweep-long-max').value),
-    long_threshold_step: parseFloat(document.getElementById('utb-sweep-long-step').value),
-    short_threshold_min: parseFloat(document.getElementById('utb-sweep-short-min').value),
-    short_threshold_max: parseFloat(document.getElementById('utb-sweep-short-max').value),
-    short_threshold_step: parseFloat(document.getElementById('utb-sweep-short-step').value),
-    exclude_top_n: parseInt(document.getElementById('utb-sweep-exclude-top-n').value) || 0,
+    days: parseInt(document.getElementById('er-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('er-sweep-exclude-top-n').value) || 0,
+    ema_min: parseInt(document.getElementById('er-sweep-ema-min').value),
+    ema_max: parseInt(document.getElementById('er-sweep-ema-max').value),
+    ema_step: parseInt(document.getElementById('er-sweep-ema-step').value),
+    rsi_min: parseInt(document.getElementById('er-sweep-rsi-min').value),
+    rsi_max: parseInt(document.getElementById('er-sweep-rsi-max').value),
+    rsi_step: parseInt(document.getElementById('er-sweep-rsi-step').value),
     config: buildConfigPayload(),
   };
   btn.disabled = true;
-  tableEl.style.display = 'none';
-  worstTableEl.style.display = 'none';
-  worstTitleEl.style.display = 'none';
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen...`;
+  try {
+    const res = await fetch(`/api/er_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}), Ausstieg: ${data.exit_mode === 'plan' ? 'Plan (SL + TP1/2/3)' : 'Wechsel'} - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unzuverlässig.`;
+      window.erSweepResultsData = data.results || [];
+      window.erSweepWorstData = data.worst_results || [];
+      renderErSweepResults();
+      renderErSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.erSweepResultsData = [];
+window.erSweepWorstData = [];
+const erSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.er_ema_len}</td>
+    <td>${r.er_rsi_len}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+    ${applyBtn({er_ema_len: r.er_ema_len, er_rsi_len: r.er_rsi_len})}
+  </tr>`;
+const renderErSweepResults = makeSortableTable('er-sweep-results-table', () => window.erSweepResultsData, erSweepRowHtml);
+const renderErSweepWorst = makeSortableTable('er-sweep-worst-table', () => window.erSweepWorstData, erSweepRowHtml);
+
+document.getElementById('btn-liq-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-liq-sweep');
+  const statusEl = document.getElementById('liq-sweep-status');
+  const tables = {top: document.getElementById('liq-sweep-results-table'), worst: document.getElementById('liq-sweep-worst-table')};
+  const titles = {top: document.getElementById('liq-sweep-top-title'), worst: document.getElementById('liq-sweep-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('liq-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('liq-sweep-exclude-top-n').value) || 0,
+    entry_min: parseFloat(document.getElementById('liq-sweep-entry-min').value),
+    entry_max: parseFloat(document.getElementById('liq-sweep-entry-max').value),
+    entry_step: parseFloat(document.getElementById('liq-sweep-entry-step').value),
+    levels_min: parseInt(document.getElementById('liq-sweep-levels-min').value),
+    levels_max: parseInt(document.getElementById('liq-sweep-levels-max').value),
+    levels_step: parseInt(document.getElementById('liq-sweep-levels-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen...`;
+  try {
+    const res = await fetch(`/api/liq_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.liqSweepResultsData = data.results || [];
+      window.liqSweepWorstData = data.worst_results || [];
+      renderLiqSweepResults();
+      renderLiqSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.liqSweepResultsData = [];
+window.liqSweepWorstData = [];
+const liqSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.liq_entry_threshold_pct}</td>
+    <td>${r.liq_max_levels}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+    ${applyBtn({liq_entry_threshold_pct: r.liq_entry_threshold_pct, liq_max_levels: r.liq_max_levels})}
+  </tr>`;
+const renderLiqSweepResults = makeSortableTable('liq-sweep-results-table', () => window.liqSweepResultsData, liqSweepRowHtml);
+const renderLiqSweepWorst = makeSortableTable('liq-sweep-worst-table', () => window.liqSweepWorstData, liqSweepRowHtml);
+
+window.dvMcResultsData = [];
+window.dvMcWorstData = [];
+const dvMcRowHtml = (r) => `
+  <tr>
+    <td>${r.dv_sens}</td>
+    <td>${r.dv_sl_usd > 0 ? r.dv_sl_usd : '–'}</td>
+    <td>${r.dv_tp_usd > 0 ? r.dv_tp_usd : '–'}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+    ${applyBtn(r.dv_sl_usd > 0 ? {dv_sens: r.dv_sens, dv_exit_mode: 'sltp', dv_sl_usd: r.dv_sl_usd, dv_tp_usd: r.dv_tp_usd} : {dv_sens: r.dv_sens, dv_exit_mode: 'reverse'})}
+  </tr>`;
+const renderDvMcResults = makeSortableTable('dv-mc-results-table', () => window.dvMcResultsData, dvMcRowHtml);
+const renderDvMcWorst = makeSortableTable('dv-mc-worst-table', () => window.dvMcWorstData, dvMcRowHtml);
+
+document.getElementById('btn-dv-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-dv-mc');
+  const statusEl = document.getElementById('dv-mc-status');
+  const tables = {top: document.getElementById('dv-mc-results-table'), worst: document.getElementById('dv-mc-worst-table')};
+  const titles = {top: document.getElementById('dv-mc-top-title'), worst: document.getElementById('dv-mc-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const num = (id) => parseFloat(document.getElementById(id).value);
+  const payload = {
+    days: parseInt(document.getElementById('dv-mc-days').value) || 30,
+    runs: parseInt(document.getElementById('dv-mc-runs').value) || 300,
+    seed: document.getElementById('dv-mc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('dv-mc-exclude-top-n').value) || 0,
+    sens_min: num('dv-mc-sens-min'), sens_max: num('dv-mc-sens-max'),
+    sl_min: num('dv-mc-sl-min'), sl_max: num('dv-mc-sl-max'),
+    tp_min: num('dv-mc-tp-min'), tp_max: num('dv-mc-tp-max'),
+    config: Object.assign(buildConfigPayload(), document.getElementById('dv-mc-exit-mode').value ? {dv_exit_mode: document.getElementById('dv-mc-exit-mode').value} : {}),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste die Zufalls-Kombinationen...`;
+  try {
+    const res = await fetch(`/api/dv_mc?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - ${data.profitable_pct}% der Kombinationen im Plus, Median ${data.median_pnl_usd} $, bester ${data.best_pnl_usd} $, schlechtester ${data.worst_pnl_usd} $. Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.dvMcResultsData = data.results || [];
+      window.dvMcWorstData = data.worst_results || [];
+      renderDvMcResults();
+      renderDvMcWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.rlmMcResultsData = [];
+window.rlmMcWorstData = [];
+const rlmMcRowHtml = (r) => `
+  <tr>
+    <td>${r.rlm_min_score}</td>
+    <td>${r.rlm_swing_len}</td>
+    <td>${r.rlm_level_tol}</td>
+    <td>${r.rlm_min_touches}</td>
+    <td>${r.rlm_reject_clv}</td>
+    <td>${r.rlm_sl_usd > 0 ? r.rlm_sl_usd : '–'}</td>
+    <td>${r.rlm_tp_usd > 0 ? r.rlm_tp_usd : '–'}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+    ${applyBtn(Object.assign({rlm_min_score: r.rlm_min_score, rlm_swing_len: r.rlm_swing_len, rlm_level_tol: r.rlm_level_tol, rlm_min_touches: r.rlm_min_touches, rlm_reject_clv: r.rlm_reject_clv}, window.rlmMcVaried && window.rlmMcVaried.sl ? {rlm_sl_usd: r.rlm_sl_usd} : {}, window.rlmMcVaried && window.rlmMcVaried.tp ? {rlm_tp_usd: r.rlm_tp_usd} : {}, window.rlmMcCandle ? {rlm_candle_type: window.rlmMcCandle} : {}))}
+  </tr>`;
+const renderRlmMcResults = makeSortableTable('rlm-mc-results-table', () => window.rlmMcResultsData, rlmMcRowHtml);
+const renderRlmMcWorst = makeSortableTable('rlm-mc-worst-table', () => window.rlmMcWorstData, rlmMcRowHtml);
+
+document.getElementById('btn-rlm-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-rlm-mc');
+  const statusEl = document.getElementById('rlm-mc-status');
+  const tables = {top: document.getElementById('rlm-mc-results-table'), worst: document.getElementById('rlm-mc-worst-table'), eff: document.getElementById('rlm-mc-effect-table')};
+  const titles = {top: document.getElementById('rlm-mc-top-title'), worst: document.getElementById('rlm-mc-worst-title'), eff: document.getElementById('rlm-mc-effect-title')};
+  const sweepSymbol = currentSymbol;
+  const num = (id) => parseFloat(document.getElementById(id).value);
+  const payload = {
+    days: parseInt(document.getElementById('rlm-mc-days').value) || 30,
+    runs: parseInt(document.getElementById('rlm-mc-runs').value) || 150,
+    seed: document.getElementById('rlm-mc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('rlm-mc-exclude-top-n').value) || 0,
+    score_min: num('rlm-mc-score-min'), score_max: num('rlm-mc-score-max'),
+    swing_min: num('rlm-mc-swing-min'), swing_max: num('rlm-mc-swing-max'),
+    tol_min: num('rlm-mc-tol-min'), tol_max: num('rlm-mc-tol-max'),
+    touches_min: num('rlm-mc-touches-min'), touches_max: num('rlm-mc-touches-max'),
+    clv_min: num('rlm-mc-clv-min'), clv_max: num('rlm-mc-clv-max'),
+    sl_min: document.getElementById('rlm-mc-sl-on').checked ? num('rlm-mc-sl-min') : null, sl_max: num('rlm-mc-sl-max'),
+    tp_min: document.getElementById('rlm-mc-tp-on').checked ? num('rlm-mc-tp-min') : null, tp_max: num('rlm-mc-tp-max'),
+    config: Object.assign(buildConfigPayload(), document.getElementById('rlm-mc-candle').value ? {rlm_candle_type: document.getElementById('rlm-mc-candle').value} : {}),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste die Zufalls-Kombinationen (kann einige Minuten dauern)...`;
+  try {
+    const res = await fetch(`/api/rlm_mc?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - ${data.profitable_pct}% der Kombinationen im Plus, Median ${data.median_pnl_usd} $, bester ${data.best_pnl_usd} $, schlechtester ${data.worst_pnl_usd} $. Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.rlmMcVaried = data.varied || {};
+      window.rlmMcCandle = document.getElementById('rlm-mc-candle').value;
+      if (data.sl_tp_ignored) statusEl.innerText += ' Hinweis: SL/TP wurden nicht variiert, weil der SL-Modus „Hinter dem Docht" ist.';
+      window.rlmMcResultsData = data.results || [];
+      window.rlmMcWorstData = data.worst_results || [];
+      renderRlmMcResults();
+      renderRlmMcWorst();
+      const fmt = (v) => v === null || v === undefined ? '–' : `<span class="${v >= 0 ? 'green' : 'red'}">${v} $</span>`;
+      tables.eff.querySelector('tbody').innerHTML = (data.effects || []).map(e => `<tr><td>${e.param}</td><td>${e.low_range}: ${fmt(e.low)}</td><td>${e.mid_range}: ${fmt(e.mid)}</td><td>${e.high_range}: ${fmt(e.high)}</td></tr>`).join('');
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+      if (!(data.effects || []).length) { tables.eff.style.display = 'none'; titles.eff.style.display = 'none'; }
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+document.getElementById('btn-wa-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-wa-sweep');
+  const statusEl = document.getElementById('wa-sweep-status');
+  const tables = {top: document.getElementById('wa-sweep-results-table'), worst: document.getElementById('wa-sweep-worst-table')};
+  const titles = {top: document.getElementById('wa-sweep-top-title'), worst: document.getElementById('wa-sweep-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const payload = {
+    days: parseInt(document.getElementById('wa-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('wa-sweep-exclude-top-n').value) || 0,
+    zone1_min: parseFloat(document.getElementById('wa-sweep-zone1-min').value),
+    zone1_max: parseFloat(document.getElementById('wa-sweep-zone1-max').value),
+    zone1_step: parseFloat(document.getElementById('wa-sweep-zone1-step').value),
+    level_min: parseFloat(document.getElementById('wa-sweep-lvl-min').value),
+    level_max: parseFloat(document.getElementById('wa-sweep-lvl-max').value),
+    level_step: parseFloat(document.getElementById('wa-sweep-lvl-step').value),
+    level_lines: ['signal', 'wave', 'both'].filter(k => document.getElementById('wa-sweep-line-' + k).checked),
+    nachkauf_min: parseInt(document.getElementById('wa-sweep-nachkauf-min').value),
+    nachkauf_max: parseInt(document.getElementById('wa-sweep-nachkauf-max').value),
+    sl_min: parseFloat(document.getElementById('wa-sweep-sl-min').value),
+    sl_max: parseFloat(document.getElementById('wa-sweep-sl-max').value),
+    sl_step: parseFloat(document.getElementById('wa-sweep-sl-step').value),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen...`;
+  try {
+    const res = await fetch(`/api/wa_sweep?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `[Modus: ${({zone:'Zone 1', level:'Level', cross:'Kreuzung zu Kreuzung (ohne Zone/Level)'})[data.entry_mode] || data.entry_mode}] ${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      window.waSweepResultsData = data.results || [];
+      window.waSweepWorstData = data.worst_results || [];
+      renderWaSweepResults();
+      renderWaSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.waSweepResultsData = [];
+window.waSweepWorstData = [];
+const waSweepRowHtml = (r) => `
+  <tr>
+    <td>${r.wa_zone1}</td>
+    <td>${({signal:'Signallinie', wave:'Welle', both:'Beide'})[r.wa_level_line] || '–'}</td>
+    <td>${r.wa_max_nachkauf}</td>
+    <td>${r.wa_sl_usd}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+    ${applyBtn({[document.getElementById('wa_entry_mode').value === 'level' ? 'wa_level' : 'wa_zone1']: r.wa_zone1, wa_level_line: r.wa_level_line, wa_max_nachkauf: r.wa_max_nachkauf, wa_sl_usd: r.wa_sl_usd})}
+  </tr>`;
+const renderWaSweepResults = makeSortableTable('wa-sweep-results-table', () => window.waSweepResultsData, waSweepRowHtml);
+const renderWaSweepWorst = makeSortableTable('wa-sweep-worst-table', () => window.waSweepWorstData, waSweepRowHtml);
+
+document.getElementById('btn-ab-sweep-tf-6-20').addEventListener('click', () => {
+  const boxes = Array.from(document.querySelectorAll('.ab-sweep-tf')).filter(x => { const m = parseInt(x.value); return x.value.endsWith('m') && m >= 6 && m <= 20 && m !== 15; });
+  const allOn = boxes.every(x => x.checked);
+  boxes.forEach(x => x.checked = !allOn);
+});
+
+document.getElementById('btn-ab-sweep').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-ab-sweep');
+  const statusEl = document.getElementById('ab-sweep-status');
+  const els = ['best-tf', 'top', 'worst'].map(k => k);
+  const tables = {best: document.getElementById('ab-sweep-best-tf-table'), top: document.getElementById('ab-sweep-results-table'), worst: document.getElementById('ab-sweep-worst-table')};
+  const titles = {best: document.getElementById('ab-sweep-best-tf-title'), top: document.getElementById('ab-sweep-top-title'), worst: document.getElementById('ab-sweep-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const tfs = Array.from(document.querySelectorAll('.ab-sweep-tf:checked')).map(x => x.value);
+  document.getElementById('ab-sweep-tf-extra').value.split(',').map(x => x.trim()).filter(x => x).forEach(x => { if (!tfs.includes(x)) tfs.push(x); });
+  const payload = {
+    days: parseInt(document.getElementById('ab-sweep-days').value) || 30,
+    exclude_top_n: parseInt(document.getElementById('ab-sweep-exclude-top-n').value) || 0,
+    st_mult_min: parseFloat(document.getElementById('ab-sweep-st-mult-min').value),
+    st_mult_max: parseFloat(document.getElementById('ab-sweep-st-mult-max').value),
+    st_mult_step: parseFloat(document.getElementById('ab-sweep-st-mult-step').value),
+    timeframes: tfs,
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
   statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Werten etwas dauern.`;
   try {
-    const res = await fetch(`/api/utb_param_sweep?symbol=${sweepSymbol}`, {
+    const res = await fetch(`/api/ab_sweep?symbol=${sweepSymbol}`, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -5023,14 +4654,19 @@ document.getElementById('btn-utb-sweep').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
-      window.utbSweepResultsData = data.results || [];
-      window.utbSweepWorstData = data.worst_results || [];
-      renderUtbSweepResults();
-      renderUtbSweepWorst();
-      tableEl.style.display = '';
-      worstTableEl.style.display = '';
-      worstTitleEl.style.display = '';
+      let msg = `${data.combos_tested} Kombinationen (${data.multipliers_tested} Multiplikatoren × ${data.timeframes_tested.length} Zeiteinheiten: ${data.timeframes_tested.join(', ')}) getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}), Ausstieg: ${data.exit_mode === 'plan' ? 'Plan (ATR-SL + TP1/2/3)' : 'Wechsel, SL ' + (data.sl_enabled ? '$' + data.sl_usd : 'aus')} - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades stehen unten in den Listen.`;
+      if (data.skipped_timeframes && data.skipped_timeframes.length) {
+        msg += ` ⚠️ Übersprungen: ` + data.skipped_timeframes.map(x => `${x.timeframe} (${x.reason})`).join(' | ');
+      }
+      statusEl.innerText = msg;
+      window.abSweepBestTfData = data.best_per_timeframe || [];
+      window.abSweepResultsData = data.results || [];
+      window.abSweepWorstData = data.worst_results || [];
+      renderAbSweepBestTf();
+      renderAbSweepResults();
+      renderAbSweepWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
     }
   } catch (e) {
     if (sweepSymbol !== currentSymbol) return;
@@ -5039,97 +4675,25 @@ document.getElementById('btn-utb-sweep').addEventListener('click', async () => {
   if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
-window.utbSweepResultsData = [];
-window.utbSweepWorstData = [];
-const utbSweepRowHtml = (r) => `
+window.abSweepBestTfData = [];
+window.abSweepResultsData = [];
+window.abSweepWorstData = [];
+const abSweepRowHtml = (r) => `
   <tr>
-    <td>${r.utb_atr_period}</td>
-    <td>${r.utb_sensitivity}</td>
-    <td>${r.utb_mtf_long_threshold}</td>
-    <td>${r.utb_mtf_short_threshold}</td>
+    <td>${r.ab_trend_filter_resolution}</td>
+    <td>${r.ab_trend_filter_multiplier}</td>
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
+    ${applyBtn({ab_trend_filter_resolution: r.ab_trend_filter_resolution, ab_trend_filter_multiplier: r.ab_trend_filter_multiplier})}
   </tr>`;
-const renderUtbSweepResults = makeSortableTable('utb-sweep-results-table', () => window.utbSweepResultsData, utbSweepRowHtml);
-const renderUtbSweepWorst = makeSortableTable('utb-sweep-worst-table', () => window.utbSweepWorstData, utbSweepRowHtml);
+const renderAbSweepBestTf = makeSortableTable('ab-sweep-best-tf-table', () => window.abSweepBestTfData, abSweepRowHtml);
+const renderAbSweepResults = makeSortableTable('ab-sweep-results-table', () => window.abSweepResultsData, abSweepRowHtml);
+const renderAbSweepWorst = makeSortableTable('ab-sweep-worst-table', () => window.abSweepWorstData, abSweepRowHtml);
 
-document.getElementById('hvd-sweep-st-mult-enabled').addEventListener('change', (e) => {
-  document.getElementById('hvd-sweep-st-mult-row').style.display = e.target.checked ? 'flex' : 'none';
-});
-
-document.getElementById('btn-hvd-sweep').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-hvd-sweep');
-  const statusEl = document.getElementById('hvd-sweep-status');
-  const tableEl = document.getElementById('hvd-sweep-results-table');
-  const worstTableEl = document.getElementById('hvd-sweep-worst-table');
-  const worstTitleEl = document.getElementById('hvd-sweep-worst-title');
-  const sweepSymbol = currentSymbol;
-  const payload = {
-    days: parseInt(document.getElementById('hvd-sweep-days').value) || 30,
-    hull_min: parseInt(document.getElementById('hvd-sweep-hull-min').value),
-    hull_max: parseInt(document.getElementById('hvd-sweep-hull-max').value),
-    hull_step: parseInt(document.getElementById('hvd-sweep-hull-step').value),
-    rr_min: parseFloat(document.getElementById('hvd-sweep-rr-min').value),
-    rr_max: parseFloat(document.getElementById('hvd-sweep-rr-max').value),
-    rr_step: parseFloat(document.getElementById('hvd-sweep-rr-step').value),
-    exclude_top_n: parseInt(document.getElementById('hvd-sweep-exclude-top-n').value) || 0,
-    config: buildConfigPayload(),
-  };
-  if (document.getElementById('hvd-sweep-st-mult-enabled').checked) {
-    payload.st_mult_min = parseFloat(document.getElementById('hvd-sweep-st-mult-min').value);
-    payload.st_mult_max = parseFloat(document.getElementById('hvd-sweep-st-mult-max').value);
-    payload.st_mult_step = parseFloat(document.getElementById('hvd-sweep-st-mult-step').value);
-  }
-  btn.disabled = true;
-  tableEl.style.display = 'none';
-  worstTableEl.style.display = 'none';
-  worstTitleEl.style.display = 'none';
-  statusEl.innerText = `⏳ Lade Kerzen und teste alle Kombinationen... kann bei vielen Werten etwas dauern.`;
-  try {
-    const res = await fetch(`/api/hvd_sweep?symbol=${sweepSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (sweepSymbol !== currentSymbol) return;
-    if (data.error) {
-      statusEl.innerText = `❌ ${data.error}`;
-    } else {
-      statusEl.innerText = `${data.combos_tested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
-      window.hvdSweepResultsData = data.results || [];
-      window.hvdSweepWorstData = data.worst_results || [];
-      renderHvdSweepResults();
-      renderHvdSweepWorst();
-      tableEl.style.display = '';
-      worstTableEl.style.display = '';
-      worstTitleEl.style.display = '';
-    }
-  } catch (e) {
-    if (sweepSymbol !== currentSymbol) return;
-    statusEl.innerText = `❌ Fehler: ${e}`;
-  }
-  if (sweepSymbol === currentSymbol) btn.disabled = false;
-});
-
-window.hvdSweepResultsData = [];
-window.hvdSweepWorstData = [];
-const hvdSweepRowHtml = (r) => `
-  <tr>
-    <td>${r.hvd_hull_length}</td>
-    <td>${r.hvd_risk_reward}</td>
-    <td>${r.hvd_trend_filter_multiplier ?? '–'}</td>
-    <td>${r.trades}</td>
-    <td>${r.win_rate_pct}%</td>
-    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
-    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
-    <td>${r.max_drawdown_usd}</td>
-    <td>${r.avg_bars_held}</td>
-  </tr>`;
-const renderHvdSweepResults = makeSortableTable('hvd-sweep-results-table', () => window.hvdSweepResultsData, hvdSweepRowHtml);
-const renderHvdSweepWorst = makeSortableTable('hvd-sweep-worst-table', () => window.hvdSweepWorstData, hvdSweepRowHtml);
 
 
 
@@ -5261,31 +4825,6 @@ function renderScalpBoard(board) {
   </div>`;
 }
 
-function renderOmsChecklist(data) {
-  const row = (label, status, detail) => {
-    const icon = status === true ? '✅' : status === false ? '❌' : '➖';
-    return `<div style="display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid var(--panel-border);">
-      <span>${icon} ${label}</span><span style="color:var(--text-dim); font-size:12px;">${detail}</span>
-    </div>`;
-  };
-  const obiOk = data.oms_obi_direction != null;
-  const obiDetail = `schnell ${data.oms_obi_fast ?? '-'} / mittel ${data.oms_obi_medium ?? '-'} / langsam ${data.oms_obi_slow ?? '-'}`;
-  const cvdDetail = data.config.oms_cvd_confirm_enabled ? `CVD ${data.oms_cvd_ratio ?? '-'} (min. ${data.config.oms_cvd_min_ratio})` : 'deaktiviert';
-  const fundingDetail = data.config.oms_funding_filter_enabled ? `${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'} (Grenze ${(data.config.oms_funding_max_abs*100).toFixed(3)}%)` : 'deaktiviert';
-  const rsiDetail = data.config.oms_rsi_filter_enabled ? `RSI ${data.oms_rsi ?? '-'} (Mittellinie ${data.config.oms_rsi_midline})` : 'deaktiviert';
-  const oiDetail = data.config.oms_oi_filter_enabled ? `Score ${data.oms_oi_score ?? '-'} (min. ${data.config.oms_oi_min_score})` : 'deaktiviert';
-  const liqDetail = data.config.oms_liq_filter_enabled ? `${data.oms_liq_ratio ?? '-'} (${data.oms_liq_count ?? 0} Events im Fenster, min. ${data.config.oms_liq_min_ratio})` : 'deaktiviert';
-  return `<div class="panel-card" style="padding:14px;">
-    <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">Warum feuert (nicht)?</div>
-    ${row('OBI-Übereinstimmung (3 Fenster gleiche Richtung)', obiOk, obiDetail)}
-    ${row('CVD-Bestätigung', data.oms_cvd_ok, cvdDetail)}
-    ${row('Funding-Filter bestanden', data.oms_funding_ok, fundingDetail)}
-    ${row('RSI-Regime-Filter bestanden', data.oms_rsi_ok, rsiDetail)}
-    ${row('Open-Interest-Filter bestanden', data.oms_oi_ok, oiDetail)}
-    ${row('Liquidations-Filter bestanden', data.oms_liq_ok, liqDetail)}
-  </div>`;
-}
-
 function renderOmsChart(history, markers, pos) {
   if (!history || history.length < 2) {
     return '<div class="panel-card" style="padding:10px; color:var(--text-dim); font-size:12px;">Preisverlauf sammelt noch Daten...</div>';
@@ -5367,91 +4906,34 @@ async function refresh() {
   // Uebersichts-Pills fuer alle Coins
   const overviewRes = await fetch('/api/overview');
   const overview = await overviewRes.json();
-  document.getElementById('coin-overview').innerHTML = Object.entries(overview).map(([sym, o]) => `
-    <div class="coin-pill ${sym===currentSymbol?'selected':''}" onclick="document.getElementById('symbol-select').value='${sym}'; document.getElementById('symbol-select').dispatchEvent(new Event('change'));">
-      ${sym}: ${o.position || 'flach'} | PnL $${o.total_pnl_usd}
-    </div>
-  `).join('');
+  // Start-Zustand je Coin: laeuft (gruen) / gestoppt / "nach Deploy NICHT gestartet" (rot - gespeichert aktiv, aber laeuft in diesem Prozess nicht)
+  const stateOf = o => !o.bot_active ? 'stopped' : (o.session_started ? 'running' : 'pending');
+  const pendingCoins = Object.entries(overview).filter(([s, o]) => stateOf(o) === 'pending');
+  const pendingWithPos = pendingCoins.filter(([s, o]) => o.position).map(([s]) => s);
+  const startBanner = pendingCoins.length ? `<div class="start-banner">⚠️ <b>${pendingCoins.length} Bot${pendingCoins.length>1?'s sind':' ist'} nach dem Deploy NICHT gestartet:</b> ${pendingCoins.map(([s]) => s).join(', ')}.
+      Sie sind als „aktiv“ gespeichert, laufen aber erst nach einem Klick auf <b>Start</b> (Coin wählen → Start).${pendingWithPos.length ? ` <b>Achtung: offene Position ohne laufenden Bot bei ${pendingWithPos.join(', ')}</b> – TP/SL/Strategie werden nicht überwacht!` : ''}</div>` : '';
+  document.getElementById('coin-overview').innerHTML = startBanner + Object.entries(overview).map(([sym, o]) => {
+    const stt = stateOf(o);
+    const icon = stt === 'running' ? '🟢' : stt === 'pending' ? '⚠️' : '⏸️';
+    const tip = stt === 'running' ? 'Bot läuft' : stt === 'pending' ? 'Nach Deploy NICHT gestartet – Start klicken' : 'Bot gestoppt';
+    return `
+    <div class="coin-pill ${sym===currentSymbol?'selected':''} ${stt==='pending'?'pending':''}" title="${tip}" onclick="document.getElementById('symbol-select').value='${sym}'; document.getElementById('symbol-select').dispatchEvent(new Event('change'));">
+      ${icon} ${sym}: ${o.position || 'flach'} | PnL $${o.total_pnl_usd}
+    </div>`;
+  }).join('');
 
   document.getElementById('mode-badge').innerHTML =
     data.config.dry_run ? '<span class="badge dry">DRY RUN</span>' : '<span class="badge live">LIVE</span>';
   document.getElementById('active-badge').innerHTML =
-    data.config.bot_active ? '<span class="badge active">AKTIV</span>' : '<span class="badge paused">GESTOPPT</span>';
+    !data.config.bot_active ? '<span class="badge paused">GESTOPPT</span>'
+      : (data.session_started ? '<span class="badge active">AKTIV</span>'
+        : '<span class="badge pending" title="Als aktiv gespeichert, läuft aber erst nach Klick auf Start">⚠️ NICHT GESTARTET – Start klicken</span>');
   document.getElementById('live-warn').style.display = data.config.dry_run ? 'none' : 'block';
-
-  // OBI-Momentum-Scalp Trend-Meter: grosse, prominente Live-Anzeige der aktuellen
-  // Signal-Richtung - auch nutzbar wenn der Bot pausiert ist, zum manuellen Nachhandeln
-  const trendMeterEl = document.getElementById('oms-trend-meter');
-  const trendMeterDetailEl = document.getElementById('oms-trend-meter-detail');
-  const gaugeWrap = document.getElementById('oms-gauge-wrap');
-  const checklistWrap = document.getElementById('oms-checklist-wrap');
-  const chartWrap = document.getElementById('oms-chart-wrap');
-
-  const showGridWidget = (gsiId, show) => {
-    const el = document.getElementById(gsiId);
-    if (el) el.style.display = show ? '' : 'none';
-  };
-  const isOms = data.config.entry_mode === 'oms_scalp';
-  const isObiLikeMode = isOms || data.config.entry_mode === 'obi_scalp';
-  // Das Grid selbst ist jetzt IMMER sichtbar (Pocket-Trading und das Scalp-Board sind
-  // absichtlich unabhaengig von der gewaehlten Strategie nutzbar) - nur einzelne Kacheln
-  // darin bleiben an bestimmte Modi gebunden (z.B. die OBI-/CVD-Gauges an oms_scalp).
-  document.getElementById('oms-grid').style.display = '';
-  document.getElementById('oms-grid-header').style.display = '';
-  showGridWidget('gsi-signal', isOms);
-  showGridWidget('gsi-gauge', isOms);
-  showGridWidget('gsi-cvd-gauge', isOms);
-  showGridWidget('gsi-oi-gauge', isOms);
-  showGridWidget('gsi-liq-gauge', isOms);
-  showGridWidget('gsi-checklist', isOms);
-  showGridWidget('gsi-chart', isOms);
-  showGridWidget('gsi-pocket', true);
-  showGridWidget('gsi-obi', isObiLikeMode);
-  showGridWidget('gsi-scalp-board', true);
-  document.getElementById('scalp-board-wrap').innerHTML = renderScalpBoard(data.scalp_board);
-  showGridWidget('gsi-quad-stoch', true);
-
-  if (isOms) {
-    const sig = data.oms_signal;
-    if (sig === 'long') {
-      trendMeterEl.style.background = 'rgba(34,197,94,0.18)';
-      trendMeterEl.style.color = '#22c55e';
-      trendMeterEl.innerText = '🟢 JETZT LONG';
-    } else if (sig === 'short') {
-      trendMeterEl.style.background = 'rgba(240,82,107,0.18)';
-      trendMeterEl.style.color = '#f0526b';
-      trendMeterEl.innerText = '🔴 JETZT SHORT';
-    } else {
-      trendMeterEl.style.background = 'rgba(124,138,168,0.12)';
-      trendMeterEl.style.color = 'var(--text-dim)';
-      trendMeterEl.innerText = '⚪ KEIN SIGNAL';
-    }
-    trendMeterDetailEl.innerText =
-      `OBI schnell/mittel/langsam: ${data.oms_obi_fast ?? '-'} / ${data.oms_obi_medium ?? '-'} / ${data.oms_obi_slow ?? '-'}  |  ` +
-      `CVD: ${data.oms_cvd_ratio ?? '-'}  |  Funding: ${data.oms_funding_rate != null ? (data.oms_funding_rate*100).toFixed(4)+'%' : '-'}` +
-      (data.config.oms_rsi_filter_enabled ? `  |  RSI: ${data.oms_rsi ?? '-'}` : '');
-
-    gaugeWrap.innerHTML = renderOmsGauge(data.oms_obi_fast, data.oms_obi_medium, data.oms_obi_slow, data.config.oms_obi_threshold);
-    document.getElementById('oms-cvd-gauge-wrap').innerHTML = renderOmsCvdGauge(data.oms_cvd_ratio, data.config.oms_cvd_min_ratio);
-    document.getElementById('oms-oi-gauge-wrap').innerHTML = renderOmsOiGauge(data.oms_oi_score, data.config.oms_oi_min_score);
-    document.getElementById('oms-liq-gauge-wrap').innerHTML = renderOmsLiqGauge(data.oms_liq_ratio, data.config.oms_liq_min_ratio, data.oms_liq_count);
-    checklistWrap.innerHTML = renderOmsChecklist(data);
-    chartWrap.innerHTML = renderOmsChart(data.oms_price_history, data.oms_markers, {
-      position: data.position, avg_entry_price: data.avg_entry_price, size: data.total_coin_size,
-      sl_usd: data.config.oms_sl_usd, tp1_usd: data.config.oms_tp1_usd,
-      tp1_done: data.oms_tp1_done, trail_price: data.oms_trail_price, exit_mode: data.config.oms_exit_mode,
-    });
-  }
 
   const gl = data.grid_levels || {};
   const mode = data.config.entry_mode;
   // Nachkauf-Stufe: die generische max_nachkauf-Einstellung gilt eigentlich nur fuer Grid -
-  // bei Fractals+DCA war hier faelschlich IMMER der Grid-Wert zu sehen, unabhaengig von der
-  // tatsaechlich eingestellten fr_dca_max_entries-Grenze.
   let nachkaufMax = data.config.max_nachkauf || '∞';
-  if (mode === 'fractals_flip' && data.config.fr_dca_enabled) {
-    nachkaufMax = 1 + data.config.fr_dca_max_entries;
-  }
 
   // Uebersicht: nur noch die Kern-Kacheln (immer relevant, egal welche Strategie) plus
   // GENAU die Diagnose-Kacheln der aktuell gewaehlten Strategie - vorher standen hier
@@ -5469,435 +4951,309 @@ async function refresh() {
     `<div class="card"><div class="label">Trades / Trefferquote</div><div class="value">${data.stats.trades} / ${data.stats.win_rate_pct}%</div></div>`,
   ];
 
-  const modeCards = {
-    obi_scalp: () => [
-      `<div class="card"><div class="label">OBI schnell</div><div class="value ${data.obi_fast>=0?'green':'red'}">${data.obi_fast ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">OBI mittel</div><div class="value ${data.obi_medium>=0?'green':'red'}">${data.obi_medium ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">OBI langsam</div><div class="value ${data.obi_slow>=0?'green':'red'}">${data.obi_slow ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">Spread % (Filter ${data.config.obi_spread_filter_enabled?'an':'aus'})</div><div class="value ${data.config.obi_spread_filter_enabled && data.obi_spread_pct!=null && data.obi_spread_pct>data.config.obi_max_spread_pct?'red':''}">${data.obi_spread_pct!=null?data.obi_spread_pct.toFixed(4):'-'}</div></div>`,
-      `<div class="card"><div class="label">Volatilität % (Filter ${data.config.obi_vol_filter_enabled?'an':'aus'})</div><div class="value ${data.config.obi_vol_filter_enabled && data.obi_recent_vol_pct!=null && (data.obi_recent_vol_pct<data.config.obi_vol_min_pct || data.obi_recent_vol_pct>data.config.obi_vol_max_pct)?'red':''}">${data.obi_recent_vol_pct!=null?data.obi_recent_vol_pct.toFixed(4):'-'}</div></div>`,
-    ],
-    oms_scalp: () => [
-      `<div class="card"><div class="label">OMS TP1 erreicht?</div><div class="value ${data.oms_tp1_done?'green':''}">${data.oms_tp1_done?'Ja - Rest wird getrailt':'Nein'}</div></div>`,
-      `<div class="card"><div class="label">OMS Trailing-Referenz</div><div class="value">${data.oms_trail_price ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">OMS Nachkauf-Stufe</div><div class="value">${data.oms_dca_count ?? 0} / ${data.config.oms_dca_max_entries}</div></div>`,
-    ],
-    fib_reversal: () => [
-      `<div class="card"><div class="label">Fib High / Low</div><div class="value">${data.fib?.high ?? '-'} / ${data.fib?.low ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">Fib Einstieg 1 / 2</div><div class="value">${data.fib?.entry1_price ?? '-'} / ${data.fib?.entry2_price ?? '-'}</div></div>`,
-      `<div class="card"><div class="label">Fib TP1 / TP2 / SL</div><div class="value">${data.fib?.tp1_price ?? '-'} / ${data.fib?.tp2_price ?? '-'} / ${data.fib?.sl_price ?? '-'}</div></div>`,
-    ],
-    halftrend: () => [
-      `<div class="card"><div class="label">HalfTrend</div><div class="value ${data.ht_direction===1?'green':data.ht_direction===-1?'red':''}">${data.ht_direction===1?'LONG-Signal':data.ht_direction===-1?'SHORT-Signal':'-'}</div></div>`,
-      `<div class="card"><div class="label">HalfTrend SL</div><div class="value">${data.ht_sl_price!=null?data.ht_sl_price.toFixed(4):'-'}${data.ht_tp1_done?' (Break-Even)':''}</div></div>`,
-      `<div class="card"><div class="label">HalfTrend TP1 / TP2 / TP3</div><div class="value">${data.ht_tp1_price!=null?data.ht_tp1_price.toFixed(4):'-'}${data.ht_tp1_done?'✓':''} / ${data.ht_tp2_price!=null?data.ht_tp2_price.toFixed(4):'-'}${data.ht_tp2_done?'✓':''} / ${data.ht_tp3_price!=null?data.ht_tp3_price.toFixed(4):'-'}</div></div>`,
-    ],
-    diamond_algo: () => [
-      `<div class="card"><div class="label">Diamond Algo</div><div class="value ${data.da_direction===1?'green':data.da_direction===-1?'red':''}">${data.da_direction===1?'LONG-Signal':data.da_direction===-1?'SHORT-Signal':'-'}</div></div>`,
-      `<div class="card"><div class="label">Diamond Algo SL / TP</div><div class="value">${data.da_sl_price!=null?data.da_sl_price.toFixed(4):'-'} / ${data.da_tp_price!=null?data.da_tp_price.toFixed(4):'-'}</div></div>`,
-    ],
-    elte_smart: () => [
-      `<div class="card"><div class="label">ELTE Smart</div><div class="value ${data.es_direction===1?'green':data.es_direction===-1?'red':''}">${data.es_direction===1?'LONG-Signal':data.es_direction===-1?'SHORT-Signal':'-'} (Sens. ${data.es_sensitivity_last!=null?data.es_sensitivity_last.toFixed(2):'-'})</div></div>`,
-      `<div class="card"><div class="label">ELTE Smart SL / TP1 / TP2 / TP3</div><div class="value">${data.es_sl_price!=null?data.es_sl_price.toFixed(4):'-'} / ${data.es_tp1_price!=null?data.es_tp1_price.toFixed(4):'-'}${data.es_tp1_done?'✓':''} / ${data.es_tp2_price!=null?data.es_tp2_price.toFixed(4):'-'}${data.es_tp2_done?'✓':''} / ${data.es_tp3_price!=null?data.es_tp3_price.toFixed(4):'-'}</div></div>`,
-    ],
-  };
-
   const diagnosticCards = [
     `<div class="card"><div class="label">Binance-1s-Puffer (Diagnose)</div><div class="value">${data.binance_1s_buffer_size ?? 0} Kerzen / ${Math.round((data.binance_1s_buffer_span_sec ?? 0)/60)} Min</div></div>`,
     `<div class="card"><div class="label">Lighter-Tick-Fallback-Puffer (Diagnose)</div><div class="value">${data.local_1s_buffer_size ?? 0} Kerzen</div></div>`,
   ];
 
-  const extraCards = (modeCards[mode] ? modeCards[mode]() : []);
-  document.getElementById('status-grid').innerHTML = coreCards.concat(extraCards, diagnosticCards).join('');
+  document.getElementById('status-grid').innerHTML = coreCards.concat(diagnosticCards).join('');
 
+  const realConfig = data.config;
+  if (window.resetCfg) data.config = Object.assign({}, data.config, window.resetCfg);   // "Auf Standard zurücksetzen": Standardwerte statt gespeicherter Werte ins Formular
   if (!window.formTouched) {
     document.getElementById('margin').value = data.config.margin;
     document.getElementById('leverage').value = data.config.leverage;
     document.getElementById('entry_mode').value = data.config.entry_mode;
-    document.getElementById('obi_threshold').value = data.config.obi_threshold;
-    document.getElementById('obi_mode').value = data.config.obi_mode;
-    document.getElementById('obi_long_threshold').value = data.config.obi_long_threshold;
-    document.getElementById('obi_short_threshold').value = data.config.obi_short_threshold;
-    document.getElementById('obi_reversal_min_bounce').value = data.config.obi_reversal_min_bounce;
-    document.getElementById('obi_instant_reset_ratio').value = data.config.obi_instant_reset_ratio;
-    document.getElementById('obi_window_fast_seconds').value = data.config.obi_window_fast_seconds;
-    document.getElementById('obi_window_medium_seconds').value = data.config.obi_window_medium_seconds;
-    document.getElementById('obi_window_slow_seconds').value = data.config.obi_window_slow_seconds;
-    document.getElementById('obi_levels').value = data.config.obi_levels;
-    document.getElementById('obi_depth_weighting_enabled').value = String(data.config.obi_depth_weighting_enabled);
-    document.getElementById('obi_use_median').value = String(data.config.obi_use_median);
-    document.getElementById('obi_min_liquidity').value = data.config.obi_min_liquidity;
-    document.getElementById('obi_breakeven_enabled').value = String(data.config.obi_breakeven_enabled);
-    document.getElementById('obi_breakeven_trigger_ratio').value = data.config.obi_breakeven_trigger_ratio;
-    document.getElementById('obi_breakeven_lock_usd').value = data.config.obi_breakeven_lock_usd;
-    document.getElementById('obi_breakeven_lock_pct').value = data.config.obi_breakeven_lock_pct;
-    document.getElementById('obi_tp_sl_mode').value = data.config.obi_tp_sl_mode;
-    document.getElementById('obi_tp_pct').value = data.config.obi_tp_pct;
-    document.getElementById('obi_sl_pct').value = data.config.obi_sl_pct;
-    document.getElementById('obi_tp_usd').value = data.config.obi_tp_usd;
-    document.getElementById('obi_sl_usd').value = data.config.obi_sl_usd;
-    document.getElementById('obi_cooldown_seconds').value = data.config.obi_cooldown_seconds;
-    document.getElementById('obi_trend_filter').value = String(data.config.obi_trend_filter);
-    document.getElementById('obi_trend_ema_length').value = data.config.obi_trend_ema_length;
-    document.getElementById('obi_spread_filter_enabled').value = String(data.config.obi_spread_filter_enabled);
-    document.getElementById('obi_max_spread_pct').value = data.config.obi_max_spread_pct;
-    document.getElementById('obi_vol_filter_enabled').value = String(data.config.obi_vol_filter_enabled);
-    document.getElementById('obi_vol_window_seconds').value = data.config.obi_vol_window_seconds;
-    document.getElementById('obi_vol_min_pct').value = data.config.obi_vol_min_pct;
-    document.getElementById('obi_vol_max_pct').value = data.config.obi_vol_max_pct;
-    document.getElementById('oms_levels').value = data.config.oms_levels;
-    document.getElementById('oms_obi_threshold').value = data.config.oms_obi_threshold;
-    document.getElementById('oms_window_fast_seconds').value = data.config.oms_window_fast_seconds;
-    document.getElementById('oms_window_medium_seconds').value = data.config.oms_window_medium_seconds;
-    document.getElementById('oms_window_slow_seconds').value = data.config.oms_window_slow_seconds;
-    document.getElementById('oms_cvd_confirm_enabled').value = String(data.config.oms_cvd_confirm_enabled);
-    document.getElementById('oms_cvd_window_seconds').value = data.config.oms_cvd_window_seconds;
-    document.getElementById('oms_cvd_min_ratio').value = data.config.oms_cvd_min_ratio;
-    document.getElementById('oms_funding_filter_enabled').value = String(data.config.oms_funding_filter_enabled);
-    document.getElementById('oms_funding_max_abs').value = data.config.oms_funding_max_abs;
-    document.getElementById('oms_cooldown_seconds').value = data.config.oms_cooldown_seconds;
-    document.getElementById('oms_tp1_usd').value = data.config.oms_tp1_usd;
-    document.getElementById('oms_exit_mode').value = data.config.oms_exit_mode;
-    document.getElementById('oms_tp1_close_pct').value = data.config.oms_tp1_close_pct;
-    document.getElementById('oms_sl_usd').value = data.config.oms_sl_usd;
-    document.getElementById('oms_trail_distance_usd').value = data.config.oms_trail_distance_usd;
-    document.getElementById('oms_dca_enabled').value = String(data.config.oms_dca_enabled);
-    document.getElementById('oms_dca_max_entries').value = data.config.oms_dca_max_entries;
-    document.getElementById('oms_dca_size_fraction').value = data.config.oms_dca_size_fraction;
-    document.getElementById('oms_dca_min_pullback_usd').value = data.config.oms_dca_min_pullback_usd;
-    document.getElementById('oms_reverse_on_signal').value = String(data.config.oms_reverse_on_signal);
-    document.getElementById('oms_rsi_filter_enabled').value = String(data.config.oms_rsi_filter_enabled);
-    document.getElementById('oms_rsi_resolution').value = data.config.oms_rsi_resolution;
-    document.getElementById('oms_rsi_period').value = data.config.oms_rsi_period;
-    document.getElementById('oms_rsi_midline').value = data.config.oms_rsi_midline;
-    document.getElementById('oms_oi_filter_enabled').value = String(data.config.oms_oi_filter_enabled);
-    document.getElementById('oms_oi_window_seconds').value = data.config.oms_oi_window_seconds;
-    document.getElementById('oms_oi_min_change_pct').value = data.config.oms_oi_min_change_pct;
-    document.getElementById('oms_oi_min_score').value = data.config.oms_oi_min_score;
-    document.getElementById('oms_liq_filter_enabled').value = String(data.config.oms_liq_filter_enabled);
-    document.getElementById('oms_liq_window_seconds').value = data.config.oms_liq_window_seconds;
-    document.getElementById('oms_liq_min_ratio').value = data.config.oms_liq_min_ratio;
-    document.getElementById('fib_resolution').value = data.config.fib_resolution;
-    document.getElementById('fib_lookback_candles').value = data.config.fib_lookback_candles;
-    document.getElementById('fib_entry1_level').value = data.config.fib_entry1_level;
-    document.getElementById('fib_entry2_level').value = data.config.fib_entry2_level;
-    document.getElementById('fib_tp1_level').value = data.config.fib_tp1_level;
-    document.getElementById('fib_tp1_close_pct').value = data.config.fib_tp1_close_pct;
-    document.getElementById('fib_tp2_level').value = data.config.fib_tp2_level;
-    document.getElementById('fib_sl_level').value = data.config.fib_sl_level;
-    document.getElementById('fib_cooldown_seconds').value = data.config.fib_cooldown_seconds;
-    setResolutionField('ht_resolution', data.config.ht_resolution);
-    document.getElementById('ht_amplitude').value = data.config.ht_amplitude;
-    document.getElementById('ht_channel_deviation').value = data.config.ht_channel_deviation;
-    document.getElementById('ht_base_risk_mult').value = data.config.ht_base_risk_mult;
-    document.getElementById('ht_entry_trigger').value = data.config.ht_entry_trigger;
-    document.getElementById('ht_exit_trigger').value = data.config.ht_exit_trigger;
-    document.getElementById('ht_invert_direction').value = String(data.config.ht_invert_direction);
-    document.getElementById('ht_tp_enabled').value = String(data.config.ht_tp_enabled);
-    document.getElementById('ht_tp1_close_pct').value = data.config.ht_tp1_close_pct;
-    document.getElementById('ht_tp2_close_pct').value = data.config.ht_tp2_close_pct;
-    document.getElementById('ht_sl_enabled').value = String(data.config.ht_sl_enabled);
-    document.getElementById('ht_sl_cooldown_seconds').value = data.config.ht_sl_cooldown_seconds;
-    setResolutionField('da_resolution', data.config.da_resolution);
-    document.getElementById('da_atr_period').value = data.config.da_atr_period;
-    document.getElementById('da_sensitivity').value = data.config.da_sensitivity;
-    document.getElementById('da_sma_period').value = data.config.da_sma_period;
-    document.getElementById('da_ema_trend_period').value = data.config.da_ema_trend_period;
-    document.getElementById('da_signal_mode').value = data.config.da_signal_mode;
-    document.getElementById('da_entry_trigger').value = data.config.da_entry_trigger;
-    document.getElementById('da_exit_trigger').value = data.config.da_exit_trigger;
-    document.getElementById('da_invert_direction').value = String(data.config.da_invert_direction);
-    document.getElementById('da_sl_enabled').value = String(data.config.da_sl_enabled);
-    document.getElementById('da_tp_enabled').value = String(data.config.da_tp_enabled);
-    document.getElementById('da_risk_atr_period').value = data.config.da_risk_atr_period;
-    document.getElementById('da_risk_mult').value = data.config.da_risk_mult;
-    document.getElementById('da_tp_rr').value = data.config.da_tp_rr;
-    document.getElementById('da_sl_cooldown_seconds').value = data.config.da_sl_cooldown_seconds;
-    document.getElementById('da_use_heikin_ashi').value = String(data.config.da_use_heikin_ashi);
-    setResolutionField('es_resolution', data.config.es_resolution);
-    document.getElementById('es_atr_period').value = data.config.es_atr_period;
-    document.getElementById('es_auto_sensitivity').value = String(data.config.es_auto_sensitivity);
-    document.getElementById('es_sensitivity').value = data.config.es_sensitivity;
-    document.getElementById('es_vol_period').value = data.config.es_vol_period;
-    document.getElementById('es_vol_ma_len').value = data.config.es_vol_ma_len;
-    document.getElementById('es_entry_trigger').value = data.config.es_entry_trigger;
-    document.getElementById('es_exit_trigger').value = data.config.es_exit_trigger;
-    document.getElementById('es_invert_direction').value = String(data.config.es_invert_direction);
-    document.getElementById('es_risk_atr_period').value = data.config.es_risk_atr_period;
-    document.getElementById('es_risk_mult').value = data.config.es_risk_mult;
-    document.getElementById('es_tp1_close_pct').value = data.config.es_tp1_close_pct;
-    document.getElementById('es_tp2_close_pct').value = data.config.es_tp2_close_pct;
-    document.getElementById('es_tp1_rr').value = data.config.es_tp1_rr;
-    document.getElementById('es_tp2_rr').value = data.config.es_tp2_rr;
-    document.getElementById('es_tp3_rr').value = data.config.es_tp3_rr;
-    document.getElementById('es_sl_cooldown_seconds').value = data.config.es_sl_cooldown_seconds;
-    document.getElementById('es_reenter_on_flip').value = String(data.config.es_reenter_on_flip);
-    document.getElementById('es_sl_enabled').value = String(data.config.es_sl_enabled);
-    document.getElementById('es_sl_mode').value = data.config.es_sl_mode;
-    document.getElementById('es_sl_manual_usd').value = data.config.es_sl_manual_usd;
-    document.getElementById('es_tp_mode').value = data.config.es_tp_mode;
-    document.getElementById('es_tp_manual_usd').value = data.config.es_tp_manual_usd;
-    document.getElementById('es_breakeven_pct_enabled').value = String(data.config.es_breakeven_pct_enabled);
-    document.getElementById('es_breakeven_trigger_pct').value = data.config.es_breakeven_trigger_pct;
-    document.getElementById('es_tp_enabled').value = String(data.config.es_tp_enabled);
-    setResolutionField('cp_resolution', data.config.cp_resolution);
-    document.getElementById('cp_signal_source').value = data.config.cp_signal_source;
-    document.getElementById('cp_three_line_strict').value = String(data.config.cp_three_line_strict);
-    document.getElementById('cp_engulfing_strict').value = String(data.config.cp_engulfing_strict);
-    document.getElementById('cp_direction_mode').value = data.config.cp_direction_mode;
-    document.getElementById('cp_flip_exit_enabled').value = String(data.config.cp_flip_exit_enabled);
-    document.getElementById('cp_risk_atr_period').value = data.config.cp_risk_atr_period;
-    document.getElementById('cp_risk_mult').value = data.config.cp_risk_mult;
-    document.getElementById('cp_tp_rr').value = data.config.cp_tp_rr;
-    document.getElementById('cp_sl_cooldown_seconds').value = data.config.cp_sl_cooldown_seconds;
-    document.getElementById('cp_sl_enabled').value = String(data.config.cp_sl_enabled);
-    document.getElementById('cp_sl_mode').value = data.config.cp_sl_mode;
-    document.getElementById('cp_sl_manual_usd').value = data.config.cp_sl_manual_usd;
-    document.getElementById('cp_tp_enabled').value = String(data.config.cp_tp_enabled);
-    document.getElementById('cp_tp_mode').value = data.config.cp_tp_mode;
-    document.getElementById('cp_tp_manual_usd').value = data.config.cp_tp_manual_usd;
-    document.getElementById('cp_breakeven_enabled').value = String(data.config.cp_breakeven_enabled);
-    document.getElementById('cp_breakeven_trigger_mult').value = data.config.cp_breakeven_trigger_mult;
-    document.getElementById('mo7_resolution').value = data.config.mo7_resolution;
-    document.getElementById('mo7_entry_mode').value = data.config.mo7_entry_mode;
-    document.getElementById('mo7_buy_threshold').value = data.config.mo7_buy_threshold;
-    document.getElementById('mo7_sell_threshold').value = data.config.mo7_sell_threshold;
-    document.getElementById('mo7_sum_low').value = data.config.mo7_sum_low;
-    document.getElementById('mo7_sum_high').value = data.config.mo7_sum_high;
-    document.getElementById('mo7_trend_threshold').value = data.config.mo7_trend_threshold;
-    document.getElementById('mo7_trend_deadband').value = data.config.mo7_trend_deadband;
-    document.getElementById('mo7_direction_mode').value = data.config.mo7_direction_mode;
-    document.getElementById('mo7_flip_exit_enabled').value = String(data.config.mo7_flip_exit_enabled);
-    document.getElementById('mo7_sl_enabled').value = String(data.config.mo7_sl_enabled);
-    document.getElementById('mo7_sl_manual_usd').value = data.config.mo7_sl_manual_usd;
-    document.getElementById('mo7_tp_enabled').value = String(data.config.mo7_tp_enabled);
-    document.getElementById('mo7_tp_manual_usd').value = data.config.mo7_tp_manual_usd;
-    document.getElementById('mo7_sl_cooldown_seconds').value = data.config.mo7_sl_cooldown_seconds;
-    setResolutionField('utb_resolution', data.config.utb_resolution);
-    document.getElementById('utb_atr_period').value = data.config.utb_atr_period;
-    document.getElementById('utb_sensitivity').value = data.config.utb_sensitivity;
-    document.getElementById('utb_heikin_ashi').value = String(data.config.utb_heikin_ashi);
-    document.getElementById('utb_hull_period').value = data.config.utb_hull_period;
-    document.getElementById('utb_flip_trigger').value = data.config.utb_flip_trigger;
-    document.getElementById('utb_direction_mode').value = data.config.utb_direction_mode;
-    document.getElementById('utb_instant_trigger_enabled').value = String(data.config.utb_instant_trigger_enabled);
-    document.getElementById('utb_sl_enabled').value = String(data.config.utb_sl_enabled);
-    document.getElementById('utb_sl_manual_usd').value = data.config.utb_sl_manual_usd;
-    document.getElementById('utb_sl_cooldown_seconds').value = data.config.utb_sl_cooldown_seconds;
-    document.getElementById('utb_tp_enabled').value = String(data.config.utb_tp_enabled);
-    document.getElementById('utb_tp_manual_usd').value = data.config.utb_tp_manual_usd;
-    document.getElementById('utb_trail_tp_enabled').value = String(data.config.utb_trail_tp_enabled);
-    document.getElementById('utb_trail_tp_activation_pct').value = data.config.utb_trail_tp_activation_pct;
-    document.getElementById('utb_trail_tp_step_pct').value = data.config.utb_trail_tp_step_pct;
-    document.getElementById('utb_mtf_filter_enabled').value = String(data.config.utb_mtf_filter_enabled);
-    setResolutionField('utb_mtf_tf1', data.config.utb_mtf_tf1);
-    setResolutionField('utb_mtf_tf2', data.config.utb_mtf_tf2);
-    setResolutionField('utb_mtf_tf3', data.config.utb_mtf_tf3);
-    document.getElementById('utb_mtf_long_threshold').value = data.config.utb_mtf_long_threshold;
-    document.getElementById('utb_mtf_short_threshold').value = data.config.utb_mtf_short_threshold;
-    document.getElementById('utb_mtf_fast_len').value = data.config.utb_mtf_fast_len;
-    document.getElementById('utb_mtf_slow_len').value = data.config.utb_mtf_slow_len;
-    document.getElementById('utb_mtf_atr_len').value = data.config.utb_mtf_atr_len;
-    document.getElementById('utb_zscore_filter_enabled').value = String(data.config.utb_zscore_filter_enabled);
-    setResolutionField('utb_zscore_resolution', data.config.utb_zscore_resolution);
-    document.getElementById('utb_zscore_lookback').value = data.config.utb_zscore_lookback;
-    document.getElementById('utb_zscore_smooth').value = data.config.utb_zscore_smooth;
-    document.getElementById('utb_rsi_filter_enabled').value = String(data.config.utb_rsi_filter_enabled);
-    document.getElementById('utb_rsi_length').value = data.config.utb_rsi_length;
-    document.getElementById('utb_rsi_midline').value = data.config.utb_rsi_midline;
-    document.getElementById('utb_adx_filter_enabled').value = String(data.config.utb_adx_filter_enabled);
-    document.getElementById('utb_adx_length').value = data.config.utb_adx_length;
-    document.getElementById('utb_adx_threshold').value = data.config.utb_adx_threshold;
-    setResolutionField('wtc_resolution', data.config.wtc_resolution);
-    document.getElementById('wtc_channel_len').value = data.config.wtc_channel_len;
-    document.getElementById('wtc_average_len').value = data.config.wtc_average_len;
-    document.getElementById('wtc_ma_len').value = data.config.wtc_ma_len;
-    document.getElementById('wtc_require_zone').value = String(data.config.wtc_require_zone);
-    document.getElementById('wtc_os_level').value = data.config.wtc_os_level;
-    document.getElementById('wtc_ob_level').value = data.config.wtc_ob_level;
-    document.getElementById('wtc_direction_mode').value = data.config.wtc_direction_mode;
-    document.getElementById('wtc_always_in_market').value = String(data.config.wtc_always_in_market);
-    document.getElementById('wtc_flip_exit_enabled').value = String(data.config.wtc_flip_exit_enabled);
-    document.getElementById('wtc_sl_enabled').value = String(data.config.wtc_sl_enabled);
-    document.getElementById('wtc_sl_manual_usd').value = data.config.wtc_sl_manual_usd;
-    document.getElementById('wtc_tp_enabled').value = String(data.config.wtc_tp_enabled);
-    document.getElementById('wtc_tp_manual_usd').value = data.config.wtc_tp_manual_usd;
-    document.getElementById('wtc_sl_cooldown_seconds').value = data.config.wtc_sl_cooldown_seconds;
-    setResolutionField('pk_resolution', data.config.pk_resolution);
-    document.getElementById('pk_sensitivity').value = data.config.pk_sensitivity;
-    document.getElementById('pk_atr_period').value = data.config.pk_atr_period;
-    document.getElementById('pk_sma_period').value = data.config.pk_sma_period;
-    document.getElementById('pk_direction_mode').value = data.config.pk_direction_mode;
-    document.getElementById('pk_exit_mode').value = data.config.pk_exit_mode;
-    document.getElementById('pk_sl_enabled').value = String(data.config.pk_sl_enabled);
-    document.getElementById('pk_sl_manual_usd').value = data.config.pk_sl_manual_usd;
-    document.getElementById('pk_tp_enabled').value = String(data.config.pk_tp_enabled);
-    document.getElementById('pk_tp_manual_usd').value = data.config.pk_tp_manual_usd;
-    document.getElementById('pk_sl_cooldown_seconds').value = data.config.pk_sl_cooldown_seconds;
-    document.getElementById('pk_trailing_enabled').value = String(data.config.pk_trailing_enabled);
-    document.getElementById('pk_trailing_activation_pct').value = data.config.pk_trailing_activation_pct;
-    document.getElementById('pk_trailing_step_pct').value = data.config.pk_trailing_step_pct;
-    document.getElementById('pk_mtf_filter_enabled').value = String(data.config.pk_mtf_filter_enabled);
-    setResolutionField('pk_mtf_tf1', data.config.pk_mtf_tf1);
-    setResolutionField('pk_mtf_tf2', data.config.pk_mtf_tf2);
-    setResolutionField('pk_mtf_tf3', data.config.pk_mtf_tf3);
-    document.getElementById('pk_mtf_long_threshold').value = data.config.pk_mtf_long_threshold;
-    document.getElementById('pk_mtf_short_threshold').value = data.config.pk_mtf_short_threshold;
-    document.getElementById('pk_mtf_fast_len').value = data.config.pk_mtf_fast_len;
-    document.getElementById('pk_mtf_slow_len').value = data.config.pk_mtf_slow_len;
-    document.getElementById('pk_mtf_atr_len').value = data.config.pk_mtf_atr_len;
-    setResolutionField('fr_resolution', data.config.fr_resolution);
-    document.getElementById('fr_periods').value = data.config.fr_periods;
-    document.getElementById('fr_direction_mode').value = data.config.fr_direction_mode;
-    document.getElementById('fr_invert_direction').value = String(data.config.fr_invert_direction);
-    document.getElementById('fr_zscore_filter_enabled').value = String(data.config.fr_zscore_filter_enabled);
-    setResolutionField('fr_zscore_resolution', data.config.fr_zscore_resolution);
-    document.getElementById('fr_zscore_lookback').value = data.config.fr_zscore_lookback;
-    document.getElementById('fr_zscore_smooth').value = data.config.fr_zscore_smooth;
-    document.getElementById('fr_sl_enabled').value = String(data.config.fr_sl_enabled);
-    document.getElementById('fr_sl_manual_usd').value = data.config.fr_sl_manual_usd;
-    document.getElementById('fr_sl_cooldown_seconds').value = data.config.fr_sl_cooldown_seconds;
-    document.getElementById('fr_tp_enabled').value = String(data.config.fr_tp_enabled);
-    document.getElementById('fr_tp_manual_usd').value = data.config.fr_tp_manual_usd;
-    document.getElementById('fr_adx_filter_enabled').value = String(data.config.fr_adx_filter_enabled);
-    setResolutionField('fr_adx_resolution', data.config.fr_adx_resolution);
-    document.getElementById('fr_adx_length').value = data.config.fr_adx_length;
-    document.getElementById('fr_adx_threshold').value = data.config.fr_adx_threshold;
-    document.getElementById('fr_adx_invert_enabled').value = String(data.config.fr_adx_invert_enabled);
-    document.getElementById('fr_mtf_filter_enabled').value = String(data.config.fr_mtf_filter_enabled);
-    setResolutionField('fr_mtf_tf1', data.config.fr_mtf_tf1);
-    document.getElementById('fr_mtf_long_threshold').value = data.config.fr_mtf_long_threshold;
-    document.getElementById('fr_mtf_short_threshold').value = data.config.fr_mtf_short_threshold;
-    document.getElementById('fr_mtf_fast_len').value = data.config.fr_mtf_fast_len;
-    document.getElementById('fr_mtf_slow_len').value = data.config.fr_mtf_slow_len;
-    document.getElementById('fr_mtf_atr_len').value = data.config.fr_mtf_atr_len;
-    document.getElementById('fr_flatten_on_block_enabled').value = String(data.config.fr_flatten_on_block_enabled);
-    document.getElementById('fr_dca_enabled').value = String(data.config.fr_dca_enabled);
-    document.getElementById('fr_dca_max_entries').value = data.config.fr_dca_max_entries;
-    document.getElementById('fr_dca_step_usd').value = data.config.fr_dca_step_usd;
-    setResolutionField('cd_resolution', data.config.cd_resolution);
-    document.getElementById('cd_threshold').value = data.config.cd_threshold;
-    document.getElementById('cd_rejection_mult').value = data.config.cd_rejection_mult;
-    document.getElementById('cd_direction_mode').value = data.config.cd_direction_mode;
-    document.getElementById('cd_invert_direction').value = String(data.config.cd_invert_direction);
-    document.getElementById('cd_zscore_filter_enabled').value = String(data.config.cd_zscore_filter_enabled);
-    setResolutionField('cd_zscore_resolution', data.config.cd_zscore_resolution);
-    document.getElementById('cd_zscore_lookback').value = data.config.cd_zscore_lookback;
-    document.getElementById('cd_zscore_smooth').value = data.config.cd_zscore_smooth;
-    document.getElementById('cd_rsi_filter_enabled').value = String(data.config.cd_rsi_filter_enabled);
-    document.getElementById('cd_rsi_length').value = data.config.cd_rsi_length;
-    document.getElementById('cd_rsi_midline').value = data.config.cd_rsi_midline;
-    document.getElementById('cd_adx_filter_enabled').value = String(data.config.cd_adx_filter_enabled);
-    document.getElementById('cd_adx_length').value = data.config.cd_adx_length;
-    document.getElementById('cd_adx_threshold').value = data.config.cd_adx_threshold;
-    document.getElementById('cd_sl_enabled').value = String(data.config.cd_sl_enabled);
-    document.getElementById('cd_sl_manual_usd').value = data.config.cd_sl_manual_usd;
-    document.getElementById('cd_sl_cooldown_seconds').value = data.config.cd_sl_cooldown_seconds;
-    document.getElementById('cd_tp_enabled').value = String(data.config.cd_tp_enabled);
-    document.getElementById('cd_tp_manual_usd').value = data.config.cd_tp_manual_usd;
-    document.getElementById('cd_use_heikin_ashi').value = String(data.config.cd_use_heikin_ashi);
-    setResolutionField('rf_resolution', data.config.rf_resolution);
-    document.getElementById('rf_period').value = data.config.rf_period;
-    document.getElementById('rf_qty').value = data.config.rf_qty;
-    document.getElementById('rf_direction_mode').value = data.config.rf_direction_mode;
-    document.getElementById('rf_zscore_filter_enabled').value = String(data.config.rf_zscore_filter_enabled);
-    setResolutionField('rf_zscore_resolution', data.config.rf_zscore_resolution);
-    document.getElementById('rf_zscore_lookback').value = data.config.rf_zscore_lookback;
-    document.getElementById('rf_zscore_smooth').value = data.config.rf_zscore_smooth;
-    document.getElementById('rf_rsi_filter_enabled').value = String(data.config.rf_rsi_filter_enabled);
-    document.getElementById('rf_rsi_length').value = data.config.rf_rsi_length;
-    document.getElementById('rf_rsi_midline').value = data.config.rf_rsi_midline;
-    document.getElementById('rf_adx_filter_enabled').value = String(data.config.rf_adx_filter_enabled);
-    document.getElementById('rf_adx_length').value = data.config.rf_adx_length;
-    document.getElementById('rf_adx_threshold').value = data.config.rf_adx_threshold;
-    document.getElementById('rf_sl_enabled').value = String(data.config.rf_sl_enabled);
-    document.getElementById('rf_sl_manual_usd').value = data.config.rf_sl_manual_usd;
-    document.getElementById('rf_sl_cooldown_seconds').value = data.config.rf_sl_cooldown_seconds;
-    document.getElementById('rf_tp_enabled').value = String(data.config.rf_tp_enabled);
-    document.getElementById('rf_tp_manual_usd').value = data.config.rf_tp_manual_usd;
-    document.getElementById('mv_resolution').value = data.config.mv_resolution;
-    document.getElementById('mv_fast_len').value = data.config.mv_fast_len;
-    document.getElementById('mv_slow_len').value = data.config.mv_slow_len;
-    document.getElementById('mv_guide_len').value = data.config.mv_guide_len;
-    document.getElementById('mv_atr_len').value = data.config.mv_atr_len;
-    document.getElementById('mv_strong_mult').value = data.config.mv_strong_mult;
-    document.getElementById('mv_use_volume_enabled').value = String(data.config.mv_use_volume_enabled);
-    document.getElementById('mv_vol_len').value = data.config.mv_vol_len;
-    document.getElementById('mv_vol_mult').value = data.config.mv_vol_mult;
-    document.getElementById('mv_direction_mode').value = data.config.mv_direction_mode;
-    document.getElementById('mv_invert_direction').value = String(data.config.mv_invert_direction);
-    document.getElementById('mv_sl_mode').value = data.config.mv_sl_mode;
-    document.getElementById('mv_sl_manual_usd').value = data.config.mv_sl_manual_usd;
-    document.getElementById('mv_sl_cooldown_seconds').value = data.config.mv_sl_cooldown_seconds;
-    document.getElementById('mv_tp_enabled').value = String(data.config.mv_tp_enabled);
-    document.getElementById('mv_tp_manual_usd').value = data.config.mv_tp_manual_usd;
-    setResolutionField('sr_resolution', data.config.sr_resolution);
-    document.getElementById('sr_st_atr_period').value = data.config.sr_st_atr_period;
-    document.getElementById('sr_st_multiplier').value = data.config.sr_st_multiplier;
-    document.getElementById('sr_rsi_period').value = data.config.sr_rsi_period;
-    document.getElementById('sr_rsi_midline').value = data.config.sr_rsi_midline;
-    document.getElementById('sr_rsi_mode').value = data.config.sr_rsi_mode;
-    document.getElementById('sr_rsi_overbought').value = data.config.sr_rsi_overbought;
-    document.getElementById('sr_rsi_oversold').value = data.config.sr_rsi_oversold;
-    document.getElementById('sr_ema_filter_enabled').value = String(data.config.sr_ema_filter_enabled);
-    document.getElementById('sr_ema_length').value = data.config.sr_ema_length;
-    setResolutionField('sr_ema_resolution', data.config.sr_ema_resolution);
-    document.getElementById('sr_direction_mode').value = data.config.sr_direction_mode;
-    document.getElementById('sr_adx_filter_enabled').value = String(data.config.sr_adx_filter_enabled);
-    document.getElementById('sr_adx_length').value = data.config.sr_adx_length;
-    setResolutionField('sr_adx_resolution', data.config.sr_adx_resolution);
-    document.getElementById('sr_adx_threshold').value = data.config.sr_adx_threshold;
-    document.getElementById('sr_adx_invert_enabled').value = String(data.config.sr_adx_invert_enabled);
-    document.getElementById('sr_immediate_signal_enabled').value = String(data.config.sr_immediate_signal_enabled);
-    document.getElementById('sr_zscore_filter_enabled').value = String(data.config.sr_zscore_filter_enabled);
-    document.getElementById('sr_zscore_lookback').value = data.config.sr_zscore_lookback;
-    document.getElementById('sr_zscore_smooth').value = data.config.sr_zscore_smooth;
-    document.getElementById('sr_mo7_filter_enabled').value = String(data.config.sr_mo7_filter_enabled);
-    document.getElementById('sr_mo7_mode').value = data.config.sr_mo7_mode;
-    document.getElementById('sr_mo7_buy_threshold').value = data.config.sr_mo7_buy_threshold;
-    document.getElementById('sr_mo7_sell_threshold').value = data.config.sr_mo7_sell_threshold;
-    document.getElementById('sr_sl_tp_mode').value = data.config.sr_sl_tp_mode;
-    document.getElementById('sr_sl_enabled').value = String(data.config.sr_sl_enabled);
-    document.getElementById('sr_sl_manual_usd').value = data.config.sr_sl_manual_usd;
-    document.getElementById('sr_sl_cooldown_seconds').value = data.config.sr_sl_cooldown_seconds;
-    document.getElementById('sr_vwap_dev_filter_enabled').value = String(data.config.sr_vwap_dev_filter_enabled);
-    document.getElementById('sr_vwap_dev_length').value = data.config.sr_vwap_dev_length;
-    document.getElementById('sr_vwap_dev_mult').value = data.config.sr_vwap_dev_mult;
-    document.getElementById('sr_vwap_midline_filter_enabled').value = String(data.config.sr_vwap_midline_filter_enabled);
-    document.getElementById('sr_vwap_midline_mult').value = data.config.sr_vwap_midline_mult;
-    document.getElementById('sr_vwap_midline_breakeven_enabled').value = String(data.config.sr_vwap_midline_breakeven_enabled);
-    document.getElementById('sr_vwap_sl_mult').value = data.config.sr_vwap_sl_mult;
-    document.getElementById('sr_vwap_tp_rr').value = data.config.sr_vwap_tp_rr;
-    document.getElementById('sr_st_tp_rr').value = data.config.sr_st_tp_rr;
-    document.getElementById('sr_st_sl_buffer_usd').value = data.config.sr_st_sl_buffer_usd;
-    document.getElementById('sr_tp_enabled').value = String(data.config.sr_tp_enabled);
-    document.getElementById('sr_tp_manual_usd').value = data.config.sr_tp_manual_usd;
-    setResolutionField('hvd_resolution', data.config.hvd_resolution);
-    document.getElementById('hvd_hull_length').value = data.config.hvd_hull_length;
-    document.getElementById('hvd_vwap_length').value = data.config.hvd_vwap_length;
-    document.getElementById('hvd_vwap_dev_mult').value = data.config.hvd_vwap_dev_mult;
-    document.getElementById('hvd_rsi_length').value = data.config.hvd_rsi_length;
-    document.getElementById('hvd_rsi_overbought').value = data.config.hvd_rsi_overbought;
-    document.getElementById('hvd_rsi_oversold').value = data.config.hvd_rsi_oversold;
-    document.getElementById('hvd_adx_length').value = data.config.hvd_adx_length;
-    document.getElementById('hvd_direction_mode').value = data.config.hvd_direction_mode;
-    document.getElementById('hvd_atr_period').value = data.config.hvd_atr_period;
-    document.getElementById('hvd_atr_min_mult').value = data.config.hvd_atr_min_mult;
-    document.getElementById('hvd_risk_reward').value = data.config.hvd_risk_reward;
-    document.getElementById('hvd_sl_cooldown_seconds').value = data.config.hvd_sl_cooldown_seconds;
-    document.getElementById('hvd_immediate_signal_enabled').value = String(data.config.hvd_immediate_signal_enabled);
-    document.getElementById('hvd_flip_exit_enabled').value = String(data.config.hvd_flip_exit_enabled);
-    document.getElementById('hvd_touch_arm_enabled').value = String(data.config.hvd_touch_arm_enabled);
-    document.getElementById('hvd_arm_flip_exit_enabled').value = String(data.config.hvd_arm_flip_exit_enabled);
-    document.getElementById('hvd_adx_filter_enabled').value = String(data.config.hvd_adx_filter_enabled);
-    document.getElementById('hvd_adx_filter_length').value = data.config.hvd_adx_filter_length;
-    setResolutionField('hvd_adx_filter_resolution', data.config.hvd_adx_filter_resolution);
-    document.getElementById('hvd_adx_filter_threshold').value = data.config.hvd_adx_filter_threshold;
-    document.getElementById('hvd_trend_filter_enabled').value = String(data.config.hvd_trend_filter_enabled);
-    document.getElementById('hvd_trend_filter_resolution').value = data.config.hvd_trend_filter_resolution;
-    document.getElementById('hvd_trend_filter_atr_period').value = data.config.hvd_trend_filter_atr_period;
-    document.getElementById('hvd_trend_filter_multiplier').value = data.config.hvd_trend_filter_multiplier;
-    document.getElementById('hvd_trend_filter_signal_window_candles').value = data.config.hvd_trend_filter_signal_window_candles;
+    document.getElementById('trade_account').value = data.config.trade_account || 'main';
+    document.getElementById('ab_preset').value = data.config.ab_preset;
+    setResolutionField('ab_resolution', data.config.ab_resolution);
+    document.getElementById('ab_lookback').value = data.config.ab_lookback;
+    document.getElementById('ab_fast_len').value = data.config.ab_fast_len;
+    document.getElementById('ab_slow_len').value = data.config.ab_slow_len;
+    document.getElementById('ab_rsi_len').value = data.config.ab_rsi_len;
+    document.getElementById('ab_rsi_gate').value = data.config.ab_rsi_gate;
+    document.getElementById('ab_use_volume').value = String(data.config.ab_use_volume);
+    document.getElementById('ab_vol_mult').value = data.config.ab_vol_mult;
+    document.getElementById('ab_direction_mode').value = data.config.ab_direction_mode;
+    document.getElementById('ab_exit_mode').value = data.config.ab_exit_mode || 'flip';
+    document.getElementById('ab_sl_enabled').value = String(data.config.ab_sl_enabled);
+    document.getElementById('ab_be_enabled').value = String(data.config.ab_be_enabled);
+    document.getElementById('ab_be_trigger_usd').value = data.config.ab_be_trigger_usd;
+    document.getElementById('ab_atr_len').value = data.config.ab_atr_len;
+    document.getElementById('ab_atr_mult').value = data.config.ab_atr_mult;
+    document.getElementById('ab_r1').value = data.config.ab_r1;
+    document.getElementById('ab_r2').value = data.config.ab_r2;
+    document.getElementById('ab_r3').value = data.config.ab_r3;
+    document.getElementById('ab_tp1_close_pct').value = data.config.ab_tp1_close_pct;
+    document.getElementById('ab_tp2_close_pct').value = data.config.ab_tp2_close_pct;
+    document.getElementById('ab_sl_to_breakeven_on_tp1').value = String(data.config.ab_sl_to_breakeven_on_tp1);
+    document.getElementById('ab_sl_to_tp1_on_tp2').value = String(data.config.ab_sl_to_tp1_on_tp2);
+    document.getElementById('ab_sl_manual_usd').value = data.config.ab_sl_manual_usd;
+    document.getElementById('ab_sl_cooldown_seconds').value = data.config.ab_sl_cooldown_seconds;
+    document.getElementById('ab_use_heikin_ashi').value = String(data.config.ab_use_heikin_ashi);
+
+    setResolutionField('er_resolution', data.config.er_resolution);
+    document.getElementById('er_ema_len').value = data.config.er_ema_len;
+    document.getElementById('er_rsi_len').value = data.config.er_rsi_len;
+    document.getElementById('er_rsi_mid').value = data.config.er_rsi_mid;
+    document.getElementById('er_invert').value = String(data.config.er_invert);
+    document.getElementById('er_direction_mode').value = data.config.er_direction_mode;
+    document.getElementById('er_exit_mode').value = data.config.er_exit_mode || 'plan';
+    document.getElementById('er_sl_lookback').value = data.config.er_sl_lookback;
+    document.getElementById('er_sl_buffer_pct').value = data.config.er_sl_buffer_pct;
+    document.getElementById('er_tp_mode').value = data.config.er_tp_mode || 'atr';
+    document.getElementById('er_tp_step_usd').value = data.config.er_tp_step_usd;
+    document.getElementById('er_tp_step_atr_mult').value = data.config.er_tp_step_atr_mult;
+    document.getElementById('er_atr_len').value = data.config.er_atr_len;
+    document.getElementById('er_tp1_close_pct').value = data.config.er_tp1_close_pct;
+    document.getElementById('er_tp2_close_pct').value = data.config.er_tp2_close_pct;
+    document.getElementById('er_sl_to_breakeven_on_tp1').value = String(data.config.er_sl_to_breakeven_on_tp1);
+    document.getElementById('er_sl_to_tp1_on_tp2').value = String(data.config.er_sl_to_tp1_on_tp2);
+    document.getElementById('er_sl_cooldown_seconds').value = data.config.er_sl_cooldown_seconds;
+    setResolutionField('mt_resolution', data.config.mt_resolution);
+    document.getElementById('mt_use_b1').value = String(data.config.mt_use_b1);
+    document.getElementById('mt_block1').value = data.config.mt_block1;
+    document.getElementById('mt_use_b2').value = String(data.config.mt_use_b2);
+    document.getElementById('mt_block2').value = data.config.mt_block2;
+    document.getElementById('mt_use_b3').value = String(data.config.mt_use_b3);
+    document.getElementById('mt_block3').value = data.config.mt_block3;
+    document.getElementById('mt_n1').value = data.config.mt_n1;
+    document.getElementById('mt_n2').value = data.config.mt_n2;
+    document.getElementById('mt_sig').value = data.config.mt_sig;
+    document.getElementById('mt_scale').value = data.config.mt_scale;
+    document.getElementById('mt_src').value = data.config.mt_src || 'close';
+    document.getElementById('mt_spread_full').value = data.config.mt_spread_full;
+    document.getElementById('mt_signal_mode').value = data.config.mt_signal_mode || 'zone';
+    document.getElementById('mt_confirm_bars').value = data.config.mt_confirm_bars || 3;
+    document.getElementById('mt_red_below').value = data.config.mt_red_below;
+    document.getElementById('mt_green_above').value = data.config.mt_green_above;
+    document.getElementById('mt_buy_level').value = data.config.mt_buy_level;
+    document.getElementById('mt_sell_level').value = data.config.mt_sell_level;
+    document.getElementById('mt_lookback').value = data.config.mt_lookback;
+    document.getElementById('mt_use_accel').value = String(data.config.mt_use_accel);
+    document.getElementById('mt_accel').value = data.config.mt_accel;
+    document.getElementById('mt_force_change').value = String(data.config.mt_force_change);
+    document.getElementById('mt_direction_mode').value = data.config.mt_direction_mode || 'both';
+    document.getElementById('mt_exit_mode').value = data.config.mt_exit_mode || 'flip';
+    document.getElementById('mt_sl_usd').value = data.config.mt_sl_usd ?? 5;
+    document.getElementById('mt_tp_usd').value = data.config.mt_tp_usd ?? 5;
+    document.getElementById('mt_tp1_close_pct').value = data.config.mt_tp1_close_pct;
+    document.getElementById('mt_tp2_close_pct').value = data.config.mt_tp2_close_pct;
+    document.getElementById('mt_sl_to_breakeven_on_tp1').value = String(data.config.mt_sl_to_breakeven_on_tp1);
+    document.getElementById('mt_sl_to_tp1_on_tp2').value = String(data.config.mt_sl_to_tp1_on_tp2);
+    document.getElementById('mt_sl_cooldown_seconds').value = data.config.mt_sl_cooldown_seconds;
+
+    setResolutionField('pm_resolution', data.config.pm_resolution);
+    document.getElementById('pm_len').value = data.config.pm_len;
+    document.getElementById('pm_long').value = data.config.pm_long;
+    document.getElementById('pm_short').value = data.config.pm_short;
+    document.getElementById('pm_direction_mode').value = data.config.pm_direction_mode || 'both';
+    document.getElementById('pm_sl_usd').value = data.config.pm_sl_usd;
+    document.getElementById('pm_tp_usd').value = data.config.pm_tp_usd;
+    document.getElementById('pm_trail_usd').value = data.config.pm_trail_usd || 0;
+    document.getElementById('pm_sl_cooldown_seconds').value = data.config.pm_sl_cooldown_seconds;
+
+    setResolutionField('dv_resolution', data.config.dv_resolution);
+    document.getElementById('dv_sens').value = data.config.dv_sens;
+    document.getElementById('dv_direction_mode').value = data.config.dv_direction_mode || 'both';
+    document.getElementById('dv_exit_mode').value = data.config.dv_exit_mode || 'sltp';
+    document.getElementById('dv_sl_usd').value = data.config.dv_sl_usd;
+    document.getElementById('dv_tp_usd').value = data.config.dv_tp_usd;
+    document.getElementById('dv_trail_usd').value = data.config.dv_trail_usd || 0;
+    document.getElementById('dv_sl_cooldown_seconds').value = data.config.dv_sl_cooldown_seconds;
+    document.getElementById('tfl_resolution').value = data.config.tfl_resolution || '1m';
+    document.getElementById('tfl_trend_tf').value = data.config.tfl_trend_tf || '5m';
+    document.getElementById('tfl_trend_mode').value = data.config.tfl_trend_mode || 'swing';
+    document.getElementById('tfl_trend_ilen').value = data.config.tfl_trend_ilen ?? 4;
+    document.getElementById('tfl_trend_slen').value = data.config.tfl_trend_slen ?? 50;
+    document.getElementById('tfl_direction_mode').value = data.config.tfl_direction_mode || 'both';
+    document.getElementById('tfl_tp_usd').value = data.config.tfl_tp_usd ?? 3;
+    document.getElementById('tfl_sl_usd').value = data.config.tfl_sl_usd ?? 0;
+    document.getElementById('tfl_max_entries').value = data.config.tfl_max_entries ?? 10;
+    document.getElementById('tfl_flip_mode').value = data.config.tfl_flip_mode || 'reverse';
+    document.getElementById('rlm_swing_len').value = data.config.rlm_swing_len ?? '';
+    document.getElementById('rlm_level_tol').value = data.config.rlm_level_tol ?? '';
+    document.getElementById('rlm_min_touches').value = data.config.rlm_min_touches ?? '';
+    document.getElementById('rlm_half_life').value = data.config.rlm_half_life ?? '';
+    document.getElementById('rlm_levels_per_side').value = data.config.rlm_levels_per_side ?? '';
+    document.getElementById('rlm_min_score').value = data.config.rlm_min_score ?? '';
+    document.getElementById('rlm_reject_clv').value = data.config.rlm_reject_clv ?? '';
+    document.getElementById('rlm_cooldown').value = data.config.rlm_cooldown ?? '';
+    document.getElementById('rlm_sl_usd').value = data.config.rlm_sl_usd ?? '';
+    document.getElementById('rlm_tp_usd').value = data.config.rlm_tp_usd ?? '';
+    document.getElementById('rlm_atr_len').value = data.config.rlm_atr_len ?? '';
+    document.getElementById('rlm_tp1_r').value = data.config.rlm_tp1_r ?? '';
+    document.getElementById('rlm_tp2_r').value = data.config.rlm_tp2_r ?? '';
+    document.getElementById('rlm_tp3_r').value = data.config.rlm_tp3_r ?? '';
+    document.getElementById('rlm_tp1_close_pct').value = data.config.rlm_tp1_close_pct ?? '';
+    document.getElementById('rlm_tp2_close_pct').value = data.config.rlm_tp2_close_pct ?? '';
+    document.getElementById('rlm_resolution').value = data.config.rlm_resolution || '';
+    document.getElementById('vc_resolution').value = data.config.vc_resolution || '15m';
+    document.getElementById('vc_ema_len').value = data.config.vc_ema_len ?? 9;
+    document.getElementById('vc_use_day').checked = !!data.config.vc_use_day;
+    document.getElementById('vc_use_week').checked = !!data.config.vc_use_week;
+    document.getElementById('vc_use_month').checked = !!data.config.vc_use_month;
+    document.getElementById('vc_skip_first').checked = !!data.config.vc_skip_first;
+    document.getElementById('vc_direction_mode').value = data.config.vc_direction_mode || 'both';
+    document.getElementById('vc_sl_mode').value = data.config.vc_sl_mode || 'kerze';
+    document.getElementById('vc_sl_candle_rule').value = data.config.vc_sl_candle_rule || 'whole';
+    document.getElementById('vc_sl_buffer_pct').value = data.config.vc_sl_buffer_pct ?? 0;
+    document.getElementById('vc_sl_usd').value = data.config.vc_sl_usd ?? '';
+    document.getElementById('vc_tp_mode').value = data.config.vc_tp_mode || 'kreuzung';
+    document.getElementById('vc_tp_vwap').value = data.config.vc_tp_vwap || 'd';
+    document.getElementById('vc_tp_usd').value = data.config.vc_tp_usd ?? '';
+    document.getElementById('rlm_direction_mode').value = data.config.rlm_direction_mode || 'both';
+    document.getElementById('rlm_candle_type').value = data.config.rlm_candle_type || 'normal';
+    document.getElementById('rlm_trend_filter').value = data.config.rlm_trend_filter || 'off';
+    document.getElementById('rlm_trend_tf').value = data.config.rlm_trend_tf || '15m';
+    document.getElementById('rlm_trend_mode').value = data.config.rlm_trend_mode || 'swing';
+    document.getElementById('rlm_trend_ilen').value = data.config.rlm_trend_ilen ?? 4;
+    document.getElementById('rlm_trend_slen').value = data.config.rlm_trend_slen ?? 50;
+    document.getElementById('rlm_sl_mode').value = data.config.rlm_sl_mode || '';
+    document.getElementById('rlm_be_after_tp1').value = String(data.config.rlm_be_after_tp1 !== false);
+    document.getElementById('rlm_reverse').value = String(data.config.rlm_reverse !== false);
+
+    setResolutionField('rsi_resolution', data.config.rsi_resolution);
+    document.getElementById('rsi_length').value = data.config.rsi_length;
+    document.getElementById('rsi_oversold').value = data.config.rsi_oversold;
+    document.getElementById('rsi_overbought').value = data.config.rsi_overbought;
+    document.getElementById('rsi_direction_mode').value = data.config.rsi_direction_mode;
+    document.getElementById('rsi_sl_enabled').value = String(data.config.rsi_sl_enabled);
+    document.getElementById('rsi_sl_manual_usd').value = data.config.rsi_sl_manual_usd;
+    document.getElementById('rsi_be_enabled').value = String(data.config.rsi_be_enabled);
+    document.getElementById('rsi_be_trigger_usd').value = data.config.rsi_be_trigger_usd;
+    document.getElementById('rsi_tp_enabled').value = String(data.config.rsi_tp_enabled);
+    document.getElementById('rsi_tp_manual_usd').value = data.config.rsi_tp_manual_usd;
+    document.getElementById('rsi_sl_cooldown_seconds').value = data.config.rsi_sl_cooldown_seconds;
+    document.getElementById('rsi_supertrend_filter_enabled').value = String(data.config.rsi_supertrend_filter_enabled);
+    setResolutionField('rsi_supertrend_filter_resolution', data.config.rsi_supertrend_filter_resolution);
+    document.getElementById('rsi_supertrend_filter_multiplier').value = data.config.rsi_supertrend_filter_multiplier;
+    document.getElementById('rsi_supertrend_filter_atr_period').value = data.config.rsi_supertrend_filter_atr_period;
+    document.getElementById('rsi_adx_filter_enabled').value = String(data.config.rsi_adx_filter_enabled);
+    document.getElementById('rsi_adx_filter_length').value = data.config.rsi_adx_filter_length;
+    document.getElementById('rsi_adx_filter_threshold').value = data.config.rsi_adx_filter_threshold;
+    document.getElementById('rsi_adx_filter_directional').value = String(data.config.rsi_adx_filter_directional);
+    document.getElementById('rsi_macd_filter_enabled').value = String(data.config.rsi_macd_filter_enabled);
+    document.getElementById('rsi_macd_filter_fast').value = data.config.rsi_macd_filter_fast;
+    document.getElementById('rsi_macd_filter_slow').value = data.config.rsi_macd_filter_slow;
+    document.getElementById('rsi_macd_filter_signal').value = data.config.rsi_macd_filter_signal;
+
+    setResolutionField('mvwap_resolution', data.config.mvwap_resolution);
+    document.getElementById('mvwap_direction_mode').value = data.config.mvwap_direction_mode;
+    document.getElementById('mvwap_max_entries').value = data.config.mvwap_max_entries;
+    document.getElementById('mvwap_nachkauf_min_abstand_usd').value = data.config.mvwap_nachkauf_min_abstand_usd;
+    document.getElementById('mvwap_use_daily').value = String(data.config.mvwap_use_daily);
+    document.getElementById('mvwap_w_daily').value = data.config.mvwap_w_daily;
+    document.getElementById('mvwap_use_weekly').value = String(data.config.mvwap_use_weekly);
+    document.getElementById('mvwap_w_weekly').value = data.config.mvwap_w_weekly;
+    document.getElementById('mvwap_use_monthly').value = String(data.config.mvwap_use_monthly);
+    document.getElementById('mvwap_w_monthly').value = data.config.mvwap_w_monthly;
+    document.getElementById('mvwap_mf_source').value = data.config.mvwap_mf_source;
+    document.getElementById('mvwap_mf_length').value = data.config.mvwap_mf_length;
+    document.getElementById('mvwap_cmf_length').value = data.config.mvwap_cmf_length;
+    document.getElementById('mvwap_mf_weight').value = data.config.mvwap_mf_weight;
+    document.getElementById('mvwap_smooth_len').value = data.config.mvwap_smooth_len;
+    document.getElementById('mvwap_use_zone_filter').value = String(data.config.mvwap_use_zone_filter);
+    document.getElementById('mvwap_ob_level').value = data.config.mvwap_ob_level;
+    document.getElementById('mvwap_os_level').value = data.config.mvwap_os_level;
+    document.getElementById('mvwap_sl_enabled').value = String(data.config.mvwap_sl_enabled);
+    document.getElementById('mvwap_sl_manual_usd').value = data.config.mvwap_sl_manual_usd;
+    document.getElementById('mvwap_tp_enabled').value = String(data.config.mvwap_tp_enabled);
+    document.getElementById('mvwap_tp_manual_usd').value = data.config.mvwap_tp_manual_usd;
+    document.getElementById('mvwap_be_enabled').value = String(data.config.mvwap_be_enabled);
+    document.getElementById('mvwap_be_trigger_usd').value = data.config.mvwap_be_trigger_usd;
+    document.getElementById('mvwap_sl_cooldown_seconds').value = data.config.mvwap_sl_cooldown_seconds;
+    document.getElementById('mvwap_supertrend_filter_enabled').value = String(data.config.mvwap_supertrend_filter_enabled);
+    setResolutionField('mvwap_supertrend_filter_resolution', data.config.mvwap_supertrend_filter_resolution);
+    document.getElementById('mvwap_supertrend_filter_multiplier').value = data.config.mvwap_supertrend_filter_multiplier;
+    document.getElementById('mvwap_supertrend_filter_atr_period').value = data.config.mvwap_supertrend_filter_atr_period;
+    document.getElementById('mvwap_adx_filter_enabled').value = String(data.config.mvwap_adx_filter_enabled);
+    document.getElementById('mvwap_adx_filter_length').value = data.config.mvwap_adx_filter_length;
+    document.getElementById('mvwap_adx_filter_threshold').value = data.config.mvwap_adx_filter_threshold;
+    document.getElementById('mvwap_adx_filter_directional').value = String(data.config.mvwap_adx_filter_directional);
+    document.getElementById('mvwap_adx_filter_mode').value = data.config.mvwap_adx_filter_mode || 'require_trend';
+    document.getElementById('mvwap_macd_filter_enabled').value = String(data.config.mvwap_macd_filter_enabled);
+    document.getElementById('mvwap_macd_filter_fast').value = data.config.mvwap_macd_filter_fast;
+    document.getElementById('mvwap_macd_filter_slow').value = data.config.mvwap_macd_filter_slow;
+    document.getElementById('mvwap_macd_filter_signal').value = data.config.mvwap_macd_filter_signal;
+    document.getElementById('mvwap_rsi_filter_enabled').value = String(data.config.mvwap_rsi_filter_enabled);
+    document.getElementById('mvwap_rsi_filter_length').value = data.config.mvwap_rsi_filter_length;
+    document.getElementById('mvwap_rsi_filter_os_level').value = data.config.mvwap_rsi_filter_os_level;
+    document.getElementById('mvwap_rsi_filter_ob_level').value = data.config.mvwap_rsi_filter_ob_level;
+    document.getElementById('mvwap_cloud_filter_enabled').value = String(data.config.mvwap_cloud_filter_enabled);
+    document.getElementById('mvwap_cloud_filter_length').value = data.config.mvwap_cloud_filter_length;
+    document.getElementById('mvwap_cloud_filter_dev_mult').value = data.config.mvwap_cloud_filter_dev_mult;
+    document.getElementById('mvwap_cloud_filter_touch_arm').value = String(data.config.mvwap_cloud_filter_touch_arm);
+    setResolutionField('scalp_timeframe', data.config.scalp_timeframe);
+    document.getElementById('scalp_vwap_length').value = data.config.scalp_vwap_length;
+    document.getElementById('scalp_rsi_length').value = data.config.scalp_rsi_length;
+    document.getElementById('scalp_rsi_upper').value = data.config.scalp_rsi_upper;
+    document.getElementById('scalp_rsi_lower').value = data.config.scalp_rsi_lower;
+    document.getElementById('scalp_docht_threshold').value = data.config.scalp_docht_threshold;
+    document.getElementById('scalp_sl_mode').value = data.config.scalp_sl_mode;
+    document.getElementById('scalp_sl_pct').value = data.config.scalp_sl_pct;
+    document.getElementById('scalp_sl_usd').value = data.config.scalp_sl_usd;
+    document.getElementById('scalp_max_nachkauf').value = data.config.scalp_max_nachkauf;
+    document.getElementById('scalp_nachkauf_require_reversal').checked = !!data.config.scalp_nachkauf_require_reversal;
+    document.getElementById('scalp_tp1_require_profit').checked = !!data.config.scalp_tp1_require_profit;
+    document.getElementById('scalp_tp1_full_close').checked = !!data.config.scalp_tp1_full_close;
+    document.getElementById('scalp_halfway_sl_enabled').checked = !!data.config.scalp_halfway_sl_enabled;
+    document.getElementById('scalp_nachkauf_min_abstand_usd').value = data.config.scalp_nachkauf_min_abstand_usd;
+    document.getElementById('scalp_nachkauf_min_candles').value = data.config.scalp_nachkauf_min_candles;
+    document.getElementById('scalp_supertrend_filter_enabled').value = String(data.config.scalp_supertrend_filter_enabled);
+    setResolutionField('scalp_supertrend_filter_resolution', data.config.scalp_supertrend_filter_resolution);
+    document.getElementById('scalp_supertrend_filter_multiplier').value = data.config.scalp_supertrend_filter_multiplier;
+    document.getElementById('scalp_supertrend_filter_atr_period').value = data.config.scalp_supertrend_filter_atr_period;
+    document.getElementById('scalp_ms_trend_mode').value = data.config.scalp_ms_trend_mode || 'off';
+    document.getElementById('scalp_ms_trend_tf').value = data.config.scalp_ms_trend_tf || '5m';
+    document.getElementById('scalp_ms_trend_ilen').value = data.config.scalp_ms_trend_ilen || 4;
+    document.getElementById('scalp_ms_trend_slen').value = data.config.scalp_ms_trend_slen || 50;
+    setResolutionField('liq_timeframe', data.config.liq_timeframe);
+    document.getElementById('liq_body_max_pct').value = data.config.liq_body_max_pct;
+    document.getElementById('liq_max_levels').value = data.config.liq_max_levels;
+    document.getElementById('liq_side_filter').value = String(data.config.liq_side_filter);
+    document.getElementById('liq_dup_remove').value = String(data.config.liq_dup_remove);
+    document.getElementById('liq_dup_tolerance_usd').value = data.config.liq_dup_tolerance_usd;
+    document.getElementById('liq_entry_threshold_pct').value = data.config.liq_entry_threshold_pct;
+    document.getElementById('liq_tp1_pct').value = data.config.liq_tp1_pct;
+    document.getElementById('liq_tp2_pct').value = data.config.liq_tp2_pct;
+    document.getElementById('liq_sl_usd').value = data.config.liq_sl_usd;
+    document.getElementById('liq_tp1_require_profit').checked = !!data.config.liq_tp1_require_profit;
+    document.getElementById('liq_max_nachkauf').value = data.config.liq_max_nachkauf;
+    document.getElementById('liq_nachkauf_progress_pct').value = data.config.liq_nachkauf_progress_pct;
+    setResolutionField('wa_timeframe', data.config.wa_timeframe);
+    document.getElementById('wa_src').value = data.config.wa_src;
+    document.getElementById('wa_n1').value = data.config.wa_n1;
+    document.getElementById('wa_n2').value = data.config.wa_n2;
+    document.getElementById('wa_sig_len').value = data.config.wa_sig_len;
+    document.getElementById('wa_wave_scale').value = data.config.wa_wave_scale;
+    document.getElementById('wa_zone1').value = data.config.wa_zone1;
+    document.getElementById('wa_entry_mode').value = data.config.wa_entry_mode || 'zone';
+    document.getElementById('wa_level').value = data.config.wa_level ?? 10;
+    document.getElementById('wa_level_line').value = data.config.wa_level_line || 'signal';
+    document.getElementById('wa_cross_zero').value = data.config.wa_cross_zero || 'off';
+    document.getElementById('wa_signal_timing').value = data.config.wa_signal_timing || 'live';
+    document.getElementById('wa_tp_cross_zero').value = data.config.wa_tp_cross_zero || 'off';
+    document.getElementById('wa_max_nachkauf').value = data.config.wa_max_nachkauf;
+    document.getElementById('wa_nachkauf_min_pct').value = data.config.wa_nachkauf_min_pct ?? 0;
+    document.getElementById('wa_reverse_only_profit').checked = !!data.config.wa_reverse_only_profit;
+    document.getElementById('wa_tp_mode').value = data.config.wa_tp_mode;
+    document.getElementById('wa_ueberlauf_level').value = data.config.wa_ueberlauf_level;
+    document.getElementById('wa_tp_usd').value = data.config.wa_tp_usd;
+    document.getElementById('wa_sl_usd').value = data.config.wa_sl_usd;
+    document.getElementById('wa_open_every').value = data.config.wa_open_every ?? 1;
+    document.getElementById('wa_trend_mode').value = data.config.wa_trend_mode || 'off';
+    document.getElementById('wa_trend_tf').value = data.config.wa_trend_tf || '1h';
+    document.getElementById('wa_trend_ilen').value = data.config.wa_trend_ilen ?? 4;
+    document.getElementById('wa_trend_slen').value = data.config.wa_trend_slen ?? 50;
+    document.getElementById('ab_trend_filter_enabled').value = String(data.config.ab_trend_filter_enabled);
+    setResolutionField('ab_trend_filter_resolution', data.config.ab_trend_filter_resolution);
+    document.getElementById('ab_trend_filter_atr_period').value = data.config.ab_trend_filter_atr_period;
+    document.getElementById('ab_trend_filter_multiplier').value = data.config.ab_trend_filter_multiplier;
+    document.getElementById('ab_aso_filter_enabled').value = String(data.config.ab_aso_filter_enabled);
+    document.getElementById('ab_aso_filter_length').value = data.config.ab_aso_filter_length;
+    document.getElementById('ab_aso_filter_mode').value = data.config.ab_aso_filter_mode;
+    document.getElementById('ab_aso_filter_confirm_bars').value = data.config.ab_aso_filter_confirm_bars;
     document.getElementById('grid_direction_mode').value = data.config.grid_direction_mode;
     document.getElementById('grid_mode').value = data.config.grid_mode;
     document.getElementById('grid_step_pct').value = data.config.grid_step_pct;
@@ -5919,6 +5275,24 @@ async function refresh() {
     document.getElementById('gs_requote_ticks').value = data.config.gs_requote_ticks;
     document.getElementById('gs_max_open_orders').value = data.config.gs_max_open_orders;
     document.getElementById('gs_poll_seconds').value = data.config.gs_poll_seconds;
+    { const e=document.getElementById('gc_lower'); if(e && data.config.gc_lower!==undefined) e.value = data.config.gc_lower; }
+    { const e=document.getElementById('gc_upper'); if(e && data.config.gc_upper!==undefined) e.value = data.config.gc_upper; }
+    { const e=document.getElementById('gc_auto_pct'); if(e && data.config.gc_auto_pct!==undefined) e.value = data.config.gc_auto_pct; }
+    { const e=document.getElementById('gc_levels'); if(e && data.config.gc_levels!==undefined) e.value = data.config.gc_levels; }
+    { const e=document.getElementById('gc_size_usd'); if(e && data.config.gc_size_usd!==undefined) e.value = data.config.gc_size_usd; }
+    { const e=document.getElementById('gc_max_lots'); if(e && data.config.gc_max_lots!==undefined) e.value = data.config.gc_max_lots; }
+    { const e=document.getElementById('gc_open_each_side'); if(e && data.config.gc_open_each_side!==undefined) e.value = data.config.gc_open_each_side; }
+    { const e=document.getElementById('gc_exit_orders'); if(e && data.config.gc_exit_orders!==undefined) e.value = data.config.gc_exit_orders; }
+    { const e=document.getElementById('gc_stop_pct'); if(e && data.config.gc_stop_pct!==undefined) e.value = data.config.gc_stop_pct; }
+    { const e=document.getElementById('gc_poll_seconds'); if(e && data.config.gc_poll_seconds!==undefined) e.value = data.config.gc_poll_seconds; }
+    { const e=document.getElementById('gc_trend_mode'); if(e) e.value = data.config.gc_trend_mode || 'off'; }
+    { const e=document.getElementById('gc_trend_tf'); if(e) e.value = data.config.gc_trend_tf || '1h'; }
+    { const e=document.getElementById('gc_trend_ilen'); if(e) e.value = data.config.gc_trend_ilen ?? 4; }
+    { const e=document.getElementById('gc_trend_slen'); if(e) e.value = data.config.gc_trend_slen ?? 50; }
+    { const e=document.getElementById('gc_trend_on_flip'); if(e) e.value = data.config.gc_trend_on_flip || 'wait'; }
+    { const e=document.getElementById('gc_direction'); if(e && data.config.gc_direction!==undefined) e.value = data.config.gc_direction; }
+    { const e=document.getElementById('gc_spacing'); if(e && data.config.gc_spacing!==undefined) e.value = data.config.gc_spacing; }
+
     document.getElementById('grid_anchor_follow_pct').value = data.config.grid_anchor_follow_pct;
     document.getElementById('dry_run').value = String(data.config.dry_run);
     document.getElementById('binance_market_type').value = data.config.binance_market_type;
@@ -5943,6 +5317,7 @@ async function refresh() {
     document.getElementById('g2_size_multiplier').value = data.config.g2_size_multiplier;
     document.getElementById('g2_deviation_multiplier').value = data.config.g2_deviation_multiplier;
   }
+  data.config = realConfig;
   updateModeFields();
 
   document.getElementById('abs-distances').innerText =
@@ -5960,62 +5335,47 @@ async function refresh() {
   if (gl.next_entry_long) datasets.push({ label:'Entry Long ab', data: Array(n).fill(gl.next_entry_long), borderColor:'#4ade80', borderDash:[2,2], pointRadius:0, borderWidth:1 });
   if (gl.next_entry_short) datasets.push({ label:'Entry Short ab', data: Array(n).fill(gl.next_entry_short), borderColor:'#f87171', borderDash:[2,2], pointRadius:0, borderWidth:1 });
 
-  if (data.config.entry_mode === 'obi_scalp' && prices.length > 5) {
-    datasets.push({ label:'EMA 9', data: computeEMA(prices, 9), borderColor:'#fbbf24', pointRadius:0, borderWidth:1.5 });
-    datasets.push({ label:'EMA 21', data: computeEMA(prices, 21), borderColor:'#a78bfa', pointRadius:0, borderWidth:1.5 });
-  }
-
-  if (!priceChart) {
-    priceChart = new Chart(document.getElementById('priceChart'), {
-      type: 'line',
-      data: { labels, datasets },
-      options: { responsive:true, maintainAspectRatio:false, animation:false, scales:{ x:{ display:false }, y:{ ticks:{color:'#9ca3af'} } }, plugins:{legend:{labels:{color:'#e5e7eb'}}} }
-    });
-  } else {
-    priceChart.data.labels = labels;
-    priceChart.data.datasets = datasets;
-    priceChart.update('none');
-  }
-
-  try {
-    const isObiLike = data.config.entry_mode === 'obi_scalp' || data.config.entry_mode === 'oms_scalp';
-    const rawHist = data.config.entry_mode === 'oms_scalp' ? (data.oms_obi_history || []) : (data.obi_history || []);
-    const threshold = data.config.entry_mode === 'oms_scalp' ? data.config.oms_obi_threshold : data.config.obi_threshold;
-    if (isObiLike && rawHist.length > 0) {
-      const obiHist = rawHist;
-      const obiLabels = obiHist.map(p => new Date(p.ts).toLocaleTimeString());
-      const obiDatasets = [
-        { label:'Schnell', data: obiHist.map(p=>p.fast), borderColor:'#f87171', pointRadius:0, borderWidth:2 },
-        { label:'Mittel', data: obiHist.map(p=>p.medium), borderColor:'#fbbf24', pointRadius:0, borderWidth:2 },
-        { label:'Langsam', data: obiHist.map(p=>p.slow), borderColor:'#60a5fa', pointRadius:0, borderWidth:2 },
-        { label:'Schwelle +', data: Array(obiHist.length).fill(threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
-        { label:'Schwelle -', data: Array(obiHist.length).fill(-threshold), borderColor:'#4ade80', borderDash:[4,4], pointRadius:0, borderWidth:1 },
-        { label:'Null', data: Array(obiHist.length).fill(0), borderColor:'#4b5563', pointRadius:0, borderWidth:1 },
-      ];
-      const obiCanvas = document.getElementById('obiChart');
-      if (obiCanvas) {
-        if (!obiChart) {
-          obiChart = new Chart(obiCanvas, {
-            type: 'line',
-            data: { labels: obiLabels, datasets: obiDatasets },
-            options: {
-              responsive:true, maintainAspectRatio:false, animation:false,
-              scales: { x:{ display:false }, y:{ min:-1, max:1, ticks:{color:'#9ca3af'} } },
-              plugins:{legend:{labels:{color:'#e5e7eb', boxWidth:10, font:{size:10}}}}
-            }
-          });
-          // Falls die Kachel beim ersten Erstellen noch unsichtbar war (display:none),
-          // rechnet Chart.js sonst dauerhaft mit Groesse 0 - erzwingt Neuberechnung
-          requestAnimationFrame(() => obiChart && obiChart.resize());
-        } else {
-          obiChart.data.labels = obiLabels;
-          obiChart.data.datasets = obiDatasets;
-          obiChart.update('none');
-        }
+  // Scalp VWAP OBV RSI: Mittellinie (=TP1) + obere/untere TP2-Baender als Verlauf ueber die Zeit
+  // einblenden (nicht als starre Linie wie bei Grid oben, weil sich die Baender mit jeder neu
+  // geschlossenen Kerze verschieben), plus die tatsaechlichen Einstiege als Marker im Kursverlauf.
+  if (data.config.entry_mode === 'scalp_vwap_obv_rsi') {
+    const bandHist = (data.scalp_band_history || []).slice().sort((a, b) => a.ts - b.ts);
+    const lookupBand = (ts, key) => {
+      let val = null;
+      for (const b of bandHist) {
+        if (b.ts <= ts) val = b[key]; else break;
       }
-    }
-  } catch (e) {
-    console.error('OBI-Chart-Fehler:', e);
+      return val;
+    };
+    datasets.push({ label:'Mittellinie (TP1)', data: hist.map(p => lookupBand(p.ts, 'mean')), borderColor:'#facc15', borderDash:[5,3], pointRadius:0, borderWidth:1.5, spanGaps:true });
+    datasets.push({ label:'TP2 oben', data: hist.map(p => lookupBand(p.ts, 'upper')), borderColor:'#4ade80', borderDash:[3,3], pointRadius:0, borderWidth:1, spanGaps:true });
+    datasets.push({ label:'TP2 unten', data: hist.map(p => lookupBand(p.ts, 'lower')), borderColor:'#f87171', borderDash:[3,3], pointRadius:0, borderWidth:1, spanGaps:true });
+
+    // Trigger-Preis (Binance-Live, siehe scalp_poll_loop) als eigene Linie - WEICHT vom Lighter-
+    // Preis oben ab und ist der Preis, an dem SL/TP tatsaechlich ausgeloest werden. Ohne diese
+    // Linie sieht ein Trigger im Chart faelschlich aus wie "Preis hat die Linie nicht beruehrt".
+    const scalpPriceHist = (data.scalp_price_history || []).slice().sort((a, b) => a.ts - b.ts);
+    const lookupPrice = (ts) => {
+      let val = null;
+      for (const p of scalpPriceHist) {
+        if (p.ts <= ts) val = p.price; else break;
+      }
+      return val;
+    };
+    datasets.push({ label:'Preis (Binance-Live, Trigger)', data: hist.map(p => lookupPrice(p.ts)), borderColor:'#c084fc', pointRadius:0, borderWidth:1.5, spanGaps:true });
+
+    const scalpEntries = data.current_position_entries || [];
+    const entryArr = Array(n).fill(null);
+    scalpEntries.forEach(e => {
+      const eTs = new Date(e.time).getTime();
+      let bestIdx = -1, bestDiff = Infinity;
+      hist.forEach((p, i) => {
+        const d = Math.abs(p.ts - eTs);
+        if (d < bestDiff) { bestDiff = d; bestIdx = i; }
+      });
+      if (bestIdx >= 0) entryArr[bestIdx] = e.price;
+    });
+    datasets.push({ label:'Einstiege', data: entryArr, borderColor:'#60a5fa', backgroundColor:'#facc15', pointRadius:6, pointStyle:'triangle', showLine:false });
   }
 
   try {
@@ -6059,18 +5419,6 @@ async function refresh() {
   }
 
   try {
-    document.getElementById('pocket-margin').innerText = `$${data.config.margin} (${data.config.leverage}x)`;
-    document.getElementById('pocket-position').innerText = data.position ? data.position.toUpperCase() : 'flach';
-    document.getElementById('pocket-entry').innerText = data.avg_entry_price ?? '-';
-    const pnlEl = document.getElementById('pocket-pnl');
-    pnlEl.innerText = data.unrealized_pnl_usd ?? '-';
-    pnlEl.className = (data.unrealized_pnl_usd ?? 0) >= 0 ? 'value green' : 'value red';
-    renderMiniCandles(hist);
-  } catch (e) {
-    console.error('Pocket-Trading-Fehler:', e);
-  }
-
-  try {
     const entries = (data.current_position_entries || []).slice().reverse();
     document.getElementById('entries-debug').innerText = entries.length ? `(${entries.length} bisher)` : '';
     const fmtTime2 = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
@@ -6103,390 +5451,293 @@ function buildConfigPayload() {
     margin: parseFloat(document.getElementById('margin').value),
     leverage: parseInt(document.getElementById('leverage').value),
     entry_mode: document.getElementById('entry_mode').value,
-    obi_threshold: parseFloat(document.getElementById('obi_threshold').value),
-    obi_mode: document.getElementById('obi_mode').value,
-    obi_long_threshold: parseFloat(document.getElementById('obi_long_threshold').value),
-    obi_short_threshold: parseFloat(document.getElementById('obi_short_threshold').value),
-    obi_reversal_min_bounce: parseFloat(document.getElementById('obi_reversal_min_bounce').value),
-    obi_instant_reset_ratio: parseFloat(document.getElementById('obi_instant_reset_ratio').value),
-    obi_window_fast_seconds: parseFloat(document.getElementById('obi_window_fast_seconds').value),
-    obi_window_medium_seconds: parseFloat(document.getElementById('obi_window_medium_seconds').value),
-    obi_window_slow_seconds: parseFloat(document.getElementById('obi_window_slow_seconds').value),
-    obi_levels: parseInt(document.getElementById('obi_levels').value),
-    obi_depth_weighting_enabled: document.getElementById('obi_depth_weighting_enabled').value === 'true',
-    obi_use_median: document.getElementById('obi_use_median').value === 'true',
-    obi_min_liquidity: parseFloat(document.getElementById('obi_min_liquidity').value),
-    obi_breakeven_enabled: document.getElementById('obi_breakeven_enabled').value === 'true',
-    obi_breakeven_trigger_ratio: parseFloat(document.getElementById('obi_breakeven_trigger_ratio').value),
-    obi_breakeven_lock_usd: parseFloat(document.getElementById('obi_breakeven_lock_usd').value),
-    obi_breakeven_lock_pct: parseFloat(document.getElementById('obi_breakeven_lock_pct').value),
-    obi_tp_sl_mode: document.getElementById('obi_tp_sl_mode').value,
-    obi_tp_pct: parseFloat(document.getElementById('obi_tp_pct').value),
-    obi_sl_pct: parseFloat(document.getElementById('obi_sl_pct').value),
-    obi_tp_usd: parseFloat(document.getElementById('obi_tp_usd').value),
-    obi_sl_usd: parseFloat(document.getElementById('obi_sl_usd').value),
-    obi_cooldown_seconds: parseFloat(document.getElementById('obi_cooldown_seconds').value),
-    obi_trend_filter: document.getElementById('obi_trend_filter').value === 'true',
-    obi_trend_ema_length: parseInt(document.getElementById('obi_trend_ema_length').value),
-    obi_spread_filter_enabled: document.getElementById('obi_spread_filter_enabled').value === 'true',
-    obi_max_spread_pct: parseFloat(document.getElementById('obi_max_spread_pct').value),
-    obi_vol_filter_enabled: document.getElementById('obi_vol_filter_enabled').value === 'true',
-    obi_vol_window_seconds: parseFloat(document.getElementById('obi_vol_window_seconds').value),
-    obi_vol_min_pct: parseFloat(document.getElementById('obi_vol_min_pct').value),
-    obi_vol_max_pct: parseFloat(document.getElementById('obi_vol_max_pct').value),
-    oms_levels: parseInt(document.getElementById('oms_levels').value),
-    oms_obi_threshold: parseFloat(document.getElementById('oms_obi_threshold').value),
-    oms_window_fast_seconds: parseFloat(document.getElementById('oms_window_fast_seconds').value),
-    oms_window_medium_seconds: parseFloat(document.getElementById('oms_window_medium_seconds').value),
-    oms_window_slow_seconds: parseFloat(document.getElementById('oms_window_slow_seconds').value),
-    oms_cvd_confirm_enabled: document.getElementById('oms_cvd_confirm_enabled').value === 'true',
-    oms_cvd_window_seconds: parseFloat(document.getElementById('oms_cvd_window_seconds').value),
-    oms_cvd_min_ratio: parseFloat(document.getElementById('oms_cvd_min_ratio').value),
-    oms_funding_filter_enabled: document.getElementById('oms_funding_filter_enabled').value === 'true',
-    oms_funding_max_abs: parseFloat(document.getElementById('oms_funding_max_abs').value),
-    oms_cooldown_seconds: parseFloat(document.getElementById('oms_cooldown_seconds').value),
-    oms_tp1_usd: parseFloat(document.getElementById('oms_tp1_usd').value),
-    oms_exit_mode: document.getElementById('oms_exit_mode').value,
-    oms_tp1_close_pct: parseFloat(document.getElementById('oms_tp1_close_pct').value),
-    oms_sl_usd: parseFloat(document.getElementById('oms_sl_usd').value),
-    oms_trail_distance_usd: parseFloat(document.getElementById('oms_trail_distance_usd').value),
-    oms_dca_enabled: document.getElementById('oms_dca_enabled').value === 'true',
-    oms_dca_max_entries: parseInt(document.getElementById('oms_dca_max_entries').value),
-    oms_dca_size_fraction: parseFloat(document.getElementById('oms_dca_size_fraction').value),
-    oms_dca_min_pullback_usd: parseFloat(document.getElementById('oms_dca_min_pullback_usd').value),
-    oms_reverse_on_signal: document.getElementById('oms_reverse_on_signal').value === 'true',
-    oms_rsi_filter_enabled: document.getElementById('oms_rsi_filter_enabled').value === 'true',
-    oms_rsi_resolution: document.getElementById('oms_rsi_resolution').value,
-    oms_rsi_period: parseInt(document.getElementById('oms_rsi_period').value),
-    oms_rsi_midline: parseFloat(document.getElementById('oms_rsi_midline').value),
-    oms_oi_filter_enabled: document.getElementById('oms_oi_filter_enabled').value === 'true',
-    oms_oi_window_seconds: parseFloat(document.getElementById('oms_oi_window_seconds').value),
-    oms_oi_min_change_pct: parseFloat(document.getElementById('oms_oi_min_change_pct').value),
-    oms_oi_min_score: parseFloat(document.getElementById('oms_oi_min_score').value),
-    oms_liq_filter_enabled: document.getElementById('oms_liq_filter_enabled').value === 'true',
-    oms_liq_window_seconds: parseFloat(document.getElementById('oms_liq_window_seconds').value),
-    oms_liq_min_ratio: parseFloat(document.getElementById('oms_liq_min_ratio').value),
-    fib_resolution: document.getElementById('fib_resolution').value,
-    fib_lookback_candles: parseInt(document.getElementById('fib_lookback_candles').value),
-    fib_entry1_level: parseFloat(document.getElementById('fib_entry1_level').value),
-    fib_entry2_level: parseFloat(document.getElementById('fib_entry2_level').value),
-    fib_tp1_level: parseFloat(document.getElementById('fib_tp1_level').value),
-    fib_tp1_close_pct: parseFloat(document.getElementById('fib_tp1_close_pct').value),
-    fib_tp2_level: parseFloat(document.getElementById('fib_tp2_level').value),
-    fib_sl_level: parseFloat(document.getElementById('fib_sl_level').value),
-    fib_cooldown_seconds: parseFloat(document.getElementById('fib_cooldown_seconds').value),
-    ht_resolution: getResolutionField('ht_resolution'),
-    ht_amplitude: parseInt(document.getElementById('ht_amplitude').value),
-    ht_channel_deviation: parseFloat(document.getElementById('ht_channel_deviation').value),
-    ht_base_risk_mult: parseFloat(document.getElementById('ht_base_risk_mult').value),
-    ht_entry_trigger: document.getElementById('ht_entry_trigger').value,
-    ht_exit_trigger: document.getElementById('ht_exit_trigger').value,
-    ht_invert_direction: document.getElementById('ht_invert_direction').value === 'true',
-    ht_tp_enabled: document.getElementById('ht_tp_enabled').value === 'true',
-    ht_tp1_close_pct: parseFloat(document.getElementById('ht_tp1_close_pct').value),
-    ht_tp2_close_pct: parseFloat(document.getElementById('ht_tp2_close_pct').value),
-    ht_sl_enabled: document.getElementById('ht_sl_enabled').value === 'true',
-    ht_sl_cooldown_seconds: parseFloat(document.getElementById('ht_sl_cooldown_seconds').value),
-    da_resolution: getResolutionField('da_resolution'),
-    da_atr_period: parseInt(document.getElementById('da_atr_period').value),
-    da_sensitivity: parseFloat(document.getElementById('da_sensitivity').value),
-    da_sma_period: parseInt(document.getElementById('da_sma_period').value),
-    da_ema_trend_period: parseInt(document.getElementById('da_ema_trend_period').value),
-    da_signal_mode: document.getElementById('da_signal_mode').value,
-    da_entry_trigger: document.getElementById('da_entry_trigger').value,
-    da_exit_trigger: document.getElementById('da_exit_trigger').value,
-    da_invert_direction: document.getElementById('da_invert_direction').value === 'true',
-    da_sl_enabled: document.getElementById('da_sl_enabled').value === 'true',
-    da_tp_enabled: document.getElementById('da_tp_enabled').value === 'true',
-    da_risk_atr_period: parseInt(document.getElementById('da_risk_atr_period').value),
-    da_risk_mult: parseFloat(document.getElementById('da_risk_mult').value),
-    da_tp_rr: parseFloat(document.getElementById('da_tp_rr').value),
-    da_sl_cooldown_seconds: parseFloat(document.getElementById('da_sl_cooldown_seconds').value),
-    da_use_heikin_ashi: document.getElementById('da_use_heikin_ashi').value === 'true',
-    es_resolution: getResolutionField('es_resolution'),
-    es_atr_period: parseInt(document.getElementById('es_atr_period').value),
-    es_auto_sensitivity: document.getElementById('es_auto_sensitivity').value === 'true',
-    es_sensitivity: parseFloat(document.getElementById('es_sensitivity').value),
-    es_vol_period: parseInt(document.getElementById('es_vol_period').value),
-    es_vol_ma_len: parseInt(document.getElementById('es_vol_ma_len').value),
-    es_entry_trigger: document.getElementById('es_entry_trigger').value,
-    es_exit_trigger: document.getElementById('es_exit_trigger').value,
-    es_invert_direction: document.getElementById('es_invert_direction').value === 'true',
-    es_risk_atr_period: parseInt(document.getElementById('es_risk_atr_period').value),
-    es_risk_mult: parseFloat(document.getElementById('es_risk_mult').value),
-    es_tp1_close_pct: parseFloat(document.getElementById('es_tp1_close_pct').value),
-    es_tp2_close_pct: parseFloat(document.getElementById('es_tp2_close_pct').value),
-    es_tp1_rr: parseFloat(document.getElementById('es_tp1_rr').value),
-    es_tp2_rr: parseFloat(document.getElementById('es_tp2_rr').value),
-    es_tp3_rr: parseFloat(document.getElementById('es_tp3_rr').value),
-    es_sl_cooldown_seconds: parseFloat(document.getElementById('es_sl_cooldown_seconds').value),
-    es_reenter_on_flip: document.getElementById('es_reenter_on_flip').value === 'true',
-    es_sl_enabled: document.getElementById('es_sl_enabled').value === 'true',
-    es_sl_mode: document.getElementById('es_sl_mode').value,
-    es_sl_manual_usd: parseFloat(document.getElementById('es_sl_manual_usd').value),
-    es_tp_mode: document.getElementById('es_tp_mode').value,
-    es_tp_manual_usd: parseFloat(document.getElementById('es_tp_manual_usd').value),
-    es_breakeven_pct_enabled: document.getElementById('es_breakeven_pct_enabled').value === 'true',
-    es_breakeven_trigger_pct: parseFloat(document.getElementById('es_breakeven_trigger_pct').value),
-    es_tp_enabled: document.getElementById('es_tp_enabled').value === 'true',
-    cp_resolution: getResolutionField('cp_resolution'),
-    cp_signal_source: document.getElementById('cp_signal_source').value,
-    cp_three_line_strict: document.getElementById('cp_three_line_strict').value === 'true',
-    cp_engulfing_strict: document.getElementById('cp_engulfing_strict').value === 'true',
-    cp_direction_mode: document.getElementById('cp_direction_mode').value,
-    cp_flip_exit_enabled: document.getElementById('cp_flip_exit_enabled').value === 'true',
-    cp_risk_atr_period: parseInt(document.getElementById('cp_risk_atr_period').value),
-    cp_risk_mult: parseFloat(document.getElementById('cp_risk_mult').value),
-    cp_tp_rr: parseFloat(document.getElementById('cp_tp_rr').value),
-    cp_sl_cooldown_seconds: parseFloat(document.getElementById('cp_sl_cooldown_seconds').value),
-    cp_sl_enabled: document.getElementById('cp_sl_enabled').value === 'true',
-    cp_sl_mode: document.getElementById('cp_sl_mode').value,
-    cp_sl_manual_usd: parseFloat(document.getElementById('cp_sl_manual_usd').value),
-    cp_tp_enabled: document.getElementById('cp_tp_enabled').value === 'true',
-    cp_tp_mode: document.getElementById('cp_tp_mode').value,
-    cp_tp_manual_usd: parseFloat(document.getElementById('cp_tp_manual_usd').value),
-    cp_breakeven_enabled: document.getElementById('cp_breakeven_enabled').value === 'true',
-    cp_breakeven_trigger_mult: parseFloat(document.getElementById('cp_breakeven_trigger_mult').value),
-    mo7_resolution: document.getElementById('mo7_resolution').value,
-    mo7_entry_mode: document.getElementById('mo7_entry_mode').value,
-    mo7_buy_threshold: parseFloat(document.getElementById('mo7_buy_threshold').value),
-    mo7_sell_threshold: parseFloat(document.getElementById('mo7_sell_threshold').value),
-    mo7_sum_low: parseFloat(document.getElementById('mo7_sum_low').value),
-    mo7_sum_high: parseFloat(document.getElementById('mo7_sum_high').value),
-    mo7_trend_threshold: parseFloat(document.getElementById('mo7_trend_threshold').value),
-    mo7_trend_deadband: parseFloat(document.getElementById('mo7_trend_deadband').value),
-    mo7_direction_mode: document.getElementById('mo7_direction_mode').value,
-    mo7_flip_exit_enabled: document.getElementById('mo7_flip_exit_enabled').value === 'true',
-    mo7_sl_enabled: document.getElementById('mo7_sl_enabled').value === 'true',
-    mo7_sl_manual_usd: parseFloat(document.getElementById('mo7_sl_manual_usd').value),
-    mo7_tp_enabled: document.getElementById('mo7_tp_enabled').value === 'true',
-    mo7_tp_manual_usd: parseFloat(document.getElementById('mo7_tp_manual_usd').value),
-    mo7_sl_cooldown_seconds: parseFloat(document.getElementById('mo7_sl_cooldown_seconds').value),
-    utb_resolution: getResolutionField('utb_resolution'),
-    utb_atr_period: parseInt(document.getElementById('utb_atr_period').value),
-    utb_sensitivity: parseFloat(document.getElementById('utb_sensitivity').value),
-    utb_heikin_ashi: document.getElementById('utb_heikin_ashi').value === 'true',
-    utb_hull_period: parseInt(document.getElementById('utb_hull_period').value),
-    utb_flip_trigger: document.getElementById('utb_flip_trigger').value,
-    utb_direction_mode: document.getElementById('utb_direction_mode').value,
-    utb_instant_trigger_enabled: document.getElementById('utb_instant_trigger_enabled').value === 'true',
-    utb_sl_enabled: document.getElementById('utb_sl_enabled').value === 'true',
-    utb_sl_manual_usd: parseFloat(document.getElementById('utb_sl_manual_usd').value),
-    utb_sl_cooldown_seconds: parseFloat(document.getElementById('utb_sl_cooldown_seconds').value),
-    utb_tp_enabled: document.getElementById('utb_tp_enabled').value === 'true',
-    utb_tp_manual_usd: parseFloat(document.getElementById('utb_tp_manual_usd').value),
-    utb_trail_tp_enabled: document.getElementById('utb_trail_tp_enabled').value === 'true',
-    utb_trail_tp_activation_pct: parseFloat(document.getElementById('utb_trail_tp_activation_pct').value),
-    utb_trail_tp_step_pct: parseFloat(document.getElementById('utb_trail_tp_step_pct').value),
-    utb_mtf_filter_enabled: document.getElementById('utb_mtf_filter_enabled').value === 'true',
-    utb_mtf_tf1: getResolutionField('utb_mtf_tf1'),
-    utb_mtf_tf2: getResolutionField('utb_mtf_tf2'),
-    utb_mtf_tf3: getResolutionField('utb_mtf_tf3'),
-    utb_mtf_long_threshold: parseFloat(document.getElementById('utb_mtf_long_threshold').value),
-    utb_mtf_short_threshold: parseFloat(document.getElementById('utb_mtf_short_threshold').value),
-    utb_mtf_fast_len: parseInt(document.getElementById('utb_mtf_fast_len').value),
-    utb_mtf_slow_len: parseInt(document.getElementById('utb_mtf_slow_len').value),
-    utb_mtf_atr_len: parseInt(document.getElementById('utb_mtf_atr_len').value),
-    utb_zscore_filter_enabled: document.getElementById('utb_zscore_filter_enabled').value === 'true',
-    utb_zscore_resolution: getResolutionField('utb_zscore_resolution'),
-    utb_zscore_lookback: parseInt(document.getElementById('utb_zscore_lookback').value),
-    utb_zscore_smooth: parseInt(document.getElementById('utb_zscore_smooth').value),
-    utb_rsi_filter_enabled: document.getElementById('utb_rsi_filter_enabled').value === 'true',
-    utb_rsi_length: parseInt(document.getElementById('utb_rsi_length').value),
-    utb_rsi_midline: parseFloat(document.getElementById('utb_rsi_midline').value),
-    utb_adx_filter_enabled: document.getElementById('utb_adx_filter_enabled').value === 'true',
-    utb_adx_length: parseInt(document.getElementById('utb_adx_length').value),
-    utb_adx_threshold: parseFloat(document.getElementById('utb_adx_threshold').value),
-    wtc_resolution: getResolutionField('wtc_resolution'),
-    wtc_channel_len: parseInt(document.getElementById('wtc_channel_len').value),
-    wtc_average_len: parseInt(document.getElementById('wtc_average_len').value),
-    wtc_ma_len: parseInt(document.getElementById('wtc_ma_len').value),
-    wtc_require_zone: document.getElementById('wtc_require_zone').value === 'true',
-    wtc_os_level: parseFloat(document.getElementById('wtc_os_level').value),
-    wtc_ob_level: parseFloat(document.getElementById('wtc_ob_level').value),
-    wtc_direction_mode: document.getElementById('wtc_direction_mode').value,
-    wtc_always_in_market: document.getElementById('wtc_always_in_market').value === 'true',
-    wtc_flip_exit_enabled: document.getElementById('wtc_flip_exit_enabled').value === 'true',
-    wtc_sl_enabled: document.getElementById('wtc_sl_enabled').value === 'true',
-    wtc_sl_manual_usd: parseFloat(document.getElementById('wtc_sl_manual_usd').value),
-    wtc_tp_enabled: document.getElementById('wtc_tp_enabled').value === 'true',
-    wtc_tp_manual_usd: parseFloat(document.getElementById('wtc_tp_manual_usd').value),
-    wtc_sl_cooldown_seconds: parseFloat(document.getElementById('wtc_sl_cooldown_seconds').value),
-    pk_resolution: getResolutionField('pk_resolution'),
-    pk_sensitivity: parseFloat(document.getElementById('pk_sensitivity').value),
-    pk_atr_period: parseInt(document.getElementById('pk_atr_period').value),
-    pk_sma_period: parseInt(document.getElementById('pk_sma_period').value),
-    pk_direction_mode: document.getElementById('pk_direction_mode').value,
-    pk_exit_mode: document.getElementById('pk_exit_mode').value,
-    pk_sl_enabled: document.getElementById('pk_sl_enabled').value === 'true',
-    pk_sl_manual_usd: parseFloat(document.getElementById('pk_sl_manual_usd').value),
-    pk_tp_enabled: document.getElementById('pk_tp_enabled').value === 'true',
-    pk_tp_manual_usd: parseFloat(document.getElementById('pk_tp_manual_usd').value),
-    pk_sl_cooldown_seconds: parseFloat(document.getElementById('pk_sl_cooldown_seconds').value),
-    pk_trailing_enabled: document.getElementById('pk_trailing_enabled').value === 'true',
-    pk_trailing_activation_pct: parseFloat(document.getElementById('pk_trailing_activation_pct').value),
-    pk_trailing_step_pct: parseFloat(document.getElementById('pk_trailing_step_pct').value),
-    pk_mtf_filter_enabled: document.getElementById('pk_mtf_filter_enabled').value === 'true',
-    pk_mtf_tf1: getResolutionField('pk_mtf_tf1'),
-    pk_mtf_tf2: getResolutionField('pk_mtf_tf2'),
-    pk_mtf_tf3: getResolutionField('pk_mtf_tf3'),
-    pk_mtf_long_threshold: parseFloat(document.getElementById('pk_mtf_long_threshold').value),
-    pk_mtf_short_threshold: parseFloat(document.getElementById('pk_mtf_short_threshold').value),
-    pk_mtf_fast_len: parseInt(document.getElementById('pk_mtf_fast_len').value),
-    pk_mtf_slow_len: parseInt(document.getElementById('pk_mtf_slow_len').value),
-    pk_mtf_atr_len: parseInt(document.getElementById('pk_mtf_atr_len').value),
-    fr_resolution: getResolutionField('fr_resolution'),
-    fr_periods: parseInt(document.getElementById('fr_periods').value),
-    fr_direction_mode: document.getElementById('fr_direction_mode').value,
-    fr_invert_direction: document.getElementById('fr_invert_direction').value === 'true',
-    fr_zscore_filter_enabled: document.getElementById('fr_zscore_filter_enabled').value === 'true',
-    fr_zscore_resolution: getResolutionField('fr_zscore_resolution'),
-    fr_zscore_lookback: parseInt(document.getElementById('fr_zscore_lookback').value),
-    fr_zscore_smooth: parseInt(document.getElementById('fr_zscore_smooth').value),
-    fr_sl_enabled: document.getElementById('fr_sl_enabled').value === 'true',
-    fr_sl_manual_usd: parseFloat(document.getElementById('fr_sl_manual_usd').value),
-    fr_sl_cooldown_seconds: parseFloat(document.getElementById('fr_sl_cooldown_seconds').value),
-    fr_tp_enabled: document.getElementById('fr_tp_enabled').value === 'true',
-    fr_tp_manual_usd: parseFloat(document.getElementById('fr_tp_manual_usd').value),
-    fr_adx_filter_enabled: document.getElementById('fr_adx_filter_enabled').value === 'true',
-    fr_adx_resolution: getResolutionField('fr_adx_resolution'),
-    fr_adx_length: parseInt(document.getElementById('fr_adx_length').value),
-    fr_adx_threshold: parseFloat(document.getElementById('fr_adx_threshold').value),
-    fr_adx_invert_enabled: document.getElementById('fr_adx_invert_enabled').value === 'true',
-    fr_mtf_filter_enabled: document.getElementById('fr_mtf_filter_enabled').value === 'true',
-    fr_mtf_tf1: getResolutionField('fr_mtf_tf1'),
-    fr_mtf_long_threshold: parseFloat(document.getElementById('fr_mtf_long_threshold').value),
-    fr_mtf_short_threshold: parseFloat(document.getElementById('fr_mtf_short_threshold').value),
-    fr_mtf_fast_len: parseInt(document.getElementById('fr_mtf_fast_len').value),
-    fr_mtf_slow_len: parseInt(document.getElementById('fr_mtf_slow_len').value),
-    fr_mtf_atr_len: parseInt(document.getElementById('fr_mtf_atr_len').value),
-    fr_flatten_on_block_enabled: document.getElementById('fr_flatten_on_block_enabled').value === 'true',
-    fr_dca_enabled: document.getElementById('fr_dca_enabled').value === 'true',
-    fr_dca_max_entries: parseInt(document.getElementById('fr_dca_max_entries').value),
-    fr_dca_step_usd: parseFloat(document.getElementById('fr_dca_step_usd').value),
-    cd_resolution: getResolutionField('cd_resolution'),
-    cd_threshold: parseFloat(document.getElementById('cd_threshold').value),
-    cd_rejection_mult: parseFloat(document.getElementById('cd_rejection_mult').value),
-    cd_direction_mode: document.getElementById('cd_direction_mode').value,
-    cd_invert_direction: document.getElementById('cd_invert_direction').value === 'true',
-    cd_zscore_filter_enabled: document.getElementById('cd_zscore_filter_enabled').value === 'true',
-    cd_zscore_resolution: getResolutionField('cd_zscore_resolution'),
-    cd_zscore_lookback: parseInt(document.getElementById('cd_zscore_lookback').value),
-    cd_zscore_smooth: parseInt(document.getElementById('cd_zscore_smooth').value),
-    cd_rsi_filter_enabled: document.getElementById('cd_rsi_filter_enabled').value === 'true',
-    cd_rsi_length: parseInt(document.getElementById('cd_rsi_length').value),
-    cd_rsi_midline: parseFloat(document.getElementById('cd_rsi_midline').value),
-    cd_adx_filter_enabled: document.getElementById('cd_adx_filter_enabled').value === 'true',
-    cd_adx_length: parseInt(document.getElementById('cd_adx_length').value),
-    cd_adx_threshold: parseFloat(document.getElementById('cd_adx_threshold').value),
-    cd_sl_enabled: document.getElementById('cd_sl_enabled').value === 'true',
-    cd_sl_manual_usd: parseFloat(document.getElementById('cd_sl_manual_usd').value),
-    cd_sl_cooldown_seconds: parseFloat(document.getElementById('cd_sl_cooldown_seconds').value),
-    cd_tp_enabled: document.getElementById('cd_tp_enabled').value === 'true',
-    cd_tp_manual_usd: parseFloat(document.getElementById('cd_tp_manual_usd').value),
-    cd_use_heikin_ashi: document.getElementById('cd_use_heikin_ashi').value === 'true',
-    rf_resolution: getResolutionField('rf_resolution'),
-    rf_period: parseInt(document.getElementById('rf_period').value),
-    rf_qty: parseFloat(document.getElementById('rf_qty').value),
-    rf_direction_mode: document.getElementById('rf_direction_mode').value,
-    rf_zscore_filter_enabled: document.getElementById('rf_zscore_filter_enabled').value === 'true',
-    rf_zscore_resolution: getResolutionField('rf_zscore_resolution'),
-    rf_zscore_lookback: parseInt(document.getElementById('rf_zscore_lookback').value),
-    rf_zscore_smooth: parseInt(document.getElementById('rf_zscore_smooth').value),
-    rf_rsi_filter_enabled: document.getElementById('rf_rsi_filter_enabled').value === 'true',
-    rf_rsi_length: parseInt(document.getElementById('rf_rsi_length').value),
-    rf_rsi_midline: parseFloat(document.getElementById('rf_rsi_midline').value),
-    rf_adx_filter_enabled: document.getElementById('rf_adx_filter_enabled').value === 'true',
-    rf_adx_length: parseInt(document.getElementById('rf_adx_length').value),
-    rf_adx_threshold: parseFloat(document.getElementById('rf_adx_threshold').value),
-    rf_sl_enabled: document.getElementById('rf_sl_enabled').value === 'true',
-    rf_sl_manual_usd: parseFloat(document.getElementById('rf_sl_manual_usd').value),
-    rf_sl_cooldown_seconds: parseFloat(document.getElementById('rf_sl_cooldown_seconds').value),
-    rf_tp_enabled: document.getElementById('rf_tp_enabled').value === 'true',
-    rf_tp_manual_usd: parseFloat(document.getElementById('rf_tp_manual_usd').value),
-    mv_resolution: document.getElementById('mv_resolution').value,
-    mv_fast_len: parseInt(document.getElementById('mv_fast_len').value),
-    mv_slow_len: parseInt(document.getElementById('mv_slow_len').value),
-    mv_guide_len: parseInt(document.getElementById('mv_guide_len').value),
-    mv_atr_len: parseInt(document.getElementById('mv_atr_len').value),
-    mv_strong_mult: parseFloat(document.getElementById('mv_strong_mult').value),
-    mv_use_volume_enabled: document.getElementById('mv_use_volume_enabled').value === 'true',
-    mv_vol_len: parseInt(document.getElementById('mv_vol_len').value),
-    mv_vol_mult: parseFloat(document.getElementById('mv_vol_mult').value),
-    mv_direction_mode: document.getElementById('mv_direction_mode').value,
-    mv_invert_direction: document.getElementById('mv_invert_direction').value === 'true',
-    mv_sl_mode: document.getElementById('mv_sl_mode').value,
-    mv_sl_manual_usd: parseFloat(document.getElementById('mv_sl_manual_usd').value),
-    mv_sl_cooldown_seconds: parseFloat(document.getElementById('mv_sl_cooldown_seconds').value),
-    mv_tp_enabled: document.getElementById('mv_tp_enabled').value === 'true',
-    mv_tp_manual_usd: parseFloat(document.getElementById('mv_tp_manual_usd').value),
-    sr_resolution: getResolutionField('sr_resolution'),
-    sr_st_atr_period: parseInt(document.getElementById('sr_st_atr_period').value),
-    sr_st_multiplier: parseFloat(document.getElementById('sr_st_multiplier').value),
-    sr_rsi_period: parseInt(document.getElementById('sr_rsi_period').value),
-    sr_rsi_midline: parseFloat(document.getElementById('sr_rsi_midline').value),
-    sr_rsi_mode: document.getElementById('sr_rsi_mode').value,
-    sr_rsi_overbought: parseFloat(document.getElementById('sr_rsi_overbought').value),
-    sr_rsi_oversold: parseFloat(document.getElementById('sr_rsi_oversold').value),
-    sr_ema_filter_enabled: document.getElementById('sr_ema_filter_enabled').value === 'true',
-    sr_ema_length: parseInt(document.getElementById('sr_ema_length').value),
-    sr_ema_resolution: getResolutionField('sr_ema_resolution'),
-    sr_direction_mode: document.getElementById('sr_direction_mode').value,
-    sr_adx_filter_enabled: document.getElementById('sr_adx_filter_enabled').value === 'true',
-    sr_adx_length: parseInt(document.getElementById('sr_adx_length').value),
-    sr_adx_resolution: getResolutionField('sr_adx_resolution'),
-    sr_adx_threshold: parseFloat(document.getElementById('sr_adx_threshold').value),
-    sr_adx_invert_enabled: document.getElementById('sr_adx_invert_enabled').value === 'true',
-    sr_immediate_signal_enabled: document.getElementById('sr_immediate_signal_enabled').value === 'true',
-    sr_zscore_filter_enabled: document.getElementById('sr_zscore_filter_enabled').value === 'true',
-    sr_zscore_lookback: parseInt(document.getElementById('sr_zscore_lookback').value),
-    sr_zscore_smooth: parseInt(document.getElementById('sr_zscore_smooth').value),
-    sr_mo7_filter_enabled: document.getElementById('sr_mo7_filter_enabled').value === 'true',
-    sr_mo7_mode: document.getElementById('sr_mo7_mode').value,
-    sr_mo7_buy_threshold: parseFloat(document.getElementById('sr_mo7_buy_threshold').value),
-    sr_mo7_sell_threshold: parseFloat(document.getElementById('sr_mo7_sell_threshold').value),
-    sr_sl_tp_mode: document.getElementById('sr_sl_tp_mode').value,
-    sr_sl_enabled: document.getElementById('sr_sl_enabled').value === 'true',
-    sr_sl_manual_usd: parseFloat(document.getElementById('sr_sl_manual_usd').value),
-    sr_sl_cooldown_seconds: parseFloat(document.getElementById('sr_sl_cooldown_seconds').value),
-    sr_vwap_dev_filter_enabled: document.getElementById('sr_vwap_dev_filter_enabled').value === 'true',
-    sr_vwap_dev_length: parseInt(document.getElementById('sr_vwap_dev_length').value),
-    sr_vwap_dev_mult: parseFloat(document.getElementById('sr_vwap_dev_mult').value),
-    sr_vwap_midline_filter_enabled: document.getElementById('sr_vwap_midline_filter_enabled').value === 'true',
-    sr_vwap_midline_mult: parseFloat(document.getElementById('sr_vwap_midline_mult').value),
-    sr_vwap_midline_breakeven_enabled: document.getElementById('sr_vwap_midline_breakeven_enabled').value === 'true',
-    sr_vwap_sl_mult: parseFloat(document.getElementById('sr_vwap_sl_mult').value),
-    sr_vwap_tp_rr: parseFloat(document.getElementById('sr_vwap_tp_rr').value),
-    sr_st_tp_rr: parseFloat(document.getElementById('sr_st_tp_rr').value),
-    sr_st_sl_buffer_usd: parseFloat(document.getElementById('sr_st_sl_buffer_usd').value),
-    sr_tp_enabled: document.getElementById('sr_tp_enabled').value === 'true',
-    sr_tp_manual_usd: parseFloat(document.getElementById('sr_tp_manual_usd').value),
-    hvd_resolution: getResolutionField('hvd_resolution'),
-    hvd_hull_length: parseInt(document.getElementById('hvd_hull_length').value),
-    hvd_vwap_length: parseInt(document.getElementById('hvd_vwap_length').value),
-    hvd_vwap_dev_mult: parseFloat(document.getElementById('hvd_vwap_dev_mult').value),
-    hvd_rsi_length: parseInt(document.getElementById('hvd_rsi_length').value),
-    hvd_rsi_overbought: parseFloat(document.getElementById('hvd_rsi_overbought').value),
-    hvd_rsi_oversold: parseFloat(document.getElementById('hvd_rsi_oversold').value),
-    hvd_adx_length: parseInt(document.getElementById('hvd_adx_length').value),
-    hvd_direction_mode: document.getElementById('hvd_direction_mode').value,
-    hvd_atr_period: parseInt(document.getElementById('hvd_atr_period').value),
-    hvd_atr_min_mult: parseFloat(document.getElementById('hvd_atr_min_mult').value),
-    hvd_risk_reward: parseFloat(document.getElementById('hvd_risk_reward').value),
-    hvd_sl_cooldown_seconds: parseFloat(document.getElementById('hvd_sl_cooldown_seconds').value),
-    hvd_immediate_signal_enabled: document.getElementById('hvd_immediate_signal_enabled').value === 'true',
-    hvd_flip_exit_enabled: document.getElementById('hvd_flip_exit_enabled').value === 'true',
-    hvd_touch_arm_enabled: document.getElementById('hvd_touch_arm_enabled').value === 'true',
-    hvd_arm_flip_exit_enabled: document.getElementById('hvd_arm_flip_exit_enabled').value === 'true',
-    hvd_adx_filter_enabled: document.getElementById('hvd_adx_filter_enabled').value === 'true',
-    hvd_adx_filter_length: parseInt(document.getElementById('hvd_adx_filter_length').value),
-    hvd_adx_filter_resolution: getResolutionField('hvd_adx_filter_resolution'),
-    hvd_adx_filter_threshold: parseFloat(document.getElementById('hvd_adx_filter_threshold').value),
-    hvd_trend_filter_enabled: document.getElementById('hvd_trend_filter_enabled').value === 'true',
-    hvd_trend_filter_resolution: document.getElementById('hvd_trend_filter_resolution').value,
-    hvd_trend_filter_atr_period: parseInt(document.getElementById('hvd_trend_filter_atr_period').value),
-    hvd_trend_filter_multiplier: parseFloat(document.getElementById('hvd_trend_filter_multiplier').value),
-    hvd_trend_filter_signal_window_candles: parseInt(document.getElementById('hvd_trend_filter_signal_window_candles').value),
+    trade_account: document.getElementById('trade_account').value,
+    ab_preset: document.getElementById('ab_preset').value,
+    ab_resolution: getResolutionField('ab_resolution'),
+    ab_lookback: parseInt(document.getElementById('ab_lookback').value),
+    ab_fast_len: parseInt(document.getElementById('ab_fast_len').value),
+    ab_slow_len: parseInt(document.getElementById('ab_slow_len').value),
+    ab_rsi_len: parseInt(document.getElementById('ab_rsi_len').value),
+    ab_rsi_gate: parseFloat(document.getElementById('ab_rsi_gate').value),
+    ab_use_volume: document.getElementById('ab_use_volume').value === 'true',
+    ab_vol_mult: parseFloat(document.getElementById('ab_vol_mult').value),
+    ab_direction_mode: document.getElementById('ab_direction_mode').value,
+    ab_exit_mode: document.getElementById('ab_exit_mode').value,
+    ab_sl_enabled: document.getElementById('ab_sl_enabled').value === 'true',
+    ab_be_enabled: document.getElementById('ab_be_enabled').value === 'true',
+    ab_be_trigger_usd: parseFloat(document.getElementById('ab_be_trigger_usd').value),
+    ab_atr_len: parseInt(document.getElementById('ab_atr_len').value),
+    ab_atr_mult: parseFloat(document.getElementById('ab_atr_mult').value),
+    ab_r1: parseFloat(document.getElementById('ab_r1').value),
+    ab_r2: parseFloat(document.getElementById('ab_r2').value),
+    ab_r3: parseFloat(document.getElementById('ab_r3').value),
+    ab_tp1_close_pct: parseFloat(document.getElementById('ab_tp1_close_pct').value),
+    ab_tp2_close_pct: parseFloat(document.getElementById('ab_tp2_close_pct').value),
+    ab_sl_to_breakeven_on_tp1: document.getElementById('ab_sl_to_breakeven_on_tp1').value === 'true',
+    ab_sl_to_tp1_on_tp2: document.getElementById('ab_sl_to_tp1_on_tp2').value === 'true',
+    ab_sl_manual_usd: parseFloat(document.getElementById('ab_sl_manual_usd').value),
+    ab_sl_cooldown_seconds: parseFloat(document.getElementById('ab_sl_cooldown_seconds').value),
+    ab_use_heikin_ashi: document.getElementById('ab_use_heikin_ashi').value === 'true',
+    er_resolution: getResolutionField('er_resolution'),
+    er_ema_len: parseInt(document.getElementById('er_ema_len').value),
+    er_rsi_len: parseInt(document.getElementById('er_rsi_len').value),
+    er_rsi_mid: parseFloat(document.getElementById('er_rsi_mid').value),
+    er_invert: document.getElementById('er_invert').value === 'true',
+    er_direction_mode: document.getElementById('er_direction_mode').value,
+    er_exit_mode: document.getElementById('er_exit_mode').value,
+    er_sl_lookback: parseInt(document.getElementById('er_sl_lookback').value),
+    er_sl_buffer_pct: parseFloat(document.getElementById('er_sl_buffer_pct').value),
+    er_tp_mode: document.getElementById('er_tp_mode').value,
+    er_tp_step_usd: parseFloat(document.getElementById('er_tp_step_usd').value),
+    er_tp_step_atr_mult: parseFloat(document.getElementById('er_tp_step_atr_mult').value),
+    er_atr_len: parseInt(document.getElementById('er_atr_len').value),
+    er_tp1_close_pct: parseFloat(document.getElementById('er_tp1_close_pct').value),
+    er_tp2_close_pct: parseFloat(document.getElementById('er_tp2_close_pct').value),
+    er_sl_to_breakeven_on_tp1: document.getElementById('er_sl_to_breakeven_on_tp1').value === 'true',
+    er_sl_to_tp1_on_tp2: document.getElementById('er_sl_to_tp1_on_tp2').value === 'true',
+    er_sl_cooldown_seconds: parseFloat(document.getElementById('er_sl_cooldown_seconds').value),
+    mt_resolution: getResolutionField('mt_resolution'),
+    mt_use_b1: document.getElementById('mt_use_b1').value === 'true',
+    mt_block1: document.getElementById('mt_block1').value,
+    mt_use_b2: document.getElementById('mt_use_b2').value === 'true',
+    mt_block2: document.getElementById('mt_block2').value,
+    mt_use_b3: document.getElementById('mt_use_b3').value === 'true',
+    mt_block3: document.getElementById('mt_block3').value,
+    mt_n1: parseInt(document.getElementById('mt_n1').value),
+    mt_n2: parseInt(document.getElementById('mt_n2').value),
+    mt_sig: parseInt(document.getElementById('mt_sig').value),
+    mt_scale: parseFloat(document.getElementById('mt_scale').value),
+    mt_src: document.getElementById('mt_src').value,
+    mt_spread_full: parseFloat(document.getElementById('mt_spread_full').value),
+    mt_signal_mode: document.getElementById('mt_signal_mode').value,
+    mt_confirm_bars: parseInt(document.getElementById('mt_confirm_bars').value) || 1,
+    mt_red_below: parseFloat(document.getElementById('mt_red_below').value),
+    mt_green_above: parseFloat(document.getElementById('mt_green_above').value),
+    mt_buy_level: parseFloat(document.getElementById('mt_buy_level').value),
+    mt_sell_level: parseFloat(document.getElementById('mt_sell_level').value),
+    mt_lookback: parseInt(document.getElementById('mt_lookback').value),
+    mt_use_accel: document.getElementById('mt_use_accel').value === 'true',
+    mt_accel: parseFloat(document.getElementById('mt_accel').value),
+    mt_force_change: document.getElementById('mt_force_change').value === 'true',
+    mt_direction_mode: document.getElementById('mt_direction_mode').value,
+    mt_exit_mode: document.getElementById('mt_exit_mode').value,
+    mt_sl_usd: parseFloat(document.getElementById('mt_sl_usd').value) || 0,
+    mt_tp_usd: parseFloat(document.getElementById('mt_tp_usd').value) || 0,
+    mt_tp1_close_pct: parseFloat(document.getElementById('mt_tp1_close_pct').value),
+    mt_tp2_close_pct: parseFloat(document.getElementById('mt_tp2_close_pct').value),
+    mt_sl_to_breakeven_on_tp1: document.getElementById('mt_sl_to_breakeven_on_tp1').value === 'true',
+    mt_sl_to_tp1_on_tp2: document.getElementById('mt_sl_to_tp1_on_tp2').value === 'true',
+    mt_sl_cooldown_seconds: parseFloat(document.getElementById('mt_sl_cooldown_seconds').value),
+
+    pm_resolution: getResolutionField('pm_resolution'),
+    pm_len: parseInt(document.getElementById('pm_len').value) || 45,
+    pm_long: parseFloat(document.getElementById('pm_long').value),
+    pm_short: parseFloat(document.getElementById('pm_short').value),
+    pm_direction_mode: document.getElementById('pm_direction_mode').value,
+    pm_sl_usd: parseFloat(document.getElementById('pm_sl_usd').value) || 0,
+    pm_tp_usd: parseFloat(document.getElementById('pm_tp_usd').value) || 0,
+    pm_trail_usd: parseFloat(document.getElementById('pm_trail_usd').value) || 0,
+    pm_sl_cooldown_seconds: parseFloat(document.getElementById('pm_sl_cooldown_seconds').value),
+    dv_resolution: getResolutionField('dv_resolution'),
+    dv_sens: parseFloat(document.getElementById('dv_sens').value) || 7,
+    dv_direction_mode: document.getElementById('dv_direction_mode').value,
+    dv_exit_mode: document.getElementById('dv_exit_mode').value,
+    dv_sl_usd: parseFloat(document.getElementById('dv_sl_usd').value) || 0,
+    dv_tp_usd: parseFloat(document.getElementById('dv_tp_usd').value) || 0,
+    dv_trail_usd: parseFloat(document.getElementById('dv_trail_usd').value) || 0,
+    dv_sl_cooldown_seconds: parseFloat(document.getElementById('dv_sl_cooldown_seconds').value),
+    tfl_resolution: document.getElementById('tfl_resolution').value,
+    tfl_trend_tf: document.getElementById('tfl_trend_tf').value,
+    tfl_trend_mode: document.getElementById('tfl_trend_mode').value,
+    tfl_trend_ilen: parseInt(document.getElementById('tfl_trend_ilen').value) || 4,
+    tfl_trend_slen: parseInt(document.getElementById('tfl_trend_slen').value) || 50,
+    tfl_direction_mode: document.getElementById('tfl_direction_mode').value,
+    tfl_tp_usd: parseFloat(document.getElementById('tfl_tp_usd').value) || 0,
+    tfl_sl_usd: parseFloat(document.getElementById('tfl_sl_usd').value) || 0,
+    tfl_max_entries: parseInt(document.getElementById('tfl_max_entries').value) || 0,
+    tfl_flip_mode: document.getElementById('tfl_flip_mode').value,
+    rlm_swing_len: parseInt(document.getElementById('rlm_swing_len').value) || 0,
+    rlm_level_tol: parseFloat(document.getElementById('rlm_level_tol').value) || 0,
+    rlm_min_touches: parseInt(document.getElementById('rlm_min_touches').value) || 0,
+    rlm_half_life: parseInt(document.getElementById('rlm_half_life').value) || 0,
+    rlm_levels_per_side: parseInt(document.getElementById('rlm_levels_per_side').value) || 0,
+    rlm_min_score: parseFloat(document.getElementById('rlm_min_score').value) || 0,
+    rlm_reject_clv: parseFloat(document.getElementById('rlm_reject_clv').value) || 0,
+    rlm_cooldown: parseInt(document.getElementById('rlm_cooldown').value) || 0,
+    rlm_sl_usd: parseFloat(document.getElementById('rlm_sl_usd').value) || 0,
+    rlm_tp_usd: parseFloat(document.getElementById('rlm_tp_usd').value) || 0,
+    rlm_atr_len: parseInt(document.getElementById('rlm_atr_len').value) || 0,
+    rlm_tp1_r: parseFloat(document.getElementById('rlm_tp1_r').value) || 0,
+    rlm_tp2_r: parseFloat(document.getElementById('rlm_tp2_r').value) || 0,
+    rlm_tp3_r: parseFloat(document.getElementById('rlm_tp3_r').value) || 0,
+    rlm_tp1_close_pct: parseFloat(document.getElementById('rlm_tp1_close_pct').value) || 0,
+    rlm_tp2_close_pct: parseFloat(document.getElementById('rlm_tp2_close_pct').value) || 0,
+    rlm_resolution: document.getElementById('rlm_resolution').value,
+    vc_resolution: document.getElementById('vc_resolution').value,
+    vc_ema_len: parseInt(document.getElementById('vc_ema_len').value) || 9,
+    vc_use_day: document.getElementById('vc_use_day').checked,
+    vc_use_week: document.getElementById('vc_use_week').checked,
+    vc_use_month: document.getElementById('vc_use_month').checked,
+    vc_skip_first: document.getElementById('vc_skip_first').checked,
+    vc_direction_mode: document.getElementById('vc_direction_mode').value,
+    vc_sl_mode: document.getElementById('vc_sl_mode').value,
+    vc_sl_candle_rule: document.getElementById('vc_sl_candle_rule').value,
+    vc_sl_buffer_pct: parseFloat(document.getElementById('vc_sl_buffer_pct').value) || 0,
+    vc_sl_usd: parseFloat(document.getElementById('vc_sl_usd').value) || 0,
+    vc_tp_mode: document.getElementById('vc_tp_mode').value,
+    vc_tp_vwap: document.getElementById('vc_tp_vwap').value,
+    vc_tp_usd: parseFloat(document.getElementById('vc_tp_usd').value) || 0,
+    rlm_direction_mode: document.getElementById('rlm_direction_mode').value,
+    rlm_candle_type: document.getElementById('rlm_candle_type').value,
+    rlm_trend_filter: document.getElementById('rlm_trend_filter').value,
+    rlm_trend_tf: document.getElementById('rlm_trend_tf').value,
+    rlm_trend_mode: document.getElementById('rlm_trend_mode').value,
+    rlm_trend_ilen: parseInt(document.getElementById('rlm_trend_ilen').value) || 4,
+    rlm_trend_slen: parseInt(document.getElementById('rlm_trend_slen').value) || 50,
+    rlm_sl_mode: document.getElementById('rlm_sl_mode').value,
+    rlm_be_after_tp1: document.getElementById('rlm_be_after_tp1').value === 'true',
+    rlm_reverse: document.getElementById('rlm_reverse').value === 'true',
+    rsi_resolution: getResolutionField('rsi_resolution'),
+    rsi_length: parseInt(document.getElementById('rsi_length').value),
+    rsi_oversold: parseFloat(document.getElementById('rsi_oversold').value),
+    rsi_overbought: parseFloat(document.getElementById('rsi_overbought').value),
+    rsi_direction_mode: document.getElementById('rsi_direction_mode').value,
+    rsi_sl_enabled: document.getElementById('rsi_sl_enabled').value === 'true',
+    rsi_sl_manual_usd: parseFloat(document.getElementById('rsi_sl_manual_usd').value),
+    rsi_be_enabled: document.getElementById('rsi_be_enabled').value === 'true',
+    rsi_be_trigger_usd: parseFloat(document.getElementById('rsi_be_trigger_usd').value),
+    rsi_tp_enabled: document.getElementById('rsi_tp_enabled').value === 'true',
+    rsi_tp_manual_usd: parseFloat(document.getElementById('rsi_tp_manual_usd').value),
+    rsi_sl_cooldown_seconds: parseFloat(document.getElementById('rsi_sl_cooldown_seconds').value),
+    rsi_supertrend_filter_enabled: document.getElementById('rsi_supertrend_filter_enabled').value === 'true',
+    rsi_supertrend_filter_resolution: getResolutionField('rsi_supertrend_filter_resolution'),
+    rsi_supertrend_filter_multiplier: parseFloat(document.getElementById('rsi_supertrend_filter_multiplier').value),
+    rsi_supertrend_filter_atr_period: parseInt(document.getElementById('rsi_supertrend_filter_atr_period').value),
+    rsi_adx_filter_enabled: document.getElementById('rsi_adx_filter_enabled').value === 'true',
+    rsi_adx_filter_length: parseInt(document.getElementById('rsi_adx_filter_length').value),
+    rsi_adx_filter_threshold: parseFloat(document.getElementById('rsi_adx_filter_threshold').value),
+    rsi_adx_filter_directional: document.getElementById('rsi_adx_filter_directional').value === 'true',
+    rsi_macd_filter_enabled: document.getElementById('rsi_macd_filter_enabled').value === 'true',
+    rsi_macd_filter_fast: parseInt(document.getElementById('rsi_macd_filter_fast').value),
+    rsi_macd_filter_slow: parseInt(document.getElementById('rsi_macd_filter_slow').value),
+    rsi_macd_filter_signal: parseInt(document.getElementById('rsi_macd_filter_signal').value),
+
+    mvwap_resolution: getResolutionField('mvwap_resolution'),
+    mvwap_direction_mode: document.getElementById('mvwap_direction_mode').value,
+    mvwap_max_entries: parseInt(document.getElementById('mvwap_max_entries').value),
+    mvwap_nachkauf_min_abstand_usd: parseFloat(document.getElementById('mvwap_nachkauf_min_abstand_usd').value),
+    mvwap_use_daily: document.getElementById('mvwap_use_daily').value === 'true',
+    mvwap_w_daily: parseFloat(document.getElementById('mvwap_w_daily').value),
+    mvwap_use_weekly: document.getElementById('mvwap_use_weekly').value === 'true',
+    mvwap_w_weekly: parseFloat(document.getElementById('mvwap_w_weekly').value),
+    mvwap_use_monthly: document.getElementById('mvwap_use_monthly').value === 'true',
+    mvwap_w_monthly: parseFloat(document.getElementById('mvwap_w_monthly').value),
+    mvwap_mf_source: document.getElementById('mvwap_mf_source').value,
+    mvwap_mf_length: parseInt(document.getElementById('mvwap_mf_length').value),
+    mvwap_cmf_length: parseInt(document.getElementById('mvwap_cmf_length').value),
+    mvwap_mf_weight: parseFloat(document.getElementById('mvwap_mf_weight').value),
+    mvwap_smooth_len: parseInt(document.getElementById('mvwap_smooth_len').value),
+    mvwap_use_zone_filter: document.getElementById('mvwap_use_zone_filter').value === 'true',
+    mvwap_ob_level: parseFloat(document.getElementById('mvwap_ob_level').value),
+    mvwap_os_level: parseFloat(document.getElementById('mvwap_os_level').value),
+    mvwap_sl_enabled: document.getElementById('mvwap_sl_enabled').value === 'true',
+    mvwap_sl_manual_usd: parseFloat(document.getElementById('mvwap_sl_manual_usd').value),
+    mvwap_tp_enabled: document.getElementById('mvwap_tp_enabled').value === 'true',
+    mvwap_tp_manual_usd: parseFloat(document.getElementById('mvwap_tp_manual_usd').value),
+    mvwap_be_enabled: document.getElementById('mvwap_be_enabled').value === 'true',
+    mvwap_be_trigger_usd: parseFloat(document.getElementById('mvwap_be_trigger_usd').value),
+    mvwap_sl_cooldown_seconds: parseFloat(document.getElementById('mvwap_sl_cooldown_seconds').value),
+    mvwap_supertrend_filter_enabled: document.getElementById('mvwap_supertrend_filter_enabled').value === 'true',
+    mvwap_supertrend_filter_resolution: getResolutionField('mvwap_supertrend_filter_resolution'),
+    mvwap_supertrend_filter_multiplier: parseFloat(document.getElementById('mvwap_supertrend_filter_multiplier').value),
+    mvwap_supertrend_filter_atr_period: parseInt(document.getElementById('mvwap_supertrend_filter_atr_period').value),
+    mvwap_adx_filter_enabled: document.getElementById('mvwap_adx_filter_enabled').value === 'true',
+    mvwap_adx_filter_length: parseInt(document.getElementById('mvwap_adx_filter_length').value),
+    mvwap_adx_filter_threshold: parseFloat(document.getElementById('mvwap_adx_filter_threshold').value),
+    mvwap_adx_filter_directional: document.getElementById('mvwap_adx_filter_directional').value === 'true',
+    mvwap_adx_filter_mode: document.getElementById('mvwap_adx_filter_mode').value,
+    mvwap_macd_filter_enabled: document.getElementById('mvwap_macd_filter_enabled').value === 'true',
+    mvwap_macd_filter_fast: parseInt(document.getElementById('mvwap_macd_filter_fast').value),
+    mvwap_macd_filter_slow: parseInt(document.getElementById('mvwap_macd_filter_slow').value),
+    mvwap_macd_filter_signal: parseInt(document.getElementById('mvwap_macd_filter_signal').value),
+    mvwap_rsi_filter_enabled: document.getElementById('mvwap_rsi_filter_enabled').value === 'true',
+    mvwap_rsi_filter_length: parseInt(document.getElementById('mvwap_rsi_filter_length').value),
+    mvwap_rsi_filter_os_level: parseFloat(document.getElementById('mvwap_rsi_filter_os_level').value),
+    mvwap_rsi_filter_ob_level: parseFloat(document.getElementById('mvwap_rsi_filter_ob_level').value),
+    mvwap_cloud_filter_enabled: document.getElementById('mvwap_cloud_filter_enabled').value === 'true',
+    mvwap_cloud_filter_length: parseInt(document.getElementById('mvwap_cloud_filter_length').value),
+    mvwap_cloud_filter_dev_mult: parseFloat(document.getElementById('mvwap_cloud_filter_dev_mult').value),
+    mvwap_cloud_filter_touch_arm: document.getElementById('mvwap_cloud_filter_touch_arm').value === 'true',
+    scalp_timeframe: getResolutionField('scalp_timeframe'),
+    scalp_vwap_length: parseInt(document.getElementById('scalp_vwap_length').value),
+    scalp_rsi_length: parseInt(document.getElementById('scalp_rsi_length').value),
+    scalp_rsi_upper: parseFloat(document.getElementById('scalp_rsi_upper').value),
+    scalp_rsi_lower: parseFloat(document.getElementById('scalp_rsi_lower').value),
+    scalp_docht_threshold: parseFloat(document.getElementById('scalp_docht_threshold').value),
+    scalp_sl_mode: document.getElementById('scalp_sl_mode').value,
+    scalp_sl_pct: parseFloat(document.getElementById('scalp_sl_pct').value),
+    scalp_sl_usd: parseFloat(document.getElementById('scalp_sl_usd').value),
+    scalp_max_nachkauf: parseInt(document.getElementById('scalp_max_nachkauf').value),
+    scalp_nachkauf_require_reversal: document.getElementById('scalp_nachkauf_require_reversal').checked,
+    scalp_tp1_require_profit: document.getElementById('scalp_tp1_require_profit').checked,
+    scalp_tp1_full_close: document.getElementById('scalp_tp1_full_close').checked,
+    scalp_halfway_sl_enabled: document.getElementById('scalp_halfway_sl_enabled').checked,
+    scalp_nachkauf_min_abstand_usd: parseFloat(document.getElementById('scalp_nachkauf_min_abstand_usd').value),
+    scalp_nachkauf_min_candles: parseInt(document.getElementById('scalp_nachkauf_min_candles').value),
+    scalp_supertrend_filter_enabled: document.getElementById('scalp_supertrend_filter_enabled').value === 'true',
+    scalp_supertrend_filter_resolution: getResolutionField('scalp_supertrend_filter_resolution'),
+    scalp_supertrend_filter_multiplier: parseFloat(document.getElementById('scalp_supertrend_filter_multiplier').value),
+    scalp_supertrend_filter_atr_period: parseInt(document.getElementById('scalp_supertrend_filter_atr_period').value),
+    scalp_ms_trend_mode: document.getElementById('scalp_ms_trend_mode').value,
+    scalp_ms_trend_tf: document.getElementById('scalp_ms_trend_tf').value,
+    scalp_ms_trend_ilen: parseInt(document.getElementById('scalp_ms_trend_ilen').value) || 4,
+    scalp_ms_trend_slen: parseInt(document.getElementById('scalp_ms_trend_slen').value) || 50,
+    liq_timeframe: getResolutionField('liq_timeframe'),
+    liq_body_max_pct: parseFloat(document.getElementById('liq_body_max_pct').value),
+    liq_max_levels: parseInt(document.getElementById('liq_max_levels').value),
+    liq_side_filter: document.getElementById('liq_side_filter').value === 'true',
+    liq_dup_remove: document.getElementById('liq_dup_remove').value === 'true',
+    liq_dup_tolerance_usd: parseFloat(document.getElementById('liq_dup_tolerance_usd').value),
+    liq_entry_threshold_pct: parseFloat(document.getElementById('liq_entry_threshold_pct').value),
+    liq_tp1_pct: parseFloat(document.getElementById('liq_tp1_pct').value),
+    liq_tp2_pct: parseFloat(document.getElementById('liq_tp2_pct').value),
+    liq_sl_usd: parseFloat(document.getElementById('liq_sl_usd').value),
+    liq_tp1_require_profit: document.getElementById('liq_tp1_require_profit').checked,
+    liq_max_nachkauf: parseInt(document.getElementById('liq_max_nachkauf').value),
+    liq_nachkauf_progress_pct: parseFloat(document.getElementById('liq_nachkauf_progress_pct').value),
+    wa_timeframe: getResolutionField('wa_timeframe'),
+    wa_src: document.getElementById('wa_src').value,
+    wa_n1: parseInt(document.getElementById('wa_n1').value),
+    wa_n2: parseInt(document.getElementById('wa_n2').value),
+    wa_sig_len: parseInt(document.getElementById('wa_sig_len').value),
+    wa_wave_scale: parseFloat(document.getElementById('wa_wave_scale').value),
+    wa_zone1: parseFloat(document.getElementById('wa_zone1').value),
+    wa_entry_mode: document.getElementById('wa_entry_mode').value,
+    wa_level: parseFloat(document.getElementById('wa_level').value),
+    wa_level_line: document.getElementById('wa_level_line').value,
+    wa_cross_zero: document.getElementById('wa_cross_zero').value,
+    wa_signal_timing: document.getElementById('wa_signal_timing').value,
+    wa_tp_cross_zero: document.getElementById('wa_tp_cross_zero').value,
+    wa_max_nachkauf: parseInt(document.getElementById('wa_max_nachkauf').value),
+    wa_nachkauf_min_pct: parseFloat(document.getElementById('wa_nachkauf_min_pct').value) || 0,
+    wa_reverse_only_profit: document.getElementById('wa_reverse_only_profit').checked,
+    wa_tp_mode: document.getElementById('wa_tp_mode').value,
+    wa_ueberlauf_level: parseFloat(document.getElementById('wa_ueberlauf_level').value),
+    wa_tp_usd: parseFloat(document.getElementById('wa_tp_usd').value),
+    wa_sl_usd: parseFloat(document.getElementById('wa_sl_usd').value),
+    wa_open_every: Math.max(1, parseInt(document.getElementById('wa_open_every').value) || 1),
+    wa_trend_mode: document.getElementById('wa_trend_mode').value,
+    wa_trend_tf: document.getElementById('wa_trend_tf').value,
+    wa_trend_ilen: parseInt(document.getElementById('wa_trend_ilen').value) || 4,
+    wa_trend_slen: parseInt(document.getElementById('wa_trend_slen').value) || 50,
+    ab_trend_filter_enabled: document.getElementById('ab_trend_filter_enabled').value === 'true',
+    ab_trend_filter_resolution: getResolutionField('ab_trend_filter_resolution'),
+    ab_trend_filter_atr_period: parseInt(document.getElementById('ab_trend_filter_atr_period').value),
+    ab_trend_filter_multiplier: parseFloat(document.getElementById('ab_trend_filter_multiplier').value),
+    ab_aso_filter_enabled: document.getElementById('ab_aso_filter_enabled').value === 'true',
+    ab_aso_filter_length: parseInt(document.getElementById('ab_aso_filter_length').value),
+    ab_aso_filter_mode: parseInt(document.getElementById('ab_aso_filter_mode').value),
+    ab_aso_filter_confirm_bars: parseInt(document.getElementById('ab_aso_filter_confirm_bars').value),
     grid_direction_mode: document.getElementById('grid_direction_mode').value,
     grid_mode: document.getElementById('grid_mode').value,
     grid_step_pct: parseFloat(document.getElementById('grid_step_pct').value),
@@ -6508,6 +5759,23 @@ function buildConfigPayload() {
     gs_requote_ticks: parseInt(document.getElementById('gs_requote_ticks').value),
     gs_max_open_orders: parseInt(document.getElementById('gs_max_open_orders').value),
     gs_poll_seconds: parseFloat(document.getElementById('gs_poll_seconds').value),
+    gc_lower: parseFloat(document.getElementById('gc_lower').value),
+    gc_upper: parseFloat(document.getElementById('gc_upper').value),
+    gc_auto_pct: parseFloat(document.getElementById('gc_auto_pct').value),
+    gc_levels: parseInt(document.getElementById('gc_levels').value),
+    gc_size_usd: parseFloat(document.getElementById('gc_size_usd').value),
+    gc_max_lots: parseInt(document.getElementById('gc_max_lots').value),
+    gc_open_each_side: parseInt(document.getElementById('gc_open_each_side').value),
+    gc_exit_orders: parseInt(document.getElementById('gc_exit_orders').value),
+    gc_stop_pct: parseFloat(document.getElementById('gc_stop_pct').value),
+    gc_poll_seconds: parseFloat(document.getElementById('gc_poll_seconds').value),
+    gc_trend_mode: document.getElementById('gc_trend_mode').value,
+    gc_trend_tf: document.getElementById('gc_trend_tf').value,
+    gc_trend_ilen: parseInt(document.getElementById('gc_trend_ilen').value) || 4,
+    gc_trend_slen: parseInt(document.getElementById('gc_trend_slen').value) || 50,
+    gc_trend_on_flip: document.getElementById('gc_trend_on_flip').value,
+    gc_direction: document.getElementById('gc_direction').value,
+    gc_spacing: document.getElementById('gc_spacing').value,
     grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
     dry_run: document.getElementById('dry_run').value === 'true',
     binance_market_type: document.getElementById('binance_market_type').value,
@@ -6534,6 +5802,30 @@ function buildConfigPayload() {
   };
 }
 
+document.getElementById('btn-reset-defaults').addEventListener('click', async () => {
+  const mode = document.getElementById('entry_mode').value;
+  if (!confirm('Alle Einstellungen der gewählten Strategie (' + mode + ') für ' + currentSymbol + ' auf die Grundeinstellung zurücksetzen?\\nMargin, Hebel, Strategie, Konto und Datenquelle bleiben unverändert. Gespeichert wird erst, wenn du auf Speichern klickst.')) return;
+  try {
+    const res = await fetch('/api/config/defaults');
+    const defaults = await res.json();
+    const subset = {};
+    document.querySelectorAll('[data-mode="' + mode + '"]').forEach(box => {
+      const fields = box.matches('input,select,textarea') ? [box] : box.querySelectorAll('input,select,textarea');
+      fields.forEach(f => { if (f.id && Object.prototype.hasOwnProperty.call(defaults, f.id)) subset[f.id] = defaults[f.id]; });
+    });
+    ['margin', 'leverage', 'entry_mode', 'trade_account', 'binance_market_type'].forEach(id => { const el = document.getElementById(id); if (el) subset[id] = el.value; });   // diese bleiben, wie im Formular eingestellt
+    window.resetCfg = subset;
+    window.formTouched = false;
+    await refresh();
+    window.resetCfg = null;
+    window.formTouched = true;
+    showToast('↺ ' + (Object.keys(subset).length - 5) + ' Felder auf Standard gesetzt - zum Übernehmen auf Speichern klicken.');
+  } catch (e) {
+    window.resetCfg = null;
+    showToast('❌ Zurücksetzen fehlgeschlagen: ' + e);
+  }
+});
+
 document.getElementById('config-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const payload = buildConfigPayload();
@@ -6549,6 +5841,31 @@ document.getElementById('config-form').addEventListener('submit', async (e) => {
   } catch (e) {
     showToast(`❌ Netzwerkfehler beim Speichern: ${e}`);
   }
+});
+
+// --- Ergebnis einer Sweep-/Monte-Carlo-Zeile in die Einstellungen uebernehmen (nur das Formular fuellen, Speichern bleibt manuell) ---
+const applyBtn = (obj) => `<td><button type="button" class="apply-row" data-apply="${encodeURIComponent(JSON.stringify(obj))}" style="padding:4px 10px; font-size:12px; white-space:nowrap;">↩ Übernehmen</button></td>`;
+function applySweepRow(vals) {
+  let n = 0, first = null;
+  for (const [id, v] of Object.entries(vals)) {
+    const el = document.getElementById(id);
+    if (!el || v === undefined || v === null || v === '-') continue;
+    if (el.tagName === 'SELECT' && document.getElementById(id + '_custom_minutes')) setResolutionField(id, String(v));
+    else el.value = String(v);
+    el.style.outline = '2px solid #1fcf6e';
+    setTimeout(() => { el.style.outline = ''; }, 6000);
+    if (!first) first = el;
+    n++;
+  }
+  document.getElementById('config-form').dispatchEvent(new Event('change'));
+  window.formTouched = true;
+  if (first) first.scrollIntoView({behavior: 'smooth', block: 'center'});
+  showToast(n ? `↩ ${n} Werte in die Einstellungen übernommen (grün markiert) – jetzt „Speichern“ klicken.` : '⚠️ Keine passenden Felder gefunden.');
+}
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button.apply-row');
+  if (!btn) return;
+  try { applySweepRow(JSON.parse(decodeURIComponent(btn.dataset.apply))); } catch (e) { showToast('⚠️ Übernehmen fehlgeschlagen: ' + e); }
 });
 
 function showToast(msg) {
@@ -6587,16 +5904,11 @@ async function loadGlobalSettings() {
   try {
     const res = await fetch('/api/global_settings');
     const data = await res.json();
-    document.getElementById('toggle-scalp-board-global').checked = !!data.scalp_board_enabled;
     document.getElementById('toggle-copytrading-global').checked = !!data.copytrading_enabled;
   } catch (e) {
     console.error('Globale Einstellungen konnten nicht geladen werden:', e);
   }
 }
-document.getElementById('toggle-scalp-board-global').addEventListener('change', async (e) => {
-  await fetch('/api/global_settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({scalp_board_enabled: e.target.checked}) });
-  showToast(e.target.checked ? '✅ Scalp-Details global AN' : '⏸️ Scalp-Details global AUS (spart Ressourcen)');
-});
 document.getElementById('toggle-copytrading-global').addEventListener('change', async (e) => {
   await fetch('/api/global_settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({copytrading_enabled: e.target.checked}) });
   showToast(e.target.checked ? '✅ Copytrading global AN' : '⏸️ Copytrading global AUS');
@@ -6608,6 +5920,29 @@ document.getElementById('toggle-copytrading-global').addEventListener('change', 
   refresh();
   setInterval(refresh, 6000);
 })();
+// --- Backtest- und Sweep-/Monte-Carlo-Bereiche aufklappbar (Zustand wird gemerkt, Standard: zugeklappt) ---
+(function() {
+  let state = {};
+  try { state = JSON.parse(localStorage.getItem('collapsed_sections') || '{}'); } catch (e) {}
+  document.querySelectorAll('h2.section-title').forEach(h => {
+    if (!/Backtest|Sweep|Monte-Carlo/.test(h.textContent)) return;
+    const card = h.nextElementSibling;
+    if (!card || !card.classList.contains('panel-card')) return;
+    const key = h.textContent.trim().slice(0, 40);
+    const chev = document.createElement('span');
+    chev.style.marginRight = '8px';
+    h.prepend(chev);
+    h.style.cursor = 'pointer';
+    const setOpen = (open) => { card.style.display = open ? '' : 'none'; chev.textContent = open ? '▾' : '▸'; };
+    setOpen(state[key] === true);
+    h.addEventListener('click', () => {
+      const open = card.style.display === 'none';
+      setOpen(open);
+      state[key] = open;
+      try { localStorage.setItem('collapsed_sections', JSON.stringify(state)); } catch (e) {}
+    });
+  });
+})();
 </script>
 </body>
 </html>
@@ -6615,7 +5950,7 @@ document.getElementById('toggle-copytrading-global').addEventListener('change', 
 
 
 async def handle_index(request):
-    return web.Response(text=DASHBOARD_HTML, content_type="text/html")
+    return web.Response(text=DASHBOARD_HTML, content_type="text/html", headers={"Cache-Control": "no-store, max-age=0"})
 
 
 async def handle_symbols(request):
@@ -6626,8 +5961,16 @@ async def handle_overview(request):
     result = {}
     for s in SYMBOLS:
         st = BOTS[s]["state"]
-        result[s] = {"position": st["position"], "total_pnl_usd": round(st["stats"]["total_pnl_usd"], 3)}
+        result[s] = {"position": st["position"], "total_pnl_usd": round(st["stats"]["total_pnl_usd"], 3),
+                     # Start-Zustand: bot_active = gespeicherter Wunsch, session_started = laeuft in DIESEM Prozess wirklich
+                     # (faellt nach jedem Deploy/Neustart auf False, siehe handle_control)
+                     "bot_active": bool(BOTS[s]["config"].get("bot_active")), "session_started": bool(st.get("session_started"))}
     return web.json_response(result)
+
+
+async def handle_config_defaults(request):
+    """Grundeinstellungen (Standardwerte) - fuer den Knopf 'Auf Standard zuruecksetzen' im Dashboard."""
+    return web.json_response(default_config())
 
 
 async def handle_status(request):
@@ -6639,54 +5982,33 @@ async def handle_status(request):
     win_rate = round(stats["wins"] / stats["trades"] * 100, 1) if stats["trades"] else 0
     payload = {
         "symbol": symbol, "last_price": st["last_price"], "anchor_price": st["anchor_price"],
+        "session_started": bool(st.get("session_started")),
+        "gc_view": st.get("gc_view"), "grid_account": st.get("gs_account"),
         "position": st["position"], "avg_entry_price": round(st["avg_entry_price"], 2) if st["avg_entry_price"] else None,
         "total_coin_size": st["total_coin_size"],
         "entry_count": st["entry_count"], "liquidation_price": estimate_liquidation_price(symbol),
         "unrealized_pnl_usd": calc_unrealized_pnl(symbol),
         "grid_levels": calc_grid_levels(symbol),
         "current_position_entries": st.get("current_position_entries", []),
-        "obi_current": st.get("obi_current"), "obi_fast": st.get("obi_fast"),
-        "obi_medium": st.get("obi_medium"), "obi_slow": st.get("obi_slow"),
-        "oms_signal": st.get("oms_signal"), "oms_obi_fast": st.get("oms_obi_fast"),
-        "oms_obi_medium": st.get("oms_obi_medium"), "oms_obi_slow": st.get("oms_obi_slow"),
-        "oms_obi_direction": st.get("oms_obi_direction"), "oms_cvd_ok": st.get("oms_cvd_ok"),
-        "oms_funding_ok": st.get("oms_funding_ok"), "oms_rsi_ok": st.get("oms_rsi_ok"), "oms_rsi": st.get("oms_rsi"),
-        "oms_oi_ok": st.get("oms_oi_ok"), "oms_oi_score": st.get("oms_oi_score"), "oms_open_interest": st.get("oms_open_interest"),
-        "oms_liq_ok": st.get("oms_liq_ok"), "oms_liq_ratio": st.get("oms_liq_ratio"), "oms_liq_count": st.get("oms_liq_count"),
-        "scalp_board": st.get("scalp_board", {}),
-        "quad_stoch_history": st.get("quad_stoch_history", [])[-100:],
-        "oms_cvd_ratio": st.get("oms_cvd_ratio"), "oms_funding_rate": st.get("oms_funding_rate"),
-        "oms_tp1_done": st.get("oms_tp1_done"), "oms_trail_price": st.get("oms_trail_price"),
-        "oms_dca_count": st.get("oms_dca_count"),
-        "oms_price_history": [[round(ts, 1), price] for ts, price in st.get("oms_price_history", [])[-100:]],
-        "oms_markers": st.get("oms_markers", [])[-30:],
-        "oms_obi_history": st.get("oms_obi_history", [])[-100:],
-        "obi_history": st.get("obi_history", [])[-100:],
-        "obi_spread_pct": st.get("obi_spread_pct"), "obi_recent_vol_pct": st.get("obi_recent_vol_pct"),
-        "fib": st.get("fib"),
         "ht_direction": st.get("ht_direction"), "ht_sl_price": st.get("ht_sl_price"),
         "ht_tp1_price": st.get("ht_tp1_price"), "ht_tp2_price": st.get("ht_tp2_price"), "ht_tp3_price": st.get("ht_tp3_price"),
         "ht_tp1_done": st.get("ht_tp1_done"), "ht_tp2_done": st.get("ht_tp2_done"),
-        "da_direction": st.get("da_direction"), "da_sl_price": st.get("da_sl_price"), "da_tp_price": st.get("da_tp_price"),
-        "es_direction": st.get("es_direction"), "es_sensitivity_last": st.get("es_sensitivity_last"),
-        "es_sl_price": st.get("es_sl_price"), "es_tp1_price": st.get("es_tp1_price"),
-        "es_tp2_price": st.get("es_tp2_price"), "es_tp3_price": st.get("es_tp3_price"),
-        "es_tp1_done": st.get("es_tp1_done"), "es_tp2_done": st.get("es_tp2_done"),
-        "cp_last_signal": st.get("cp_last_signal"), "cp_sl_price": st.get("cp_sl_price"),
-        "cp_tp_price": st.get("cp_tp_price"), "cp_breakeven_done": st.get("cp_breakeven_done"),
-        "mo7_last_value": st.get("mo7_last_value"), "mo7_sl_price": st.get("mo7_sl_price"),
-        "mo7_tp_price": st.get("mo7_tp_price"),
-        "utb_last_hull_green": st.get("utb_last_hull_green"),
-        "utb_sl_price": st.get("utb_sl_price"),
-        "fr_sl_price": st.get("fr_sl_price"),
-        "cd_sl_price": st.get("cd_sl_price"),
-        "rf_sl_price": st.get("rf_sl_price"), "rf_tp_price": st.get("rf_tp_price"),
-        "utb_trend_pct_last": st.get("utb_trend_pct_last"),
-        "wtc_last_wt1": st.get("wtc_last_wt1"), "wtc_last_wt2": st.get("wtc_last_wt2"),
-        "wtc_sl_price": st.get("wtc_sl_price"), "wtc_tp_price": st.get("wtc_tp_price"),
-        "pk_sl_price": st.get("pk_sl_price"), "pk_tp_price": st.get("pk_tp_price"),
-        "pk_trail_active": st.get("pk_trail_active"), "pk_trail_best_price": st.get("pk_trail_best_price"),
-        "pk_trend_pct_last": st.get("pk_trend_pct_last"),
+        "ab_sl_price": st.get("ab_sl_price"), "ab_tp1_price": st.get("ab_tp1_price"),
+        "ab_tp2_price": st.get("ab_tp2_price"), "ab_tp3_price": st.get("ab_tp3_price"),
+        "ab_tp1_done": st.get("ab_tp1_done"), "ab_tp2_done": st.get("ab_tp2_done"),
+        "ab_be_done": st.get("ab_be_done"),
+        "ab_atr_last": st.get("ab_atr_last"),
+        "rsi_sl_price": st.get("rsi_sl_price"), "rsi_tp_price": st.get("rsi_tp_price"), "rsi_be_done": st.get("rsi_be_done"), "rsi_last": st.get("rsi_last"),
+        "mvwap_sl_price": st.get("mvwap_sl_price"), "mvwap_tp_price": st.get("mvwap_tp_price"), "mvwap_be_done": st.get("mvwap_be_done"), "mvwap_osc_last": st.get("mvwap_osc_last"),
+        "scalp_sl_price": st.get("scalp_sl_price"), "scalp_tp1_done": st.get("scalp_tp1_done"),
+        "scalp_mean_price": st.get("scalp_mean_price"), "scalp_upper_band": st.get("scalp_upper_band"),
+        "scalp_lower_band": st.get("scalp_lower_band"), "scalp_obv_rsi": st.get("scalp_obv_rsi"),
+        "scalp_band_history": st.get("scalp_band_history", [])[-500:],
+        "scalp_price_history": st.get("scalp_price_history", [])[-500:],
+        "liq_sl_price": st.get("liq_sl_price"), "liq_tp1_done": st.get("liq_tp1_done"),
+        "liq_buyers_pct": st.get("liq_buyers_pct"), "liq_sellers_pct": st.get("liq_sellers_pct"),
+        "liq_peak_pct": st.get("liq_peak_pct"), "liq_nachkauf_count": st.get("liq_nachkauf_count"),
+        "wa_sl_price": st.get("wa_sl_price"), "wa_tp_price": st.get("wa_tp_price"), "wa_wt2_last": st.get("wa_wt2_last"),
         "binance_1s_buffer_size": len(st.get("binance_1s_buffer", [])),
         "binance_1s_buffer_span_sec": (
             (st["binance_1s_buffer"][-1]["ts"] - st["binance_1s_buffer"][0]["ts"]) // 1000
@@ -6707,122 +6029,60 @@ async def handle_config_update(request):
         return web.json_response({"error": "unknown symbol"}, status=404)
     body = await request.json()
     cfg = BOTS[symbol]["config"]
-    for key in ["margin", "leverage", "entry_mode", "grid_mode", "grid_direction_mode", "grid_step_pct", "tp_step_pct",
+    for key in ["margin", "leverage", "trade_account", "entry_mode", "grid_mode", "grid_direction_mode", "grid_step_pct", "tp_step_pct",
                 "grid_step_usd", "tp_step_usd", "max_nachkauf", "grid_sl_enabled", "grid_sl_manual_usd",
                 "grid_anchor_follow_enabled", "grid_anchor_follow_pct", "grid_sl_cooldown_min",
                 "gs_step_notional_usd", "gs_max_levels", "gs_step_pct", "gs_tp_usd",
                 "gs_flatten_usd", "gs_cooldown_min", "gs_anchor_follow_pct",
                 "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
+                "gc_direction", "gc_lower", "gc_upper", "gc_auto_pct", "gc_levels", "gc_spacing", "gc_size_usd",
+                "gc_max_lots", "gc_open_each_side", "gc_exit_orders", "gc_stop_pct", "gc_poll_seconds",
+                "gc_trend_mode", "gc_trend_tf", "gc_trend_ilen", "gc_trend_slen", "gc_trend_on_flip",
                 "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",
                 "g2_anchor_follow_enabled", "g2_anchor_follow_pct",
                 "g2_auto_reverse", "g2_revisit_enabled", "g2_revisit_rearm_pct", "g2_double_enabled",
                 "g2_size_multiplier", "g2_deviation_multiplier",
-                "obi_threshold", "obi_mode", "obi_long_threshold", "obi_short_threshold", "obi_reversal_min_bounce", "obi_instant_reset_ratio", "obi_window_fast_seconds", "obi_window_medium_seconds", "obi_window_slow_seconds", "obi_levels", "obi_depth_weighting_enabled", "obi_use_median", "obi_min_liquidity", "obi_breakeven_enabled", "obi_breakeven_trigger_ratio", "obi_breakeven_lock_usd", "obi_breakeven_lock_pct", "obi_tp_sl_mode", "obi_tp_pct", "obi_sl_pct", "obi_tp_usd", "obi_sl_usd",
-                "obi_cooldown_seconds", "obi_trend_filter", "obi_trend_ema_length",
-                "obi_spread_filter_enabled", "obi_max_spread_pct",
-                "obi_vol_filter_enabled", "obi_vol_window_seconds", "obi_vol_min_pct", "obi_vol_max_pct",
-                "oms_levels", "oms_obi_threshold", "oms_window_fast_seconds", "oms_window_medium_seconds",
-                "oms_window_slow_seconds", "oms_cvd_confirm_enabled", "oms_cvd_window_seconds", "oms_cvd_min_ratio",
-                "oms_funding_filter_enabled", "oms_funding_max_abs", "oms_cooldown_seconds",
-                "oms_tp1_usd", "oms_exit_mode", "oms_tp1_close_pct", "oms_sl_usd", "oms_trail_distance_usd",
-                "oms_dca_enabled", "oms_dca_max_entries", "oms_dca_size_fraction", "oms_dca_min_pullback_usd",
-                "oms_reverse_on_signal",
-                "oms_rsi_filter_enabled", "oms_rsi_resolution", "oms_rsi_period", "oms_rsi_midline",
-                "oms_oi_filter_enabled", "oms_oi_window_seconds", "oms_oi_min_change_pct", "oms_oi_min_score",
-                "oms_liq_filter_enabled", "oms_liq_window_seconds", "oms_liq_min_ratio",
-                "fib_resolution", "fib_lookback_candles", "fib_entry1_level", "fib_entry2_level",
-                "fib_tp1_level", "fib_tp1_close_pct", "fib_tp2_level", "fib_sl_level", "fib_cooldown_seconds",
-                "ht_resolution", "ht_amplitude", "ht_channel_deviation", "ht_base_risk_mult",
-                "ht_entry_trigger", "ht_exit_trigger", "ht_invert_direction",
-                "ht_tp_enabled", "ht_tp1_close_pct", "ht_tp2_close_pct", "ht_sl_enabled", "ht_sl_cooldown_seconds",
-                "da_resolution", "da_atr_period", "da_sensitivity", "da_sma_period", "da_ema_trend_period",
-                "da_signal_mode", "da_entry_trigger", "da_exit_trigger", "da_invert_direction",
-                "da_sl_enabled", "da_tp_enabled", "da_risk_atr_period", "da_risk_mult", "da_tp_rr", "da_sl_cooldown_seconds",
-                "da_use_heikin_ashi",
-                "es_resolution", "es_atr_period", "es_auto_sensitivity", "es_sensitivity",
-                "es_vol_period", "es_vol_ma_len", "es_entry_trigger", "es_exit_trigger", "es_invert_direction",
-                "es_risk_atr_period", "es_risk_mult", "es_tp1_close_pct", "es_tp2_close_pct",
-                "es_tp1_rr", "es_tp2_rr", "es_tp3_rr", "es_sl_cooldown_seconds", "es_reenter_on_flip",
-                "es_sl_enabled", "es_sl_mode", "es_sl_manual_usd", "es_tp_enabled", "es_tp_mode", "es_tp_manual_usd",
-                "es_breakeven_pct_enabled", "es_breakeven_trigger_pct",
-                "cp_resolution", "cp_signal_source", "cp_three_line_strict", "cp_engulfing_strict", "cp_direction_mode",
-                "cp_flip_exit_enabled", "cp_risk_atr_period", "cp_risk_mult", "cp_tp_rr",
-                "cp_sl_cooldown_seconds", "cp_sl_enabled", "cp_sl_mode", "cp_sl_manual_usd",
-                "cp_tp_enabled", "cp_tp_mode", "cp_tp_manual_usd",
-                "cp_breakeven_enabled", "cp_breakeven_trigger_mult",
-                "mo7_resolution", "mo7_entry_mode", "mo7_buy_threshold", "mo7_sell_threshold",
-                "mo7_sum_low", "mo7_sum_high", "mo7_trend_threshold", "mo7_trend_deadband",
-                "mo7_direction_mode", "mo7_flip_exit_enabled",
-                "mo7_sl_enabled", "mo7_sl_manual_usd", "mo7_tp_enabled", "mo7_tp_manual_usd",
-                "mo7_sl_cooldown_seconds",
-                "utb_resolution", "utb_atr_period", "utb_sensitivity", "utb_heikin_ashi",
-                "utb_hull_period", "utb_flip_trigger", "utb_direction_mode", "utb_instant_trigger_enabled",
-                "utb_sl_enabled", "utb_sl_manual_usd", "utb_sl_cooldown_seconds",
-                "utb_tp_enabled", "utb_tp_manual_usd",
-                "utb_trail_tp_enabled", "utb_trail_tp_activation_pct", "utb_trail_tp_step_pct",
-                "utb_mtf_filter_enabled", "utb_mtf_tf1", "utb_mtf_tf2", "utb_mtf_tf3",
-                "utb_mtf_fast_len", "utb_mtf_slow_len", "utb_mtf_atr_len",
-                "utb_mtf_long_threshold", "utb_mtf_short_threshold",
-                "utb_zscore_filter_enabled", "utb_zscore_resolution", "utb_zscore_lookback", "utb_zscore_smooth",
-                "utb_rsi_filter_enabled", "utb_rsi_length", "utb_rsi_midline",
-                "utb_adx_filter_enabled", "utb_adx_length", "utb_adx_threshold",
-                "wtc_resolution", "wtc_channel_len", "wtc_average_len", "wtc_ma_len",
-                "wtc_require_zone", "wtc_os_level", "wtc_ob_level", "wtc_direction_mode",
-                "wtc_always_in_market", "wtc_flip_exit_enabled", "wtc_sl_enabled",
-                "wtc_sl_manual_usd", "wtc_tp_enabled", "wtc_tp_manual_usd", "wtc_sl_cooldown_seconds",
-                "pk_resolution", "pk_sensitivity", "pk_atr_period", "pk_sma_period", "pk_direction_mode",
-                "pk_exit_mode", "pk_sl_enabled", "pk_sl_manual_usd", "pk_tp_enabled", "pk_tp_manual_usd",
-                "pk_sl_cooldown_seconds", "pk_trailing_enabled", "pk_trailing_activation_pct", "pk_trailing_step_pct",
-                "pk_mtf_filter_enabled", "pk_mtf_tf1", "pk_mtf_tf2", "pk_mtf_tf3", "pk_mtf_fast_len", "pk_mtf_slow_len",
-                "pk_mtf_atr_len", "pk_mtf_long_threshold", "pk_mtf_short_threshold",
-                "fr_resolution", "fr_periods", "fr_direction_mode", "fr_invert_direction",
-                "fr_zscore_filter_enabled", "fr_zscore_resolution", "fr_zscore_lookback", "fr_zscore_smooth",
-                "fr_sl_enabled", "fr_sl_manual_usd", "fr_sl_cooldown_seconds",
-                "fr_tp_enabled", "fr_tp_manual_usd",
-                "fr_adx_filter_enabled", "fr_adx_resolution", "fr_adx_length", "fr_adx_threshold", "fr_adx_invert_enabled",
-                "fr_mtf_filter_enabled", "fr_mtf_tf1", "fr_mtf_fast_len", "fr_mtf_slow_len", "fr_mtf_atr_len",
-                "fr_mtf_long_threshold", "fr_mtf_short_threshold",
-                "fr_flatten_on_block_enabled",
-                "fr_dca_enabled", "fr_dca_max_entries", "fr_dca_step_usd",
-                "cd_resolution", "cd_threshold", "cd_rejection_mult", "cd_direction_mode", "cd_invert_direction",
-                "cd_zscore_filter_enabled", "cd_zscore_resolution", "cd_zscore_lookback", "cd_zscore_smooth",
-                "cd_rsi_filter_enabled", "cd_rsi_length", "cd_rsi_midline",
-                "cd_adx_filter_enabled", "cd_adx_length", "cd_adx_threshold",
-                "cd_sl_enabled", "cd_sl_manual_usd", "cd_sl_cooldown_seconds",
-                "cd_tp_enabled", "cd_tp_manual_usd", "cd_use_heikin_ashi",
-                "rf_resolution", "rf_period", "rf_qty", "rf_direction_mode",
-                "rf_zscore_filter_enabled", "rf_zscore_resolution", "rf_zscore_lookback", "rf_zscore_smooth",
-                "rf_rsi_filter_enabled", "rf_rsi_length", "rf_rsi_midline",
-                "rf_adx_filter_enabled", "rf_adx_length", "rf_adx_threshold",
-                "rf_sl_enabled", "rf_sl_manual_usd", "rf_sl_cooldown_seconds",
-                "rf_tp_enabled", "rf_tp_manual_usd",
-                "mv_resolution", "mv_fast_len", "mv_slow_len", "mv_guide_len", "mv_atr_len", "mv_strong_mult",
-                "mv_use_volume_enabled", "mv_vol_len", "mv_vol_mult", "mv_direction_mode", "mv_invert_direction",
-                "mv_sl_mode", "mv_sl_enabled", "mv_sl_manual_usd", "mv_sl_cooldown_seconds",
-                "mv_tp_enabled", "mv_tp_manual_usd",
-                "sr_resolution", "sr_st_atr_period", "sr_st_multiplier", "sr_rsi_period", "sr_rsi_midline",
-                "sr_rsi_mode", "sr_rsi_overbought", "sr_rsi_oversold",
-                "sr_ema_filter_enabled", "sr_ema_length", "sr_ema_resolution",
-                "sr_direction_mode", "sr_adx_filter_enabled", "sr_adx_length", "sr_adx_threshold", "sr_adx_resolution", "sr_adx_invert_enabled",
-                "sr_immediate_signal_enabled",
-                "sr_zscore_filter_enabled", "sr_zscore_lookback", "sr_zscore_smooth",
-                "sr_mo7_filter_enabled", "sr_mo7_mode", "sr_mo7_buy_threshold", "sr_mo7_sell_threshold",
-                "sr_sl_tp_mode",
-                "sr_sl_enabled", "sr_sl_manual_usd", "sr_tp_enabled", "sr_tp_manual_usd", "sr_sl_cooldown_seconds",
-                "sr_vwap_dev_filter_enabled", "sr_vwap_dev_length", "sr_vwap_dev_mult",
-                "sr_vwap_midline_filter_enabled", "sr_vwap_midline_mult", "sr_vwap_midline_breakeven_enabled",
-                "sr_vwap_sl_mult", "sr_vwap_tp_rr", "sr_st_tp_rr", "sr_st_sl_buffer_usd",
-                "hvd_resolution", "hvd_hull_length", "hvd_vwap_length", "hvd_vwap_dev_mult",
-                "hvd_rsi_length", "hvd_rsi_overbought", "hvd_rsi_oversold", "hvd_adx_length",
-                "hvd_direction_mode", "hvd_atr_period", "hvd_atr_min_mult", "hvd_risk_reward",
-                "hvd_sl_cooldown_seconds", "hvd_immediate_signal_enabled", "hvd_flip_exit_enabled",
-                "hvd_touch_arm_enabled", "hvd_arm_flip_exit_enabled",
-                "hvd_adx_filter_enabled", "hvd_adx_filter_length", "hvd_adx_filter_resolution", "hvd_adx_filter_threshold",
-                "hvd_trend_filter_enabled", "hvd_trend_filter_resolution", "hvd_trend_filter_atr_period", "hvd_trend_filter_multiplier",
-                "hvd_trend_filter_signal_window_candles",
-                "quad_stoch_resolution"]:
+                "ab_resolution", "ab_preset", "ab_lookback", "ab_fast_len", "ab_slow_len", "ab_rsi_len", "ab_rsi_gate",
+                "ab_use_volume", "ab_vol_mult", "ab_atr_len", "ab_atr_mult", "ab_r1", "ab_r2", "ab_r3", "ab_direction_mode",
+                "ab_exit_mode", "ab_sl_enabled", "ab_sl_manual_usd", "ab_be_enabled", "ab_be_trigger_usd", "ab_tp1_close_pct", "ab_tp2_close_pct",
+                "ab_sl_to_breakeven_on_tp1", "ab_sl_to_tp1_on_tp2", "ab_sl_cooldown_seconds", "ab_use_heikin_ashi",
+                "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
+                "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
+                "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds",
+                "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
+                "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
+                "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
+                "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
+                "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
+                "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
+                "rsi_resolution", "rsi_length", "rsi_oversold", "rsi_overbought", "rsi_direction_mode",
+                "rsi_sl_enabled", "rsi_sl_manual_usd", "rsi_be_enabled", "rsi_be_trigger_usd", "rsi_tp_enabled", "rsi_tp_manual_usd", "rsi_sl_cooldown_seconds",
+                "rsi_supertrend_filter_enabled", "rsi_supertrend_filter_resolution", "rsi_supertrend_filter_multiplier", "rsi_supertrend_filter_atr_period",
+                "rsi_adx_filter_enabled", "rsi_adx_filter_length", "rsi_adx_filter_threshold", "rsi_adx_filter_directional",
+                "rsi_macd_filter_enabled", "rsi_macd_filter_fast", "rsi_macd_filter_slow", "rsi_macd_filter_signal",
+                "mvwap_resolution", "mvwap_direction_mode", "mvwap_max_entries", "mvwap_nachkauf_min_abstand_usd", "mvwap_use_daily", "mvwap_w_daily", "mvwap_use_weekly", "mvwap_w_weekly",
+                "mvwap_use_monthly", "mvwap_w_monthly", "mvwap_mf_source", "mvwap_mf_length", "mvwap_cmf_length", "mvwap_mf_weight",
+                "mvwap_smooth_len", "mvwap_use_zone_filter", "mvwap_ob_level", "mvwap_os_level",
+                "mvwap_sl_enabled", "mvwap_sl_manual_usd", "mvwap_tp_enabled", "mvwap_tp_manual_usd",
+                "mvwap_be_enabled", "mvwap_be_trigger_usd", "mvwap_sl_cooldown_seconds",
+                "mvwap_supertrend_filter_enabled", "mvwap_supertrend_filter_resolution", "mvwap_supertrend_filter_multiplier", "mvwap_supertrend_filter_atr_period",
+                "mvwap_adx_filter_enabled", "mvwap_adx_filter_length", "mvwap_adx_filter_threshold", "mvwap_adx_filter_directional", "mvwap_adx_filter_mode",
+                "mvwap_macd_filter_enabled", "mvwap_macd_filter_fast", "mvwap_macd_filter_slow", "mvwap_macd_filter_signal",
+                "mvwap_rsi_filter_enabled", "mvwap_rsi_filter_length", "mvwap_rsi_filter_os_level", "mvwap_rsi_filter_ob_level",
+                "mvwap_cloud_filter_enabled", "mvwap_cloud_filter_length", "mvwap_cloud_filter_dev_mult", "mvwap_cloud_filter_touch_arm",
+                "scalp_timeframe", "scalp_vwap_length", "scalp_rsi_length", "scalp_rsi_upper", "scalp_rsi_lower",
+                "scalp_docht_threshold", "scalp_sl_mode", "scalp_sl_pct", "scalp_sl_usd", "scalp_max_nachkauf", "scalp_nachkauf_min_abstand_usd", "scalp_nachkauf_min_candles", "scalp_nachkauf_require_reversal", "scalp_tp1_require_profit", "scalp_tp1_full_close", "scalp_halfway_sl_enabled",
+                "scalp_supertrend_filter_enabled", "scalp_supertrend_filter_resolution", "scalp_supertrend_filter_multiplier", "scalp_supertrend_filter_atr_period",
+                "scalp_ms_trend_mode", "scalp_ms_trend_tf", "scalp_ms_trend_ilen", "scalp_ms_trend_slen",
+                "liq_timeframe", "liq_body_max_pct", "liq_max_levels", "liq_side_filter", "liq_dup_remove", "liq_dup_tolerance_usd",
+                "liq_entry_threshold_pct", "liq_tp1_pct", "liq_tp2_pct", "liq_sl_usd", "liq_tp1_require_profit",
+                "liq_max_nachkauf", "liq_nachkauf_progress_pct",
+                "wa_timeframe", "wa_src", "wa_n1", "wa_n2", "wa_sig_len", "wa_wave_scale", "wa_zone1", "wa_entry_mode", "wa_level", "wa_level_line", "wa_cross_zero", "wa_signal_timing", "wa_tp_cross_zero", "wa_max_nachkauf", "wa_nachkauf_min_pct", "wa_reverse_only_profit",
+                "wa_tp_mode", "wa_ueberlauf_level", "wa_tp_usd", "wa_sl_usd",
+                "wa_open_every", "wa_trend_mode", "wa_trend_tf", "wa_trend_ilen", "wa_trend_slen"]:
         if key in body:
             cfg[key] = body[key]
     debug_log(f"⚙️ [{symbol}] Konfiguration aktualisiert", cfg)
@@ -6838,9 +6098,212 @@ async def handle_control(request):
     cfg = BOTS[symbol]["config"]
     if "bot_active" in body:
         cfg["bot_active"] = bool(body["bot_active"])
+        # session_started: rein prozessinterner Flag (NICHT gespeichert, faellt bei jedem
+        # Neustart/Deploy automatisch auf False zurueck) - erst ein manueller Klick auf Start HIER
+        # setzt ihn auf True und gibt damit die REST-Kerzen-Abfrage in den Poll-Loops frei (siehe
+        # dortige "session_started"-Checks). So loesen nach einem Deploy nicht mehr ALLE vorher
+        # aktiven Coins gleichzeitig ihre erste Abfrage aus (das war der IP-Bann-Burst) - jeder
+        # Coin bleibt stumm, bis er hier im Panel explizit neu gestartet wird, unabhaengig vom
+        # gespeicherten bot_active-Wert.
+        BOTS[symbol]["state"]["session_started"] = cfg["bot_active"]
         debug_log(f"{'▶️' if cfg['bot_active'] else '⏸️'} [{symbol}] Bot {'gestartet' if cfg['bot_active'] else 'gestoppt'}")
         await save_bot_configs()  # sonst geht bot_active bei Neustart/Redeploy verloren
     return web.json_response({"success": True, "bot_active": cfg["bot_active"]})
+
+
+BACKTEST_TIMEOUT_SECONDS = 90  # siehe Kommentar in handle_backtest - verhindert unbegrenzt
+# haengende Backtest-Tasks, die den globalen Binance-Throttle fuer alle Live-Coins blockieren
+
+
+async def handle_wa_trend(request):
+    """Trend (Marktstruktur BOS/CHoCH) aller Zeitebenen fuers Dashboard - 60 s gecacht."""
+    from strategies import wa_trend_table, _wa_trend_cfg
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    cfg = BOTS[symbol]["config"]
+    ent = _wa_trend_ui_cache.get(symbol)
+    if ent and time.time() - ent[0] < 60 and ent[2] == (cfg.get("wa_trend_ilen"), cfg.get("wa_trend_slen")):
+        rows = ent[1]
+    else:
+        rows = await wa_trend_table(symbol, cfg)
+        _wa_trend_ui_cache[symbol] = (time.time(), rows, (cfg.get("wa_trend_ilen"), cfg.get("wa_trend_slen")))
+    mode, tf, _i, _s = _wa_trend_cfg(cfg)
+    return web.json_response({"rows": rows, "mode": mode, "tf": tf, "active": BOTS[symbol]["state"].get("wa_trend", 0)})
+
+
+_wa_trend_ui_cache = {}
+
+
+_gc_trend_ui_cache = {}
+
+
+async def handle_gc_trend(request):
+    """Trend (Marktstruktur BOS/CHoCH) aller Zeitebenen fuer das Grid-Bot-Panel - 30 s gecacht."""
+    from strategies import gc_trend_table, _gc_trend_cfg
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    cfg = BOTS[symbol]["config"]
+    sig = (cfg.get("gc_trend_ilen"), cfg.get("gc_trend_slen"), cfg.get("wa_n1"), cfg.get("wa_n2"), cfg.get("wa_sig_len"), cfg.get("wa_entry_mode"), cfg.get("wa_zone1"), cfg.get("wa_level"), cfg.get("wa_level_line"), cfg.get("wa_cross_zero"))
+    ent = _gc_trend_ui_cache.get(symbol)
+    if ent and time.time() - ent[0] < 30 and ent[2] == sig:
+        rows = ent[1]
+    else:
+        rows = await gc_trend_table(symbol, cfg)
+        _gc_trend_ui_cache[symbol] = (time.time(), rows, sig)
+    mode, tf, _i, _s = _gc_trend_cfg(cfg)
+    return web.json_response({"rows": rows, "mode": mode, "tf": tf, "active": BOTS[symbol]["state"].get("gc_trend", 0)})
+
+_scalp_trend_ui_cache = {}
+
+
+async def handle_scalp_trend(request):
+    """Marktstruktur-Trend (10s/30s/1m/5m/...) fuers Scalp-Dashboard - 10 s gecacht."""
+    from strategies import scalp_trend_table
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    cfg = BOTS[symbol]["config"]
+    ent = _scalp_trend_ui_cache.get(symbol)
+    sig = (cfg.get("scalp_ms_trend_ilen"), cfg.get("scalp_ms_trend_slen"))
+    if ent and time.time() - ent[0] < 10 and ent[2] == sig:
+        rows = ent[1]
+    else:
+        rows = await scalp_trend_table(symbol, BOTS[symbol]["state"], cfg)
+        _scalp_trend_ui_cache[symbol] = (time.time(), rows, sig)
+    return web.json_response({"rows": rows, "mode": cfg.get("scalp_ms_trend_mode", "off"), "tf": cfg.get("scalp_ms_trend_tf", "5m")})
+
+
+async def handle_wa_live_chart(request):
+    """Live-Chart fuer Wellenanker im Dashboard: Kerzen (inkl. laufender Kerze), Wellenlinien, Signale, Position."""
+    from strategies import fetch_candles_binance_multi, wa_chart_payload, mt_chart_payload
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    cfg = BOTS[symbol]["config"]
+    st = BOTS[symbol]["state"]
+    n1, n2, sl = int(cfg.get("wa_n1", 10)), int(cfg.get("wa_n2", 21)), int(cfg.get("wa_sig_len", 4))
+    bars = max(300, (n1 + n2 + sl + 20) * 3)
+    is_wa = cfg.get("entry_mode") == "wellenanker"
+    is_mt = cfg.get("entry_mode") == "mtf_spread"
+    is_pm = cfg.get("entry_mode") == "pure_momentum"
+    is_dv = cfg.get("entry_mode") == "dollar701"
+    is_tfl = cfg.get("entry_mode") == "trendfolge"
+    is_rlm = cfg.get("entry_mode") == "rlm"
+    is_vc = cfg.get("entry_mode") == "vwap_cross"
+    tf = request.query.get("tf", "")
+    SUBMIN = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}
+    if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
+        tf = cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
+        if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
+            tf = "5m"
+    if tf in SUBMIN:
+        from strategies import get_seconds_candles
+        data = get_seconds_candles(st, SUBMIN[tf], 1000)   # aus dem 1s-Puffer des Bots
+        if not data:
+            return web.json_response({"ok": False, "reason": f"sammelt noch Sekunden-Kerzen für {tf} … (der Puffer füllt sich nach dem Start; Bot einmal aktiv starten)"})
+    else:
+        data = await fetch_candles_binance_multi(symbol, tf, count_back=1000, market_type=cfg.get("binance_market_type", "spot"))
+    if not data:
+        return web.json_response({"ok": False, "reason": "lädt noch … (keine Kerzen erhalten)"})
+    ts, o, h, l, c = data
+    if len(c) < n1 + n2 + sl + 21:
+        return web.json_response({"ok": False, "reason": "lädt noch … (zu wenig Kerzen)"})
+    payload = None
+    if is_vc:
+        from vwap_cross import vc_chart_payload
+        payload = await vc_chart_payload(symbol, cfg, ts, o, h, l, c, tf)
+    elif is_rlm:
+        from rlm import rlm_chart_payload
+        payload = await asyncio.to_thread(rlm_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_tfl:
+        from trendfolge import tfl_chart_payload
+        payload = await asyncio.to_thread(tfl_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_dv:
+        from dollar701 import dv_chart_payload
+        payload = await asyncio.to_thread(dv_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_pm:
+        from pure_momentum import pm_chart_payload
+        payload = await asyncio.to_thread(pm_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_mt:
+        payload = await mt_chart_payload(symbol, ts, o, h, l, c, cfg, 1000)
+        if payload is None:
+            return web.json_response({"ok": False, "reason": "lädt noch … (Daten der Zeitebenen fehlen)"})
+    else:
+        payload = await asyncio.to_thread(wa_chart_payload, ts, o, h, l, c, cfg, 1000)
+    pos = None
+    if st.get("position") and st.get("avg_entry_price"):
+        size = st.get("total_coin_size") or 0
+        avg = st["avg_entry_price"]
+        sl_usd = float(cfg.get("wa_sl_usd", 5.0))
+        d = (sl_usd / size) if size else 0
+        pos = {"dir": st["position"], "avg": avg, "size": size, "pnl": ((st.get("last_price") or avg) - avg) * size * (1 if st["position"] == "long" else -1),
+               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else None),
+               "tps": (st.get("rlm_tps") or []) if is_rlm else []}
+    gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
+    grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
+    structure = []
+    if cfg.get("entry_mode") == "grid_classic" and cfg.get("gc_trend_mode", "off") in ("intern", "swing"):
+        try:
+            from strategies import gc_structure_events
+            structure = await gc_structure_events(symbol, cfg, ts)
+        except Exception as e:
+            debug_log(f"⚠️ Marktstruktur-Overlay fehlgeschlagen: {e}")
+    elif is_tfl:
+        try:
+            from trendfolge import tfl_structure_events
+            structure = await tfl_structure_events(symbol, cfg, st, ts)
+        except Exception as e:
+            debug_log(f"⚠️ Marktstruktur-Overlay (Trendfolge) fehlgeschlagen: {e}")
+    overlays = []
+    try:
+        if tf in SUBMIN:
+            raise RuntimeError("keine Overlays für Sekunden-Zeitebenen")
+        from strategies import fetch_candles_binance_vol, chart_overlays
+        vd, h1 = await asyncio.gather(fetch_candles_binance_vol(symbol, tf, count_back=1000), fetch_candles_binance_vol(symbol, "1h", count_back=1000))
+        if vd:
+            vmap = dict(zip(vd[0], vd[5]))
+            vol = [vmap.get(t, 0.0) for t in ts]
+            overlays = await asyncio.to_thread(chart_overlays, ts, h, l, c, vol, h1)
+    except Exception as e:
+        if tf not in SUBMIN:
+            debug_log(f"⚠️ Chart-Overlays fehlgeschlagen: {e}")
+    # echte Ein-/Ausstiege des Bots (aus dem Trade-Log und der offenen Position) fuer den Chart
+    trade_marks = []
+    try:
+        import bisect
+        ct = [cd["time"] for cd in payload.get("candles", [])]
+
+        def _snap(iso):
+            if not iso or not ct:
+                return None
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=DISPLAY_TZ) if DISPLAY_TZ is not None else dt
+            t = int(dt.timestamp())
+            if t < ct[0]:
+                return None
+            return ct[max(0, bisect.bisect_right(ct, t) - 1)]
+        seen_open = set()
+        for tr in (st.get("trade_log") or [])[-40:]:
+            d = "long" if tr.get("side") == "long" else "short"
+            key = (tr.get("opened_at"), d)
+            t_in, t_out = _snap(tr.get("opened_at")), _snap(tr.get("closed_at"))
+            if t_in and key not in seen_open:
+                seen_open.add(key)
+                trade_marks.append({"time": t_in, "kind": "entry", "dir": d, "price": tr.get("avg_entry")})
+            if t_out:
+                trade_marks.append({"time": t_out, "kind": "exit", "dir": d, "price": tr.get("exit"), "pnl": tr.get("pnl_usd"), "reason": tr.get("reason"), "partial": bool(tr.get("partial"))})
+        for en in (st.get("current_position_entries") or []):
+            t_in = _snap(en.get("time"))
+            if t_in and st.get("position"):
+                trade_marks.append({"time": t_in, "kind": "entry", "dir": st["position"], "price": en.get("price")})
+    except Exception as e:
+        debug_log(f"⚠️ Chart-Trade-Markierungen fehlgeschlagen: {e}")
+    payload.update({"trade_marks": trade_marks, "ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid, "overlays": overlays, "structure": structure,
+                    "active": bool(cfg.get("bot_active"))})
+    return web.json_response(payload)
 
 
 async def handle_backtest(request):
@@ -6866,172 +6329,60 @@ async def handle_backtest(request):
         # nicht auf "Speichern" geklickt wurde.
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
     entry_mode = cfg["entry_mode"]
-    result = await run_backtest(symbol, entry_mode, cfg, days, exclude_top_n)
+    # BACKTEST_TIMEOUT_SECONDS: ohne dieses Limit kann ein Backtest (v.a. bei Sekunden-
+    # Aufloesungen wie 10s/15s/30s/45s ueber mehrere Tage/Wochen) im schlimmsten Fall
+    # unbegrenzt lange im Hintergrund weiterlaufen - selbst wenn der Browser-Tab laengst
+    # geschlossen wurde, der aiohttp-Request also niemand mehr zuhoert. Beobachtet: ein
+    # solcher haengender Task blockierte ueber eine Stunde denselben globalen Binance-
+    # Throttle/Lock, den auch die LIVE-Strategien aller anderen Coins benutzen - die
+    # bekamen in der Zeit "zu wenig Kerzen" bzw. "keine Kerzen erhalten". asyncio.wait_for
+    # bricht die Coroutine nach Ablauf hart ab (CancelledError propagiert nach innen),
+    # damit sowas nie wieder unbegrenzt weiterlaufen und Ressourcen binden kann.
+    try:
+        result = await asyncio.wait_for(
+            run_backtest(symbol, entry_mode, cfg, days, exclude_top_n),
+            timeout=BACKTEST_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        debug_log(f"⏱️ [{symbol}] Backtest ({entry_mode}) nach {BACKTEST_TIMEOUT_SECONDS}s abgebrochen (Timeout)",
+                  {"days": days})
+        return web.json_response({
+            "error": f"Backtest nach {BACKTEST_TIMEOUT_SECONDS}s abgebrochen (Timeout) - "
+                     f"wahrscheinlich zu viele Kerzen fuer den gewaehlten Zeitraum/Aufloesung. "
+                     f"Bei Sekunden-Aufloesungen (10s/15s/30s/45s) einen kuerzeren Zeitraum wählen."
+        }, status=504)
+    except Exception as e:
+        # Ohne dieses try/except wuerde ein unerwarteter Fehler (z.B. bei sehr kurzen Zeitraeumen
+        # mit zu wenig Kerzen fuer die Einschwingphase eines Filters) als rohe aiohttp-Fehlerseite
+        # statt JSON beim Frontend ankommen - der Browser bricht dann mit einem kryptischen
+        # "JSON.parse"-Fehler ab, statt die eigentliche Ursache anzuzeigen.
+        debug_log(f"⚠️ [{symbol}] Backtest ({entry_mode}) fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Backtest fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
 
-async def handle_ht_sweep(request):
-    """'Monte-Carlo'-Parametersweep fuer HalfTrend: testet einen Bereich von Amplitude,
-    Channel Deviation (SL-Abstand) und Base Risk (TP-Abstand) gegeneinander und gibt die
-    besten/schlechtesten Kombinationen zurueck."""
-    from strategies import run_ht_param_sweep
+async def handle_ab_signal_sweep(request):
+    """'Monte-Carlo'-Sweep fuer Al-Shatri Breakout: Breakout-Range x schnelle EMA x langsame EMA,
+    unabhaengig vom SuperTrend-Trendfilter (der bleibt unveraendert wie konfiguriert), siehe
+    run_ab_signal_sweep."""
+    from strategies import run_ab_signal_sweep
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()
     if symbol not in BOTS:
         return web.json_response({"error": "unknown symbol"}, status=404)
     body = await request.json()
     try:
         days = max(1, min(365, int(body.get("days", 30))))
-        amplitude_min = max(2, int(body.get("amplitude_min", 10)))
-        amplitude_max = max(amplitude_min, int(body.get("amplitude_max", 40)))
-        amplitude_step = max(1, int(body.get("amplitude_step", 2)))
-        channel_dev_min = max(0.01, float(body.get("channel_dev_min", 1.0)))
-        channel_dev_max = max(channel_dev_min, float(body.get("channel_dev_max", 4.0)))
-        channel_dev_step = max(0.01, float(body.get("channel_dev_step", 0.5)))
-        base_risk_min = max(0.01, float(body.get("base_risk_min", 1.0)))
-        base_risk_max = max(base_risk_min, float(body.get("base_risk_max", 5.0)))
-        base_risk_step = max(0.01, float(body.get("base_risk_step", 0.5)))
+        lookback_min = max(2, int(body.get("lookback_min", 10)))
+        lookback_max = max(lookback_min, int(body.get("lookback_max", 60)))
+        lookback_step = max(1, int(body.get("lookback_step", 10)))
+        fast_min = max(2, int(body.get("fast_min", 10)))
+        fast_max = max(fast_min, int(body.get("fast_max", 60)))
+        fast_step = max(1, int(body.get("fast_step", 10)))
+        slow_min = max(2, int(body.get("slow_min", 30)))
+        slow_max = max(slow_min, int(body.get("slow_max", 150)))
+        slow_step = max(1, int(body.get("slow_step", 20)))
     except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
-
-    cfg = dict(BOTS[symbol]["config"])
-    overrides = body.get("config")
-    if isinstance(overrides, dict):
-        cfg.update({k: v for k, v in overrides.items() if k in cfg})
-
-    result = await run_ht_param_sweep(symbol, cfg, days, amplitude_min, amplitude_max, amplitude_step,
-                                       channel_dev_min, channel_dev_max, channel_dev_step,
-                                       base_risk_min, base_risk_max, base_risk_step)
-    return web.json_response(result)
-
-
-async def handle_da_sweep(request):
-    """'Monte-Carlo'-Parametersweep fuer Diamond Algo: testet einen Bereich von ATR-Periode
-    und Sensitivity gegeneinander und gibt die besten/schlechtesten Kombinationen zurueck."""
-    from strategies import run_da_param_sweep
-    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
-    if symbol not in BOTS:
-        return web.json_response({"error": "unknown symbol"}, status=404)
-    body = await request.json()
-    try:
-        days = max(1, min(365, int(body.get("days", 30))))
-        atr_period_min = max(1, int(body.get("atr_period_min", 5)))
-        atr_period_max = max(atr_period_min, int(body.get("atr_period_max", 20)))
-        atr_period_step = max(1, int(body.get("atr_period_step", 1)))
-        sensitivity_min = max(0.01, float(body.get("sensitivity_min", 1.0)))
-        sensitivity_max = max(sensitivity_min, float(body.get("sensitivity_max", 5.0)))
-        sensitivity_step = max(0.01, float(body.get("sensitivity_step", 0.5)))
-    except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
-
-    cfg = dict(BOTS[symbol]["config"])
-    overrides = body.get("config")
-    if isinstance(overrides, dict):
-        cfg.update({k: v for k, v in overrides.items() if k in cfg})
-
-    result = await run_da_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
-                                       sensitivity_min, sensitivity_max, sensitivity_step)
-    return web.json_response(result)
-
-
-async def handle_rf_sweep(request):
-    """'Monte-Carlo'-Parametersweep fuer Range Filter: testet einen Bereich von Swing-Periode
-    und Swing-Multiplikator gegeneinander und gibt die besten/schlechtesten Kombinationen
-    zurueck."""
-    from strategies import run_rf_param_sweep
-    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
-    if symbol not in BOTS:
-        return web.json_response({"error": "unknown symbol"}, status=404)
-    body = await request.json()
-    try:
-        days = max(1, min(365, int(body.get("days", 30))))
-        period_min = max(1, int(body.get("period_min", 10)))
-        period_max = max(period_min, int(body.get("period_max", 50)))
-        period_step = max(1, int(body.get("period_step", 5)))
-        qty_min = max(0.01, float(body.get("qty_min", 1.0)))
-        qty_max = max(qty_min, float(body.get("qty_max", 6.0)))
-        qty_step = max(0.01, float(body.get("qty_step", 0.5)))
-    except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
-
-    cfg = dict(BOTS[symbol]["config"])
-    overrides = body.get("config")
-    if isinstance(overrides, dict):
-        cfg.update({k: v for k, v in overrides.items() if k in cfg})
-
-    result = await run_rf_param_sweep(symbol, cfg, days, period_min, period_max, period_step,
-                                       qty_min, qty_max, qty_step)
-    return web.json_response(result)
-
-
-async def handle_es_sensitivity_sweep(request):
-    """'Monte-Carlo'-Parametersweep fuer ELTE Smart, NUR ueber die manuelle Sensitivity (2
-    Nachkommastellen wie im Original-Skript)."""
-    from strategies import run_es_sensitivity_sweep
-    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
-    if symbol not in BOTS:
-        return web.json_response({"error": "unknown symbol"}, status=404)
-    body = await request.json()
-    try:
-        days = max(1, min(365, int(body.get("days", 30))))
-        sens_min = max(0.01, round(float(body.get("sens_min", 0.11)), 2))
-        sens_max = max(sens_min, round(float(body.get("sens_max", 5.0)), 2))
-        sens_step = max(0.01, round(float(body.get("sens_step", 0.01)), 2))
-    except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
-
-    cfg = dict(BOTS[symbol]["config"])
-    overrides = body.get("config")
-    if isinstance(overrides, dict):
-        cfg.update({k: v for k, v in overrides.items() if k in cfg})
-
-    result = await run_es_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step)
-    return web.json_response(result)
-
-
-async def handle_pk_sensitivity_sweep(request):
-    """'Monte-Carlo'-Parametersweep fuer Pieki Algo, NUR ueber die Sensitivity (2 Nachkommastellen
-    wie im Original-Pine-Script, Schritt 0.01)."""
-    from strategies import run_pk_sensitivity_sweep
-    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
-    if symbol not in BOTS:
-        return web.json_response({"error": "unknown symbol"}, status=404)
-    body = await request.json()
-    try:
-        days = max(1, min(365, int(body.get("days", 30))))
-        sens_min = max(0.01, round(float(body.get("sens_min", 0.5)), 2))
-        sens_max = max(sens_min, round(float(body.get("sens_max", 8.0)), 2))
-        sens_step = max(0.01, round(float(body.get("sens_step", 0.01)), 2))
-    except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
-
-    cfg = dict(BOTS[symbol]["config"])
-    overrides = body.get("config")
-    if isinstance(overrides, dict):
-        cfg.update({k: v for k, v in overrides.items() if k in cfg})
-
-    result = await run_pk_sensitivity_sweep(symbol, cfg, days, sens_min, sens_max, sens_step)
-    return web.json_response(result)
-
-
-async def handle_mo7_sum_sweep(request):
-    """'Monte-Carlo'-Parametersweep fuer den MO7 'five_candle_sum'-Einstiegsmodus: testet einen
-    Bereich von Long-/Short-Summenschwellen gegeneinander (der MO7-Score selbst wird nur EINMAL
-    berechnet und fuer alle Kombinationen wiederverwendet)."""
-    from strategies import run_mo7_sum_sweep
-    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
-    if symbol not in BOTS:
-        return web.json_response({"error": "unknown symbol"}, status=404)
-    body = await request.json()
-    try:
-        days = max(1, min(365, int(body.get("days", 30))))
-        sum_low_min = max(0.0, float(body.get("sum_low_min", 20)))
-        sum_low_max = max(sum_low_min, float(body.get("sum_low_max", 200)))
-        sum_low_step = max(1.0, float(body.get("sum_low_step", 20)))
-        sum_high_min = max(0.0, float(body.get("sum_high_min", 300)))
-        sum_high_max = max(sum_high_min, float(body.get("sum_high_max", 480)))
-        sum_high_step = max(1.0, float(body.get("sum_high_step", 20)))
-    except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
     try:
         exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
     except (TypeError, ValueError):
@@ -7042,35 +6393,62 @@ async def handle_mo7_sum_sweep(request):
     if isinstance(overrides, dict):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
-    result = await run_mo7_sum_sweep(symbol, cfg, days, sum_low_min, sum_low_max, sum_low_step,
-                                      sum_high_min, sum_high_max, sum_high_step, exclude_top_n)
+    result = await run_ab_signal_sweep(symbol, cfg, days, lookback_min, lookback_max, lookback_step,
+                                        fast_min, fast_max, fast_step, slow_min, slow_max, slow_step, exclude_top_n)
     return web.json_response(result)
 
 
-async def handle_utb_param_sweep(request):
-    """'Monte-Carlo'-Parametersweep fuer UT Bot + Hull Flip: testet einen Bereich von ATR-Periode
-    und Sensitivity gegeneinander."""
-    from strategies import run_utb_param_sweep
+async def handle_er_sweep(request):
+    """Sweep EMA-Laenge x RSI-Laenge fuer die Strategie EMA + RSI, siehe run_er_sweep."""
+    from strategies import run_er_sweep
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()
     if symbol not in BOTS:
         return web.json_response({"error": "unknown symbol"}, status=404)
     body = await request.json()
     try:
         days = max(1, min(365, int(body.get("days", 30))))
-        atr_period_min = max(1, int(body.get("atr_period_min", 1)))
-        atr_period_max = max(atr_period_min, int(body.get("atr_period_max", 20)))
-        atr_period_step = max(1, int(body.get("atr_period_step", 1)))
-        sensitivity_min = max(0.01, float(body.get("sensitivity_min", 0.5)))
-        sensitivity_max = max(sensitivity_min, float(body.get("sensitivity_max", 5.0)))
-        sensitivity_step = max(0.01, float(body.get("sensitivity_step", 0.5)))
-        long_threshold_min = float(body.get("long_threshold_min", 0.5))
-        long_threshold_max = max(long_threshold_min, float(body.get("long_threshold_max", 0.5)))
-        long_threshold_step = max(0.01, float(body.get("long_threshold_step", 0.5)))
-        short_threshold_min = float(body.get("short_threshold_min", -0.5))
-        short_threshold_max = max(short_threshold_min, float(body.get("short_threshold_max", -0.5)))
-        short_threshold_step = max(0.01, float(body.get("short_threshold_step", 0.5)))
+        ema_min = max(1, int(body.get("ema_min", 5)))
+        ema_max = max(ema_min, int(body.get("ema_max", 50)))
+        ema_step = max(1, int(body.get("ema_step", 5)))
+        rsi_min = max(2, int(body.get("rsi_min", 7)))
+        rsi_max = max(rsi_min, int(body.get("rsi_max", 28)))
+        rsi_step = max(1, int(body.get("rsi_step", 7)))
     except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await run_er_sweep(symbol, cfg, days, ema_min, ema_max, ema_step, rsi_min, rsi_max, rsi_step, exclude_top_n)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] EMA+RSI-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_liq_sweep(request):
+    """'Monte-Carlo'-Sweep fuer Liquidity Waves: Einstiegs-Schwelle x Levels keep alive,
+    siehe run_liq_sweep."""
+    from strategies import run_liq_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        entry_min = max(0.1, float(body.get("entry_min", 1.0)))
+        entry_max = max(entry_min, float(body.get("entry_max", 10.0)))
+        entry_step = max(0.1, float(body.get("entry_step", 1.0)))
+        levels_min = max(1, int(body.get("levels_min", 30)))
+        levels_max = max(levels_min, int(body.get("levels_max", 100)))
+        levels_step = max(1, int(body.get("levels_step", 5)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
     try:
         exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
     except (TypeError, ValueError):
@@ -7081,64 +6459,161 @@ async def handle_utb_param_sweep(request):
     if isinstance(overrides, dict):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
-    result = await run_utb_param_sweep(symbol, cfg, days, atr_period_min, atr_period_max, atr_period_step,
-                                        sensitivity_min, sensitivity_max, sensitivity_step, exclude_top_n,
-                                        long_threshold_min, long_threshold_max, long_threshold_step,
-                                        short_threshold_min, short_threshold_max, short_threshold_step)
+    try:
+        result = await run_liq_sweep(symbol, cfg, days, entry_min, entry_max, entry_step,
+                                      levels_min, levels_max, levels_step, exclude_top_n)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Liquidity-Waves-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
 
-async def handle_hvd_sweep(request):
-    """'Monte-Carlo'-Parametersweep fuer [Hoss] VWAP+RSI+Hull+DI: testet einen Bereich von
-    Hull-Laenge und Risk:Reward gegeneinander (VWAP-Deviation/OBV-RSI/ADX-DI/ATR werden nur
-    einmal berechnet und fuer alle Kombinationen wiederverwendet, siehe run_hvd_sweep).
-
-    Optionale dritte Dimension (SuperTrend-Trendfilter-Multiplikator, nach Nutzer-Vorgabe): wird
-    NUR aktiv, wenn sowohl st_mult_min als auch st_mult_max im Request-Body mitgeschickt werden -
-    sonst bleibt der Multiplikator konstant auf dem konfigurierten Wert (2D-Sweep wie bisher,
-    unveraenderte Geschwindigkeit). ACHTUNG Laufzeit: bei aktiver dritter Dimension multipliziert
-    sich die Kombinationsanzahl mit der Anzahl Multiplikator-Werte (Standard-Vorschlag 1.0-5.0 in
-    0.1-Schritten = 41 Werte) - HVD_SWEEP_MAX_COMBOS greift entsprechend strenger, ggf. Hull-/
-    Risk:Reward-Bereich verkleinern."""
-    from strategies import run_hvd_sweep
+async def handle_wa_sweep(request):
+    """'Monte-Carlo'-Sweep fuer Wellenanker: Zone 1 x Max. Nachkäufe (0-20) x Stop-Loss ($),
+    siehe run_wa_sweep."""
+    from strategies import run_wa_sweep
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()
     if symbol not in BOTS:
         return web.json_response({"error": "unknown symbol"}, status=404)
     body = await request.json()
     try:
         days = max(1, min(365, int(body.get("days", 30))))
-        hull_min = max(2, int(body.get("hull_min", 50)))
-        hull_max = max(hull_min, int(body.get("hull_max", 150)))
-        hull_step = max(1, int(body.get("hull_step", 5)))
-        rr_min = max(0.01, float(body.get("rr_min", 1.0)))
-        rr_max = max(rr_min, float(body.get("rr_max", 5.0)))
-        rr_step = max(0.01, float(body.get("rr_step", 0.5)))
+        zone1_min = max(1.0, float(body.get("zone1_min", 30.0)))
+        zone1_max = max(zone1_min, float(body.get("zone1_max", 80.0)))
+        zone1_step = max(0.1, float(body.get("zone1_step", 1.0)))
+        level_min = max(0.0, min(30.0, float(body.get("level_min", 0.0))))
+        level_max = max(level_min, min(30.0, float(body.get("level_max", 30.0))))
+        level_step = max(0.1, float(body.get("level_step", 2.0)))
+        nachkauf_min = max(0, min(20, int(body.get("nachkauf_min", 0))))
+        nachkauf_max = max(nachkauf_min, min(20, int(body.get("nachkauf_max", 4))))
+        sl_min = max(0.1, float(body.get("sl_min", 5.0)))
+        sl_max = max(sl_min, float(body.get("sl_max", 25.0)))
+        sl_step = max(0.1, float(body.get("sl_step", 2.0)))
     except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültige Zahlenwerte im Sweep-Bereich."}, status=400)
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
     try:
         exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
     except (TypeError, ValueError):
         exclude_top_n = 1
-
-    st_mult_min = None
-    st_mult_max = None
-    st_mult_step = 0.1
-    if body.get("st_mult_min") not in (None, "") and body.get("st_mult_max") not in (None, ""):
-        try:
-            st_mult_min = max(0.1, float(body.get("st_mult_min")))
-            st_mult_max = max(st_mult_min, float(body.get("st_mult_max")))
-            st_mult_step = max(0.01, float(body.get("st_mult_step", 0.1)))
-        except (TypeError, ValueError):
-            return web.json_response({"error": "Ungültige Zahlenwerte im SuperTrend-Multiplikator-Sweep-Bereich."}, status=400)
 
     cfg = dict(BOTS[symbol]["config"])
     overrides = body.get("config")
     if isinstance(overrides, dict):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
 
-    result = await run_hvd_sweep(symbol, cfg, days, hull_min, hull_max, hull_step,
-                                  rr_min, rr_max, rr_step, exclude_top_n,
-                                  st_mult_min, st_mult_max, st_mult_step)
+    try:
+        if cfg.get("wa_entry_mode") == "level":
+            zone1_min, zone1_max, zone1_step = level_min, level_max, level_step   # im Level-Modus wird der Abstand 0-30 getestet
+        lines = body.get("level_lines")
+        result = await run_wa_sweep(symbol, cfg, days, zone1_min, zone1_max, zone1_step,
+                                     nachkauf_min, nachkauf_max, sl_min, sl_max, sl_step, exclude_top_n,
+                                     lines if isinstance(lines, list) else None)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Wellenanker-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_dv_montecarlo(request):
+    """Monte-Carlo-Backtest fuer Dollar701: zufaellige Kombinationen aus Sensitivity x SL x TP, siehe run_dv_montecarlo."""
+    from dollar701 import run_dv_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        runs = max(1, min(2000, int(body.get("runs", 300))))
+        sens_min = float(body.get("sens_min", 3.0)); sens_max = float(body.get("sens_max", 12.0))
+        sl_min = float(body.get("sl_min", 1.0)); sl_max = float(body.get("sl_max", 10.0))
+        tp_min = float(body.get("tp_min", 1.0)); tp_max = float(body.get("tp_max", 10.0))
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(
+            run_dv_montecarlo(symbol, cfg, days, runs, sens_min, sens_max, sl_min, sl_max, tp_min, tp_max, exclude_top_n, seed),
+            timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Dollar701-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_rlm_montecarlo(request):
+    """Monte-Carlo fuer die Reaction Level Matrix: zufaellige Kombinationen aus Score, Swing, Toleranz, Beruehrungen, Ablehnungs-Staerke."""
+    from rlm import run_rlm_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        runs = max(1, min(1000, int(body.get("runs", 150))))
+        ranges = {k: (float(body.get(k + "_min")), float(body.get(k + "_max"))) for k in ("score", "swing", "tol", "touches", "clv")}
+        for k in ("sl", "tp"):
+            if body.get(k + "_min") not in (None, ""):
+                ranges[k] = (float(body.get(k + "_min")), float(body.get(k + "_max")))
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(run_rlm_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n, seed), timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] RLM-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_ab_sweep(request):
+    """'Monte-Carlo'-Sweep fuer Al-Shatri Breakout: uebergeordnete SuperTrend-Zeiteinheit(en) x
+    Multiplikator-Bereich (Standard 0.1-3.0 in 0.1-Schritten), siehe run_ab_sweep."""
+    from strategies import run_ab_sweep
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        st_mult_min = max(0.1, float(body.get("st_mult_min", 0.1)))
+        st_mult_max = max(st_mult_min, float(body.get("st_mult_max", 3.0)))
+        st_mult_step = max(0.01, float(body.get("st_mult_step", 0.1)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte im Multiplikator-Bereich."}, status=400)
+    try:
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+    except (TypeError, ValueError):
+        exclude_top_n = 1
+    timeframes = body.get("timeframes")
+    if not isinstance(timeframes, list) or len(timeframes) > 20:
+        return web.json_response({"error": "Bitte 1-20 SuperTrend-Zeiteinheiten auswählen."}, status=400)
+
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+
+    try:
+        result = await run_ab_sweep(symbol, cfg, days, [str(t) for t in timeframes], st_mult_min, st_mult_max, st_mult_step, exclude_top_n)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] SuperTrend-Sweep fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Sweep fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
 
@@ -7182,6 +6657,22 @@ async def handle_close_position(request):
         return web.json_response({"error": "kein aktueller Preis bekannt"}, status=400)
     await execute_exit(symbol, st["last_price"], "MANUAL")
     return web.json_response({"success": True})
+
+
+async def handle_reverse_position(request):
+    """Manueller Reverse: laufende Position mit EINER Order in die Gegenrichtung drehen (gleiche Groesse)."""
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    st = BOTS[symbol]["state"]
+    if st["position"] is None:
+        return web.json_response({"error": "keine offene Position zum Umkehren"}, status=400)
+    if st["last_price"] is None:
+        return web.json_response({"error": "kein aktueller Preis bekannt"}, status=400)
+    ok = await execute_reverse(symbol, st["last_price"], "MANUAL-REVERSE")
+    if not ok:
+        return web.json_response({"error": "Reverse fehlgeschlagen - siehe Log"}, status=500)
+    return web.json_response({"success": True, "position": st["position"]})
 
 
 async def handle_reset(request):
