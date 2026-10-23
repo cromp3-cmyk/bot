@@ -561,19 +561,6 @@ def default_config():
         "rf_sl_cooldown_seconds": float(os.getenv("RF_SL_COOLDOWN_SECONDS", "30")),
         "rf_tp_enabled": os.getenv("RF_TP_ENABLED", "false").lower() == "true",
         "rf_tp_manual_usd": float(os.getenv("RF_TP_MANUAL_USD", "10.0")),
-        "pa_resolution": os.getenv("PA_RESOLUTION", "5m"),
-        "pa_period1": int(os.getenv("PA_PERIOD1", "27")),  # im Pine-Script hartverdrahtet: smoothrng(close, 27, 9.1)
-        "pa_mult1": float(os.getenv("PA_MULT1", "9.1")),
-        "pa_period2": int(os.getenv("PA_PERIOD2", "55")),  # smoothrng(close, 55, sensitivity)
-        "pa_mult2": float(os.getenv("PA_MULT2", "1.3")),  # "sensitivity" im Pine-Script
-        "pa_direction_mode": os.getenv("PA_DIRECTION_MODE", "both"),  # "both" | "long_only" | "short_only"
-        "pa_wt_exit_enabled": os.getenv("PA_WT_EXIT_ENABLED", "true").lower() == "true",  # WaveTrend-"X" beendet die Position
-        "pa_wt_level": float(os.getenv("PA_WT_LEVEL", "53")),  # Pine: wt2 <= -53 / >= 53
-        "pa_sl_enabled": os.getenv("PA_SL_ENABLED", "false").lower() == "true",
-        "pa_sl_manual_usd": float(os.getenv("PA_SL_MANUAL_USD", "5.0")),
-        "pa_sl_cooldown_seconds": float(os.getenv("PA_SL_COOLDOWN_SECONDS", "30")),
-        "pa_tp_enabled": os.getenv("PA_TP_ENABLED", "false").lower() == "true",
-        "pa_tp_manual_usd": float(os.getenv("PA_TP_MANUAL_USD", "10.0")),
         "mv_resolution": os.getenv("MV_RESOLUTION", "5m"),
         "mv_fast_len": int(os.getenv("MV_FAST_LEN", "9")),
         "mv_slow_len": int(os.getenv("MV_SLOW_LEN", "21")),
@@ -702,7 +689,6 @@ def default_state():
         "fr_sl_price": None, "fr_tp_price": None, "fr_sl_cooldown_until": 0.0,
         "cd_sl_price": None, "cd_sl_cooldown_until": 0.0,
         "rf_sl_price": None, "rf_tp_price": None, "rf_sl_cooldown_until": 0.0,
-        "pa_sl_price": None, "pa_tp_price": None, "pa_sl_cooldown_until": 0.0,
         "mv_sl_price": None, "mv_tp_price": None, "mv_sl_cooldown_until": 0.0,
         "utb_trend_pct_last": None,
         "wtc_last_wt1": None, "wtc_last_wt2": None, "wtc_sl_cooldown_until": 0.0,
@@ -1554,7 +1540,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="range_filter">Range Filter (DonovanWall, nachziehende Glättungslinie, immer im Markt, optionaler fester SL/TP)</option>
       <option value="maverick_edge">Maverick Edge (Trend-EMA + Guide-Linie + Kerzenstärke, reiner Signal-Einstieg, SL fest oder Guide-Linie als Trail-Stop, fester TP)</option>
       <option value="st_rsi_signal">SuperTrend+RSI (SuperTrend 10/2-Flip + RSI 9-Bestätigung, immer Flip bei Gegensignal, optional ADX/Volumen/MTF%/Z-Score-Filter, fester SL+TP)</option>
-      <option value="punk_algo">Punk Algo (Range-Filter-Dreiecke ▲/▼ als Einstieg, Gegensignal = Flip, WaveTrend-X = Ausstieg, optionaler fester SL/TP)</option>
       <option value="hvd_signal">[Hoss] VWAP+RSI+Hull+DI (Hull-Farbwechsel + DI-Bestätigung, scharf durch VWAP-Band+OBV-RSI-Extrem am selben Balken, SL=Hull mit ATR-Mindestabstand, TP=Risk-Reward, kein Flip-Exit)</option>
     </select>
   </div>
@@ -2976,66 +2961,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="range_filter" data-requires="rf_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="rf_tp_manual_usd"></div>
 
-  <div data-mode="punk_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🟣 Punk Algo (Port des Pine-Scripts "Punk Algo", nur die Bausteine, die die Einstiege wirklich
-    steuern): zwei geglättete Kursbandbreiten (Periode 27 / Faktor 9,1 und Periode 55 / "Sensitivity"
-    1,3) ergeben eine nachziehende Linie. Ein ▲/▼-Dreieck entsteht beim ersten Richtungswechsel
-    NACH dem jeweils anderen Zustand. Einstieg = Dreieck, Gegen-Dreieck = Flip, das WaveTrend-"X"
-    (wt1 kreuzt wt2 im Extrembereich ±53) beendet die Position. Ausgewertet wird nur auf
-    ABGESCHLOSSENEN Kerzen (das Script nutzt den Schlusskurs). EMA144, Dashboard, RSI und
-    Momentum-Kerzen aus dem Script beeinflussen die Einstiege dort nicht und sind nicht portiert.
-  </div>
-  <div data-mode="punk_algo"><label>Zeitrahmen</label>
-    <select class="cfg" id="pa_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
-      <option value="1m">1 Minute</option>
-      <option value="2m">2 Minuten</option>
-      <option value="5m">5 Minuten</option>
-      <option value="15m">15 Minuten</option>
-      <option value="30m">30 Minuten</option>
-      <option value="1h">1 Stunde</option>
-      <option value="4h">4 Stunden</option>
-      <option value="custom">Eigene Minuten...</option>
-    </select>
-    <input type="number" step="1" min="1" id="pa_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
-  </div>
-  <div data-mode="punk_algo"><label>Periode 1 (Original: 27)</label><input type="number" step="1" min="2" id="pa_period1"></div>
-  <div data-mode="punk_algo"><label>Faktor 1 (Original: 9,1)</label><input type="number" step="0.1" min="0.1" id="pa_mult1"></div>
-  <div data-mode="punk_algo"><label>Periode 2 (Original: 55)</label><input type="number" step="1" min="2" id="pa_period2"></div>
-  <div data-mode="punk_algo"><label>Faktor 2 / Sensitivity (Original: 1,3)</label><input type="number" step="0.1" min="0.1" id="pa_mult2"></div>
-  <div data-mode="punk_algo"><label>Richtung</label>
-    <select class="cfg" id="pa_direction_mode">
-      <option value="both">Beide (Long + Short)</option>
-      <option value="long_only">Nur Long</option>
-      <option value="short_only">Nur Short</option>
-    </select>
-  </div>
-  <div data-mode="punk_algo"><label>WaveTrend-X beendet Position</label>
-    <select class="cfg" id="pa_wt_exit_enabled">
-      <option value="true">An (wie die X-Marker im Script)</option>
-      <option value="false">Aus (nur Gegen-Dreieck / SL / TP)</option>
-    </select>
-  </div>
-  <div data-mode="punk_algo" data-requires="pa_wt_exit_enabled"><label>WaveTrend-Schwelle (Original: 53)</label><input type="number" step="1" min="1" id="pa_wt_level"></div>
-  <div data-mode="punk_algo"><label>Stop-Loss</label>
-    <select class="cfg" id="pa_sl_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="punk_algo" data-requires="pa_sl_enabled"><label>SL Fester $-Betrag</label><input type="number" step="0.5" id="pa_sl_manual_usd"></div>
-  <div data-mode="punk_algo" data-requires="pa_sl_enabled"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="pa_sl_cooldown_seconds"></div>
-  <div data-mode="punk_algo"><label>Take-Profit</label>
-    <select class="cfg" id="pa_tp_enabled">
-      <option value="false">Aus</option>
-      <option value="true">An</option>
-    </select>
-  </div>
-  <div data-mode="punk_algo" data-requires="pa_tp_enabled"><label>TP Fester $-Betrag</label><input type="number" step="0.5" id="pa_tp_manual_usd"></div>
-
   <div data-mode="maverick_edge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🗺️ Maverick Edge (Port von "Maverick Edge Style - Modul 1"): Trend-Kontrolle aus zwei EMAs
     (schneller EMA über/unter langsamem UND steigend/fallend), eine "Guide-Linie" (EMA) als
@@ -4124,88 +4049,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
-<div data-mode-section="punk_algo" style="display:none;">
-<h2 class="section-title">🎲 Punk-Algo Monte-Carlo-Backtest</h2>
-<div class="panel-card">
-  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Statt ein starres Raster abzulaufen, werden zufällige Kombinationen der vier Range-Filter-Werte
-    (Periode 1, Faktor 1, Periode 2, Faktor 2) gezogen und jeweils komplett durchgerechnet. Die
-    Original-Werte (27 / 9,1 / 55 / 1,3) laufen immer als Referenz mit. Der Zeitraum wird geteilt:
-    die ersten 70 % sind "Training", die letzten 30 % der "Test" - eine Kombination, die im
-    Training glänzt und im Test einbricht, ist nur überangepasst. Entscheidend ist die Spalte
-    "PnL Test". Die Einstellungen für Zeitrahmen, Richtung, WaveTrend-X und SL/TP oben gelten für den Lauf.
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="pa-mc-days" value="30" style="width:90px;"></div>
-    <div><label>Zufalls-Kombinationen</label><input type="number" step="50" id="pa-mc-samples" value="300" style="width:110px;"></div>
-    <div><label>Seed (leer = zufällig)</label><input type="number" step="1" id="pa-mc-seed" placeholder="z.B. 42" style="width:110px;"></div>
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Periode 1 von</label><input type="number" step="1" id="pa-mc-p1-min" value="10" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="1" id="pa-mc-p1-max" value="50" style="width:80px;"></div>
-    <div><label>Faktor 1 von</label><input type="number" step="0.1" id="pa-mc-m1-min" value="3.0" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" id="pa-mc-m1-max" value="15.0" style="width:80px;"></div>
-  </div>
-  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-    <div><label>Periode 2 von</label><input type="number" step="1" id="pa-mc-p2-min" value="30" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="1" id="pa-mc-p2-max" value="100" style="width:80px;"></div>
-    <div><label>Faktor 2 von</label><input type="number" step="0.1" id="pa-mc-m2-min" value="0.5" style="width:80px;"></div>
-    <div><label>bis</label><input type="number" step="0.1" id="pa-mc-m2-max" value="3.0" style="width:80px;"></div>
-    <button id="btn-pa-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
-  </div>
-  <div id="pa-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
-  <div id="pa-mc-summary" style="display:none; margin:10px 0; padding:10px 12px; border:1px solid var(--border, #333); border-radius:8px; font-size:13px; line-height:1.6;"></div>
-  <h3 style="margin-top:14px; font-size:14px; color:var(--text-dim); display:none;" id="pa-mc-robust-title">✅ Robuste Kombinationen (Training UND Test im Plus, nach PnL Test)</h3>
-  <table id="pa-mc-robust-table" style="display:none; margin-top:8px;">
-    <thead><tr>
-      <th class="sortable" data-key="pa_period1">P1 ⇅</th>
-      <th class="sortable" data-key="pa_mult1">F1 ⇅</th>
-      <th class="sortable" data-key="pa_period2">P2 ⇅</th>
-      <th class="sortable" data-key="pa_mult2">F2 ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL gesamt $ ⇅</th>
-      <th class="sortable" data-key="pnl_train">PnL Training $ ⇅</th>
-      <th class="sortable" data-key="pnl_test">PnL Test $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="pa-mc-best-title">🏆 Die 30 besten Kombinationen (nach PnL gesamt - Vorsicht, kann überangepasst sein)</h3>
-  <table id="pa-mc-results-table" style="display:none; margin-top:8px;">
-    <thead><tr>
-      <th class="sortable" data-key="pa_period1">P1 ⇅</th>
-      <th class="sortable" data-key="pa_mult1">F1 ⇅</th>
-      <th class="sortable" data-key="pa_period2">P2 ⇅</th>
-      <th class="sortable" data-key="pa_mult2">F2 ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL gesamt $ ⇅</th>
-      <th class="sortable" data-key="pnl_train">PnL Training $ ⇅</th>
-      <th class="sortable" data-key="pnl_test">PnL Test $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="pa-mc-worst-title">📉 Die 20 schlechtesten Kombinationen</h3>
-  <table id="pa-mc-worst-table" style="display:none; margin-top:8px;">
-    <thead><tr>
-      <th class="sortable" data-key="pa_period1">P1 ⇅</th>
-      <th class="sortable" data-key="pa_mult1">F1 ⇅</th>
-      <th class="sortable" data-key="pa_period2">P2 ⇅</th>
-      <th class="sortable" data-key="pa_mult2">F2 ⇅</th>
-      <th class="sortable" data-key="trades">Trades ⇅</th>
-      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
-      <th class="sortable" data-key="total_pnl_usd">PnL gesamt $ ⇅</th>
-      <th class="sortable" data-key="pnl_train">PnL Training $ ⇅</th>
-      <th class="sortable" data-key="pnl_test">PnL Test $ ⇅</th>
-      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
-</div>
-</div>
-
 <div data-mode-section="range_filter" style="display:none;">
 <h2 class="section-title">🎲 Range-Filter-Parameter-Sweep (Swing-Periode × Multiplikator)</h2>
 <div class="panel-card">
@@ -4717,7 +4560,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #pa_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -4961,88 +4804,6 @@ const rfSweepRowHtml = (r) => `
   </tr>`;
 const renderRfSweepResults = makeSortableTable('rf-sweep-results-table', () => window.rfSweepResultsData, rfSweepRowHtml);
 const renderRfSweepWorst = makeSortableTable('rf-sweep-worst-table', () => window.rfSweepWorstData, rfSweepRowHtml);
-
-document.getElementById('btn-pa-mc').addEventListener('click', async () => {
-  const btn = document.getElementById('btn-pa-mc');
-  const statusEl = document.getElementById('pa-mc-status');
-  const summaryEl = document.getElementById('pa-mc-summary');
-  const sections = [
-    ['pa-mc-robust-table', 'pa-mc-robust-title'],
-    ['pa-mc-results-table', 'pa-mc-best-title'],
-    ['pa-mc-worst-table', 'pa-mc-worst-title'],
-  ];
-  const sweepSymbol = currentSymbol;
-  const num = (id) => parseFloat(document.getElementById(id).value);
-  const seedRaw = document.getElementById('pa-mc-seed').value;
-  const payload = {
-    days: parseInt(document.getElementById('pa-mc-days').value) || 30,
-    samples: parseInt(document.getElementById('pa-mc-samples').value) || 300,
-    seed: seedRaw === '' ? null : parseInt(seedRaw),
-    p1_min: num('pa-mc-p1-min'), p1_max: num('pa-mc-p1-max'),
-    m1_min: num('pa-mc-m1-min'), m1_max: num('pa-mc-m1-max'),
-    p2_min: num('pa-mc-p2-min'), p2_max: num('pa-mc-p2-max'),
-    m2_min: num('pa-mc-m2-min'), m2_max: num('pa-mc-m2-max'),
-    config: buildConfigPayload(),
-  };
-  btn.disabled = true;
-  summaryEl.style.display = 'none';
-  sections.forEach(([t, h]) => { document.getElementById(t).style.display = 'none'; document.getElementById(h).style.display = 'none'; });
-  statusEl.innerText = `⏳ Lade Kerzen und rechne die Zufalls-Kombinationen... bei vielen Kombinationen und langen Zeiträumen kann das etwas dauern.`;
-  try {
-    const res = await fetch(`/api/pa_monte_carlo?symbol=${sweepSymbol}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (sweepSymbol !== currentSymbol) return;
-    if (data.error) {
-      statusEl.innerText = `❌ ${data.error}`;
-    } else {
-      statusEl.innerText = `${data.combos_tested} Kombinationen auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - die letzten ${data.test_fraction_pct}% sind der Test-Zeitraum. Ergebnisse mit weniger als ${data.min_reliable_trades} Trades sind unten einsortiert.`;
-      const b = data.baseline;
-      const cls = (v) => v >= 0 ? 'green' : 'red';
-      summaryEl.innerHTML = `
-        <b>Original-Werte (27 / 9,1 / 55 / 1,3):</b> ${b.trades} Trades, Trefferquote ${b.win_rate_pct}%,
-        PnL gesamt <span class="${cls(b.total_pnl_usd)}">${b.total_pnl_usd} $</span>,
-        Training <span class="${cls(b.pnl_train)}">${b.pnl_train} $</span>,
-        Test <span class="${cls(b.pnl_test)}">${b.pnl_test} $</span>, Max DD ${b.max_drawdown_usd} $.<br>
-        <b>Breite über alle Zufalls-Kombinationen:</b> ${data.profitable_share_pct}% sind im Plus,
-        Median-PnL ${data.median_pnl_usd} $, ${data.robust_count} Kombinationen sind in Training UND Test im Plus.`;
-      summaryEl.style.display = '';
-      window.paMcRobustData = data.robust_results || [];
-      window.paMcResultsData = data.results || [];
-      window.paMcWorstData = data.worst_results || [];
-      renderPaMcRobust(); renderPaMcResults(); renderPaMcWorst();
-      const show = [[0, window.paMcRobustData.length], [1, window.paMcResultsData.length], [2, window.paMcWorstData.length]];
-      show.forEach(([i, len]) => {
-        if (len > 0) { document.getElementById(sections[i][0]).style.display = ''; document.getElementById(sections[i][1]).style.display = ''; }
-      });
-    }
-  } catch (e) {
-    if (sweepSymbol !== currentSymbol) return;
-    statusEl.innerText = `❌ Fehler: ${e}`;
-  }
-  if (sweepSymbol === currentSymbol) btn.disabled = false;
-});
-
-window.paMcRobustData = [];
-window.paMcResultsData = [];
-window.paMcWorstData = [];
-const paMcRowHtml = (r) => `
-  <tr>
-    <td>${r.pa_period1}</td>
-    <td>${r.pa_mult1}</td>
-    <td>${r.pa_period2}</td>
-    <td>${r.pa_mult2}</td>
-    <td>${r.trades}</td>
-    <td>${r.win_rate_pct}%</td>
-    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
-    <td class="${r.pnl_train >= 0 ? 'green' : 'red'}">${r.pnl_train}</td>
-    <td class="${r.pnl_test >= 0 ? 'green' : 'red'}">${r.pnl_test}</td>
-    <td>${r.max_drawdown_usd}</td>
-  </tr>`;
-const renderPaMcRobust = makeSortableTable('pa-mc-robust-table', () => window.paMcRobustData, paMcRowHtml);
-const renderPaMcResults = makeSortableTable('pa-mc-results-table', () => window.paMcResultsData, paMcRowHtml);
-const renderPaMcWorst = makeSortableTable('pa-mc-worst-table', () => window.paMcWorstData, paMcRowHtml);
 
 document.getElementById('btn-es-sweep').addEventListener('click', async () => {
   const btn = document.getElementById('btn-es-sweep');
@@ -6054,19 +5815,6 @@ async function refresh() {
     document.getElementById('rf_sl_cooldown_seconds').value = data.config.rf_sl_cooldown_seconds;
     document.getElementById('rf_tp_enabled').value = String(data.config.rf_tp_enabled);
     document.getElementById('rf_tp_manual_usd').value = data.config.rf_tp_manual_usd;
-    setResolutionField('pa_resolution', data.config.pa_resolution);
-    document.getElementById('pa_period1').value = data.config.pa_period1;
-    document.getElementById('pa_mult1').value = data.config.pa_mult1;
-    document.getElementById('pa_period2').value = data.config.pa_period2;
-    document.getElementById('pa_mult2').value = data.config.pa_mult2;
-    document.getElementById('pa_direction_mode').value = data.config.pa_direction_mode;
-    document.getElementById('pa_wt_exit_enabled').value = String(data.config.pa_wt_exit_enabled);
-    document.getElementById('pa_wt_level').value = data.config.pa_wt_level;
-    document.getElementById('pa_sl_enabled').value = String(data.config.pa_sl_enabled);
-    document.getElementById('pa_sl_manual_usd').value = data.config.pa_sl_manual_usd;
-    document.getElementById('pa_sl_cooldown_seconds').value = data.config.pa_sl_cooldown_seconds;
-    document.getElementById('pa_tp_enabled').value = String(data.config.pa_tp_enabled);
-    document.getElementById('pa_tp_manual_usd').value = data.config.pa_tp_manual_usd;
     document.getElementById('mv_resolution').value = data.config.mv_resolution;
     document.getElementById('mv_fast_len').value = data.config.mv_fast_len;
     document.getElementById('mv_slow_len').value = data.config.mv_slow_len;
@@ -6656,19 +6404,6 @@ function buildConfigPayload() {
     rf_sl_cooldown_seconds: parseFloat(document.getElementById('rf_sl_cooldown_seconds').value),
     rf_tp_enabled: document.getElementById('rf_tp_enabled').value === 'true',
     rf_tp_manual_usd: parseFloat(document.getElementById('rf_tp_manual_usd').value),
-    pa_resolution: getResolutionField('pa_resolution'),
-    pa_period1: parseInt(document.getElementById('pa_period1').value),
-    pa_mult1: parseFloat(document.getElementById('pa_mult1').value),
-    pa_period2: parseInt(document.getElementById('pa_period2').value),
-    pa_mult2: parseFloat(document.getElementById('pa_mult2').value),
-    pa_direction_mode: document.getElementById('pa_direction_mode').value,
-    pa_wt_exit_enabled: document.getElementById('pa_wt_exit_enabled').value === 'true',
-    pa_wt_level: parseFloat(document.getElementById('pa_wt_level').value),
-    pa_sl_enabled: document.getElementById('pa_sl_enabled').value === 'true',
-    pa_sl_manual_usd: parseFloat(document.getElementById('pa_sl_manual_usd').value),
-    pa_sl_cooldown_seconds: parseFloat(document.getElementById('pa_sl_cooldown_seconds').value),
-    pa_tp_enabled: document.getElementById('pa_tp_enabled').value === 'true',
-    pa_tp_manual_usd: parseFloat(document.getElementById('pa_tp_manual_usd').value),
     mv_resolution: document.getElementById('mv_resolution').value,
     mv_fast_len: parseInt(document.getElementById('mv_fast_len').value),
     mv_slow_len: parseInt(document.getElementById('mv_slow_len').value),
@@ -6946,7 +6681,6 @@ async def handle_status(request):
         "fr_sl_price": st.get("fr_sl_price"),
         "cd_sl_price": st.get("cd_sl_price"),
         "rf_sl_price": st.get("rf_sl_price"), "rf_tp_price": st.get("rf_tp_price"),
-        "pa_sl_price": st.get("pa_sl_price"), "pa_tp_price": st.get("pa_tp_price"),
         "utb_trend_pct_last": st.get("utb_trend_pct_last"),
         "wtc_last_wt1": st.get("wtc_last_wt1"), "wtc_last_wt2": st.get("wtc_last_wt2"),
         "wtc_sl_price": st.get("wtc_sl_price"), "wtc_tp_price": st.get("wtc_tp_price"),
@@ -7064,10 +6798,6 @@ async def handle_config_update(request):
                 "rf_adx_filter_enabled", "rf_adx_length", "rf_adx_threshold",
                 "rf_sl_enabled", "rf_sl_manual_usd", "rf_sl_cooldown_seconds",
                 "rf_tp_enabled", "rf_tp_manual_usd",
-                "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2",
-                "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level",
-                "pa_sl_enabled", "pa_sl_manual_usd", "pa_sl_cooldown_seconds",
-                "pa_tp_enabled", "pa_tp_manual_usd",
                 "mv_resolution", "mv_fast_len", "mv_slow_len", "mv_guide_len", "mv_atr_len", "mv_strong_mult",
                 "mv_use_volume_enabled", "mv_vol_len", "mv_vol_mult", "mv_direction_mode", "mv_invert_direction",
                 "mv_sl_mode", "mv_sl_enabled", "mv_sl_manual_usd", "mv_sl_cooldown_seconds",
@@ -7230,36 +6960,6 @@ async def handle_rf_sweep(request):
 
     result = await run_rf_param_sweep(symbol, cfg, days, period_min, period_max, period_step,
                                        qty_min, qty_max, qty_step)
-    return web.json_response(result)
-
-
-async def handle_pa_monte_carlo(request):
-    """Monte-Carlo-Backtest fuer Punk Algo: zufaellige Kombinationen der vier Range-Filter-Werte
-    (Original 27 / 9,1 / 55 / 1,3 laeuft immer als Referenz mit), Training-/Test-Aufteilung gegen
-    Ueberanpassung, siehe run_pa_monte_carlo."""
-    from strategies import run_pa_monte_carlo
-    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
-    if symbol not in BOTS:
-        return web.json_response({"error": "unknown symbol"}, status=404)
-    body = await request.json()
-    try:
-        days = max(1, min(365, int(body.get("days", 30))))
-        samples = max(1, min(1000, int(body.get("samples", 300))))
-        seed_raw = body.get("seed")
-        seed = int(seed_raw) if seed_raw not in (None, "") else None
-        p1 = (max(2, int(body.get("p1_min", 10))), max(2, int(body.get("p1_max", 50))))
-        p2 = (max(2, int(body.get("p2_min", 30))), max(2, int(body.get("p2_max", 100))))
-        m1 = (max(0.1, float(body.get("m1_min", 3.0))), max(0.1, float(body.get("m1_max", 15.0))))
-        m2 = (max(0.1, float(body.get("m2_min", 0.5))), max(0.1, float(body.get("m2_max", 3.0))))
-    except (TypeError, ValueError):
-        return web.json_response({"error": "Ungültige Zahlenwerte im Monte-Carlo-Bereich."}, status=400)
-
-    cfg = dict(BOTS[symbol]["config"])
-    overrides = body.get("config")
-    if isinstance(overrides, dict):
-        cfg.update({k: v for k, v in overrides.items() if k in cfg})
-
-    result = await run_pa_monte_carlo(symbol, cfg, days, p1, m1, p2, m2, samples, seed)
     return web.json_response(result)
 
 

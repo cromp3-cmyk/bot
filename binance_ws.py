@@ -38,7 +38,20 @@ WS_HOSTS = {
 # Nur Intervalle, die Binance nativ als Kline-Stream anbietet, werden hier gecacht.
 CACHEABLE_INTERVALS = {"1s", "1m", "3m", "5m", "15m", "30m", "1h", "4h"}
 
-MAX_CANDLES_PER_STREAM = 1500  # deckt alle bisherigen count_back-Werte komfortabel ab
+# War vorher 1500 - fuer synthetische Sekunden-Aufloesungen (10s/15s/30s/45s, siehe strategies.py
+# resolve_synthetic_resolution) reicht das NICHT: die werden aus dem "1s"-Basis-Stream
+# zusammengerechnet, und ein Verbraucher, der z.B. mindestens 51 fertige 30s-Kerzen braucht,
+# braucht dafuer 51*30=1530 rohe 1s-Kerzen - mehr als die alten 1500 ueberhaupt je liefern
+# konnten (der Puffer haette also SELBST BEI VOLLER FUELLUNG nie genug geliefert, ganz unabhaengig
+# vom separat gefixten 1000er-Deckel in strategies.py's fetch_candles_binance_vol). Live beobachtet:
+# "wartet: zu wenig Kerzen (33/51 nötig)" haengt DAUERHAFT fest, nicht nur waehrend des Aufwaermens.
+# 20000 deckt auch 45s-Kerzen mit hohem count_back komfortabel ab; der Speicher-Mehrbedarf ist
+# trivial (kleine Dicts, gilt zudem nur fuer den "1s"-Stream in der Praxis - andere Intervalle
+# fuellen sich so langsam, dass sie diese Grenze nie erreichen).
+# Speicher-Limit: ein Kerzen-Dict kostet ~0,5 KB, bei ~30 Coins x mehreren Zeitrahmen sprengten 20000 Kerzen pro
+# Stream (v.a. die 1s-Streams, die live staendig weiterwachsen) irgendwann die 512 MB von Render (OOM-Neustart).
+MAX_CANDLES_PER_STREAM = 1500
+MAX_CANDLES_BY_INTERVAL = {"1s": 7000, "1m": 3000}  # Screener braucht 6000 (10s x 600 Kerzen)
 
 # Wie viele Kerzen beim erstmaligen Abonnieren eines Streams per REST vorgeladen werden
 # (EINMALIG pro Stream, nicht wiederholt - danach nur noch WS-Push).
@@ -46,6 +59,10 @@ REST_SEED_LIMIT = {
     "1s": 1000, "1m": 1000, "3m": 1000, "5m": 1000,
     "15m": 500, "30m": 500, "1h": 300, "4h": 200,
 }
+
+# Wie viele REST-Seiten (je REST_SEED_LIMIT Kerzen) rueckwaerts beim Seed geholt werden. Nur "1s": dort reichen 1000
+# Kerzen (~16 Min) fuer 15s/30s-Charts nicht aus.
+SEED_PAGES = {"1s": 4}
 
 BINANCE_BASE_URLS = {
     "spot": "https://api.binance.com/api/v3/klines",
@@ -68,12 +85,13 @@ STALENESS_BUFFER_SECONDS = 30
 
 
 class _StreamState:
-    __slots__ = ("candles", "ready", "last_update_ts")
+    __slots__ = ("candles", "ready", "last_update_ts", "saved_ts")
 
-    def __init__(self):
-        self.candles = deque(maxlen=MAX_CANDLES_PER_STREAM)  # Dicts: ts,o,h,l,c,v
+    def __init__(self, interval=None):
+        self.candles = deque(maxlen=MAX_CANDLES_BY_INTERVAL.get(interval, MAX_CANDLES_PER_STREAM))  # Dicts: ts,o,h,l,c,v
         self.ready = False  # True, sobald der einmalige REST-Seed durch ist
         self.last_update_ts = 0.0  # time.time() der letzten WS-Aktualisierung (oder des Seeds)
+        self.saved_ts = 0.0  # time.time() der letzten Sicherung in Redis (siehe snapshot_loop)
 
 
 # market_type -> {"BTCUSDT|1m": _StreamState}
@@ -97,7 +115,7 @@ def ensure_subscribed(market_type, pair, interval):
         return
     k = _key(pair, interval)
     if k not in _streams[market_type]:
-        _streams[market_type][k] = _StreamState()
+        _streams[market_type][k] = _StreamState(interval)
         _pending_subscribe[market_type].add(k)
 
 
@@ -131,13 +149,190 @@ def get_cached_candles(market_type, pair, interval, count_back):
     return timestamps, opens, highs, lows, closes, volumes
 
 
+def get_cached_candles_ext(market_type, pair, interval, count_back):
+    """Wie get_cached_candles, liefert aber die Kerzen als Liste von Dicts MIT den Zusatzfeldern
+    'tb' (Taker-Buy-Basisvolumen) und 'n' (Trades) - fuer den Coin-Screener. Gleiche Frische-/
+    Warm-Regeln: None, solange der Stream nicht warm oder eingefroren ist. Rein lesend, kein
+    REST-Fallback (der Screener soll NIE selbst Binance anfragen)."""
+    st = _streams.get(market_type, {}).get(_key(pair, interval))
+    if st is None or not st.ready or not st.candles:
+        return None
+    max_staleness = INTERVAL_SECONDS.get(interval, 60) * STALENESS_MULTIPLIER + STALENESS_BUFFER_SECONDS
+    if time.time() - st.last_update_ts > max_staleness:
+        # eingefroren: wie in get_cached_candles neu abonnieren lassen (sonst koennte ein Stream, den
+        # NUR der Screener nutzt, nie wieder anspringen)
+        st.ready = False
+        _pending_subscribe[market_type].add(_key(pair, interval))
+        return None
+    return [dict(c) for c in list(st.candles)[-count_back:]]
+
+
+# ============================================================================
+# KERZEN-SNAPSHOT IN REDIS (ueberlebt Deploys/Neustarts)
+# ----------------------------------------------------------------------------
+# Problem: nach jedem Deploy war der Kerzen-Cache leer, und JEDER Stream (Coin x Zeitrahmen) hat seine komplette
+# Historie neu per REST geholt - viele Anfragen auf einmal = IP-Bann bei Binance. Jetzt wird der Cache regelmaessig
+# komprimiert in Redis gesichert. Beim Start laedt jeder Stream zuerst seinen Snapshot und holt nur noch die
+# Kerzen nach, die waehrend des Neustarts gefehlt haben (meist 0-3 Stueck). Fehlt der Snapshot oder ist er zu alt,
+# laeuft der bisherige komplette Seed wie gehabt.
+# ============================================================================
+SNAPSHOT_INTERVAL_SECONDS = 120   # wie oft gesichert wird (nur Streams mit neuen Daten)
+SNAPSHOT_TTL_SECONDS = 3 * 86400  # Redis raeumt alte Snapshots selbst auf
+SNAPSHOT_MIN_CANDLES = 30         # kleinere Snapshots sind nicht den Aufwand wert
+
+
+def _snap_key(market_type, pair, interval):
+    return f"bwscache:{market_type}:{pair}:{interval}"
+
+
+def _seed_window(interval):
+    """So viele Kerzen deckt ein kompletter Seed ab - aeltere Snapshots sind nicht mehr 'nur eine kleine Luecke'."""
+    return REST_SEED_LIMIT.get(interval, 500) * SEED_PAGES.get(interval, 1)
+
+
+def _k_to_candle(k):
+    return {
+        "ts": int(k[0]), "o": float(k[1]), "h": float(k[2]), "l": float(k[3]), "c": float(k[4]), "v": float(k[5]),
+        # Zusatzfelder fuer den Coin-Screener (Moneyflow/Buyers%): REST-Kline-Index 8 = Anzahl Trades, 9 = Taker-Buy-Basisvolumen.
+        "tb": float(k[9]) if len(k) > 9 else 0.0,
+        "n": int(k[8]) if len(k) > 8 else 0,
+    }
+
+
+def _encode_snapshot(candles):
+    import base64
+    import zlib
+    rows = [[c["ts"], c["o"], c["h"], c["l"], c["c"], c["v"], c.get("tb", 0.0), c.get("n", 0)] for c in candles]
+    return base64.b64encode(zlib.compress(json.dumps(rows, separators=(",", ":")).encode(), 6)).decode()
+
+
+def _decode_snapshot(raw):
+    import base64
+    import zlib
+    rows = json.loads(zlib.decompress(base64.b64decode(raw)).decode())
+    out = [{"ts": int(r[0]), "o": float(r[1]), "h": float(r[2]), "l": float(r[3]), "c": float(r[4]), "v": float(r[5]),
+            "tb": float(r[6]), "n": int(r[7])} for r in rows]
+    if any(out[i]["ts"] >= out[i + 1]["ts"] for i in range(len(out) - 1)):
+        return None  # nicht streng aufsteigend -> beschaedigt, lieber verwerfen
+    return out
+
+
+_SNAP_SEM = None
+
+
+def _snap_sem():
+    """Hoechstens 4 Snapshot-Zugriffe gleichzeitig (sonst ueberrennen ~50 Streams beim Start das Redis-Limit)."""
+    global _SNAP_SEM
+    if _SNAP_SEM is None:
+        _SNAP_SEM = asyncio.Semaphore(4)
+    return _SNAP_SEM
+
+
+async def _load_snapshot(market_type, pair, interval):
+    """-> Liste von Kerzen-Dicts oder None. Fehler/fehlendes Redis sind kein Problem (dann normaler Seed)."""
+    try:
+        from bot_core import get_redis
+        r = await get_redis()
+        if r is None:
+            return None
+        async with _snap_sem():
+            raw = await asyncio.wait_for(r.get(_snap_key(market_type, pair, interval)), timeout=15)
+        if not raw:
+            return None
+        candles = await asyncio.to_thread(_decode_snapshot, raw)
+        if not candles or len(candles) < SNAPSHOT_MIN_CANDLES:
+            return None
+        return candles
+    except Exception as e:
+        debug_log(f"⚠️ [WS-Cache] Snapshot laden fehlgeschlagen ({pair} {interval})", {"error": str(e)})
+        return None
+
+
+async def _save_snapshot(market_type, pair, interval, st):
+    from bot_core import get_redis
+    r = await get_redis()
+    if r is None:
+        return False
+    keep = _seed_window(interval)
+    candles = [dict(c) for c in list(st.candles)[-keep:]]
+    if len(candles) < SNAPSHOT_MIN_CANDLES:
+        return False
+    data = await asyncio.to_thread(_encode_snapshot, candles)
+    async with _snap_sem():
+        await asyncio.wait_for(r.set(_snap_key(market_type, pair, interval), data, ex=SNAPSHOT_TTL_SECONDS), timeout=15)
+    return True
+
+
+async def snapshot_loop():
+    """In binance_ws_cache_loop eingehaengt: sichert alle SNAPSHOT_INTERVAL_SECONDS die Streams, die seit der letzten
+    Sicherung neue Daten bekommen haben (Redis-Schreibzugriffe nacheinander, nicht als Schwung)."""
+    await asyncio.sleep(SNAPSHOT_INTERVAL_SECONDS)
+    while True:
+        saved = 0
+        try:
+            for market_type in ("spot", "futures"):
+                for k, st in list(_streams.get(market_type, {}).items()):
+                    if not st.ready or not st.candles or st.last_update_ts <= st.saved_ts:
+                        continue
+                    pair, interval = k.split("|")
+                    try:
+                        t_mark = time.time()
+                        if await _save_snapshot(market_type, pair, interval, st):
+                            st.saved_ts = t_mark
+                            saved += 1
+                    except Exception as e:
+                        debug_log(f"⚠️ [WS-Cache] Snapshot speichern fehlgeschlagen ({pair} {interval})", {"error": str(e)})
+                    await asyncio.sleep(0.05)
+        except Exception as e:
+            debug_log("⚠️ [WS-Cache] Snapshot-Runde fehlgeschlagen", {"error": str(e)})
+        if saved:
+            debug_log(f"💾 [WS-Cache] {saved} Kerzen-Snapshots in Redis gesichert")
+        await asyncio.sleep(SNAPSHOT_INTERVAL_SECONDS)
+
+
+def _merge_into_stream(st, *candle_lists):
+    """Fuehrt Kerzenlisten zu einer lueckenlos aufsteigenden Reihe zusammen. Spaetere Listen gewinnen bei gleichem
+    Zeitstempel; schon im Stream liegende (per WS eingetroffene) Kerzen haben zuletzt Vorrang."""
+    d = {}
+    for lst in candle_lists:
+        for c in lst:
+            d[c["ts"]] = c
+    for c in st.candles:
+        d[c["ts"]] = c
+    merged = [d[t] for t in sorted(d)]
+    st.candles.clear()
+    st.candles.extend(merged)
+
+
 async def _seed_stream_history(market_type, pair, interval):
-    """Laedt einmalig Historie per REST fuer einen frisch abonnierten Stream. Nutzt
-    bewusst die Bann-/Throttle-Infrastruktur aus strategies.py (per Lazy-Import, um einen
-    Zirkelimport beim Modul-Laden zu vermeiden - strategies.py importiert dieses Modul
-    bereits auf oberster Ebene)."""
+    """Laedt einmalig Historie fuer einen frisch abonnierten Stream. Reihenfolge:
+      1. Snapshot aus Redis laden (falls vorhanden und nicht zu alt) -> es muessen nur die Kerzen der Luecke nachgeholt
+         werden (oft gar keine: dann KEINE REST-Anfrage).
+      2. Sonst kompletter REST-Seed wie bisher (Bann-/Throttle-Infrastruktur aus strategies.py, per Lazy-Import, um
+         einen Zirkelimport beim Modul-Laden zu vermeiden)."""
     import aiohttp
-    from strategies import _binance_throttle, _binance_is_banned, _binance_register_ban
+    from strategies import _binance_throttle, _binance_is_banned, _binance_register_ban, _binance_note_response
+
+    interval_ms = INTERVAL_SECONDS.get(interval, 60) * 1000
+    snapshot = await _load_snapshot(market_type, pair, interval)
+    gap_start = None   # ab diesem Zeitstempel (inkl.) muss nachgeholt werden
+    if snapshot:
+        last_ts = snapshot[-1]["ts"]
+        missing = int(time.time() * 1000 - last_ts) // interval_ms + 1   # inkl. der damals evtl. noch laufenden Kerze
+        if missing > _seed_window(interval):
+            snapshot = None  # Luecke groesser als ein kompletter Seed -> gleich alles frisch holen
+        elif missing <= 1:
+            # Letzte gesicherte Kerze ist noch die aktuelle: nichts fehlt, der WS liefert sie sowieso gleich komplett.
+            st = _streams[market_type].get(_key(pair, interval))
+            if st is None:
+                return
+            _merge_into_stream(st, snapshot)
+            st.ready = True
+            st.last_update_ts = time.time()
+            debug_log(f"✅ [WS-Cache] {pair} {interval} ({market_type}) aus Snapshot bereit - keine REST-Anfrage nötig", {"kerzen": len(st.candles)})
+            return
+        else:
+            gap_start = last_ts   # die damals laufende (unvollstaendige) Kerze wird mit neu geholt
 
     if _binance_is_banned(market_type):
         # Aktiver Bann - Seed spaeter nachholen, damit wir ihn nicht verlaengern. Der
@@ -148,36 +343,87 @@ async def _seed_stream_history(market_type, pair, interval):
 
     base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
     limit = REST_SEED_LIMIT.get(interval, 500)
+    pages = SEED_PAGES.get(interval, 1)  # 1s: mehrere Seiten rueckwaerts (Scalp-Dashboard braucht mehr Sekunden-Historie)
+    data = []
     try:
-        await _binance_throttle()
-        url = f"{base_url}?symbol={pair}&interval={interval}&limit={limit}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status in (418, 429):
-                    body = await resp.text()
-                    _binance_register_ban(market_type, pair, resp.status, body)
+        if gap_start is not None:
+            # NUR DIE LUECKE: vorwaerts ab der letzten gesicherten Kerze bis jetzt
+            cursor = gap_start
+            for page in range(6):
+                await _binance_throttle(market_type, f"seed:{interval}")
+                if _binance_is_banned(market_type):
+                    _pending_subscribe[market_type].add(_key(pair, interval))
                     return
-                if resp.status != 200:
-                    return
-                data = await resp.json()
+                url = f"{base_url}?symbol={pair}&interval={interval}&startTime={cursor}&limit={limit}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        _binance_note_response(market_type, resp)
+                        if resp.status in (418, 429):
+                            body = await resp.text()
+                            _binance_register_ban(market_type, pair, resp.status, body)
+                            return
+                        if resp.status != 200:
+                            return
+                        chunk = await resp.json()
+                if not chunk or not isinstance(chunk, list):
+                    break
+                data.extend(chunk)
+                cursor = int(chunk[-1][0]) + 1
+                if len(chunk) < limit or cursor >= time.time() * 1000:
+                    break
+        else:
+            end_time = None
+            for page in range(pages):
+                await _binance_throttle(market_type, f"seed:{interval}")
+                # ERNEUT pruefen NACH dem Warten: waehrend der Drossel-Pause kann eine ANDERE gleichzeitig
+                # laufende Coin-Abfrage (viele Streams werden beim Bot-Start fast zeitgleich abonniert) in
+                # der Zwischenzeit einen Bann registriert haben - ohne diesen zweiten Check wuerden wir
+                # trotzdem noch feuern und einen aktiven Bann bei Binance nur weiter verlaengern.
+                if _binance_is_banned(market_type):
+                    if page == 0:
+                        _pending_subscribe[market_type].add(_key(pair, interval))
+                        return
+                    break  # Bann mitten im Nachladen: mit dem, was da ist, weitermachen
+                url = f"{base_url}?symbol={pair}&interval={interval}&limit={limit}"
+                if end_time is not None:
+                    url += f"&endTime={end_time}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        _binance_note_response(market_type, resp)
+                        if resp.status in (418, 429):
+                            body = await resp.text()
+                            _binance_register_ban(market_type, pair, resp.status, body)
+                            if page == 0:
+                                return
+                            break
+                        if resp.status != 200:
+                            if page == 0:
+                                return
+                            break
+                        chunk = await resp.json()
+                if not chunk or not isinstance(chunk, list):
+                    break
+                data = chunk + data  # aeltere Seite DAVOR
+                end_time = int(chunk[0][0]) - 1
+                if len(chunk) < limit:
+                    break
     except Exception as e:
         debug_log(f"⚠️ [WS-Cache] Seed-Historie fehlgeschlagen ({pair} {interval})", {"error": str(e)})
-        return
+        if not data:
+            return
 
-    if not data or not isinstance(data, list):
+    if (not data or not isinstance(data, list)) and not snapshot:
         return
 
     st = _streams[market_type].get(_key(pair, interval))
     if st is None:
         return  # Stream wurde inzwischen entfernt - nichts mehr zu tun
-    for k in data:
-        st.candles.append({
-            "ts": int(k[0]), "o": float(k[1]), "h": float(k[2]),
-            "l": float(k[3]), "c": float(k[4]), "v": float(k[5]),
-        })
+    # zusammenfuehren statt anhaengen: waehrend des Seeds sind evtl. schon WS-Kerzen eingetroffen (Reihenfolge/Dubletten)
+    _merge_into_stream(st, snapshot or [], [_k_to_candle(k) for k in (data or [])])
     st.ready = True
     st.last_update_ts = time.time()
-    debug_log(f"✅ [WS-Cache] {pair} {interval} ({market_type}) bereit", {"kerzen": len(st.candles)})
+    debug_log(f"✅ [WS-Cache] {pair} {interval} ({market_type}) bereit" + (" (Snapshot + Lücke nachgeholt)" if snapshot else ""),
+              {"kerzen": len(st.candles), "nachgeholt": len(data or [])})
 
 
 def _apply_kline_event(market_type, payload):
@@ -194,6 +440,8 @@ def _apply_kline_event(market_type, payload):
     candle = {
         "ts": ts, "o": float(k["o"]), "h": float(k["h"]),
         "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"]),
+        # Kline-Event: "V" = Taker-Buy-Basisvolumen, "n" = Anzahl Trades (fuer den Coin-Screener)
+        "tb": float(k.get("V", 0.0)), "n": int(k.get("n", 0)),
     }
     if st.candles and st.candles[-1]["ts"] == ts:
         st.candles[-1] = candle  # laufende (noch nicht geschlossene) Kerze aktualisieren
@@ -263,10 +511,104 @@ async def _websocket_loop(market_type):
         backoff = min(backoff * 2, 60)
 
 
+# ============================================================================
+# LUECKEN-REPARATUR
+# ----------------------------------------------------------------------------
+# Reisst die WS-Verbindung kurz ab, fehlen die Kerzen dieser Zeit im Puffer fuer immer (der Puffer behaelt nur die
+# Historie, holt aber nichts nach). Das gab Luecken im Chart UND falsche Berechnungen (Swings, ATR, Level) in den
+# Strategien. Dieser Loop sucht regelmaessig fehlende Kerzen in den letzten Kerzen jedes Streams und holt genau
+# diese Bereiche per REST nach. Jede Luecke wird nur EINMAL versucht (echte Luecken ohne Handel gibt es auch).
+# 1s-Streams bleiben aussen vor (Binance liefert dort legitim nicht jede Sekunde eine Kerze).
+# ============================================================================
+GAP_SCAN_INTERVAL_SECONDS = 20
+GAP_SCAN_LAST_CANDLES = 1500
+GAP_MAX_FETCH = 1000
+_gap_tried = {}   # (market_type, "PAIR|interval") -> {(start_ts, end_ts), ...}
+
+
+def _find_gaps(candles, interval_ms, last_n=GAP_SCAN_LAST_CANDLES):
+    """-> Liste (erste_fehlende_ts, letzte_fehlende_ts) innerhalb der letzten last_n Kerzen (aufsteigend)."""
+    cs = list(candles)[-last_n:]
+    out = []
+    for prev, cur in zip(cs, cs[1:]):
+        if cur["ts"] - prev["ts"] > interval_ms:
+            out.append((prev["ts"] + interval_ms, cur["ts"] - interval_ms))
+    return out
+
+
+async def _rest_klines_range(market_type, pair, interval, start_ts, end_ts, limit):
+    """Kerzen im Bereich [start_ts, end_ts] per REST (mit Drossel/Bann-Schutz wie beim Seed). None bei Fehler/Bann."""
+    import aiohttp
+    from strategies import _binance_throttle, _binance_is_banned, _binance_register_ban, _binance_note_response
+    if _binance_is_banned(market_type):
+        return None
+    await _binance_throttle(market_type, f"gap:{interval}")
+    if _binance_is_banned(market_type):
+        return None
+    base_url = BINANCE_BASE_URLS.get(market_type, BINANCE_BASE_URLS["spot"])
+    url = f"{base_url}?symbol={pair}&interval={interval}&startTime={start_ts}&endTime={end_ts + 1}&limit={min(limit, GAP_MAX_FETCH)}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            _binance_note_response(market_type, resp)
+            if resp.status in (418, 429):
+                _binance_register_ban(market_type, pair, resp.status, await resp.text())
+                return None
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+    return [_k_to_candle(k) for k in data] if isinstance(data, list) else None
+
+
+async def _repair_stream_gaps(market_type, k, st, fetcher=None):
+    """Repariert die Luecken EINES Streams. Rueckgabe: Anzahl nachgeholter Kerzen."""
+    pair, interval = k.split("|")
+    interval_ms = INTERVAL_SECONDS.get(interval, 60) * 1000
+    tried = _gap_tried.setdefault((market_type, k), set())
+    fetched_total = 0
+    for gap in _find_gaps(st.candles, interval_ms):
+        if gap in tried:
+            continue
+        tried.add(gap)   # jede Luecke nur einmal versuchen
+        n_missing = (gap[1] - gap[0]) // interval_ms + 1
+        got = await (fetcher or _rest_klines_range)(market_type, pair, interval, gap[0], gap[1], n_missing)
+        if got is None:
+            tried.discard(gap)   # Fehler/Bann: spaeter nochmal versuchen
+            continue
+        if not got:
+            continue             # Binance hat dort wirklich keine Kerzen (kein Handel) - nicht erneut fragen
+        _merge_into_stream(st, got)
+        fetched_total += len(got)
+    if len(tried) > 500:
+        tried.clear()
+    return fetched_total
+
+
+async def gap_repair_loop():
+    await asyncio.sleep(45)   # erst nach dem Start/Seed der Streams
+    while True:
+        try:
+            for market_type in ("spot", "futures"):
+                for k, st in list(_streams.get(market_type, {}).items()):
+                    if not st.ready or not st.candles or k.endswith("|1s"):
+                        continue
+                    try:
+                        n = await _repair_stream_gaps(market_type, k, st)
+                        if n:
+                            debug_log(f"🩹 [WS-Cache] {k} ({market_type}): {n} fehlende Kerzen nachgeholt")
+                    except Exception as e:
+                        debug_log(f"⚠️ [WS-Cache] Lücken-Reparatur fehlgeschlagen ({k})", {"error": str(e)})
+                    await asyncio.sleep(0.2)
+        except Exception as e:
+            debug_log("⚠️ [WS-Cache] Lücken-Reparatur-Runde fehlgeschlagen", {"error": str(e)})
+        await asyncio.sleep(GAP_SCAN_INTERVAL_SECONDS)
+
+
 async def binance_ws_cache_loop():
     """In main.py's asyncio.gather einhaengen - haelt je eine dauerhafte WS-Verbindung
     fuer Spot und Futures am Laufen (jede mit eigenem Reconnect-Backoff)."""
     await asyncio.gather(
         _websocket_loop("spot"),
         _websocket_loop("futures"),
+        snapshot_loop(),
+        gap_repair_loop(),
     )

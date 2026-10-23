@@ -12,18 +12,18 @@ from bot_core import (
     debug_log, PORT, SYMBOLS, BOTS, load_bot_configs, load_bot_state, state_persist_loop,
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
-    handle_config_update, handle_control, handle_close_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_ht_sweep, handle_da_sweep, handle_es_sensitivity_sweep,
-    handle_mo7_sum_sweep,
-    handle_utb_param_sweep, handle_pk_sensitivity_sweep, handle_rf_sweep, handle_hvd_sweep, handle_pa_monte_carlo,
+    handle_config_update, handle_control, handle_close_position, handle_reverse_position, handle_reset,
+    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_gc_trend, handle_scalp_trend, handle_dv_montecarlo, handle_config_defaults, handle_rlm_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
-    trading_loop, fib_reversal_poll_loop, binance_1s_poll_loop,
-    ht_poll_loop, oms_rsi_poll_loop, scalp_board_poll_loop, quad_stoch_poll_loop,
-    da_poll_loop, es_poll_loop, cp_poll_loop, mo7_poll_loop, utb_poll_loop, wtc_poll_loop, pk_poll_loop, fr_poll_loop, cd_poll_loop, rf_poll_loop, mv_poll_loop,
-    sr_poll_loop, hvd_poll_loop, pa_poll_loop,
+    trading_loop, binance_1s_poll_loop, ab_poll_loop, er_poll_loop, mt_poll_loop, rsi_poll_loop, mvwap_poll_loop, scalp_poll_loop,
+    liq_poll_loop, wa_poll_loop, load_binance_ban_state,
 )
+from pure_momentum import pm_poll_loop
+from dollar701 import dv_poll_loop
+from trendfolge import tfl_poll_loop
+from rlm import rlm_poll_loop
 from copytrade import (
     load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
     handle_ct_index, handle_ct_status, handle_ct_watch, handle_ct_copy_toggle,
@@ -32,7 +32,15 @@ from copytrade import (
     handle_ct_set_coin_setting, handle_ct_remove_coin_setting, handle_ct_set_trader_defaults,
 )
 from binance_ws import binance_ws_cache_loop
-from grid_scalp import grid_scalp_poll_loop
+from grid_scalp import grid_scalp_poll_loop, handle_gc_backtest, handle_gc_reset
+from screener import screener_loop, handle_screener_index, handle_screener_api, handle_screener_cfg_get, handle_screener_cfg_set, load_screener_cfg
+from vwap_cross import vc_poll_loop
+from vwap_scanner import vwap_scanner_loop, load_vwap_scanner_cfg, handle_vwap_index, handle_vwap_api, handle_vwap_cfg_set, handle_vwap_lighter
+from lighter_candles import lighter_candles_loop
+from scalp import (
+    scalp_loop, handle_scalp_index, handle_scalp_chart, handle_scalp_status,
+    handle_scalp_order, handle_scalp_close, handle_scalp_reverse, handle_scalp_tpsl, handle_scalp_auto, handle_scalp_wa, handle_scalp_mtf,
+)
 
 
 async def start_web_server():
@@ -42,22 +50,46 @@ async def start_web_server():
     app.router.add_get("/api/overview", handle_overview)
     app.router.add_get("/api/status", handle_status)
     app.router.add_post("/api/config", handle_config_update)
+    app.router.add_get("/api/config/defaults", handle_config_defaults)
     app.router.add_post("/api/control", handle_control)
     app.router.add_post("/api/close", handle_close_position)
+    app.router.add_post("/api/reverse", handle_reverse_position)
     app.router.add_post("/api/manual_trade", handle_manual_trade)
     app.router.add_post("/api/backtest", handle_backtest)
-    app.router.add_post("/api/ht_sweep", handle_ht_sweep)
-    app.router.add_post("/api/da_sweep", handle_da_sweep)
-    app.router.add_post("/api/es_sensitivity_sweep", handle_es_sensitivity_sweep)
-    app.router.add_post("/api/mo7_sum_sweep", handle_mo7_sum_sweep)
-    app.router.add_post("/api/utb_param_sweep", handle_utb_param_sweep)
-    app.router.add_post("/api/pk_sensitivity_sweep", handle_pk_sensitivity_sweep)
-    app.router.add_post("/api/rf_sweep", handle_rf_sweep)
-    app.router.add_post("/api/hvd_sweep", handle_hvd_sweep)
-    app.router.add_post("/api/pa_monte_carlo", handle_pa_monte_carlo)
+    app.router.add_get("/api/wa/live_chart", handle_wa_live_chart)
+    app.router.add_get("/api/wa/trend", handle_wa_trend)
+    app.router.add_get("/api/scalp/trend", handle_scalp_trend)
+    app.router.add_get("/api/gc/trend", handle_gc_trend)
+    app.router.add_post("/api/gc/backtest", handle_gc_backtest)
+    app.router.add_post("/api/gc/reset", handle_gc_reset)
+    app.router.add_post("/api/ab_sweep", handle_ab_sweep)
+    app.router.add_post("/api/dv_mc", handle_dv_montecarlo)
+    app.router.add_post("/api/rlm_mc", handle_rlm_montecarlo)
+    app.router.add_post("/api/er_sweep", handle_er_sweep)
+    app.router.add_post("/api/ab_signal_sweep", handle_ab_signal_sweep)
+    app.router.add_post("/api/liq_sweep", handle_liq_sweep)
+    app.router.add_post("/api/wa_sweep", handle_wa_sweep)
     app.router.add_get("/api/global_settings", handle_global_settings_get)
     app.router.add_post("/api/global_settings", handle_global_settings_update)
     app.router.add_post("/api/reset", handle_reset)
+    app.router.add_get("/screener", handle_screener_index)
+    app.router.add_get("/api/screener", handle_screener_api)
+    app.router.add_get("/api/screener/config", handle_screener_cfg_get)
+    app.router.add_post("/api/screener/config", handle_screener_cfg_set)
+    app.router.add_get("/vwap-scanner", handle_vwap_index)
+    app.router.add_get("/api/vwap_scanner", handle_vwap_api)
+    app.router.add_post("/api/vwap_scanner/config", handle_vwap_cfg_set)
+    app.router.add_get("/api/vwap_scanner/lighter", handle_vwap_lighter)
+    app.router.add_get("/scalp", handle_scalp_index)
+    app.router.add_get("/api/scalp/chart", handle_scalp_chart)
+    app.router.add_get("/api/scalp/status", handle_scalp_status)
+    app.router.add_post("/api/scalp/order", handle_scalp_order)
+    app.router.add_post("/api/scalp/close", handle_scalp_close)
+    app.router.add_post("/api/scalp/reverse", handle_scalp_reverse)
+    app.router.add_post("/api/scalp/tpsl", handle_scalp_tpsl)
+    app.router.add_post("/api/scalp/auto", handle_scalp_auto)
+    app.router.add_post("/api/scalp/wa", handle_scalp_wa)
+    app.router.add_post("/api/scalp/mtf", handle_scalp_mtf)
     app.router.add_get("/copytrading", handle_ct_index)
     app.router.add_get("/api/ct/status", handle_ct_status)
     app.router.add_post("/api/ct/watch", handle_ct_watch)
@@ -97,35 +129,58 @@ async def main():
     await load_bot_state()
     await load_global_settings()
     await load_ct_watched()
+    await load_screener_cfg()
+    await load_vwap_scanner_cfg()
+    # MUSS vor allen Poll-Loops geladen werden: sonst "vergisst" der Bot bei jedem Neustart einen
+    # noch laufenden Binance-Bann und alle Coins feuern sofort wieder frische Anfragen gegen einen
+    # Server, der sie noch immer ablehnt - siehe Kommentar bei save_binance_ban_state() in strategies.py.
+    await load_binance_ban_state()
     await start_web_server()
-    await asyncio.gather(
+    # return_exceptions=True ist HIER ENTSCHEIDEND: ohne das bringt eine einzige unbehandelte
+    # Exception in IRGENDEINER der ~50+ parallelen Tasks (z.B. ein Bug in genau einem Coin/einer
+    # Strategie) asyncio.gather() dazu, ALLE anderen Tasks zu canceln und main() mit dieser einen
+    # Exception abstuerzen zu lassen - das toetet den KOMPLETTEN Bot fuer JEDEN Coin wegen eines
+    # einzelnen, moeglicherweise winzigen Fehlers, und wirkt fuer den Nutzer wie "haengt/startet
+    # nicht" (Render startet den Container neu, trifft ggf. sofort wieder denselben Bug). Mit
+    # return_exceptions=True laeuft jede Task unabhaengig weiter, bis SIE SELBST endet - ein Crash
+    # in einer Task beendet nur diese eine, alle anderen (andere Coins, andere Strategien) laufen
+    # normal weiter. Die meisten Loops fangen Fehler ohnehin schon selbst ab (try/except in ihrer
+    # eigenen while-True-Schleife) - das hier ist nur das letzte Sicherheitsnetz fuer alles, was
+    # AUSSERHALB eines solchen Loops passiert (z.B. beim Task-Start selbst).
+    results = await asyncio.gather(
         trading_loop(),
-        *[fib_reversal_poll_loop(s) for s in SYMBOLS],
         *[binance_1s_poll_loop(s) for s in SYMBOLS],
-        *[ht_poll_loop(s) for s in SYMBOLS],
-        *[oms_rsi_poll_loop(s) for s in SYMBOLS],
-        *[scalp_board_poll_loop(s) for s in SYMBOLS],
-        *[quad_stoch_poll_loop(s) for s in SYMBOLS],
-        *[da_poll_loop(s) for s in SYMBOLS],
-        *[es_poll_loop(s) for s in SYMBOLS],
-        *[cp_poll_loop(s) for s in SYMBOLS],
-        *[mo7_poll_loop(s) for s in SYMBOLS],
-        *[utb_poll_loop(s) for s in SYMBOLS],
-        *[wtc_poll_loop(s) for s in SYMBOLS],
-        *[pk_poll_loop(s) for s in SYMBOLS],
-        *[fr_poll_loop(s) for s in SYMBOLS],
-        *[cd_poll_loop(s) for s in SYMBOLS],
-        *[rf_poll_loop(s) for s in SYMBOLS],
-        *[mv_poll_loop(s) for s in SYMBOLS],
-        *[sr_poll_loop(s) for s in SYMBOLS],
-        *[hvd_poll_loop(s) for s in SYMBOLS],
-        *[pa_poll_loop(s) for s in SYMBOLS],
+        *[ab_poll_loop(s) for s in SYMBOLS],
+        *[er_poll_loop(s) for s in SYMBOLS],
+        *[mt_poll_loop(s) for s in SYMBOLS],
+        *[pm_poll_loop(s) for s in SYMBOLS],
+        *[dv_poll_loop(s) for s in SYMBOLS],
+        *[tfl_poll_loop(s) for s in SYMBOLS],
+        *[rlm_poll_loop(s) for s in SYMBOLS],
+        *[rsi_poll_loop(s) for s in SYMBOLS],
+        *[mvwap_poll_loop(s) for s in SYMBOLS],
         *[grid_scalp_poll_loop(s) for s in SYMBOLS],
+        *[scalp_poll_loop(s) for s in SYMBOLS],
+        *[liq_poll_loop(s) for s in SYMBOLS],
+        *[wa_poll_loop(s) for s in SYMBOLS],
+        *[vc_poll_loop(s) for s in SYMBOLS],
         ct_leaderboard_refresh_loop(),
         ct_watch_loop(),
         state_persist_loop(),
         binance_ws_cache_loop(),
+        screener_loop(),
+        vwap_scanner_loop(),
+        scalp_loop(),
+        lighter_candles_loop(),
+        return_exceptions=True,
     )
+    # Alle obigen Loops sind 'while True' - normalerweise kehrt hier nichts jemals zurueck. Landet
+    # trotzdem eine Exception in 'results', ist eine Task fuer immer tot (kein Auto-Neustart) -
+    # das muss lautstark geloggt werden statt leise zu verschwinden.
+    for result in results:
+        if isinstance(result, BaseException):
+            debug_log("🔥 Eine Hintergrund-Task ist dauerhaft abgestürzt (kein automatischer Neustart!)",
+                      {"error": str(result), "type": type(result).__name__})
 
 
 if __name__ == "__main__":
