@@ -44,7 +44,35 @@ MAX_COINS = 150
 REDIS_KEY = "gridbot:vwap_scanner_cfg"
 
 DEFAULT_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX", "LINK", "SUI", "TRX", "LTC"]
-CFG_DEFAULT = {"coins": DEFAULT_COINS, "tf": "1m", "ema": 9, "near": 0.3}
+CFG_DEFAULT = {"coins": DEFAULT_COINS, "tf": "1m", "ema": 9, "near": 0.3, "cats": {}}
+
+# Kategorien (Lighter liefert keine Einstufung -> feste Listen + eigene Zuordnung ueber cfg["cats"]; alles Unbekannte = Krypto)
+CAT_NAMES = {"crypto": "Krypto", "stock": "Aktien", "fx": "Forex", "com": "Rohstoffe", "idx": "Indizes"}
+_CAT_ALIASES = {"krypto": "crypto", "crypto": "crypto", "coin": "crypto", "aktie": "stock", "aktien": "stock", "stock": "stock", "stocks": "stock",
+                "forex": "fx", "fx": "fx", "waehrung": "fx", "rohstoff": "com", "rohstoffe": "com", "commodity": "com", "commodities": "com",
+                "index": "idx", "indizes": "idx", "indices": "idx"}
+_FX_CODES = {"EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "CNH", "CNY", "KRW", "SEK", "NOK", "DKK", "MXN", "TRY", "SGD", "HKD", "ZAR", "PLN", "INR", "BRL"}
+_COMMODITIES = {"XAU", "XAG", "XPT", "XPD", "GOLD", "SILVER", "WTI", "BRENT", "USOIL", "UKOIL", "OIL", "NATGAS", "NG", "COPPER", "HG", "PLATINUM", "PALLADIUM", "WHEAT", "CORN", "SUGAR", "COFFEE"}
+_INDICES = {"SPX", "SPX500", "US500", "NDX", "NAS100", "US100", "DJI", "US30", "DAX", "GER40", "NIKKEI", "JP225", "FTSE", "UK100", "VIX", "DXY", "HSI", "RUT", "CAC40"}
+_STOCKS = set("""AAPL MSFT NVDA TSLA AMZN GOOGL GOOG META NFLX AMD INTC COIN MSTR HOOD PLTR BABA ORCL CRM ADBE AVGO QCOM MU TSM ASML UBER ABNB SHOP PYPL DIS NKE KO PEP
+MCD SBUX WMT COST JPM BAC GS MA XOM CVX PFE JNJ UNH LLY BA RIVN LCID SNAP PINS ROKU ZM CRWD SNOW DDOG MDB RBLX GME AMC SOFI RDDT CRCL HIMS SMCI IBM CSCO TXN VZ
+MRVL DELL LRCX AMAT INTU PANW ANET GLXY BMNR SBET NIO XPEV BIDU JD PDD SPY QQQ IWM ARKK TLT GLD SLV MARA RIOT CLSK BITF HUT CVNA DKNG LYFT TWLO OKTA SPOT PATH
+AI CRWV NBIS IONQ RGTI QBTS OKLO SMR RKLB ASTS JOBY ACHR HOOD ABT MRK AMGN GILD BMY NOC LMT RTX CAT DE HD LOW TGT NEE SO DUK""".split())
+
+
+def _category(coin, cats=None):
+    c = (cats or {}).get(coin)
+    if c in CAT_NAMES:
+        return c
+    if coin in _COMMODITIES:
+        return "com"
+    if coin in _INDICES:
+        return "idx"
+    if len(coin) == 6 and coin[:3] in _FX_CODES and coin[3:] in _FX_CODES:
+        return "fx"
+    if coin in _STOCKS:
+        return "stock"
+    return "crypto"
 CFG = dict(CFG_DEFAULT)
 
 STATE = {"rows": {}, "updated": 0.0, "last_view": 0.0, "force": False, "cycle_sec": 0.0}
@@ -111,6 +139,16 @@ def _clean_cfg(body, base=None):
             cfg["ema"] = max(2, min(200, int(body["ema"])))
         if "near" in body:
             cfg["near"] = max(0.01, min(10.0, float(body["near"])))
+        if "cats" in body:
+            raw = body["cats"]
+            items = raw.items() if isinstance(raw, dict) else [p.split("=", 1) for p in re.split(r"[,;\n]+", str(raw)) if "=" in p]
+            cats = {}
+            for k, v in items:
+                k = re.sub(r"[^A-Z0-9]", "", str(k).upper())
+                v = _CAT_ALIASES.get(re.sub(r"[^a-z]", "", str(v).lower()), str(v) if str(v) in CAT_NAMES else None)
+                if k and v:
+                    cats[k] = v
+            cfg["cats"] = cats
     except (TypeError, ValueError):
         pass
     return cfg
@@ -256,12 +294,15 @@ async def _klines(src, key, interval, start_ms, end_ms, limit):
 
 async def _fetch_base(src, key, now_ms):
     """Abgeschlossene 15m-Kerzen seit Wochen-/Monatsbeginn (zwischengespeichert, je Aufruf nur Nachladen)."""
-    base_start = min(_period_start(now_ms, "m"), _period_start(now_ms, "w"))
+    base_start = min(_period_start(now_ms, "m"), _period_start(now_ms, "w"), (now_ms - 7 * 86_400_000) // 86_400_000 * 86_400_000)   # +7 Tage fuers Wochenvolumen
     ck = (src, key)
     ent = _BASE.get(ck)
-    if ent is None or ent["start"] != base_start:
+    if ent is None or base_start < ent["start"]:
         ent = {"bars": [], "start": base_start}
         _BASE[ck] = ent
+    elif base_start > ent["start"]:                    # Fenster wandert nach vorn: alte Kerzen verwerfen statt neu laden
+        ent["bars"] = [b for b in ent["bars"] if b["ts"] >= base_start]
+        ent["start"] = base_start
     bars = ent["bars"]
     page = 500 if src == "lighter" else 1000
     next_ts = bars[-1]["ts"] + BASE_MS if bars else base_start
@@ -298,6 +339,9 @@ def compute_rows(tfc, bars, tf_ms, ema_len, now_ms):
         return None
     ema = _ema([c["c"] for c in tfc], ema_len)
     out = {}
+    cut = now_ms - 7 * 86_400_000
+    out["vol7"] = sum(pv for t, pv, _v, _j in items if t >= cut)          # Umsatz der letzten 7 Tage in USD (hlc3 x Volumen)
+    out["vol_days"] = round(min(7.0, max(0.0, (now_ms - items[0][0]) / 86_400_000)), 1) if items else 0
     for k in ("d", "w", "m"):
         vw = [None] * n
         resets = set()
@@ -480,7 +524,8 @@ async def handle_vwap_api(request):
     rows = []
     for c in CFG["coins"]:
         r = STATE["rows"].get(c)
-        rows.append(r if (r and (r.get("err") or r.get("tf") == CFG["tf"])) else {"coin": c, "loading": True})
+        row = r if (r and (r.get("err") or r.get("tf") == CFG["tf"])) else {"coin": c, "loading": True}
+        rows.append(dict(row, cat=_category(c, CFG.get("cats"))))
     return web.json_response({"cfg": CFG, "default": CFG_DEFAULT, "updated": STATE["updated"], "refresh": REFRESH_SECONDS,
                               "server_time": time.time(), "cycle_sec": STATE["cycle_sec"], "rows": rows})
 
@@ -561,6 +606,12 @@ button.act{padding:8px 16px;background:#1d2128;color:#e9ecf1;border:1px solid #2
 button.act:hover{filter:brightness(1.15)}
 #edit{display:none;margin-bottom:14px}
 th.sh{cursor:pointer;user-select:none}th.sh:hover{color:#e9ecf1}th.sh.on{color:#f5b83d}
+.catc{opacity:.7;font-weight:500;margin-left:4px}
+tr.grp td{background:#0d1015;color:#93c5fd;font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.06em;padding:8px 12px}
+select.sel,input.cats{background:#0d1015;color:#e9ecf1;border:1px solid #2a303a;border-radius:10px;height:34px;padding:0 10px;font:600 12px Inter,sans-serif}
+input.cats{width:340px}
+.chk{font-size:12px;color:var(--dim);display:inline-flex;gap:6px;align-items:center;cursor:pointer}
+.vol{font-weight:700;font-size:13px}
 button.rm{background:transparent;border:1px solid #2a303a;color:#8b93a1;border-radius:8px;width:30px;height:30px;font:700 14px Inter,sans-serif;cursor:pointer}button.rm:hover{color:#ef4444;border-color:#ef4444}
 </style>
 </head>
@@ -573,14 +624,32 @@ button.rm{background:transparent;border:1px solid #2a303a;color:#8b93a1;border-r
   <h2>Markt-Scanner · EMA <span id="elen">9</span> gegen VWAP · Binance Spot, Futures, Lighter</h2>
   <div class="row">
     <span class="lab">Zeitrahmen</span><button class="pill" id="tf-1m">1m</button><button class="pill" id="tf-3m">3m</button>
-    <span class="lab" style="margin-left:14px">Sortieren</span>
-    <button class="pill" id="s-d">Nächster Cross Day</button><button class="pill" id="s-w">Week</button><button class="pill" id="s-m">Month</button><button class="pill" id="s-l">Liste</button>
+    <span class="lab" style="margin-left:14px">Basis-VWAP</span>
+    <button class="pill" id="s-d">Day</button><button class="pill" id="s-w">Week</button><button class="pill" id="s-m">Month</button>
+    <span class="lab" style="margin-left:14px">Sortieren nach</span>
+    <select class="sel" id="by"><option value="pct">Abstand zum Cross (%)</option><option value="cross">Letzter Cross (neuester zuerst)</option><option value="vol">Wochenvolumen (größtes zuerst)</option><option value="list">Reihenfolge der Liste</option></select>
     <button class="pill" id="btn-edit" style="margin-left:14px">Coins bearbeiten</button>
     <span class="info mono" id="info">lädt …</span>
+  </div>
+  <div class="row" id="filters">
+    <span class="lab">Kategorie</span><span id="cats-pills" class="row" style="margin:0"></span>
+    <label class="chk" style="margin-left:10px"><input type="checkbox" id="f-group"> Nach Kategorie gruppieren</label>
+  </div>
+  <div class="row">
+    <span class="lab">Filter (Basis-VWAP)</span>
+    <label class="chk"><input type="checkbox" id="f-near"> nur „Cross nah“</label>
+    <span class="lab" style="margin-left:10px">Letzter Cross</span>
+    <select class="sel" id="f-age"><option value="0">egal</option><option value="900">jünger als 15 min</option><option value="3600">jünger als 1 h</option><option value="14400">jünger als 4 h</option><option value="86400">jünger als 24 h</option></select>
+    <select class="sel" id="f-dir"><option value="all">Buy und Sell</option><option value="buy">nur Buy</option><option value="sell">nur Sell</option></select>
+    <span class="lab" style="margin-left:10px">Wochenvolumen mind.</span>
+    <select class="sel" id="f-vol"><option value="0">egal</option><option value="1000000">1 Mio $</option><option value="10000000">10 Mio $</option><option value="100000000">100 Mio $</option><option value="1000000000">1 Mrd $</option></select>
   </div>
   <div id="edit">
     <div class="lab" style="margin-bottom:6px">Coins (Komma oder Leerzeichen, Reihenfolge = Reihenfolge der Liste, max. 150)</div>
     <textarea id="coins"></textarea>
+    <div class="row" style="margin-top:10px">
+      <span class="lab">Eigene Kategorie</span><input type="text" class="cats" id="cats" placeholder="z. B. TSLA=aktien, XAU=rohstoffe, DAX=indizes">
+    </div>
     <div class="row" style="margin-top:10px">
       <span class="lab">EMA-Länge</span><input type="number" id="ema" min="2" max="200">
       <span class="lab" style="margin-left:10px">Cross nah unter (%)</span><input type="number" id="near" min="0.01" max="10" step="0.05">
@@ -589,17 +658,21 @@ button.rm{background:transparent;border:1px solid #2a303a;color:#8b93a1;border-r
       <span class="err" id="edit-msg"></span>
     </div>
   </div>
-  <table><thead><tr><th style="width:13%">Coin</th><th class="sh" id="h-d">Day-VWAP<span class="ar"></span></th><th class="sh" id="h-w">Week-VWAP<span class="ar"></span></th><th class="sh" id="h-m">Month-VWAP<span class="ar"></span></th><th style="width:44px"></th></tr></thead><tbody id="tb"></tbody></table>
+  <table><thead><tr><th style="width:13%">Coin</th><th class="sh" id="h-v" style="width:11%">Wochenvolumen<span class="ar"></span></th><th class="sh" id="h-d">Day-VWAP<span class="ar"></span></th><th class="sh" id="h-w">Week-VWAP<span class="ar"></span></th><th class="sh" id="h-m">Month-VWAP<span class="ar"></span></th><th style="width:44px"></th></tr></thead><tbody id="tb"></tbody></table>
   <div class="leg"><span>Balken rechts der Mitte: EMA über VWAP · links: darunter</span><span>Prozent: Abstand bis zum Cross</span><span class="yellow">Gelb: Cross nah</span><span>Buy = EMA kreuzt VWAP nach oben, Sell = nach unten</span></div>
 </div></div>
 <script>
-var CFG=null,DATA=null,SORT='d',DIR=1,busy=false;
-try{SORT=localStorage.getItem('vwapSort')||'d';DIR=localStorage.getItem('vwapDir')==='-1'?-1:1;}catch(e){}
+var CFG=null,DATA=null,SORT='d',BY='pct',DIR=1,CAT='all',GROUP=false,NEAR=false,AGE=0,CDIR='all',VOL=0,busy=false;
+var CATN={crypto:'Krypto',stock:'Aktien',fx:'Forex',com:'Rohstoffe',idx:'Indizes'},CATO=['crypto','stock','idx','com','fx'];
+try{var u=JSON.parse(localStorage.getItem('vwapUi')||'{}');SORT=u.SORT||SORT;BY=u.BY||BY;DIR=u.DIR===-1?-1:1;CAT=u.CAT||CAT;GROUP=!!u.GROUP;NEAR=!!u.NEAR;AGE=+u.AGE||0;CDIR=u.CDIR||'all';VOL=+u.VOL||0;}catch(e){}
+function saveUi(){try{localStorage.setItem('vwapUi',JSON.stringify({SORT:SORT,BY:BY,DIR:DIR,CAT:CAT,GROUP:GROUP,NEAR:NEAR,AGE:AGE,CDIR:CDIR,VOL:VOL}));}catch(e){}}
 function $(i){return document.getElementById(i);}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function fmt(v){return Math.abs(v).toFixed(2).replace('.',',');}
 function price(p){if(p==null)return '';return Number(p).toLocaleString('de-DE',{maximumSignificantDigits:6});}
 function age(s){if(s<90)return '1 min';if(s<5400)return Math.round(s/60)+' min';if(s<172800)return Math.round(s/3600)+' h';return Math.round(s/86400)+' T';}
+function vol(v){if(v==null)return '–';var a=Math.abs(v),n=function(x,u){return x.toLocaleString('de-DE',{maximumFractionDigits:x>=100?0:x>=10?1:2})+' '+u;};
+  return a>=1e9?n(v/1e9,'Mrd $'):a>=1e6?n(v/1e6,'Mio $'):a>=1e3?n(v/1e3,'Tsd $'):n(v,'$');}
 function cell(o,near,win){
   if(!o||o.novol)return '<div class="err">'+(o&&o.novol?'kein Volumen':'keine Daten')+'</div>';
   var up=o.pct>=0,n=Math.abs(o.pct)<near,a=Math.min(Math.abs(o.pct),3)/3*50;
@@ -610,47 +683,98 @@ function cell(o,near,win){
    +'<div class="last">'+lc+'</div>';
 }
 function rmBtn(c){return '<td style="text-align:right"><button class="rm" data-c="'+esc(c)+'" title="Coin aus der Liste entfernen">✕</button></td>';}
+function hasData(r){return !r.err&&!r.loading;}
+function keyOf(r){
+  if(BY==='vol')return r.vol7!=null?r.vol7:null;
+  var o=r[SORT];if(!o||o.pct==null)return null;
+  if(BY==='cross')return o.cross?o.cross.age:null;
+  return Math.abs(o.pct);
+}
+function passes(r,near){
+  if(CAT!=='all'&&r.cat!==CAT)return false;
+  var active=NEAR||AGE>0||CDIR!=='all'||VOL>0;
+  if(!hasData(r))return !active;
+  var o=r[SORT];
+  if(NEAR&&!(o&&o.pct!=null&&Math.abs(o.pct)<near))return false;
+  if(AGE>0&&!(o&&o.cross&&o.cross.age<=AGE))return false;
+  if(CDIR!=='all'&&!(o&&o.cross&&o.cross.dir===CDIR))return false;
+  if(VOL>0&&!(r.vol7!=null&&r.vol7>=VOL))return false;
+  return true;
+}
 function sortRows(rows){
   var r=rows.slice();
-  if(SORT==='l')return r;
-  r.sort(function(a,b){var x=(a[SORT]&&a[SORT].pct!=null)?Math.abs(a[SORT].pct):1e9,y=(b[SORT]&&b[SORT].pct!=null)?Math.abs(b[SORT].pct):1e9;return (x-y)*DIR;});
+  if(BY==='list')return r;
+  var nat=BY==='vol'?-1:1;
+  r.sort(function(a,b){var x=keyOf(a),y=keyOf(b);if(x==null&&y==null)return 0;if(x==null)return 1;if(y==null)return -1;return (x-y)*nat*DIR;});
   return r;
+}
+function rowHtml(r,near){
+  if(r.loading)return '<tr><td><div class="coin">'+esc(r.coin)+'</div></td><td colspan="4" class="err">lädt …</td>'+rmBtn(r.coin)+'</tr>';
+  if(r.err)return '<tr><td><div class="coin">'+esc(r.coin)+'</div></td><td colspan="4" class="err">'+esc(r.err)+'</td>'+rmBtn(r.coin)+'</tr>';
+  var nr=['d','w','m'].some(function(k){return r[k]&&r[k].pct!=null&&Math.abs(r[k].pct)<near;});
+  var part=r.vol_days!=null&&r.vol_days<6.5?'<div class="sub" title="Für diesen Coin gibt es erst '+r.vol_days+' Tage Daten">* nur '+r.vol_days+' T</div>':'';
+  return '<tr class="'+(nr?'near':'')+'"><td><div class="coin">'+esc(r.coin)+'<span class="sub catc">'+esc(CATN[r.cat]||'')+'</span></div><div class="sub mono">'+price(r.price)+' · '+esc(r.src||'')+(r.stale?' · veraltet':'')+'</div></td>'
+   +'<td><div class="vol mono">'+vol(r.vol7)+'</div>'+part+'</td>'
+   +'<td>'+cell(r.d,near,r.win_h)+'</td><td>'+cell(r.w,near,r.win_h)+'</td><td>'+cell(r.m,near,r.win_h)+'</td>'+rmBtn(r.coin)+'</tr>';
 }
 function render(){
   if(!DATA)return;
-  var near=DATA.cfg.near,tb=[];
-  sortRows(DATA.rows).forEach(function(r){
-    if(r.loading){tb.push('<tr><td><div class="coin">'+esc(r.coin)+'</div></td><td colspan="3" class="err">lädt …</td>'+rmBtn(r.coin)+'</tr>');return;}
-    if(r.err){tb.push('<tr><td><div class="coin">'+esc(r.coin)+'</div></td><td colspan="3" class="err">'+esc(r.err)+'</td>'+rmBtn(r.coin)+'</tr>');return;}
-    var nr=['d','w','m'].some(function(k){return r[k]&&r[k].pct!=null&&Math.abs(r[k].pct)<near;});
-    tb.push('<tr class="'+(nr?'near':'')+'"><td><div class="coin">'+esc(r.coin)+'</div><div class="sub mono">'+price(r.price)+' · '+esc(r.src||'')+(r.stale?' · veraltet':'')+'</div></td><td>'+cell(r.d,near,r.win_h)+'</td><td>'+cell(r.w,near,r.win_h)+'</td><td>'+cell(r.m,near,r.win_h)+'</td>'+rmBtn(r.coin)+'</tr>');
-  });
+  var near=DATA.cfg.near,tb=[],all=DATA.rows,cnt={};
+  all.forEach(function(r){cnt[r.cat]=(cnt[r.cat]||0)+1;});
+  if(CAT!=='all'&&!cnt[CAT])CAT='all';
+  var ph=['<button class="pill'+(CAT==='all'?' on':'')+'" data-cat="all">Alle ('+all.length+')</button>'];
+  CATO.forEach(function(k){if(cnt[k])ph.push('<button class="pill'+(CAT===k?' on':'')+'" data-cat="'+k+'">'+CATN[k]+' ('+cnt[k]+')</button>');});
+  $('cats-pills').innerHTML=ph.join('');
+  var rows=sortRows(all.filter(function(r){return passes(r,near);}));
+  if(GROUP){
+    CATO.forEach(function(k){
+      var g=rows.filter(function(r){return r.cat===k;});if(!g.length)return;
+      tb.push('<tr class="grp"><td colspan="6">'+CATN[k]+' · '+g.length+'</td></tr>');
+      g.forEach(function(r){tb.push(rowHtml(r,near));});
+    });
+  }else rows.forEach(function(r){tb.push(rowHtml(r,near));});
+  if(!rows.length)tb.push('<tr><td colspan="6" class="err">Keine Coins passen zu den Filtern.</td></tr>');
   $('tb').innerHTML=tb.join('');
-  ['d','w','m','l'].forEach(function(k){$('s-'+k).className='pill'+(SORT===k?' on':'');});
-  ['d','w','m'].forEach(function(k){$('h-'+k).className='sh'+(SORT===k?' on':'');$('h-'+k).querySelector('.ar').textContent=SORT===k?(DIR===1?' ▲':' ▼'):'';});
+  ['d','w','m'].forEach(function(k){$('s-'+k).className='pill'+(SORT===k?' on':'');});
+  ['d','w','m'].forEach(function(k){$('h-'+k).className='sh'+(SORT===k&&(BY==='pct'||BY==='cross')?' on':'');$('h-'+k).querySelector('.ar').textContent=SORT===k&&(BY==='pct'||BY==='cross')?(DIR===1?' ▲':' ▼'):'';});
+  $('h-v').className='sh'+(BY==='vol'?' on':'');$('h-v').querySelector('.ar').textContent=BY==='vol'?(DIR===1?' ▼':' ▲'):'';
+  $('by').value=BY;$('f-group').checked=GROUP;$('f-near').checked=NEAR;$('f-age').value=String(AGE);$('f-dir').value=CDIR;$('f-vol').value=String(VOL);
   ['1m','3m'].forEach(function(k){$('tf-'+k).className='pill'+(DATA.cfg.tf===k?' on':'');});
   $('elen').textContent=DATA.cfg.ema;
   var t=DATA.updated?new Date(DATA.updated*1000).toLocaleTimeString('de-DE'):'–';
-  $('info').textContent='Stand '+t+' · '+DATA.cfg.coins.length+' Coins · alle '+Math.round(DATA.refresh)+' s'+(DATA.cycle_sec?' · Runde '+DATA.cycle_sec+' s':'');
+  $('info').textContent='Stand '+t+' · '+rows.length+' von '+DATA.cfg.coins.length+' Coins · alle '+Math.round(DATA.refresh)+' s'+(DATA.cycle_sec?' · Runde '+DATA.cycle_sec+' s':'');
 }
+function catsStr(c){return Object.keys(c||{}).map(function(k){return k+'='+(CATN[c[k]]||c[k]).toLowerCase();}).join(', ');}
+function applyCfg(c){CFG=c;$('coins').value=c.coins.join(', ');$('ema').value=c.ema;$('near').value=c.near;$('cats').value=catsStr(c.cats);}
 function load(){
   if(busy)return;busy=true;
   fetch('/api/vwap_scanner').then(function(r){return r.json();}).then(function(d){
     DATA=d;
-    if(!CFG){CFG=d.cfg;$('coins').value=d.cfg.coins.join(', ');$('ema').value=d.cfg.ema;$('near').value=d.cfg.near;}
+    if(!CFG)applyCfg(d.cfg);
     render();
   }).catch(function(){$('info').textContent='Verbindung unterbrochen …';}).then(function(){busy=false;});
 }
 function save(body){
   fetch('/api/vwap_scanner/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
    .then(function(r){return r.json();}).then(function(d){
-     if(d.ok){CFG=d.cfg;$('coins').value=d.cfg.coins.join(', ');$('ema').value=d.cfg.ema;$('near').value=d.cfg.near;load();}
+     if(d.ok){applyCfg(d.cfg);load();}
    });
 }
 ['1m','3m'].forEach(function(k){$('tf-'+k).onclick=function(){save({tf:k});};});
-function setSort(k,toggle){if(toggle&&SORT===k)DIR=-DIR;else{SORT=k;DIR=1;}try{localStorage.setItem('vwapSort',SORT);localStorage.setItem('vwapDir',String(DIR));}catch(e){}render();}
-['d','w','m','l'].forEach(function(k){$('s-'+k).onclick=function(){setSort(k,false);};});
-['d','w','m'].forEach(function(k){$('h-'+k).onclick=function(){setSort(k,true);};});
+function setSort(k,toggle){
+  if(k==='v'){if(BY==='vol'&&toggle)DIR=-DIR;else{BY='vol';DIR=1;}}
+  else{if(toggle&&SORT===k&&(BY==='pct'||BY==='cross'))DIR=-DIR;else{SORT=k;DIR=1;if(BY!=='pct'&&BY!=='cross')BY='pct';}}
+  saveUi();render();
+}
+['d','w','m'].forEach(function(k){$('s-'+k).onclick=function(){SORT=k;saveUi();render();};$('h-'+k).onclick=function(){setSort(k,true);};});
+$('h-v').onclick=function(){setSort('v',true);};
+$('by').onchange=function(){BY=this.value;DIR=1;saveUi();render();};
+$('f-group').onchange=function(){GROUP=this.checked;saveUi();render();};
+$('f-near').onchange=function(){NEAR=this.checked;saveUi();render();};
+$('f-age').onchange=function(){AGE=+this.value;saveUi();render();};
+$('f-dir').onchange=function(){CDIR=this.value;saveUi();render();};
+$('f-vol').onchange=function(){VOL=+this.value;saveUi();render();};
+$('cats-pills').onclick=function(e){var b=e.target.closest?e.target.closest('button[data-cat]'):null;if(!b)return;CAT=b.getAttribute('data-cat');saveUi();render();};
 $('tb').onclick=function(e){
   var b=e.target.closest?e.target.closest('button.rm'):null;if(!b||!DATA)return;
   var c=b.getAttribute('data-c'),keep=DATA.cfg.coins.filter(function(x){return x!==c;});
@@ -658,7 +782,7 @@ $('tb').onclick=function(e){
   DATA.cfg.coins=keep;DATA.rows=DATA.rows.filter(function(r){return r.coin!==c;});render();save({coins:keep});
 };
 $('btn-edit').onclick=function(){var e=$('edit');e.style.display=e.style.display==='block'?'none':'block';};
-$('btn-save').onclick=function(){save({coins:$('coins').value,ema:$('ema').value,near:$('near').value});};
+$('btn-save').onclick=function(){save({coins:$('coins').value,ema:$('ema').value,near:$('near').value,cats:$('cats').value});};
 $('btn-reset').onclick=function(){save({reset:true});};
 $('btn-lighter').onclick=function(){
   $('edit-msg').textContent='lädt …';
