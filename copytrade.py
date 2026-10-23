@@ -15,7 +15,6 @@ from aiohttp import web
 from bot_core import (
     debug_log, get_lighter_client, place_market_order, get_precision,
     get_price_decimals, get_min_base_amount, MARKET_INDICES, get_redis, GLOBAL_SETTINGS,
-    _safe_close_client, EXCHANGE_CALL_TIMEOUT_SECONDS,
 )
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
@@ -76,15 +75,9 @@ async def execute_copy_trade(symbol, direction, reference_price, margin, leverag
             return {"status": "skipped", "detail": msg}
         is_ask = direction == "short"
         try:
-            await asyncio.wait_for(
-                client.update_leverage(market_index=market_index, leverage=leverage, margin_mode=0),
-                timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+            await client.update_leverage(market_index=market_index, leverage=leverage, margin_mode=0)
         except Exception as e:
-            # Timeout hier faellt unter dieselbe Absicherung wie in place_market_order/
-            # get_account_position_from_exchange (bot_core.py): ohne Zeitlimit wuerde ein
-            # haengender Aufruf den einzigen ct_watch_loop-Task (fuer ALLE beobachteten Trader)
-            # fuer immer blockieren, statt nur diesen einen Copy-Trade-Versuch fehlschlagen zu lassen.
-            debug_log("[CopyTrading] Hebel setzen fehlgeschlagen/Timeout", {"error": str(e)})
+            debug_log("[CopyTrading] Hebel setzen fehlgeschlagen", {"error": str(e)})
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, base_amount, reference_price)
         if err:
             debug_log(f"⚠️ [CopyTrading] Order fehlgeschlagen für {symbol}", {"error": str(err)})
@@ -93,7 +86,7 @@ async def execute_copy_trade(symbol, direction, reference_price, margin, leverag
             debug_log(f"✅ [CopyTrading] ECHTER Copy-Trade: {direction.upper()} {symbol} @ ~{reference_price}", {"tx_hash": str(tx_hash)})
             return {"status": "success", "detail": str(tx_hash)}
     finally:
-        await _safe_close_client(client)
+        await client.close()
 
 
 async def execute_copy_close(symbol, position_direction, size_coin_units, reference_price, dry_run):
@@ -132,7 +125,7 @@ async def execute_copy_close(symbol, position_direction, size_coin_units, refere
             debug_log(f"✅ [CopyTrading] ECHTE Position geschlossen: {position_direction.upper()} {symbol} @ ~{reference_price}", {"tx_hash": str(tx_hash)})
             return {"status": "success", "detail": str(tx_hash)}
     finally:
-        await _safe_close_client(client)
+        await client.close()
 
 
 def _record_copy_close(address, label, coin, direction, entry_price, exit_price, size, reason, dry_run):
@@ -589,7 +582,7 @@ CT_DASHBOARD_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>📡 Copy-Trading <span id="mode-badge"></span> <a href="/">← zurück zum Grid-Bot</a> <a href="/screener" style="margin-left:14px;">🔍 Coin Screener →</a><a href="/scalp" style="margin-left:14px;">⚡ Scalp →</a><a href="/guss" style="margin-left:14px;">🎯 GUSS →</a></h1>
+<h1>📡 Copy-Trading <span id="mode-badge"></span> <a href="/">← zurück zum Grid-Bot</a></h1>
 <div id="leaderboard-error"></div>
 
 <h2>Trendmeter (Top 20 Coins - Long/Short-Verteilung der beobachteten Trader)</h2>
