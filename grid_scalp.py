@@ -19,14 +19,13 @@ damit Dashboard/PnL/Trade-Log weiter stimmen.
 """
 
 import asyncio
-import os
 import time
 import traceback
 
 from bot_core import (
     BOTS, SYMBOLS, MARKET_INDICES, debug_log, save_bot_state,
     get_lighter_client, get_precision, get_price_decimals, get_min_base_amount,
-    get_account_position_from_exchange, now_local, EXCHANGE_CALL_TIMEOUT_SECONDS,
+    get_account_position_from_exchange, now_local,
 )
 
 
@@ -62,28 +61,6 @@ GRID_SCALP_STATE_KEYS = {
 }
 
 
-MAKER_DEFAULTS = {
-    "ms_notional_usd": 300.0,     # Notional je Order
-    "ms_tp_bps": 5.0,             # Take-Profit ab Durchschnittseinstieg (1 bps = 0.01%)
-    "ms_sl_bps": 30.0,            # harter Stopp gegen die Position
-    "ms_add_step_bps": 4.0,       # Mindestabstand des Nachkaufs zum Durchschnittseinstieg
-    "ms_max_levels": 3,           # Inventar-Limit (Einstieg + Nachkaeufe)
-    "ms_vol_mult": 2.0,           # 1m-Spanne > x * Durchschnitt -> Entry-Orders weg
-    "ms_vol_pause_s": 60,
-    "ms_sl_pause_s": 300,         # Pause nach hartem Stopp
-    "ms_max_sl_per_day": 3,       # danach Pause bis Tageswechsel (UTC)
-    "ms_ema_fast": 20,
-    "ms_ema_slow": 50,
-    "ms_flat_band_bps": 1.0,      # EMA-Abstand darunter = "flat" (beide Seiten quoten)
-}
-MODES = ("grid_scalp", "maker_scalp", "grid_classic")
-
-
-def _ms(cfg, key):
-    v = cfg.get(key)
-    return MAKER_DEFAULTS[key] if v is None else v
-
-
 # ============================================================================
 # Order-Schicht (neu - existierte im Bot bisher nicht)
 # ============================================================================
@@ -94,30 +71,22 @@ async def place_post_only_order(client, market_index, symbol, is_ask, base_amoun
     das ist KEIN Fehler, sondern der Sinn von Post-Only. Naechster Tick setzt neu."""
     price_decimals = get_price_decimals(symbol)
     price_scaled = int(round(price * (10 ** price_decimals)))
-    # Timeout wie bei place_market_order in bot_core.py: grid_scalp_poll_loop(symbol) laeuft zwar
-    # als eigene Task pro Coin (ein Haenger hier reisst andere Coins nicht mit) - ohne Zeitlimit
-    # wuerde ein haengender Aufruf aber trotzdem GENAU DIESEN Coin fuer immer einfrieren, ohne
-    # jemals eine Exception zu werfen, die der try/except im Poll-Loop auffangen koennte.
-    try:
-        tx, tx_hash, err = await asyncio.wait_for(client.create_order(
-            market_index=market_index,
-            client_order_index=coi,
-            base_amount=base_amount,
-            price=price_scaled,
-            is_ask=is_ask,
-            order_type=client.ORDER_TYPE_LIMIT,
-            time_in_force=client.ORDER_TIME_IN_FORCE_POST_ONLY,
-            reduce_only=reduce_only,
-            order_expiry=client.DEFAULT_28_DAY_ORDER_EXPIRY,
-        ), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        debug_log(f"⚠️ [{symbol}] Grid-Scalp Post-Only-Order Timeout nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s")
-        return None, None, f"Timeout nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s"
+    tx, tx_hash, err = await client.create_order(
+        market_index=market_index,
+        client_order_index=coi,
+        base_amount=base_amount,
+        price=price_scaled,
+        is_ask=is_ask,
+        order_type=client.ORDER_TYPE_LIMIT,
+        time_in_force=client.ORDER_TIME_IN_FORCE_POST_ONLY,
+        reduce_only=reduce_only,
+        order_expiry=client.DEFAULT_28_DAY_ORDER_EXPIRY,
+    )
     return tx, tx_hash, err
 
 
 async def cancel_order(client, market_index, coi):
-    return await asyncio.wait_for(client.cancel_order(market_index=market_index, order_index=coi), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    return await client.cancel_order(market_index=market_index, order_index=coi)
 
 
 _auth_cache = {}  # account_index -> (token, expires_ts)
@@ -217,7 +186,7 @@ async def read_open_orders(client, market_index):
 async def read_best_bid_ask(client, market_index):
     import lighter
     order_api = lighter.OrderApi(client.api_client)
-    ob = await asyncio.wait_for(order_api.order_book_orders(market_index, 1), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    ob = await order_api.order_book_orders(market_index, 1)
     if not ob.bids or not ob.asks:
         return None, None
     return float(ob.bids[0].price), float(ob.asks[0].price)
@@ -287,189 +256,6 @@ def _desired_orders(symbol, cfg, st, pos_size, avg_entry, best_bid, best_ask):
 
 
 # ============================================================================
-# maker_scalp: Marktkontext (Trend + Volatilitaet aus Binance-1m-Futures-Kerzen,
-# kommen aus dem WS-Cache, kein zusaetzlicher REST-Traffic sobald der Stream warm ist)
-# ============================================================================
-
-_ctx_cache = {}
-
-
-def _ema(values, n):
-    k = 2.0 / (n + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = e + k * (v - e)
-    return e
-
-
-_int_candles = {}   # symbol -> {"closed": [(h,l,c)], "cur": [minute,h,l,c]}
-
-
-def _feed_internal(symbol, mid):
-    """Baut 1m-Kerzen aus Lighters eigenem Mid-Preis (Fallback, wenn Binance nichts liefert)."""
-    d = _int_candles.setdefault(symbol, {"closed": [], "cur": None})
-    m = int(time.time() // 60)
-    cur = d["cur"]
-    if cur is None or cur[0] != m:
-        if cur is not None:
-            d["closed"].append((cur[1], cur[2], cur[3]))
-            if len(d["closed"]) > 300:
-                del d["closed"][:len(d["closed"]) - 300]
-        d["cur"] = [m, mid, mid, mid]
-    else:
-        cur[1] = max(cur[1], mid); cur[2] = min(cur[2], mid); cur[3] = mid
-
-
-_seed_state = {}   # symbol -> {"done": bool, "last_try": ts}
-
-
-async def _seed_lighter(symbol):
-    import lighter
-    from bot_core import BASE_URL
-    configuration = lighter.Configuration(host=BASE_URL)
-    async with lighter.ApiClient(configuration) as api_client:
-        candle_api = lighter.CandlestickApi(api_client)
-        now_ms = int(time.time() * 1000)
-        resp = await candle_api.candles(
-            market_id=MARKET_INDICES[symbol], resolution="1m",
-            start_timestamp=now_ms - 6 * 3600 * 1000, end_timestamp=now_ms,
-            count_back=150, set_timestamp_to_end=True)
-    out = []
-    for c in (getattr(resp, "c", None) or []):
-        try:
-            t = int(c.t); t = t // 1000 if t > 1e12 else t
-            out.append((t, float(c.h), float(c.l), float(c.c)))
-        except (TypeError, ValueError, AttributeError):
-            continue
-    return out
-
-
-async def _seed_hyperliquid(symbol):
-    import aiohttp
-    now_ms = int(time.time() * 1000)
-    body = {"type": "candleSnapshot", "req": {"coin": symbol, "interval": "1m",
-                                               "startTime": now_ms - 3 * 3600 * 1000, "endTime": now_ms}}
-    async with aiohttp.ClientSession() as sess:
-        async with sess.post("https://api.hyperliquid.xyz/info", json=body,
-                             timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status != 200:
-                return []
-            data = await r.json()
-    return [(int(k["t"]) // 1000, float(k["h"]), float(k["l"]), float(k["c"])) for k in data]
-
-
-async def _seed_internal(symbol, cfg):
-    """Fuellt die eigenen 1m-Kerzen EINMALIG mit Historie (Lighter, sonst Hyperliquid) -
-    dadurch entfaellt die Aufwaermzeit nach einem Deploy."""
-    stt = _seed_state.setdefault(symbol, {"done": False, "last_try": 0.0})
-    if stt["done"] or time.time() - stt["last_try"] < 60:
-        return
-    stt["last_try"] = time.time()
-    candles = []
-    for name, fn in (("Lighter", _seed_lighter), ("Hyperliquid", _seed_hyperliquid)):
-        try:
-            candles = await asyncio.wait_for(fn(symbol), timeout=15)
-        except Exception as e:
-            debug_log(f"⚠️ [{symbol}] Maker-Scalp Seed {name} fehlgeschlagen", {"error": str(e)})
-            candles = []
-        if len(candles) >= 20:
-            cur_min = int(time.time() // 60)
-            candles = sorted(candles)
-            closed = [(h, l, c) for t, h, l, c in candles if t // 60 < cur_min]
-            d = _int_candles.setdefault(symbol, {"closed": [], "cur": None})
-            d["closed"] = closed[-300:] + d["closed"]
-            stt["done"] = True
-            debug_log(f"🌱 [{symbol}] Maker-Scalp: {len(closed)} Historien-Kerzen geladen ({name}) - keine Aufwaermzeit")
-            return
-
-
-async def _maker_context(symbol, cfg):
-    """Gibt {"trend": up/down/flat, "vol_spike": bool, "quelle": ...} zurueck oder None.
-    Quelle 1: Binance-1m-Futures (WS-Cache). Quelle 2 (Fallback): eigene 1m-Kerzen aus dem
-    Lighter-Preis - braucht nach einem Neustart ca. ms_ema_slow Minuten Aufwaermzeit."""
-    c = _ctx_cache.get(symbol)
-    if c and time.time() - c["t"] < 5:
-        return c
-    slow_n = int(_ms(cfg, "ms_ema_slow"))
-    closed_c = hi_r = lo_r = cur_rng = None
-    quelle = None
-    try:
-        from strategies import fetch_candles_binance  # Lazy-Import (Zirkelimport vermeiden)
-        res = await fetch_candles_binance(symbol, "1m", 120, "futures")
-    except Exception:
-        res = None
-    if res:
-        _ts, _o, hi, lo, cl = res[:5]
-        if len(cl) >= slow_n + 10:
-            closed_c = cl[:-1]                       # letzte Kerze laeuft noch
-            hi_r, lo_r = hi[-21:-1], lo[-21:-1]
-            cur_rng = hi[-1] - lo[-1]
-            quelle = "binance"
-    if closed_c is None:
-        d = _int_candles.get(symbol)
-        if d and len(d["closed"]) >= slow_n and d["cur"]:
-            closed_c = [x[2] for x in d["closed"]]
-            hi_r = [x[0] for x in d["closed"][-20:]]
-            lo_r = [x[1] for x in d["closed"][-20:]]
-            cur_rng = d["cur"][1] - d["cur"][2]
-            quelle = "lighter-eigen"
-    if closed_c is None:
-        return None
-    fast = _ema(closed_c[-(slow_n * 3):], int(_ms(cfg, "ms_ema_fast")))
-    slow = _ema(closed_c[-(slow_n * 3):], slow_n)
-    d_bps = (fast - slow) / slow * 1e4
-    band = float(_ms(cfg, "ms_flat_band_bps"))
-    trend = "up" if d_bps > band else "down" if d_bps < -band else "flat"
-    ranges = [h - l for h, l in zip(hi_r, lo_r)]
-    avg_rng = sum(ranges) / len(ranges) if ranges else 0.0
-    spike = avg_rng > 0 and cur_rng > float(_ms(cfg, "ms_vol_mult")) * avg_rng
-    ctx = {"t": time.time(), "trend": trend, "vol_spike": spike, "ema_bps": round(d_bps, 2), "quelle": quelle}
-    _ctx_cache[symbol] = ctx
-    return ctx
-
-
-def _desired_maker(symbol, cfg, pos_size, avg_entry, best_bid, best_ask, trend, entries_allowed):
-    mid = (best_bid + best_ask) / 2.0
-    tick = _tick_size(symbol)
-    dec = get_price_decimals(symbol)
-    notional = float(_ms(cfg, "ms_notional_usd"))
-    tp = float(_ms(cfg, "ms_tp_bps")) / 1e4
-    step = float(_ms(cfg, "ms_add_step_bps")) / 1e4
-    max_levels = int(_ms(cfg, "ms_max_levels"))
-    out = []
-
-    if pos_size != 0 and avg_entry:
-        if pos_size > 0:
-            out.append({"tag": "tp", "is_ask": True, "price": max(avg_entry * (1 + tp), best_ask),
-                        "size": abs(pos_size), "reduce_only": True})
-        else:
-            out.append({"tag": "tp", "is_ask": False, "price": min(avg_entry * (1 - tp), best_bid),
-                        "size": abs(pos_size), "reduce_only": True})
-
-    if entries_allowed:
-        base = notional / mid
-        spread = best_ask - best_bid
-        join_bid = best_bid + tick if spread > 1.5 * tick else best_bid
-        join_ask = best_ask - tick if spread > 1.5 * tick else best_ask
-        levels_used = int(abs(pos_size) * (avg_entry or mid) / max(notional, 1e-9) + 0.5) if pos_size else 0
-        if pos_size == 0:
-            if trend in ("up", "flat"):
-                out.append({"tag": "buy_0", "is_ask": False, "price": join_bid, "size": base, "reduce_only": False})
-            if trend in ("down", "flat"):
-                out.append({"tag": "sell_0", "is_ask": True, "price": join_ask, "size": base, "reduce_only": False})
-        elif pos_size > 0 and levels_used < max_levels and trend != "down":
-            out.append({"tag": "buy_add", "is_ask": False, "price": min(join_bid, avg_entry * (1 - step)),
-                        "size": base, "reduce_only": False})
-        elif pos_size < 0 and levels_used < max_levels and trend != "up":
-            out.append({"tag": "sell_add", "is_ask": True, "price": max(join_ask, avg_entry * (1 + step)),
-                        "size": base, "reduce_only": False})
-
-    for d in out:
-        d["price"] = round(round(d["price"] / tick) * tick, dec)
-    return out
-
-
-# ============================================================================
 # Dry-Run-Fill-Simulation
 #
 # WARUM DAS OPTIMISTISCH IST - bitte lesen, bevor du den Zahlen glaubst:
@@ -500,60 +286,6 @@ def _sim_stats(st):
     return stats
 
 
-def _dash_entry(st, price, size, is_add_on):
-    """Dashboard: Tabelle 'Laufende Nachkaeufe' fuettern (Dry-Run)."""
-    st.setdefault("current_position_entries", []).append({
-        "time": now_local().isoformat(), "price": round(price, 6), "size": round(size, 8),
-        "stufe": int(st.get("entry_count") or 0) + 1, "is_add_on": is_add_on})
-    st["entry_count"] = int(st.get("entry_count") or 0) + 1
-    st["last_entry_price"] = price
-    if not is_add_on:
-        st["position_opened_at"] = now_local().isoformat()
-
-
-def _dash_trade(st, side, avg, exit_px, pnl, reason):
-    """Dashboard: Trade-Log + Statistik (Dry-Run)."""
-    stats = st.setdefault("stats", {"trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0})
-    stats["trades"] += 1
-    stats["total_pnl_usd"] += pnl
-    stats["wins" if pnl > 0 else "losses"] += 1
-    log = st.setdefault("trade_log", [])
-    log.append({"side": side, "avg_entry": round(avg, 4), "exit": round(exit_px, 4),
-                "entries": int(st.get("entry_count") or 0), "pnl_usd": round(pnl, 3),
-                "opened_at": st.get("position_opened_at"), "closed_at": now_local().isoformat(),
-                "reason": reason})
-    if len(log) > 200:
-        del log[:len(log) - 200]
-
-
-def _dash_reset_cycle(st):
-    st["entry_count"] = 0
-    st["current_position_entries"] = []
-    st["position_opened_at"] = None
-    st["last_entry_price"] = None
-
-
-def _publish_levels(st, cfg, mode, desired, pos_size, avg_entry):
-    """Linien fuer Chart/Anzeige: TP, SL, naechster Nachkauf bzw. Einstiegs-Level."""
-    lv = {"tp_price": None, "sl_price": None, "next_nachkauf_price": None,
-          "next_entry_long": None, "next_entry_short": None}
-    for d in desired:
-        t = d["tag"]
-        if t == "tp":
-            lv["tp_price"] = d["price"]
-        elif t in ("buy_0", "sell_0") and pos_size == 0:
-            lv["next_entry_long" if t == "buy_0" else "next_entry_short"] = d["price"]
-        elif not d["reduce_only"] and lv["next_nachkauf_price"] is None:
-            lv["next_nachkauf_price"] = d["price"]
-    if pos_size != 0 and avg_entry:
-        if mode == "maker_scalp":
-            dist = avg_entry * float(_ms(cfg, "ms_sl_bps")) / 1e4
-        else:
-            dist = abs(float(cfg.get("gs_flatten_usd", 25.0))) / max(abs(pos_size), 1e-12)
-        lv["sl_price"] = round(avg_entry - dist if pos_size > 0 else avg_entry + dist, 6)
-    st["gs_levels"] = lv
-
-
 def _sim_process_fills(symbol, st, cfg, best_bid, best_ask):
     """Prueft alle simulierten Orders auf Fill und verbucht sie.
     Gibt (pos_size, avg_entry) nach den Fills zurueck."""
@@ -575,8 +307,6 @@ def _sim_process_fills(symbol, st, cfg, best_bid, best_ask):
             continue
 
         menge = o["size"] * (-1 if o["is_ask"] else 1)
-        st.setdefault("gs_sim_pending", []).append(
-            {"ts": time.time(), "is_ask": o["is_ask"], "price": o["price"], "m": {}})
 
         if o.get("reduce_only") or (pos != 0 and (pos > 0) != (menge > 0)):
             # Schliessender Fill -> realisierter PnL
@@ -589,8 +319,6 @@ def _sim_process_fills(symbol, st, cfg, best_bid, best_ask):
                     stats["gewinne"] += 1
                 else:
                     stats["verluste"] += 1
-                _dash_trade(st, "long" if pos > 0 else "short", avg, o["price"], pnl,
-                            "TP" if o.get("reduce_only") else "Gegen-Order")
                 quote = round(stats["gewinne"] / stats["trades"] * 100, 1)
                 debug_log(
                     f"\U0001f4b0 [{symbol}] SIM-TRADE #{stats['trades']}: "
@@ -601,10 +329,8 @@ def _sim_process_fills(symbol, st, cfg, best_bid, best_ask):
             pos += menge
             if abs(pos) < 1e-12:
                 pos, avg = 0.0, None
-                _dash_reset_cycle(st)
         else:
             # Oeffnender/aufstockender Fill
-            _dash_entry(st, o["price"], o["size"], is_add_on=not (pos == 0 or avg is None))
             if pos == 0 or avg is None:
                 pos, avg = menge, o["price"]
             else:
@@ -628,72 +354,6 @@ def _sim_process_fills(symbol, st, cfg, best_bid, best_ask):
 
 def _sim_open_orders(st):
     return [dict(o) for o in st.get("gs_sim_orders", [])]
-
-
-def _sim_reconcile(symbol, st, cfg, desired):
-    """Dry-Run: SOLL-Orders in die simulierte Buch-Liste uebernehmen (Requote nur bei Drift)."""
-    drift_limit = int(cfg.get("gs_requote_ticks", 2)) * _tick_size(symbol)
-    by_tag = {o["tag"]: o for o in st.get("gs_sim_orders", [])}
-    new = []
-    for d in desired:
-        old = by_tag.get(d["tag"])
-        if old is not None and abs(old["price"] - d["price"]) <= drift_limit and old["reduce_only"] == d["reduce_only"]:
-            old["size"] = d["size"] if d["reduce_only"] else old["size"]
-            new.append(old)
-        else:
-            new.append(dict(d))
-    st["gs_sim_orders"] = new
-
-
-def _sim_markouts(st, mid):
-    """Mid-Preis 5/30/60s nach jedem simulierten Fill -> Adverse-Selection-Messung (bps)."""
-    now = time.time()
-    marks = st.setdefault("ms_marks", [])
-    keep = []
-    for p in st.get("gs_sim_pending", []):
-        for sec in (5, 30, 60):
-            if sec not in p["m"] and now - p["ts"] >= sec:
-                p["m"][sec] = mid
-        if len(p["m"]) == 3:
-            sign = -1 if p["is_ask"] else 1
-            marks.append([sign * (p["m"][x] - p["price"]) / p["price"] * 1e4 for x in (5, 30, 60)])
-        else:
-            keep.append(p)
-    st["gs_sim_pending"] = keep
-    if len(marks) > 2000:
-        del marks[:len(marks) - 2000]
-
-
-def _markout_summary(st):
-    marks = st.get("ms_marks") or []
-    if not marks:
-        return "noch keine (n=0)"
-    n = len(marks)
-    a = [round(sum(m[i] for m in marks) / n, 2) for i in range(3)]
-    return f"{a[0]:+}/{a[1]:+}/{a[2]:+} bps (5/30/60s, n={n})"
-
-
-def _sim_close_market(st, bid, ask, reason):
-    """Dry-Run-Notausstieg: simulierte Position als Taker schliessen."""
-    pos = float(st.get("gs_sim_pos") or 0.0)
-    avg = st.get("gs_sim_avg")
-    if pos == 0 or avg is None:
-        _sim_reset(st)
-        return
-    px = bid if pos > 0 else ask
-    pnl = (px - avg) * abs(pos) * (1 if pos > 0 else -1)
-    stats = _sim_stats(st)
-    stats["trades"] += 1
-    stats["pnl"] = round(stats["pnl"] + pnl, 4)
-    stats["gewinne" if pnl >= 0 else "verluste"] += 1
-    debug_log(f"\U0001f9ea SIM-FLATTEN ({reason}): zu {px} | PnL {round(pnl, 4)}$",
-              {"gesamt_pnl": stats["pnl"], "gewinne": stats["gewinne"], "verluste": stats["verluste"]})
-    _dash_trade(st, "long" if pos > 0 else "short", avg, px, pnl, reason)
-    _dash_reset_cycle(st)
-    _sim_reset(st)
-    st["position"] = None
-    st["avg_entry_price"] = None
-    st["total_coin_size"] = 0.0
 
 
 # ============================================================================
@@ -742,7 +402,7 @@ async def _sync_position(client, symbol, market_index):
     return size * sign, avg_entry
 
 
-async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldown_s=None):
+async def _flatten_market(client, symbol, market_index, pos_size, reason):
     """Notausstieg. EINZIGE Taker-Order im ganzen Modul - hier ist Fill wichtiger
     als Spread."""
     from bot_core import place_market_order
@@ -751,9 +411,8 @@ async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldo
 
     # Offene Orders zuerst weg, sonst kollidiert das Flatten mit den eigenen Quotes
     try:
-        if not cfg["dry_run"]:
-            for o in await read_open_orders(client, market_index):
-                await cancel_order(client, market_index, o["coi"])
+        for o in await read_open_orders(client, market_index):
+            await cancel_order(client, market_index, o["coi"])
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] Grid-Scalp: Orders vor Flatten nicht abraeumbar", {"error": str(e)})
 
@@ -763,8 +422,6 @@ async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldo
 
     if cfg["dry_run"]:
         debug_log(f"🧪 [{symbol}] DRY FLATTEN ({reason}): {'SELL' if is_ask else 'BUY'} {abs(pos_size)}")
-        _sim_close_market(st, st.get("last_bid") or price, st.get("last_ask") or price, reason)
-        st["gs_sim_orders"] = []
     else:
         tx, tx_hash, err = await place_market_order(
             client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
@@ -774,9 +431,7 @@ async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldo
         debug_log(f"🚪 [{symbol}] Grid-Scalp FLATTEN ausgefuehrt ({reason})", {"tx_hash": str(tx_hash)})
 
     st["gs_tag_map"] = {}
-    st["gs_levels"] = None
-    st["gs_cooldown_until"] = time.time() + (float(cooldown_s) if cooldown_s is not None
-                                             else float(cfg.get("gs_cooldown_min", 30.0)) * 60)
+    st["gs_cooldown_until"] = time.time() + float(cfg.get("gs_cooldown_min", 30.0)) * 60
     st["gs_anchor"] = None
     await save_bot_state()
 
@@ -788,43 +443,17 @@ async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldo
 async def grid_scalp_tick(client, symbol):
     cfg, st = BOTS[symbol]["config"], BOTS[symbol]["state"]
     market_index = MARKET_INDICES[symbol]
-    if cfg.get("entry_mode") == "grid_classic":
-        return await grid_classic_tick(client, symbol)
 
     best_bid, best_ask = await read_best_bid_ask(client, market_index)
     if best_bid is None:
         return
     mid = (best_bid + best_ask) / 2.0
     st["last_price"] = mid
-    st["last_bid"], st["last_ask"] = best_bid, best_ask
-    mode = cfg.get("entry_mode")
 
-    if cfg["dry_run"]:
-        # Dry-Run: simulierte Position/Orders statt Boersen-Zustand (vorher lief die Simulation nie)
-        pos_size, avg_entry = _sim_process_fills(symbol, st, cfg, best_bid, best_ask)
-        _sim_markouts(st, mid)
-    else:
-        pos_size, avg_entry = await _sync_position(client, symbol, market_index)
+    pos_size, avg_entry = await _sync_position(client, symbol, market_index)
 
     # 1) Notausstieg ZUERST - vor allem, was neue Orders posten koennte
-    if mode == "maker_scalp" and pos_size != 0 and avg_entry:
-        px = best_bid if pos_size > 0 else best_ask
-        pnl_bps = (px - avg_entry) / avg_entry * 1e4 * (1 if pos_size > 0 else -1)
-        if pnl_bps <= -float(_ms(cfg, "ms_sl_bps")):
-            today = int(time.time() // 86400)
-            if st.get("ms_day") != today:
-                st["ms_day"], st["ms_sl_today"] = today, 0
-            st["ms_sl_today"] = int(st.get("ms_sl_today") or 0) + 1
-            debug_log(f"🛑 [{symbol}] Maker-Scalp Stopp: {round(pnl_bps,1)} bps <= -{_ms(cfg,'ms_sl_bps')} bps "
-                      f"(Stopp #{st['ms_sl_today']} heute)")
-            if st["ms_sl_today"] >= int(_ms(cfg, "ms_max_sl_per_day")):
-                pause = (today + 1) * 86400 - time.time()
-                debug_log(f"⛔ [{symbol}] Maker-Scalp: Tageslimit an Stopps erreicht - Pause bis Tageswechsel (UTC)")
-            else:
-                pause = float(_ms(cfg, "ms_sl_pause_s"))
-            await _flatten_market(client, symbol, market_index, pos_size, "maker-stopp", cooldown_s=pause)
-            return
-    elif mode != "maker_scalp" and pos_size != 0 and avg_entry:
+    if pos_size != 0 and avg_entry:
         upnl = (mid - avg_entry) * pos_size
         limit = -abs(float(cfg.get("gs_flatten_usd", 25.0)))
         if upnl <= limit:
@@ -838,21 +467,15 @@ async def grid_scalp_tick(client, symbol):
         if pos_size == 0:
             rest_min = (float(st["gs_cooldown_until"]) - time.time()) / 60
             debug_log(f"\u23f8\ufe0f [{symbol}] Grid-Scalp pausiert (Cooldown), noch {round(rest_min,1)} Min.")
-            if cfg["dry_run"]:
-                st["gs_sim_orders"] = []
-            else:
-                for o in await read_open_orders(client, market_index):
-                    await cancel_order(client, market_index, o["coi"])
+            for o in await read_open_orders(client, market_index):
+                await cancel_order(client, market_index, o["coi"])
             st.setdefault("gs_tag_map", {}).clear()
             return
 
     if not cfg.get("bot_active", True):
         debug_log(f"\u26d4 [{symbol}] Grid-Scalp: bot_active=False - raeume Orders ab und warte")
-        if cfg["dry_run"]:
-            st["gs_sim_orders"] = []
-        else:
-            for o in await read_open_orders(client, market_index):
-                await cancel_order(client, market_index, o["coi"])
+        for o in await read_open_orders(client, market_index):
+            await cancel_order(client, market_index, o["coi"])
         st.setdefault("gs_tag_map", {}).clear()
         return
 
@@ -868,52 +491,7 @@ async def grid_scalp_tick(client, symbol):
             st["gs_anchor"] = mid
 
     # 4) SOLL gegen IST abgleichen
-    if mode == "maker_scalp":
-        _feed_internal(symbol, mid)
-        await _seed_internal(symbol, cfg)
-        ctx = await _maker_context(symbol, cfg)
-        entries_ok = ctx is not None
-        trend = ctx["trend"] if ctx else "flat"
-        if ctx and ctx["vol_spike"]:
-            if time.time() >= float(st.get("ms_pause_until") or 0):
-                debug_log(f"🌊 [{symbol}] Maker-Scalp: Volatilitaets-Rueckzug {_ms(cfg,'ms_vol_pause_s')}s")
-            st["ms_pause_until"] = time.time() + float(_ms(cfg, "ms_vol_pause_s"))
-        if time.time() < float(st.get("ms_pause_until") or 0):
-            entries_ok = False
-        st["ms_trend"] = trend
-        if ctx is None:
-            d_ = _int_candles.get(symbol)
-            st["ms_ctx"] = (f"Aufwaermen: eigene 1m-Kerzen {len(d_['closed']) if d_ else 0}/{int(_ms(cfg,'ms_ema_slow'))}, "
-                            f"Binance liefert nichts -> keine Entries")
-            if time.time() - float(st.get("ms_ctx_warn") or 0) >= 60:
-                st["ms_ctx_warn"] = time.time()
-                debug_log(f"⚠️ [{symbol}] Maker-Scalp: Binance liefert keine 1m-Kerzen - nutze eigene Lighter-Kerzen, warte auf Aufwaermzeit")
-        elif time.time() < float(st.get("ms_pause_until") or 0):
-            st["ms_ctx"] = f"Vol-Pause noch {round(float(st['ms_pause_until']) - time.time())}s"
-        else:
-            st["ms_ctx"] = f"ok [{ctx.get('quelle')}] (EMA-Abstand {ctx.get('ema_bps')} bps)"
-        desired = _desired_maker(symbol, cfg, pos_size, avg_entry, best_bid, best_ask, trend, entries_ok)
-    else:
-        desired = _desired_orders(symbol, cfg, st, pos_size, avg_entry, best_bid, best_ask)
-
-    _publish_levels(st, cfg, mode, desired, pos_size, avg_entry)
-
-    if cfg["dry_run"]:
-        _sim_reconcile(symbol, st, cfg, desired)
-        now = time.time()
-        if now - float(st.get("gs_last_heartbeat") or 0) >= 30:
-            st["gs_last_heartbeat"] = now
-            stt = _sim_stats(st)
-            wr = round(stt["gewinne"] / stt["trades"] * 100, 1) if stt["trades"] else 0
-            debug_log(f"\U0001f493 [{symbol}] {mode} SIM Heartbeat", {
-                "mid": round(mid, 6), "bid/ask": f"{best_bid}/{best_ask}",
-                "trend": st.get("ms_trend"), "kontext": st.get("ms_ctx"), "position": f"{round(pos_size,6)} @ {avg_entry}" if pos_size else "flat",
-                "sim_orders": len(st["gs_sim_orders"]), "sim_trades": stt["trades"], "sim_winrate": f"{wr}%",
-                "sim_pnl_usd": stt["pnl"],
-                "sim_upnl_usd": round((mid - avg_entry) * pos_size, 3) if (pos_size and avg_entry) else 0.0,
-                "markout": _markout_summary(st)})
-        return
-
+    desired = _desired_orders(symbol, cfg, st, pos_size, avg_entry, best_bid, best_ask)
     live = await read_open_orders(client, market_index)
 
     tag_map = st.setdefault("gs_tag_map", {})
@@ -1003,10 +581,10 @@ async def grid_scalp_poll_loop(symbol):
               f"(aktueller entry_mode: {BOTS[symbol]['config'].get('entry_mode')})")
     while True:
         cfg = BOTS[symbol]["config"]
-        if cfg.get("entry_mode") not in MODES:
+        if cfg.get("entry_mode") != "grid_scalp":
             if client is not None:
                 try:
-                    await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+                    await client.close()
                 except Exception:
                     pass
                 client = None
@@ -1015,7 +593,7 @@ async def grid_scalp_poll_loop(symbol):
             if time.time() - last_idle_log >= 300:
                 last_idle_log = time.time()
                 debug_log(f"\U0001f4a4 [{symbol}] Grid-Scalp inaktiv "
-                          f"(entry_mode ist '{cfg.get('entry_mode')}', erwartet 'grid_scalp' oder 'maker_scalp')")
+                          f"(entry_mode ist '{cfg.get('entry_mode')}', erwartet 'grid_scalp')")
             await asyncio.sleep(5)
             continue
 
@@ -1023,719 +601,23 @@ async def grid_scalp_poll_loop(symbol):
             if client is None:
                 # Persistenter Client - get_lighter_client() baut sonst pro Order einen
                 # neuen auf, was bei einem Maker-Loop mit ~30 Orders/Minute nicht geht
-                client = get_lighter_client("grid")
+                client = get_lighter_client()
                 if client is None:
                     await asyncio.sleep(10)
                     continue
-                BOTS[symbol]["state"]["gs_account"] = {"index": client.account_index, "sub": bool(os.getenv("GRID_ACCOUNT_INDEX") and os.getenv("GRID_PRIVATE_KEY"))}
-                debug_log(f"🔌 [{symbol}] Grid-Bot: Client verbunden (Konto {client.account_index}{' = Unterkonto' if os.getenv('GRID_ACCOUNT_INDEX') else ''})")
+                debug_log(f"🔌 [{symbol}] Grid-Scalp: Client verbunden")
             await grid_scalp_tick(client, symbol)
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Grid-Scalp Tick-Fehler",
                       {"error": str(e), "traceback": traceback.format_exc()})
             try:
-                await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+                await client.close()
             except Exception:
                 pass
             client = None
-            # Lighter-WAF ("Human Verification", HTTP 405) = zu viele Anfragen von dieser IP: laenger pausieren,
-            # sonst bleibt die Sperre bestehen. Zufaellige Streuung, damit nicht alle Coins gleichzeitig wiederkommen.
-            _err = str(e)
-            if "405" in _err or "Human Verification" in _err or "awswaf" in _err:
-                import random
-                _w = 45 + random.random() * 30
-                debug_log(f"🚦 [{symbol}] Lighter-Anfragelimit (WAF) - pausiere {_w:.0f}s. Poll-Intervall im Grid-Bot auf 5+ Sekunden stellen!")
-                await asyncio.sleep(_w)
-            else:
-                await asyncio.sleep(5)
+            await asyncio.sleep(5)
 
-        _c = BOTS[symbol]["config"]
-        await asyncio.sleep(float(_c.get("gc_poll_seconds", 2.0) if _c.get("entry_mode") == "grid_classic" else _c.get("gs_poll_seconds", 2.0)))
-
-
-# ============================================================================
-# KLASSISCHER GRID-BOT (entry_mode "grid_classic")
-# ----------------------------------------------------------------------------
-# Festes Preisgitter zwischen gc_lower und gc_upper mit gc_levels Abschnitten.
-# LONG-Gitter: auf jedem Level UNTER dem Kurs liegt eine Kauf-Limit-Order. Fuellt sie, entsteht ein "Lot" und eine
-# Verkaufs-Order (reduce-only) EIN Level hoeher wird gesetzt. Fuellt die, ist der Stufengewinn realisiert und die
-# Kauf-Order kommt zurueck. SHORT-Gitter ist das Spiegelbild. Es wird nie mit Verlust verkauft - faellt der Kurs,
-# bleiben die Lots offen und warten (Notbremse optional: gc_stop_pct).
-# Lighter hat pro Markt nur EINE Nettoposition - die Lots sind darum ein virtuelles Buch (State), die Boerse kennt nur
-# die Summe. Gewinn je Stufe = Lot-Groesse x Level-Abstand.
-#
-# WEITERLAUFEN NACH DEPLOY: Loop braucht nur bot_active (gespeichert), NICHT session_started. Lots/Range/offene Orders
-# (gc_prev) liegen in Redis. Eigene Orders erkennt der Bot an der client_order_index (kodiert Markt + Level + Art),
-# also auch ohne tag_map. Fills waehrend des Neustarts werden aus verschwundenen Orders + Positionsabgleich erkannt.
-# ============================================================================
-
-GC_DEFAULTS = {
-    "gc_direction": "long",        # long / short
-    "gc_lower": 0.0,               # 0 = automatisch beim Start (Kurs -/+ gc_auto_pct)
-    "gc_upper": 0.0,
-    "gc_auto_pct": 5.0,
-    "gc_levels": 20,               # Abschnitte (= Anzahl Stufen)
-    "gc_spacing": "arith",         # arith (gleiche Abstaende) / geo (gleiche Prozent)
-    "gc_size_usd": 200.0,          # Notional je Stufe (Lot)
-    "gc_max_lots": 10,             # maximal gleichzeitig gehaltene Lots (Inventar-Limit)
-    "gc_open_each_side": 6,        # so viele Einstiegs-Orders liegen gleichzeitig im Buch
-    "gc_exit_orders": 15,          # Gegen-Orders (Ausstieg) nur fuer die so vielen Lots, die dem Kurs am naechsten liegen (0 = fuer alle)
-    "gc_order_cap": 30,            # Boersen-Limit aktiver Limit-Orders je Markt (Lighter: Fehler 21718) - Einstiege werden darauf gedeckelt
-    "gc_stop_pct": 0.0,            # Notbremse: % ausserhalb der Spanne -> alles schliessen + stoppen (0 = aus)
-    "gc_poll_seconds": 2.0,
-    "gc_trend_mode": "off",        # off / intern / swing: Marktstruktur-Trend (BOS/CHoCH) bestimmt die Gitter-Richtung automatisch
-    "gc_trend_tf": "1h",           # Zeitebene des Trends: 5m / 15m / 1h / 4h / 1d
-    "gc_trend_ilen": 4,            # Pivot-Laenge intern
-    "gc_trend_slen": 50,           # Pivot-Laenge swing
-    "gc_trend_on_flip": "wait",    # wait = Lots auslaufen lassen (keine neuen Kaeufe), dann wechseln / close = sofort alles schliessen
-}
-GC_COI_BASE = 10 ** 11
-
-
-def _gcv(cfg, key):
-    v = cfg.get(key)
-    return GC_DEFAULTS[key] if v is None else v
-
-
-def _gc_coi(market_index, idx, is_exit):
-    # Ziffern: Zeit (zyklisch, damit eine frische Order nie dieselbe ID wie eine gerade gefuellte hat) | Markt | Level*2+Art
-    return GC_COI_BASE + (int(time.time()) % 10000) * 10 ** 7 + int(market_index) * 1000 + int(idx) * 2 + (1 if is_exit else 0)
-
-
-def _gc_decode(coi, market_index):
-    if coi < GC_COI_BASE or coi >= GC_COI_BASE + 10 ** 11:
-        return None
-    low = coi % 10 ** 7
-    if low // 1000 != int(market_index):
-        return None
-    r = low % 1000
-    return ("x" if r & 1 else "e") + str(r >> 1)
-
-
-def _gc_levels(rng):
-    lo, hi, n = float(rng["lower"]), float(rng["upper"]), int(rng["n"])
-    if rng.get("spacing") == "geo" and lo > 0:
-        ratio = (hi / lo) ** (1.0 / n)
-        return [lo * ratio ** i for i in range(n + 1)]
-    return [lo + (hi - lo) * i / n for i in range(n + 1)]
-
-
-def _gc_sig(cfg):
-    return [str(_gcv(cfg, "gc_direction")), float(_gcv(cfg, "gc_lower")), float(_gcv(cfg, "gc_upper")),
-            int(_gcv(cfg, "gc_levels")), str(_gcv(cfg, "gc_spacing"))]
-
-
-def _gc_nearest(levels, px):
-    return min(range(len(levels)), key=lambda i: abs(levels[i] - px))
-
-
-def _gc_valid_entry(d, k, n):
-    return (0 <= k <= n - 1) if d > 0 else (1 <= k <= n)
-
-
-def _gc_desired(symbol, cfg, st, rng, levels, best_bid, best_ask):
-    d = 1 if rng["dir"] == "long" else -1
-    n = len(levels) - 1
-    tick = _tick_size(symbol)
-    dec = get_price_decimals(symbol)
-    precision = get_precision(symbol)
-    lots = st.get("gc_lots") or []
-    out = []
-
-    def rnd(p):
-        return round(round(p / tick) * tick, dec)
-
-    def qty(usd, px):
-        return int((usd / px) * precision) / precision
-
-    groups = {}
-    for lot in lots:
-        t = min(n, max(0, int(lot["k"]) + d))
-        groups.setdefault(t, 0.0)
-        groups[t] += float(lot["size"])
-    # Ausstiegs-Orders nur fuer die dem Kurs naechsten Ziel-Stufen (Boersen-Limit aktiver Orders je Markt). Die uebrigen
-    # Lots bleiben im Lot-Buch erhalten und bekommen ihre Order, sobald der Kurs naeher kommt. Nicht gesetzte/abgeraeumte
-    # Orders landen nicht in gc_prev und zaehlen deshalb nie als "gefuellt".
-    mid_px = (best_bid + best_ask) / 2.0
-    exit_items = sorted(groups.items(), key=lambda kv: abs(levels[kv[0]] - mid_px))
-    max_exit = int(_gcv(cfg, "gc_exit_orders") or 0)
-    if max_exit > 0:
-        exit_items = exit_items[:max_exit]
-    for t, size in sorted(exit_items):
-        px = max(levels[t], best_ask) if d > 0 else min(levels[t], best_bid)
-        out.append({"tag": f"x{t}", "is_ask": d > 0, "price": rnd(px), "size": size, "reduce_only": True, "idx": t, "exit": True})
-    n_exit_orders = len(exit_items)
-
-    held = {int(l["k"]) for l in lots}
-    free = max(0, int(_gcv(cfg, "gc_max_lots")) - len(lots))
-    each = min(int(_gcv(cfg, "gc_open_each_side")), free, max(0, int(_gcv(cfg, "gc_order_cap")) - n_exit_orders))
-    if st.get("gc_pause_entries"):
-        each = 0    # Trend steht gegen das laufende Gitter: nur noch Ausstiege, keine neuen Lots
-    cands = []
-    for k in range(n + 1):
-        if not _gc_valid_entry(d, k, n) or k in held:
-            continue
-        if d > 0 and levels[k] <= best_bid - tick:
-            cands.append(k)
-        elif d < 0 and levels[k] >= best_ask + tick:
-            cands.append(k)
-    cands.sort(key=lambda k: -levels[k] if d > 0 else levels[k])
-    usd = float(_gcv(cfg, "gc_size_usd"))
-    for k in cands[:each]:
-        out.append({"tag": f"e{k}", "is_ask": d < 0, "price": rnd(levels[k]), "size": qty(usd, levels[k]),
-                    "reduce_only": False, "idx": k, "exit": False})
-    return out
-
-
-def _gc_apply_fills(st, rng, levels, filled, prev):
-    """filled: Tags, die verschwunden sind (= gefuellt). prev: Orders des letzten Ticks (tag -> price/size0)."""
-    d = 1 if rng["dir"] == "long" else -1
-    lots = st.setdefault("gc_lots", [])
-    n = len(levels) - 1
-    for tag in sorted(filled):
-        info = prev.get(tag) or {}
-        idx = int(tag[1:])
-        if tag[0] == "e":
-            size = float(info.get("size0") or info.get("size") or 0)
-            if size <= 0 or any(int(l["k"]) == idx for l in lots):
-                continue
-            lots.append({"k": idx, "px": levels[idx], "size": size, "t": now_local().isoformat()})
-            _dash_entry(st, levels[idx], size, len(lots) > 1)
-            debug_log(f"🟢 Grid: Lot eröffnet @ {levels[idx]:.6g} (Level {idx}, {size}), Lots: {len(lots)}")
-        else:
-            hit = [l for l in lots if min(n, max(0, int(l["k"]) + d)) == idx]
-            if not hit:
-                continue
-            exit_px = float(info.get("price") or levels[idx])
-            for l in hit:
-                pnl = (exit_px - float(l["px"])) * float(l["size"]) * d
-                st["gc_realized"] = float(st.get("gc_realized") or 0.0) + pnl
-                st["gc_cycles"] = int(st.get("gc_cycles") or 0) + 1
-                _dash_trade(st, "long" if d > 0 else "short", float(l["px"]), exit_px, pnl, "GRID-STUFE")
-                lots.remove(l)
-                ent = st.get("current_position_entries") or []
-                for e in ent:
-                    if abs(float(e.get("price", 0)) - float(l["px"])) < 1e-9:
-                        ent.remove(e)
-                        break
-                debug_log(f"💰 Grid: Stufe geschlossen {l['px']:.6g} → {exit_px:.6g}: {pnl:+.3f} $")
-    st["entry_count"] = len(lots)
-    if lots:
-        st["last_entry_price"] = lots[-1]["px"]
-
-
-def _gc_rebuild_lots(st, rng, levels, pos_signed, mid, lot_size_coin):
-    """Notfall-Abgleich: Boersen-Position und Lot-Buch passen nicht zusammen (verpasste Fills, manueller Trade)."""
-    d = 1 if rng["dir"] == "long" else -1
-    n = len(levels) - 1
-    held = abs(pos_signed) if pos_signed * d > 0 else 0.0
-    cnt = int(round(held / lot_size_coin)) if lot_size_coin > 0 else 0
-    cand = [k for k in range(n + 1) if _gc_valid_entry(d, k, n) and ((levels[k] > mid) if d > 0 else (levels[k] < mid))]
-    cand.sort(key=lambda k: levels[k] if d > 0 else -levels[k])
-    lots = []
-    for k in cand[:cnt]:
-        lots.append({"k": k, "px": levels[k], "size": lot_size_coin, "t": now_local().isoformat()})
-    st["gc_lots"] = lots
-    st["entry_count"] = len(lots)
-    st["current_position_entries"] = [{"time": l["t"], "price": round(l["px"], 6), "size": round(l["size"], 8),
-                                       "stufe": i + 1, "is_add_on": i > 0} for i, l in enumerate(lots)]
-    return len(lots)
-
-
-def gc_reset_state(st, keep_stats=True):
-    for k in ("gc_lots", "gc_prev", "gc_sim", "gc_range", "gc_sig", "gc_stopped"):
-        st.pop(k, None)
-    st["gc_lots"] = []
-    st["entry_count"] = 0
-    st["current_position_entries"] = []
-    if not keep_stats:
-        st["gc_realized"] = 0.0
-        st["gc_cycles"] = 0
-
-
-async def _gc_cancel_own(client, market_index, cfg):
-    n = 0
-    if cfg["dry_run"]:
-        return 0
-    for o in await read_open_orders(client, market_index):
-        if _gc_decode(o["coi"], market_index):
-            try:
-                await cancel_order(client, market_index, o["coi"])
-                n += 1
-            except Exception as e:
-                debug_log(f"⚠️ Grid: Cancel fehlgeschlagen", {"error": str(e)})
-    return n
-
-
-async def grid_classic_tick(client, symbol):
-    from bot_core import save_bot_configs
-    cfg, st = BOTS[symbol]["config"], BOTS[symbol]["state"]
-    market_index = MARKET_INDICES[symbol]
-    best_bid, best_ask = await read_best_bid_ask(client, market_index)
-    if best_bid is None:
-        return
-    mid = (best_bid + best_ask) / 2.0
-    st["last_price"], st["last_bid"], st["last_ask"] = mid, best_bid, best_ask
-    st["session_started"] = bool(cfg.get("bot_active"))   # nach Deploy KEIN manueller Start noetig
-    dry = bool(cfg.get("dry_run"))
-
-    if not cfg.get("bot_active"):
-        # gestoppt: eigene Orders abraeumen, Lots/Buch bleiben erhalten (Position liegt ja weiter auf der Boerse)
-        if dry:
-            st["gc_sim"] = {}
-        elif st.get("gc_prev") or time.time() - float(st.get("gc_idle_clean") or 0) > 60:
-            st["gc_idle_clean"] = time.time()
-            await _gc_cancel_own(client, market_index, cfg)
-        st["gc_prev"] = {}
-        st["gc_view"] = None
-        return
-
-    # ---- Range / Gitter bestimmen ---------------------------------------
-    sig = _gc_sig(cfg)
-    rng = st.get("gc_range")
-    lots = st.setdefault("gc_lots", [])
-    cfg_dir = "short" if _gcv(cfg, "gc_direction") == "short" else "long"
-    # ---- Marktstruktur-Trend bestimmt die Richtung (optional) ---------------
-    trend_mode = str(_gcv(cfg, "gc_trend_mode"))
-    trend_flip = False
-    st["gc_pause_entries"] = False
-    if trend_mode in ("intern", "swing", "wave"):
-        try:
-            from strategies import gc_trend_now
-            tv = int(await gc_trend_now(symbol, cfg) or 0)
-        except Exception as e:
-            tv = int(st.get("gc_trend") or 0)
-            if time.time() - float(st.get("gc_trend_err_log") or 0) > 120:
-                st["gc_trend_err_log"] = time.time()
-                debug_log(f"⚠️ [{symbol}] Grid-Bot: Trend nicht abrufbar - behalte letzte Richtung", {"error": str(e)})
-        st["gc_trend"] = tv
-        if tv:
-            cfg_dir = "long" if tv > 0 else "short"
-        elif rng is not None:
-            cfg_dir = rng["dir"]      # Trend noch unbekannt: Richtung behalten
-        trend_flip = rng is not None and cfg_dir != rng["dir"]
-        if trend_flip and lots:
-            st["gc_pause_entries"] = True    # keine neuen Kaeufe gegen den neuen Trend, die offenen Lots laufen aus
-    if rng is None:
-        lo, hi = float(_gcv(cfg, "gc_lower")), float(_gcv(cfg, "gc_upper"))
-        if lo <= 0 or hi <= lo:
-            p = float(_gcv(cfg, "gc_auto_pct")) / 100.0
-            lo, hi = mid * (1 - p), mid * (1 + p)
-        rng = {"lower": lo, "upper": hi, "n": max(2, min(200, int(_gcv(cfg, "gc_levels")))),
-               "spacing": _gcv(cfg, "gc_spacing"), "dir": cfg_dir}
-        st["gc_range"], st["gc_sig"] = rng, sig
-        st["gc_stopped"] = None
-        debug_log(f"🧱 [{symbol}] Grid-Bot: Gitter {rng['dir']} {lo:.6g} … {hi:.6g}, {rng['n']} Stufen ({rng['spacing']})")
-    elif sig != st.get("gc_sig") or (cfg_dir != rng.get("dir") and not lots):
-        # 2. Bedingung: Richtung im Formular != Richtung des laufenden Gitters, aber keine Lots offen -> umstellen.
-        # (Frueher wurde gc_sig auch dann aktualisiert, wenn der Wechsel wegen offener Lots verweigert wurde - danach
-        # fiel der Unterschied nie mehr auf und der Bot blieb dauerhaft in der alten Richtung.)
-        lo, hi = float(_gcv(cfg, "gc_lower")), float(_gcv(cfg, "gc_upper"))
-        if lo <= 0 or hi <= lo:
-            lo, hi = rng["lower"], rng["upper"]       # Auto-Spanne bleibt, wie sie beim Start festgelegt wurde
-            if trend_flip and not lots:
-                # Trendwechsel ohne offene Lots + Auto-Spanne: Gitter um den aktuellen Kurs neu zentrieren
-                p = float(_gcv(cfg, "gc_auto_pct")) / 100.0
-                lo, hi = mid * (1 - p), mid * (1 + p)
-        new_dir = cfg_dir
-        if lots and new_dir != rng["dir"]:
-            if time.time() - float(st.get("gc_dir_warn") or 0) > 300:
-                st["gc_dir_warn"] = time.time()
-                debug_log(f"⚠️ [{symbol}] Grid-Bot: Richtung kann erst gewechselt werden, wenn keine Lots offen sind - bleibt {rng['dir']}")
-            new_dir = rng["dir"]
-        old_levels = _gc_levels(rng)
-        rng = {"lower": lo, "upper": hi, "n": max(2, min(200, int(_gcv(cfg, "gc_levels")))),
-               "spacing": _gcv(cfg, "gc_spacing"), "dir": new_dir}
-        new_levels = _gc_levels(rng)
-        for l in lots:
-            l["k"] = _gc_nearest(new_levels, float(l["px"]))
-            l["px"] = new_levels[l["k"]]
-        st["gc_range"], st["gc_sig"] = rng, sig
-        debug_log(f"🧱 [{symbol}] Grid-Bot: Gitter geändert → {lo:.6g} … {hi:.6g}, {rng['n']} Stufen ({len(lots)} Lots neu zugeordnet)")
-    if lots and trend_flip and time.time() - float(st.get("gc_dir_warn") or 0) > 300:
-        st["gc_dir_warn"] = time.time()
-        debug_log(f"🧭 [{symbol}] Grid-Bot: Trend ({_gcv(cfg, 'gc_trend_tf')}, {trend_mode}) steht jetzt auf {cfg_dir.upper()}, das Gitter läuft noch {rng['dir']} "
-                  f"({len(lots)} Lots offen) - keine neuen Käufe, Wechsel sobald die Lots geschlossen sind"
-                  + (" (Einstellung 'sofort schließen' greift gleich)" if str(_gcv(cfg, "gc_trend_on_flip")) == "close" else ""))
-    elif lots and cfg_dir != rng["dir"] and time.time() - float(st.get("gc_dir_warn") or 0) > 300:
-        st["gc_dir_warn"] = time.time()
-        debug_log(f"⚠️ [{symbol}] Grid-Bot: Formular steht auf {cfg_dir}, das Gitter läuft aber noch {rng['dir']} ({len(lots)} Lots offen). "
-                  f"Zum Wechsel: Stop, Position schließen, 'Gitter & Lots zurücksetzen', dann neu starten.")
-    levels = _gc_levels(rng)
-    n = len(levels) - 1
-    d = 1 if rng["dir"] == "long" else -1
-
-    # ---- Position von der Boerse ------------------------------------------
-    pos_signed, pos_known = 0.0, True
-    if dry:
-        pos_signed = d * sum(float(l["size"]) for l in lots)
-    else:
-        pos = await get_account_position_from_exchange(client, market_index, retries=2, delay=0.4)
-        if pos is None:
-            pos_known = False
-        else:
-            try:
-                size = abs(float(pos.position))
-                sign = int(getattr(pos, "sign", 1) or 1) or 1
-                pos_signed = size * sign
-                avg = float(pos.avg_entry_price) if size else None
-                st["position"] = ("long" if sign > 0 else "short") if size else None
-                st["avg_entry_price"] = avg
-                st["total_coin_size"] = size
-            except (TypeError, ValueError, AttributeError):
-                pos_known = False
-
-    # ---- Notbremse ---------------------------------------------------------
-    stop_pct = float(_gcv(cfg, "gc_stop_pct"))
-    if stop_pct > 0 and pos_known:
-        breached = (mid < rng["lower"] * (1 - stop_pct / 100)) if d > 0 else (mid > rng["upper"] * (1 + stop_pct / 100))
-        if breached:
-            debug_log(f"🛑 [{symbol}] Grid-Bot NOTBREMSE: Kurs {mid:.6g} {stop_pct}% ausserhalb der Spanne - alles schließen, Bot stoppt")
-            if not dry and pos_signed != 0:
-                await _flatten_market(client, symbol, market_index, pos_signed, "grid-notbremse", cooldown_s=0)
-            elif not dry:
-                await _gc_cancel_own(client, market_index, cfg)
-            gc_reset_state(st)
-            st["gc_stopped"] = f"Notbremse bei {mid:.6g}"
-            cfg["bot_active"] = False
-            st["session_started"] = False
-            await save_bot_configs()
-            await save_bot_state()
-            return
-
-    # ---- Trendwechsel mit offenen Lots: Einstellung "sofort schliessen" --------
-    if trend_flip and lots and str(_gcv(cfg, "gc_trend_on_flip")) == "close" and pos_known:
-        tot = sum(float(l["size"]) for l in lots)
-        avg_px = sum(float(l["px"]) * float(l["size"]) for l in lots) / tot if tot else mid
-        flat_pnl = sum((mid - float(l["px"])) * float(l["size"]) * d for l in lots)
-        debug_log(f"🧭 [{symbol}] Grid-Bot TRENDWECHSEL ({rng['dir']} → {cfg_dir}): {len(lots)} Lots werden sofort geschlossen ({flat_pnl:+.3f} $), Gitter dreht")
-        if not dry and pos_signed != 0:
-            await _flatten_market(client, symbol, market_index, pos_signed, "grid-trend", cooldown_s=0)
-        elif not dry:
-            await _gc_cancel_own(client, market_index, cfg)
-        st["gc_realized"] = float(st.get("gc_realized") or 0.0) + flat_pnl
-        _dash_trade(st, rng["dir"], avg_px, mid, flat_pnl, "GRID-TREND")
-        gc_reset_state(st)
-        st["position"] = None
-        st["avg_entry_price"] = None
-        st["total_coin_size"] = 0.0
-        await save_bot_state()
-        return
-
-    # ---- Aktuelle Orders (Boerse bzw. Simulation) -------------------------
-    prev = st.get("gc_prev") or {}
-    live = {}   # tag -> {price,size,is_ask,coi}
-    if dry:
-        sim = st.setdefault("gc_sim", {})
-        for tag, o in list(sim.items()):
-            hit = (best_ask <= o["price"]) if not o["is_ask"] else (best_bid >= o["price"])
-            if hit:
-                sim.pop(tag)       # gefuellt -> verschwindet wie an der Boerse
-        live = {t: dict(o) for t, o in sim.items()}
-    else:
-        for o in await read_open_orders(client, market_index):
-            tag = _gc_decode(o["coi"], market_index)
-            if tag:
-                live[tag] = o
-
-    filled = {t for t in prev if t not in live}
-    # Orders, die der Bot selbst nur umgesetzt hat, stehen nicht in prev-Verschwunden: prev wird unten immer mit dem
-    # tatsaechlichen Stand nach dem Abgleich ueberschrieben.
-    if filled and pos_known:
-        before = len(lots)
-        _gc_apply_fills(st, rng, levels, filled, prev)
-
-    # Positions-Abgleich (nur live): Boerse ist die Wahrheit
-    if not dry and pos_known:
-        lot_coin = (float(_gcv(cfg, "gc_size_usd")) / mid)
-        have = d * sum(float(l["size"]) for l in lots)
-        if abs(pos_signed - have) > 0.5 * lot_coin:
-            if time.time() - float(st.get("gc_resync_log") or 0) > 30:
-                st["gc_resync_log"] = time.time()
-                debug_log(f"⚠️ [{symbol}] Grid-Bot: Lot-Buch ({have:.6g}) ≠ Börsen-Position ({pos_signed:.6g}) - Lots werden neu abgeleitet")
-            _gc_rebuild_lots(st, rng, levels, pos_signed, mid, lot_coin)
-    if dry:
-        tot = sum(float(l["size"]) for l in lots)
-        st["position"] = ("long" if d > 0 else "short") if tot else None
-        st["total_coin_size"] = tot
-        st["avg_entry_price"] = (sum(float(l["px"]) * float(l["size"]) for l in lots) / tot) if tot else None
-
-    # ---- SOLL aufbauen und angleichen -------------------------------------
-    desired = _gc_desired(symbol, cfg, st, rng, levels, best_bid, best_ask)
-    desired_tags = {x["tag"] for x in desired}
-    tick = _tick_size(symbol)
-    precision = get_precision(symbol)
-    min_base = get_min_base_amount(symbol)
-    new_prev = {}
-    actions = 0
-
-    if dry:
-        sim = st.setdefault("gc_sim", {})
-        for tag in list(sim):
-            if tag not in desired_tags:
-                sim.pop(tag)
-        for x in desired:
-            ex = sim.get(x["tag"])
-            if ex is None or abs(ex["price"] - x["price"]) > tick or abs(ex["size"] - x["size"]) > 1e-12:
-                sim[x["tag"]] = {"price": x["price"], "size": x["size"], "size0": x["size"], "is_ask": x["is_ask"]}
-        new_prev = {t: dict(o) for t, o in sim.items()}
-    else:
-        for tag, o in live.items():
-            if tag not in desired_tags:
-                try:
-                    await cancel_order(client, market_index, o["coi"])
-                except Exception as e:
-                    debug_log(f"⚠️ [{symbol}] Grid: Cancel {tag} fehlgeschlagen", {"error": str(e)})
-        for x in desired:
-            ex = live.get(x["tag"])
-            if ex is not None and abs(ex["price"] - x["price"]) <= tick and abs(ex["size"] - x["size"]) <= max(1e-12, x["size"] * 0.02):
-                new_prev[x["tag"]] = {"price": ex["price"], "size": ex["size"], "size0": (prev.get(x["tag"]) or {}).get("size0") or ex["size"], "is_ask": x["is_ask"]}
-                continue
-            if ex is not None:
-                if x["exit"] is False and ex["size"] < x["size"] * 0.98 and abs(ex["price"] - x["price"]) <= tick:
-                    # teilgefuellter Einstieg: weiterlaufen lassen, nicht neu setzen
-                    new_prev[x["tag"]] = {"price": ex["price"], "size": ex["size"], "size0": (prev.get(x["tag"]) or {}).get("size0") or x["size"], "is_ask": x["is_ask"]}
-                    continue
-                try:
-                    await cancel_order(client, market_index, ex["coi"])
-                except Exception as e:
-                    debug_log(f"⚠️ [{symbol}] Grid: Cancel {x['tag']} fehlgeschlagen", {"error": str(e)})
-            if x["size"] * precision < max(1, min_base * precision) or actions >= 8:
-                continue
-            base_amount = int(x["size"] * precision)
-            coi = _gc_coi(market_index, x["idx"], x["exit"])
-            tx, tx_hash, err = await place_post_only_order(client, market_index, symbol, x["is_ask"], base_amount,
-                                                           x["price"], coi, reduce_only=x["reduce_only"])
-            actions += 1
-            if err:
-                st["gs_last_error"] = str(err)
-                if time.time() - float(st.get("gs_last_error_log") or 0) >= 60:
-                    st["gs_last_error_log"] = time.time()
-                    debug_log(f"⚠️ [{symbol}] Grid-Bot: Order abgelehnt ({x['tag']})", {"error": str(err), "preis": x["price"], "groesse": x["size"]})
-                continue
-            new_prev[x["tag"]] = {"price": x["price"], "size": x["size"], "size0": x["size"], "is_ask": x["is_ask"]}
-    changed = (set(new_prev) != set(prev)) or bool(filled)
-    st["gc_prev"] = new_prev
-
-    # ---- Anzeige ------------------------------------------------------------
-    upnl = 0.0
-    for l in lots:
-        upnl += (mid - float(l["px"])) * float(l["size"]) * d
-    st["gc_view"] = {
-        "dir": rng["dir"], "lower": rng["lower"], "upper": rng["upper"], "n": n, "levels": [round(x, 8) for x in levels],
-        "lots": [{"k": l["k"], "px": l["px"], "size": l["size"]} for l in lots],
-        "orders": [{"tag": t, "price": o["price"], "is_ask": o["is_ask"], "size": o["size"]} for t, o in new_prev.items()],
-        "realized": round(float(st.get("gc_realized") or 0.0), 4), "cycles": int(st.get("gc_cycles") or 0),
-        "upnl": round(upnl, 4), "max_lots": int(_gcv(cfg, "gc_max_lots")),
-        "step_profit": round(float(_gcv(cfg, "gc_size_usd")) * ((rng["upper"] - rng["lower"]) / n) / max(mid, 1e-9), 4),
-        "stopped": st.get("gc_stopped"),
-        "trend": int(st.get("gc_trend") or 0) if trend_mode in ("intern", "swing", "wave") else None,
-        "trend_mode": trend_mode, "trend_tf": str(_gcv(cfg, "gc_trend_tf")),
-        "pause": bool(st.get("gc_pause_entries")), "want_dir": cfg_dir,
-    }
-    if changed:
-        now = time.time()
-        if now - float(st.get("gc_last_save") or 0) > 1.0:
-            st["gc_last_save"] = now
-            await save_bot_state()
-    now = time.time()
-    if now - float(st.get("gs_last_heartbeat") or 0) >= 60:
-        st["gs_last_heartbeat"] = now
-        debug_log(f"💓 [{symbol}] Grid-Bot {rng['dir']} {'(Dry-Run) ' if dry else ''}Kurs {mid:.6g}, Lots {len(lots)}/{int(_gcv(cfg, 'gc_max_lots'))}, "
-                  f"Orders {len(new_prev)}, Gewinn {float(st.get('gc_realized') or 0):+.3f} $ in {int(st.get('gc_cycles') or 0)} Stufen, offen {upnl:+.3f} $")
-
-
-# ----------------------------------------------------------------------------
-# Backtest (Kerzen: Hoch/Tief je Kerze, Pfad O -> L -> H -> C bzw. O -> H -> L -> C)
-# ----------------------------------------------------------------------------
-def gc_backtest(candles, cfg, trend=None):
-    """candles: (ts, o, h, l, c, v). Gibt Kennzahlen + Stufen-Liste zurueck.
-    trend (optional): je Kerze 1 / -1 / 0 (Marktstruktur-Trend) - dann wechselt das Gitter wie live die Richtung:
-    ohne offene Lots sofort (Auto-Spanne wird um den Kurs neu zentriert), mit offenen Lots je nach gc_trend_on_flip
-    'wait' (keine neuen Kaeufe, Lots auslaufen lassen, dann wechseln) oder 'close' (sofort zum Kurs schliessen)."""
-    ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
-    n_c = len(c)
-    d = 1 if _gcv(cfg, "gc_direction") != "short" else -1
-    if trend is not None:
-        first = next((x for x in trend if x), 0)
-        if first:
-            d = 1 if first > 0 else -1
-    man_lo, man_hi = float(_gcv(cfg, "gc_lower")), float(_gcv(cfg, "gc_upper"))
-    auto = man_lo <= 0 or man_hi <= man_lo
-    p_auto = float(_gcv(cfg, "gc_auto_pct")) / 100.0
-    lo, hi = (o[0] * (1 - p_auto), o[0] * (1 + p_auto)) if auto else (man_lo, man_hi)
-    n = max(2, min(200, int(_gcv(cfg, "gc_levels"))))
-    spacing = _gcv(cfg, "gc_spacing")
-    levels = _gc_levels({"lower": lo, "upper": hi, "n": n, "spacing": spacing})
-    usd = float(_gcv(cfg, "gc_size_usd"))
-    cap = int(_gcv(cfg, "gc_max_lots"))
-    stop_pct = float(_gcv(cfg, "gc_stop_pct"))
-    on_flip = str(_gcv(cfg, "gc_trend_on_flip"))
-    lots = {}          # k -> (px, size)
-    realized, cycles, max_lots, worst_float, stopped_at = 0.0, 0, 0, 0.0, None
-    flips, pause = 0, False
-    steps = []
-    flip_log = []      # je Richtungswechsel: Ergebnis der gerade beendeten Phase
-    phase = {"start": ts[0], "base": 0.0, "cycles0": 0}
-
-    def mtm(price):
-        return sum((price - px) * sz * d for px, sz in lots.values())
-
-    def switch(want, price, i, close_loss=0.0, how="auslaufen"):
-        nonlocal d, lo, hi, levels, flips, pause
-        flip_log.append({"ts": ts[i], "from": "long" if d > 0 else "short", "to": "long" if want > 0 else "short",
-                         "price": price, "how": how, "close_loss": round(close_loss, 2),
-                         "phase_pnl": round(realized - phase["base"], 2), "phase_cycles": cycles - phase["cycles0"],
-                         "phase_start": phase["start"]})
-        phase.update({"start": ts[i], "base": realized, "cycles0": cycles})
-        d = want
-        flips += 1
-        pause = False
-        if auto:
-            lo, hi = price * (1 - p_auto), price * (1 + p_auto)
-            levels = _gc_levels({"lower": lo, "upper": hi, "n": n, "spacing": spacing})
-
-    def move(a, b, i):
-        nonlocal realized, cycles, max_lots
-        if d > 0:
-            if b < a:      # fallend: Kaeufe auf Levels dazwischen (absteigend)
-                for k in range(n - 1, -1, -1):
-                    if b <= levels[k] < a and k not in lots and len(lots) < cap and not pause:
-                        lots[k] = (levels[k], usd / levels[k])
-            elif b > a:    # steigend: Verkaeufe
-                for k in sorted(lots):
-                    if a < levels[k + 1] <= b:
-                        px, sz = lots.pop(k)
-                        pnl = (levels[k + 1] - px) * sz
-                        realized += pnl; cycles += 1; steps.append({"ts": ts[i], "px": px, "exit": levels[k + 1], "pnl": pnl})
-        else:
-            if b > a:
-                for k in range(1, n + 1):
-                    if a < levels[k] <= b and k not in lots and len(lots) < cap and not pause:
-                        lots[k] = (levels[k], usd / levels[k])
-            elif b < a:
-                for k in sorted(lots, reverse=True):
-                    if b <= levels[k - 1] < a:
-                        px, sz = lots.pop(k)
-                        pnl = (px - levels[k - 1]) * sz
-                        realized += pnl; cycles += 1; steps.append({"ts": ts[i], "px": px, "exit": levels[k - 1], "pnl": pnl})
-        max_lots = max(max_lots, len(lots))
-
-    for i in range(n_c):
-        want = 0
-        if trend is not None and trend[i]:
-            want = 1 if trend[i] > 0 else -1
-            if want != d:
-                if not lots:
-                    switch(want, o[i], i)
-                elif on_flip == "close":
-                    loss = mtm(o[i])
-                    realized += loss
-                    steps.append({"ts": ts[i], "px": o[i], "exit": o[i], "pnl": loss, "reason": "GRID-TREND"})
-                    lots.clear()
-                    switch(want, o[i], i, loss, "sofort geschlossen")
-                else:
-                    pause = True
-            else:
-                pause = False
-        path = (o[i], l[i], h[i], c[i]) if c[i] >= o[i] else (o[i], h[i], l[i], c[i])
-        for a, b in zip(path, path[1:]):
-            move(a, b, i)
-            if lots:
-                worst_float = min(worst_float, mtm(b))
-            if pause and not lots and want and want != d:
-                switch(want, b, i)
-        if stop_pct > 0 and ((d > 0 and l[i] < lo * (1 - stop_pct / 100)) or (d < 0 and h[i] > hi * (1 + stop_pct / 100))):
-            loss = mtm(lo * (1 - stop_pct / 100) if d > 0 else hi * (1 + stop_pct / 100))
-            realized += loss; stopped_at = ts[i]; lots.clear()
-            break
-    final_float = mtm(c[-1]) if lots else 0.0
-    days = max((ts[-1] - ts[0]) / 86400000.0, 1e-9)
-    return {"levels": levels, "lower": lo, "upper": hi, "n": n, "direction": "long" if d > 0 else "short",
-            "cycles": cycles, "realized": round(realized, 2), "open_lots": len(lots), "open_float": round(final_float, 2),
-            "total": round(realized + final_float, 2), "max_lots": max_lots, "worst_float": round(worst_float, 2),
-            "per_day": round(realized / days, 2), "stopped_at": stopped_at, "days": round(days, 1),
-            "step_profit": round(usd * ((hi - lo) / n) / max(o[0], 1e-9), 3), "margin_peak_notional": round(max_lots * usd, 0),
-            "candles": n_c, "steps": steps[-300:], "flips": flips, "flip_log": flip_log[-60:],
-            "last_phase_pnl": round(realized - phase["base"], 2),
-            "trend_mode": str(_gcv(cfg, "gc_trend_mode")) if trend is not None else "off", "trend_tf": str(_gcv(cfg, "gc_trend_tf"))}
-
-
-async def _gc_trend_for_backtest(symbol, cfg, cand, days):
-    """Marktstruktur-Trend der gewaehlten Zeitebene, passend auf die 1m-Backtest-Kerzen (nur geschlossene Trend-Kerzen,
-    kein Blick in die Zukunft). -> (liste|None, fehlertext|None)"""
-    from strategies import (_gc_trend_cfg, ms_trend_series, _trend_align, _tf_ms, _fetch_cached_mo7_backtest_candles)
-    mode, tf, ilen, slen = _gc_trend_cfg(cfg)
-    L = ilen if mode == "intern" else slen
-    htf_ms = _tf_ms(tf)
-    if mode == "wave":
-        from strategies import wave_dir_series
-        n1 = int(cfg.get("wa_n1", 10)); n2 = int(cfg.get("wa_n2", 21)); sl_ = int(cfg.get("wa_sig_len", 4))
-        warm = (n1 + n2 + sl_ + 60) * htf_ms / 86_400_000
-        data, err = await _fetch_cached_mo7_backtest_candles(symbol, tf, days + warm + 1, 100_000, market_type=cfg.get("binance_market_type", "spot"))
-        if err or not data or len(data[4]) < n1 + n2 + sl_ + 30:
-            return None, err or "Zu wenig Kerzen der Trend-Zeitebene für den Backtest."
-        hts, ho, hh, hl, hc, _v = data
-        ser = await asyncio.to_thread(wave_dir_series, ho, hh, hl, hc, cfg)
-        return _trend_align(cand[0], 60_000, hts, htf_ms, ser), None
-    warm_days = (2 * L + 30) * htf_ms / 86_400_000
-    data, err = await _fetch_cached_mo7_backtest_candles(symbol, tf, days + warm_days + 1, 100_000, market_type=cfg.get("binance_market_type", "spot"))
-    if err or not data or len(data[4]) < 2 * L + 5:
-        return None, err or "Zu wenig Kerzen der Trend-Zeitebene für den Backtest."
-    hts, _o, hh, hl, hc, _v = data
-    itr, swt, _ev = await asyncio.to_thread(ms_trend_series, hh, hl, hc, ilen, slen)
-    return _trend_align(cand[0], 60_000, hts, htf_ms, itr if mode == "intern" else swt), None
-
-
-async def handle_gc_backtest(request):
-    from aiohttp import web
-    from strategies import _fetch_cached_mo7_backtest_candles
-    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
-    if symbol not in BOTS:
-        return web.json_response({"error": "unknown symbol"}, status=404)
-    body = await request.json()
-    cfg = dict(BOTS[symbol]["config"])
-    ov = body.get("config")
-    if isinstance(ov, dict):
-        cfg.update({k: v for k, v in ov.items() if k.startswith("gc_")})
-    try:
-        days = max(1.0 / 24, min(90.0, float(body.get("days", 14))))
-    except (TypeError, ValueError):
-        days = 14.0
-    try:
-        cand, err = await asyncio.wait_for(_fetch_cached_mo7_backtest_candles(symbol, "1m", days, 100_000, market_type=cfg.get("binance_market_type", "spot")), timeout=90)
-        if err:
-            return web.json_response({"error": err}, status=400)
-        trend = None
-        if str(_gcv(cfg, "gc_trend_mode")) in ("intern", "swing", "wave"):
-            trend, terr = await _gc_trend_for_backtest(symbol, cfg, cand, days)
-            if trend is None:
-                return web.json_response({"error": terr}, status=400)
-        res = await asyncio.to_thread(gc_backtest, cand, cfg, trend)
-    except asyncio.TimeoutError:
-        return web.json_response({"error": "Backtest nach 90 s abgebrochen - kürzeren Zeitraum wählen"}, status=504)
-    except Exception as e:
-        return web.json_response({"error": f"Backtest fehlgeschlagen: {e}"}, status=500)
-    return web.json_response(res)
-
-
-async def handle_gc_reset(request):
-    from aiohttp import web
-    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
-    if symbol not in BOTS:
-        return web.json_response({"error": "unknown symbol"}, status=404)
-    st = BOTS[symbol]["state"]
-    cfg = BOTS[symbol]["config"]
-    body = {}
-    try:
-        body = await request.json()
-    except Exception:
-        pass
-    if cfg.get("bot_active") and not body.get("force"):
-        return web.json_response({"error": "Bot erst stoppen (Orders werden dabei abgeräumt), dann Gitter zurücksetzen."}, status=409)
-    gc_reset_state(st, keep_stats=not body.get("stats"))
-    await save_bot_state()
-    return web.json_response({"success": True})
+        await asyncio.sleep(float(BOTS[symbol]["config"].get("gs_poll_seconds", 2.0)))
 
 
 # ============================================================================
@@ -1745,7 +627,7 @@ async def handle_gc_reset(request):
 async def probe_grid_scalp(symbol):
     """Prueft die Feldnamen der API-Antworten und misst den echten Spread.
     Ueber die Konsole aufrufen oder einmalig in main() einhaengen."""
-    client = get_lighter_client("grid")
+    client = get_lighter_client()
     market_index = MARKET_INDICES[symbol]
     print(f"=== {symbol} (market_index={market_index}) ===")
     pos = await get_account_position_from_exchange(client, market_index, retries=1, delay=0)
@@ -1767,4 +649,4 @@ async def probe_grid_scalp(symbol):
         tp = BOTS[symbol]["config"].get("gs_tp_usd", 1.0)
         print(f"Spread Median: {round(med*100, 4)} % | Round-Trip als Taker: {round(med*200, 4)} %")
         print(f"-> empfohlenes gs_step_notional_usd: {round(tp / (5 * med * 2))} $")
-    await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    await client.close()
