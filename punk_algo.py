@@ -21,6 +21,7 @@ ist ueberangepasst.
 """
 
 import asyncio
+from array import array
 import random
 import time
 import traceback
@@ -409,6 +410,8 @@ def pa_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
 PA_MC_MAX_RUNS = 1000
 PA_MC_MIN_RELIABLE_TRADES = 5
 PA_MC_TEST_FRACTION = 0.3   # letzte 30 % des Zeitraums = Test (Out-of-Sample)
+PA_MC_MAX_CANDLES = 40_000  # Speicherschutz (Render hat 512 MB fuer den ganzen Bot): es zaehlen nur die juengsten Kerzen
+PA_MC_BASE_CACHE = 6        # so viele EMA-Reihen (je Periode) bleiben gleichzeitig im Speicher
 
 
 def _pa_mc_compute(candles, cfg, combos, base_p, exclude_top_n, deadline):
@@ -416,11 +419,13 @@ def _pa_mc_compute(candles, cfg, combos, base_p, exclude_top_n, deadline):
     n = len(c)
     xl, xs = pa_wt_exits(o, h, l, c, base_p["level"])
     split_ts = ts[int(n * (1 - PA_MC_TEST_FRACTION))]
-    base_cache = {}
+    base_cache = {}   # Periode -> array('d'); klein halten: eine Python-Liste kostet ~32 Byte/Kerze, ein array nur 8, und der Cache ist begrenzt
 
     def base_for(t):
         if t not in base_cache:
-            base_cache[t] = pa_smoothrng_base(c, t)
+            if len(base_cache) >= PA_MC_BASE_CACHE:
+                base_cache.pop(next(iter(base_cache)))
+            base_cache[t] = array("d", pa_smoothrng_base(c, t))
         return base_cache[t]
 
     def run_one(p1, m1, p2, m2, wt_exit):
@@ -457,6 +462,11 @@ async def run_pa_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, se
     n = len(candles[4]) if candles else 0
     if n < 400:
         return {"error": "Zu wenig historische Kerzen für einen aussagekräftigen Monte-Carlo-Test erhalten (mind. ~400 nötig)."}
+    note = None
+    if n > PA_MC_MAX_CANDLES:
+        candles = tuple(x[-PA_MC_MAX_CANDLES:] for x in candles)   # nur die juengsten Kerzen (Speicherschutz)
+        note = f"Hinweis: aus Speichergründen wurden nur die jüngsten {PA_MC_MAX_CANDLES} von {n} Kerzen getestet."
+        n = PA_MC_MAX_CANDLES
     runs = max(1, min(PA_MC_MAX_RUNS, int(runs)))
     try:
         p1r = sorted((int(ranges["p1"][0]), int(ranges["p1"][1]))); p2r = sorted((int(ranges["p2"][0]), int(ranges["p2"][1])))
@@ -475,6 +485,7 @@ async def run_pa_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, se
             seen.add(k)
             combos.append(k)
     base_p = _pa_params(cfg)
+    combos.sort(key=lambda k: (k[0], k[2]))   # gleiche Perioden hintereinander -> der kleine Cache trifft oefter
     deadline = time.time() + 240
     results, base_wt, base_nowt = await asyncio.to_thread(_pa_mc_compute, candles, cfg, combos, base_p, exclude_top_n, deadline)
     reliable = [r for r in results if r["trades"] >= PA_MC_MIN_RELIABLE_TRADES]
@@ -488,7 +499,7 @@ async def run_pa_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, se
         "symbol": symbol, "resolution": resolution, "requested_days": days, "actual_days_covered": round((ts[-1] - ts[0]) / 86_400_000, 1),
         "candles_processed": n, "min_reliable_trades": PA_MC_MIN_RELIABLE_TRADES,
         "combos_tested": len(results), "combos_requested": runs, "test_fraction_pct": int(PA_MC_TEST_FRACTION * 100),
-        "wt_exit": base_p["wt_exit"],
+        "wt_exit": base_p["wt_exit"], "note": note,
         "baseline_wt_on": base_wt, "baseline_wt_off": base_nowt,
         "profitable_pct": round(sum(1 for x in pnls if x > 0) / len(pnls) * 100, 1) if pnls else 0,
         "median_pnl_usd": round(pnls[len(pnls) // 2], 2) if pnls else 0,

@@ -4596,7 +4596,7 @@ document.getElementById('btn-pa-mc').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - ${data.profitable_pct}% der Kombinationen (mit mind. ${data.min_reliable_trades} Trades) im Plus, Median ${data.median_pnl_usd} $. Test = letzte ${data.test_fraction_pct}% des Zeitraums. Robust (Training UND Test im Plus): ${data.robust_count}.`;
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, ${data.resolution}) - ${data.profitable_pct}% der Kombinationen (mit mind. ${data.min_reliable_trades} Trades) im Plus, Median ${data.median_pnl_usd} $. Test = letzte ${data.test_fraction_pct}% des Zeitraums. ${data.note ? data.note + ' ' : ''} Robust (Training UND Test im Plus): ${data.robust_count}.`;
       const b1 = data.baseline_wt_on, b0 = data.baseline_wt_off;
       baseEl.innerText = `Referenz Pine-Standard 27 / 9,1 / 55 / 1,3 → mit WaveTrend-X: ${b1.trades} Trades, PnL ${b1.total_pnl_usd} $ (Training ${b1.pnl_train} / Test ${b1.pnl_test}) | ohne WaveTrend-X: ${b0.trades} Trades, PnL ${b0.total_pnl_usd} $ (Training ${b0.pnl_train} / Test ${b0.pnl_test})`;
       window.paMcData = {robust: data.robust_results || [], top: data.results || [], worst: data.worst_results || []};
