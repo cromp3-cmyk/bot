@@ -449,7 +449,7 @@ def _pa_mc_compute(candles, cfg, combos, base_p, exclude_top_n, deadline):
     return out, run_one(*PA_DEFAULT, True), run_one(*PA_DEFAULT, False)
 
 
-async def run_pa_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, seed=None):
+async def run_pa_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, seed=None, max_dd_usd=0.0):
     """ranges: {'p1':(a,b), 'm1':(a,b), 'p2':(a,b), 'm2':(a,b)}. Die Pine-Standardwerte (27 / 9,1 / 55 / 1,3) laufen IMMER als Referenz
     mit (einmal mit, einmal ohne WaveTrend-X). Alles andere (Zeitrahmen, WT-X an/aus, Richtung, SL/TP, Margin, Hebel) kommt aus der Config."""
     max_candles = BACKTEST_MAX_CANDLES.get("punk_algo", 100_000)
@@ -493,6 +493,14 @@ async def run_pa_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, se
     best = sorted(results, key=lambda r: (r["trades"] >= PA_MC_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
     robust_sorted = sorted(robust, key=lambda r: r["pnl_test"], reverse=True)
     worst = sorted(results, key=lambda r: r["total_pnl_usd"])
+    # Risiko-Sicht: nur Kombinationen mit Gewinn, optional mit Obergrenze fuer den Max-Drawdown, sortiert nach PnL / Drawdown
+    lowdd = []
+    for r in reliable:
+        dd = abs(r["max_drawdown_usd"] or 0)
+        if r["total_pnl_usd"] <= 0 or (max_dd_usd > 0 and dd > max_dd_usd):
+            continue
+        lowdd.append(dict(r, pnl_dd_ratio=round(r["total_pnl_usd"] / dd, 2) if dd > 0 else 999.0))
+    lowdd.sort(key=lambda r: (r["pnl_dd_ratio"], r["pnl_test"]), reverse=True)
     pnls = sorted(r["total_pnl_usd"] for r in reliable)
     ts = candles[0]
     return {
@@ -504,6 +512,7 @@ async def run_pa_montecarlo(symbol, cfg, days, runs, ranges, exclude_top_n=1, se
         "profitable_pct": round(sum(1 for x in pnls if x > 0) / len(pnls) * 100, 1) if pnls else 0,
         "median_pnl_usd": round(pnls[len(pnls) // 2], 2) if pnls else 0,
         "best_pnl_usd": pnls[-1] if pnls else 0, "worst_pnl_usd": pnls[0] if pnls else 0,
-        "robust_count": len(robust),
+        "robust_count": len(robust), "lowdd_count": len(lowdd), "max_dd_limit": max_dd_usd,
+        "lowdd_results": lowdd[:30],
         "results": best[:30], "robust_results": robust_sorted[:30], "worst_results": worst[:20],
     }

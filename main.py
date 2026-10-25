@@ -23,6 +23,7 @@ from strategies import (
 from pure_momentum import pm_poll_loop
 from dollar701 import dv_poll_loop
 from punk_algo import pa_poll_loop
+from wae_ema import we_poll_loop
 from trendfolge import tfl_poll_loop
 from rlm import rlm_poll_loop
 from copytrade import (
@@ -158,6 +159,7 @@ async def main():
         *[pm_poll_loop(s) for s in SYMBOLS],
         *[dv_poll_loop(s) for s in SYMBOLS],
         *[pa_poll_loop(s) for s in SYMBOLS],
+        *[we_poll_loop(s) for s in SYMBOLS],
         *[tfl_poll_loop(s) for s in SYMBOLS],
         *[rlm_poll_loop(s) for s in SYMBOLS],
         *[rsi_poll_loop(s) for s in SYMBOLS],
