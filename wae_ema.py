@@ -506,3 +506,145 @@ async def we_chart_payload(symbol, cfg, ts, o, h, l, c, tf, max_bars=1000):
     off = max(0, n - max_bars)
     candles = [{"time": ts[i] // 1000, "open": o[i], "high": h[i], "low": l[i], "close": c[i]} for i in range(off, n)]
     return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "entry_mode": "we", "wt1v": 0, "wt2v": 0, "bars": n}
+
+
+# ============================================================================
+# MONTE-CARLO: zufaellige Kombinationen der AUSGEWAEHLTEN WAE-/EMA-Werte, Rest bleibt wie in den Einstellungen
+# ============================================================================
+import random
+
+WE_MC_PARAMS = {   # kurzer Schluessel -> (Config-Schluessel, Typ, Nachkommastellen)
+    "ema_len": ("we_ema_len", int, 0), "sens": ("we_sensitivity", int, 0),
+    "fast": ("we_fast_len", int, 0), "slow": ("we_slow_len", int, 0), "chan": ("we_channel_len", int, 0),
+    "bbm": ("we_bb_mult", float, 1), "dlen": ("we_dead_len", int, 0), "dmult": ("we_dead_mult", float, 1),
+}
+WE_MC_MAX_RUNS = 1000
+WE_MC_MIN_RELIABLE_TRADES = 5
+WE_MC_TEST_FRACTION = 0.3
+WE_MC_MAX_CANDLES = 40_000
+WE_MC_TIME_BUDGET = 70       # Sekunden; der Aufruf im Dashboard bricht nach 90 s ab - lieber weniger Kombinationen als gar kein Ergebnis
+
+
+def _we_mc_compute(candles, cfg, combos, base_p, htf, zone_ms, start_i, exclude_top_n, deadline):
+    ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
+    n = len(c)
+    split_ts = ts[start_i + int((n - start_i) * (1 - WE_MC_TEST_FRACTION))]
+
+    def run_one(over):
+        p = dict(base_p, **over)
+        zone, ema, call, put = we_compute(ts, c, h, l, htf, p, zone_ms)
+        trades = _we_simulate(candles, cfg, zone, ema, call, put, start_i, p)
+        st = summarize_backtest_trades(trades, exclude_top_n)
+        tr = summarize_backtest_trades([t for t in trades if t.get("entry_ts", 0) < split_ts], exclude_top_n)
+        te = summarize_backtest_trades([t for t in trades if t.get("entry_ts", 0) >= split_ts], exclude_top_n)
+        row = {WE_MC_PARAMS[k][0]: p[k] for k in WE_MC_PARAMS}
+        row.update({"trades": st["trades"], "win_rate_pct": st["win_rate_pct"], "total_pnl_usd": st["total_pnl_usd"],
+                    "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"], "max_drawdown_usd": st["max_drawdown_usd"],
+                    "pnl_train": tr["total_pnl_usd"], "pnl_test": te["total_pnl_usd"], "trades_test": te["trades"]})
+        return row
+
+    out = []
+    for over in combos:
+        if time.time() > deadline:
+            break
+        out.append(run_one(over))
+    return out, run_one({})
+
+
+async def run_we_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed=None, max_dd_usd=0.0):
+    """vary: {'sens': (min, max), 'dmult': (min, max), ...} - nur diese Werte werden zufaellig gezogen, alle anderen bleiben wie in der Config.
+    Die aktuellen Einstellungen laufen IMMER als Referenz. Alle Kombinationen handeln im selben Zeitfenster (ab der Einlaufzeit der laengsten
+    Zone-Einstellung), sonst waeren sie nicht vergleichbar."""
+    base_p = _we_params(cfg)
+    resolution = cfg.get("we_resolution", "5m")
+    res_s, zone_s = _res_seconds(resolution), _res_seconds(base_p["zone_tf"])
+    if res_s >= zone_s:
+        return {"error": f"Der Signal-Zeitrahmen ({resolution}) muss kleiner sein als der Zonen-Zeitrahmen ({base_p['zone_tf']})."}
+    if not vary:
+        return {"error": "Bitte mindestens einen Wert zum Variieren auswählen."}
+    ranges = {}
+    try:
+        for k, (a, b) in vary.items():
+            if k not in WE_MC_PARAMS:
+                return {"error": f"Unbekannter Wert '{k}'."}
+            typ = WE_MC_PARAMS[k][1]
+            lo, hi = sorted((typ(a), typ(b)))
+            if lo <= 0:
+                return {"error": "Alle Bereiche müssen größer als 0 sein."}
+            ranges[k] = (lo, hi)
+    except (TypeError, ValueError):
+        return {"error": "Ungültige Bereiche für die Parameter."}
+    max_candles = BACKTEST_MAX_CANDLES.get("wae_ema", 100_000)
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    n = len(candles[4]) if candles else 0
+    note = None
+    if n > WE_MC_MAX_CANDLES:
+        candles = tuple(x[-WE_MC_MAX_CANDLES:] for x in candles)
+        note = f"Hinweis: aus Speichergründen wurden nur die jüngsten {WE_MC_MAX_CANDLES} von {n} Kerzen getestet."
+        n = WE_MC_MAX_CANDLES
+    ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
+    zone_ms = zone_s * 1000
+    max_warm = max(_we_warm_htf(dict(base_p, **{k: ranges[k][1] for k in ranges})), _we_warm_htf(base_p))
+    hts, ho, hh, hl, hc = we_aggregate(ts, o, h, l, c, zone_ms)
+    start_i = len(ts)
+    for i in range(len(ts)):
+        if bisect_left(hts, ts[i] // zone_ms * zone_ms) - 1 >= max_warm:
+            start_i = max(i - 1, 1)
+            break
+    if n < 400 or start_i > n * 0.6:
+        return {"error": f"Zu wenig Kerzen: die Zone braucht bis zu {max_warm} {base_p['zone_tf']}-Kerzen Einlaufzeit, danach sollte noch genug Zeitraum zum Testen übrig sein. "
+                         f"Mehr Tage wählen (Richtwert: mind. {int(max_warm * zone_s / 86400 / 0.4) + 1}) oder kleinere Dead-Zone-Länge."}
+    runs = max(1, min(WE_MC_MAX_RUNS, int(runs)))
+    rng = random.Random(seed)
+
+    def draw(k):
+        lo, hi = ranges[k]
+        typ, dec = WE_MC_PARAMS[k][1], WE_MC_PARAMS[k][2]
+        return rng.randint(lo, hi) if typ is int else round(rng.uniform(lo, hi), dec)
+
+    base_key = tuple(base_p[k] for k in sorted(ranges))
+    seen, combos = {base_key}, []
+    for _ in range(runs * 30):
+        if len(combos) >= runs:
+            break
+        over = {k: draw(k) for k in ranges}
+        eff = dict(base_p, **over)
+        if eff["fast"] >= eff["slow"]:
+            continue
+        key = tuple(over[k] for k in sorted(ranges))
+        if key not in seen:
+            seen.add(key)
+            combos.append(over)
+    htf = (hts, hh, hl, hc)
+    deadline = time.time() + WE_MC_TIME_BUDGET
+    results, baseline = await asyncio.to_thread(_we_mc_compute, candles, cfg, combos, base_p, htf, zone_ms, start_i, exclude_top_n, deadline)
+    reliable = [r for r in results if r["trades"] >= WE_MC_MIN_RELIABLE_TRADES]
+    robust = [r for r in reliable if r["pnl_train"] > 0 and r["pnl_test"] > 0 and r["trades_test"] >= 3]
+    best = sorted(results, key=lambda r: (r["trades"] >= WE_MC_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    robust_sorted = sorted(robust, key=lambda r: r["pnl_test"], reverse=True)
+    worst = sorted(results, key=lambda r: r["total_pnl_usd"])
+    lowdd = []
+    for r in reliable:
+        dd = abs(r["max_drawdown_usd"] or 0)
+        if r["total_pnl_usd"] <= 0 or (max_dd_usd > 0 and dd > max_dd_usd):
+            continue
+        lowdd.append(dict(r, pnl_dd_ratio=round(r["total_pnl_usd"] / dd, 2) if dd > 0 else 999.0))
+    lowdd.sort(key=lambda r: (r["pnl_dd_ratio"], r["pnl_test"]), reverse=True)
+    pnls = sorted(r["total_pnl_usd"] for r in reliable)
+    usable_days = (ts[-1] - ts[start_i]) / 86_400_000
+    return {
+        "symbol": symbol, "resolution": resolution, "zone_tf": base_p["zone_tf"], "zone_mode": base_p["zone_mode"], "exit_mode": base_p["exit_mode"],
+        "requested_days": days, "actual_days_covered": round((ts[-1] - ts[0]) / 86_400_000, 1), "usable_days": round(usable_days, 1),
+        "candles_processed": n, "min_reliable_trades": WE_MC_MIN_RELIABLE_TRADES,
+        "combos_tested": len(results), "combos_requested": len(combos), "test_fraction_pct": int(WE_MC_TEST_FRACTION * 100),
+        "varied": [WE_MC_PARAMS[k][0] for k in WE_MC_PARAMS if k in ranges], "note": note,
+        "baseline": baseline,
+        "profitable_pct": round(sum(1 for x in pnls if x > 0) / len(pnls) * 100, 1) if pnls else 0,
+        "median_pnl_usd": round(pnls[len(pnls) // 2], 2) if pnls else 0,
+        "robust_count": len(robust), "lowdd_count": len(lowdd), "max_dd_limit": max_dd_usd,
+        "lowdd_results": lowdd[:30], "robust_results": robust_sorted[:30], "results": best[:30], "worst_results": worst[:20],
+    }

@@ -3423,6 +3423,76 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="wae_ema" style="display:none;">
+<h2 class="section-title">🎲 WAE-Zonen Monte-Carlo (frei wählbare Werte)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Hake an, <b>welche Werte</b> zufällig variiert werden sollen, und gib je einen Bereich an. Alles, was nicht angehakt ist, bleibt wie in den Einstellungen oben (Zeitrahmen, Zonen-Modus, Ausstieg, Richtung, SL/TP, Margin, Hebel). Die aktuellen Einstellungen laufen immer als Referenz mit.
+    Alle Kombinationen handeln im selben Zeitfenster (ab der Einlaufzeit der Zone). <b>Gegen Überanpassung:</b> die ersten 70 % sind „Training“, die letzten 30 % „Test“; „robust“ heißt: in Training UND Test im Plus, mit mindestens 3 Test-Trades.
+    Tipp: nur 2–3 Werte gleichzeitig variieren und mindestens 30 Tage testen. Das Zeitlimit liegt bei etwa 70 Sekunden, bei zu vielen Durchläufen werden weniger getestet.
+  </div>
+  <table style="margin-bottom:12px;">
+    <thead><tr><th>Variieren</th><th>Wert</th><th>von</th><th>bis</th></tr></thead>
+    <tbody>
+    <tr><td><input type="checkbox" id="we-mc-on-ema_len" checked></td><td>EMA-Länge (Pine 9)</td>
+      <td><input type="number" step="1" id="we-mc-min-ema_len" value="5" style="width:80px;"></td>
+      <td><input type="number" step="1" id="we-mc-max-ema_len" value="21" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="we-mc-on-sens" checked></td><td>Sensitivity (Pine 150)</td>
+      <td><input type="number" step="1" id="we-mc-min-sens" value="80" style="width:80px;"></td>
+      <td><input type="number" step="1" id="we-mc-max-sens" value="250" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="we-mc-on-fast"></td><td>Fast-EMA (Pine 20)</td>
+      <td><input type="number" step="1" id="we-mc-min-fast" value="10" style="width:80px;"></td>
+      <td><input type="number" step="1" id="we-mc-max-fast" value="30" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="we-mc-on-slow"></td><td>Slow-EMA (Pine 40)</td>
+      <td><input type="number" step="1" id="we-mc-min-slow" value="30" style="width:80px;"></td>
+      <td><input type="number" step="1" id="we-mc-max-slow" value="60" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="we-mc-on-chan"></td><td>BB-Kanal-Länge (Pine 20)</td>
+      <td><input type="number" step="1" id="we-mc-min-chan" value="10" style="width:80px;"></td>
+      <td><input type="number" step="1" id="we-mc-max-chan" value="30" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="we-mc-on-bbm"></td><td>BB-Multiplikator (Pine 2,0)</td>
+      <td><input type="number" step="0.1" id="we-mc-min-bbm" value="1.0" style="width:80px;"></td>
+      <td><input type="number" step="0.1" id="we-mc-max-bbm" value="3.0" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="we-mc-on-dlen"></td><td>Dead-Zone RMA-Länge (Pine 100)</td>
+      <td><input type="number" step="1" id="we-mc-min-dlen" value="50" style="width:80px;"></td>
+      <td><input type="number" step="1" id="we-mc-max-dlen" value="150" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="we-mc-on-dmult" checked></td><td>Dead-Zone-Multiplikator (Pine 3,7)</td>
+      <td><input type="number" step="0.1" id="we-mc-min-dmult" value="2.0" style="width:80px;"></td>
+      <td><input type="number" step="0.1" id="we-mc-max-dmult" value="5.0" style="width:80px;"></td></tr>
+    </tbody>
+  </table>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="we-mc-days" value="30" style="width:90px;"></div>
+    <div><label>Durchläufe (max. 1000)</label><input type="number" step="50" min="1" max="1000" id="we-mc-runs" value="200" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="we-mc-seed" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="we-mc-exclude-top-n" value="1" style="width:90px;"></div>
+    <div><label>Max. Drawdown $ (0 = egal)</label><input type="number" step="1" min="0" id="we-mc-max-dd" value="0" style="width:90px;"></div>
+    <button id="btn-we-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="we-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <div id="we-mc-baseline" style="color:var(--text-dim); font-size:13px; margin-top:6px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="we-mc-lowdd-title">🧯 Geringes Risiko (nur Gewinn-Kombinationen, sortiert nach PnL / Max-Drawdown)</h3>
+  <table id="we-mc-lowdd-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="we-mc-robust-title">🛡️ Robuste Kombinationen (Training UND Test im Plus, sortiert nach Test-PnL)</h3>
+  <table id="we-mc-robust-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="we-mc-top-title">📈 Die 30 besten Kombinationen (nach Gesamt-PnL)</h3>
+  <table id="we-mc-top-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="we-mc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="we-mc-worst-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="punk_algo" style="display:none;">
 <h2 class="section-title">🎲 Punk Algo Monte-Carlo (Periode 1 × Multiplikator 1 × Periode 2 × Multiplikator 2)</h2>
 <div class="panel-card">
@@ -4590,6 +4660,79 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
       renderDvMcWorst();
       Object.values(tables).forEach(t => t.style.display = '');
       Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+const WE_MC_PARAMS = [["ema_len", "we_ema_len", "EMA-Länge"], ["sens", "we_sensitivity", "Sensitivity"], ["fast", "we_fast_len", "Fast-EMA"], ["slow", "we_slow_len", "Slow-EMA"], ["chan", "we_channel_len", "BB-Kanal-Länge"], ["bbm", "we_bb_mult", "BB-Multiplikator"], ["dlen", "we_dead_len", "Dead-Zone RMA-Länge"], ["dmult", "we_dead_mult", "Dead-Zone-Multiplikator"]];
+window.weMcData = {lowdd: [], robust: [], top: [], worst: []};
+window.weMcVaried = [];
+const weMcHead = (withRatio) => WE_MC_PARAMS.filter(p => window.weMcVaried.includes(p[1])).map(p => `<th class="sortable" data-key="${p[1]}">${p[2]} ⇅</th>`).join('')
+  + '<th class="sortable" data-key="trades">Trades ⇅</th><th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th><th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th><th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th><th class="sortable" data-key="pnl_train">PnL Training $ ⇅</th><th class="sortable" data-key="pnl_test">PnL Test $ ⇅</th><th class="sortable" data-key="trades_test">Trades Test ⇅</th><th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>'
+  + (withRatio ? '<th class="sortable" data-key="pnl_dd_ratio">PnL / DD ⇅</th>' : '') + '<th></th>';
+const weMcRowHtml = (r) => {
+  const vk = WE_MC_PARAMS.filter(p => window.weMcVaried.includes(p[1])).map(p => p[1]);
+  const apply = {}; vk.forEach(k => { apply[k] = r[k]; });
+  return `<tr>${vk.map(k => `<td>${r[k]}</td>`).join('')}
+    <td>${r.trades}</td><td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td class="${r.pnl_train >= 0 ? 'green' : 'red'}">${r.pnl_train}</td>
+    <td class="${r.pnl_test >= 0 ? 'green' : 'red'}">${r.pnl_test}</td>
+    <td>${r.trades_test}</td><td>${r.max_drawdown_usd}</td>
+    ${r.pnl_dd_ratio !== undefined ? `<td>${r.pnl_dd_ratio}</td>` : ''}
+    ${applyBtn(apply)}
+  </tr>`;
+};
+const weMcKinds = ['lowdd', 'robust', 'top', 'worst'];
+document.getElementById('btn-we-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-we-mc');
+  const statusEl = document.getElementById('we-mc-status');
+  const baseEl = document.getElementById('we-mc-baseline');
+  const sweepSymbol = currentSymbol;
+  const vary = {};
+  WE_MC_PARAMS.forEach(p => {
+    if (document.getElementById(`we-mc-on-${p[0]}`).checked) {
+      vary[p[0]] = [parseFloat(document.getElementById(`we-mc-min-${p[0]}`).value), parseFloat(document.getElementById(`we-mc-max-${p[0]}`).value)];
+    }
+  });
+  if (!Object.keys(vary).length) { statusEl.innerText = '❌ Bitte mindestens einen Wert zum Variieren anhaken.'; return; }
+  const payload = {
+    vary, days: parseInt(document.getElementById('we-mc-days').value) || 30,
+    runs: parseInt(document.getElementById('we-mc-runs').value) || 200,
+    seed: document.getElementById('we-mc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('we-mc-exclude-top-n').value) || 0,
+    max_dd_usd: parseFloat(document.getElementById('we-mc-max-dd').value) || 0,
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  weMcKinds.forEach(k => { document.getElementById(`we-mc-${k}-table`).style.display = 'none'; document.getElementById(`we-mc-${k}-title`).style.display = 'none'; });
+  baseEl.innerText = '';
+  statusEl.innerText = `⏳ Lade Kerzen und teste die Zufalls-Kombinationen...`;
+  try {
+    const res = await fetch(`/api/we_mc?symbol=${sweepSymbol}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage, davon ${data.usable_days} nutzbar nach Einlaufzeit; ${data.resolution}, Zone ${data.zone_tf} ${data.zone_mode}, Ausstieg ${data.exit_mode}) - ${data.profitable_pct}% der Kombinationen (mit mind. ${data.min_reliable_trades} Trades) im Plus, Median ${data.median_pnl_usd} $. Test = letzte ${data.test_fraction_pct}% des Zeitraums. ${data.note ? data.note + ' ' : ''}Robust (Training UND Test im Plus): ${data.robust_count}. Gewinn-Kombinationen${data.max_dd_limit > 0 ? ' mit Max-DD ≤ ' + data.max_dd_limit + ' $' : ''}: ${data.lowdd_count}.`;
+      const b = data.baseline;
+      baseEl.innerText = `Referenz (aktuelle Einstellungen): ${b.trades} Trades, PnL ${b.total_pnl_usd} $ (Training ${b.pnl_train} / Test ${b.pnl_test}), Max DD ${b.max_drawdown_usd} $`;
+      window.weMcVaried = data.varied || [];
+      window.weMcData = {lowdd: data.lowdd_results || [], robust: data.robust_results || [], top: data.results || [], worst: data.worst_results || []};
+      weMcKinds.forEach(k => {
+        document.querySelector(`#we-mc-${k}-table thead`).innerHTML = `<tr>${weMcHead(k === 'lowdd')}</tr>`;
+        makeSortableTable(`we-mc-${k}-table`, () => window.weMcData[k], weMcRowHtml)();
+        if (window.weMcData[k].length) {
+          document.getElementById(`we-mc-${k}-table`).style.display = '';
+          document.getElementById(`we-mc-${k}-title`).style.display = '';
+        }
+      });
     }
   } catch (e) {
     if (sweepSymbol !== currentSymbol) return;
@@ -6836,6 +6979,37 @@ async def handle_pa_montecarlo(request):
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] Punk-Algo-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_we_montecarlo(request):
+    """Monte-Carlo fuer WAE-Zonen + EMA: zufaellige Kombinationen der ausgewaehlten Werte mit Training/Test-Trennung."""
+    from wae_ema import run_we_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        runs = max(1, min(1000, int(body.get("runs", 200))))
+        vary = {str(k): (float(v[0]), float(v[1])) for k, v in (body.get("vary") or {}).items()}
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        max_dd_usd = max(0.0, float(body.get("max_dd_usd") or 0))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(run_we_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n, seed, max_dd_usd), timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] WAE-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
