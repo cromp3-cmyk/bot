@@ -453,6 +453,21 @@ def default_config():
         "we_sl_usd": float(os.getenv("WE_SL_USD", "0")),
         "we_tp_usd": float(os.getenv("WE_TP_USD", "0")),
         "we_sl_cooldown_seconds": float(os.getenv("WE_SL_COOLDOWN_SECONDS", "30.0")),
+        # ===== WT-Divergenz (entry_mode wt_div): WaveTrend-Divergenzen (Welle des Wellenankers) als Einstieg =====
+        "wd_resolution": os.getenv("WD_RESOLUTION", "15m"),
+        "wd_src": os.getenv("WD_SRC", "close"),
+        "wd_n1": int(os.getenv("WD_N1", "10")), "wd_n2": int(os.getenv("WD_N2", "21")),
+        "wd_sig_len": int(os.getenv("WD_SIG_LEN", "4")), "wd_wave_scale": float(os.getenv("WD_WAVE_SCALE", "1.35")),
+        "wd_line": os.getenv("WD_LINE", "wt2"),
+        "wd_pivot_left": int(os.getenv("WD_PIVOT_LEFT", "5")), "wd_pivot_right": int(os.getenv("WD_PIVOT_RIGHT", "3")),
+        "wd_min_range": int(os.getenv("WD_MIN_RANGE", "5")), "wd_max_range": int(os.getenv("WD_MAX_RANGE", "60")),
+        "wd_zone": float(os.getenv("WD_ZONE", "0")),   # 0 = keine Zonen-Bedingung, sonst muss mind. ein Pivot bei <= -Zone (Long) bzw. >= +Zone (Short) liegen
+        "wd_use_regular": os.getenv("WD_USE_REGULAR", "true").lower() == "true",
+        "wd_use_hidden": os.getenv("WD_USE_HIDDEN", "false").lower() == "true",
+        "wd_exit_mode": os.getenv("WD_EXIT_MODE", "flip"),
+        "wd_direction_mode": os.getenv("WD_DIRECTION_MODE", "both"),
+        "wd_sl_usd": float(os.getenv("WD_SL_USD", "0")), "wd_tp_usd": float(os.getenv("WD_TP_USD", "0")),
+        "wd_sl_cooldown_seconds": float(os.getenv("WD_SL_COOLDOWN_SECONDS", "30.0")),
 
         # ===== Trendfolge (entry_mode trendfolge): Marktstruktur-Trend + rote/gruene Kerzen =====
         "tfl_resolution": os.getenv("TFL_RESOLUTION", "1m"),        # Kerzen-Zeitebene (rot/gruen), ab 10s
@@ -847,6 +862,7 @@ PERSISTED_STATE_KEYS = [
     "dv_sl_price", "dv_tp_price", "dv_trail_extreme", "dv_sl_cooldown_until",
     "pa_sl_price", "pa_tp_price", "pa_sl_cooldown_until",
     "we_sl_price", "we_tp_price", "we_sl_cooldown_until",
+    "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until",
     "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
@@ -1754,6 +1770,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + fester $-SL/TP)</option>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
+      <option value="wt_div">WT-Divergenz (WaveTrend-Divergenzen als Einstieg, Welle wie im Wellenanker, wählbarer Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="wae_ema">WAE-Zonen + EMA9 (WAE-Zone aus höherem Zeitrahmen, CALL/PUT bei Zone + EMA, wählbarer Ausstieg, optional $-SL/-TP)</option>
       <option value="punk_algo">Punk Algo (Range-Filter-Dreiecke ▲/▼ als Einstieg, Gegen-Dreieck = Flip, WaveTrend-X = Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="vwap_cross">EMA 9 + VWAP (Einstieg bei Kreuzung EMA9 / Day-Week-Month-VWAP, SL hinter letzter Kerze, TP Kreuzung/Fest/Gegentrade, Backtest)</option>
@@ -2157,6 +2174,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wae_ema"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="we_sl_usd"></div>
   <div data-mode="wae_ema"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="we_tp_usd"></div>
   <div data-mode="wae_ema"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="we_sl_cooldown_seconds"></div>
+
+  <div data-mode="wt_div" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    〰️ <b>WT-Divergenz</b>: Die WaveTrend-Welle ist dieselbe wie im Wellenanker. Der Bot sucht <b>Pivots</b> (Hoch-/Tiefpunkte) auf der Welle und vergleicht sie mit dem Kurs: <b>Bullish</b> (Long) = Kurs macht ein tieferes Tief, die Welle ein höheres Tief; <b>Bearish</b> (Short) = Kurs höheres Hoch, Welle tieferes Hoch. <b>Hidden</b> ist das Gegenteil (Trendfortsetzung). Ein Pivot gilt erst nach „Pivot rechts“ weiteren geschlossenen Kerzen - das Signal kommt also bewusst etwas verzögert, dafür ohne Repaint.
+  </div>
+  <div data-mode="wt_div"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="wd_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <input type="number" step="1" min="1" id="wd_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="wt_div"><label>Welle: Quelle</label><select class="cfg" id="wd_src"><option value="close">Close</option><option value="hlc3">HLC3</option><option value="ohlc4">OHLC4</option><option value="hl2">HL2</option></select></div>
+  <div data-mode="wt_div"><label>Kanal-Länge n1 (Wellenanker: 10)</label><input type="number" step="1" min="2" id="wd_n1"></div>
+  <div data-mode="wt_div"><label>Durchschnitt-Länge n2 (Wellenanker: 21)</label><input type="number" step="1" min="2" id="wd_n2"></div>
+  <div data-mode="wt_div"><label>Signallinie-Glättung (Wellenanker: 4)</label><input type="number" step="1" min="1" id="wd_sig_len"></div>
+  <div data-mode="wt_div"><label>Wellen-Skalierung (Wellenanker: 1,35)</label><input type="number" step="0.05" min="0.1" id="wd_wave_scale"></div>
+  <div data-mode="wt_div"><label>Linie für die Divergenz</label><select class="cfg" id="wd_line"><option value="wt2">wt2 (Signallinie, wie die Zonen im Wellenanker)</option><option value="wt1">wt1 (Welle)</option></select></div>
+  <div data-mode="wt_div"><label>Pivot links (Kerzen)</label><input type="number" step="1" min="1" id="wd_pivot_left"></div>
+  <div data-mode="wt_div"><label>Pivot rechts (Bestätigung, Kerzen)</label><input type="number" step="1" min="1" id="wd_pivot_right"></div>
+  <div data-mode="wt_div"><label>Abstand zum vorigen Pivot: mind. (Kerzen)</label><input type="number" step="1" min="1" id="wd_min_range"></div>
+  <div data-mode="wt_div"><label>Abstand zum vorigen Pivot: max. (Kerzen)</label><input type="number" step="1" min="2" id="wd_max_range"></div>
+  <div data-mode="wt_div"><label>Zonen-Bedingung (0 = aus, z.B. 40)</label><input type="number" step="1" min="0" id="wd_zone"></div>
+  <div data-mode="wt_div"><label>Reguläre Divergenz</label><select class="cfg" id="wd_use_regular"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="wt_div"><label>Hidden-Divergenz</label><select class="cfg" id="wd_use_hidden"><option value="false">Aus</option><option value="true">An</option></select></div>
+  <div data-mode="wt_div"><label>Ausstieg</label><select class="cfg" id="wd_exit_mode"><option value="flip">Gegen-Divergenz = Flip (Long↔Short in einer Order)</option><option value="wt_cross">Welle kreuzt Signallinie zurück (Gegen-Divergenz hat Vorrang)</option><option value="sltp_only">Nur SL/TP (Gegen-Divergenzen ignoriert)</option></select></div>
+  <div data-mode="wt_div"><label>Richtung</label><select class="cfg" id="wd_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="wt_div"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="wd_sl_usd"></div>
+  <div data-mode="wt_div"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="wd_tp_usd"></div>
+  <div data-mode="wt_div"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="wd_sl_cooldown_seconds"></div>
 
   <div data-mode="trendfolge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧭 <b>Trendfolge</b>: Der Trend kommt aus der Marktstruktur (BOS/CHoCH). <b>Aufwärtstrend: bei jeder roten Kerze Kauf</b> (Nachkauf, solange die Position läuft), <b>Abwärtstrend: bei jeder grünen Kerze Short</b>. Ausstieg: fester $-TP auf die gesamte Position, optional fester $-SL. <b>Trendwechsel = Position drehen</b> (beenden und sofort im neuen Trend einsteigen, oder nur schließen). Kerzen- und Trend-Zeitebene sind getrennt wählbar (ab 10 Sekunden).
@@ -3423,6 +3466,79 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="wt_div" style="display:none;">
+<h2 class="section-title">🎲 WT-Divergenz Monte-Carlo (frei wählbare Werte)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Hake an, <b>welche Werte</b> zufällig variiert werden sollen, und gib je einen Bereich an. Alles, was nicht angehakt ist, bleibt wie in den Einstellungen oben (Zeitrahmen, Regulär/Hidden, Ausstieg, Richtung, SL/TP, Margin, Hebel). Die aktuellen Einstellungen laufen immer als Referenz mit und entsprechen dem Backtest.
+    Alle Kombinationen handeln im selben Fenster (letzte N Tage, die Welle läuft vorher ein). <b>Gegen Überanpassung:</b> die ersten 70 % sind „Training“, die letzten 30 % „Test“; „robust“ heißt: in Training UND Test im Plus, mit mindestens 3 Test-Trades.
+    Tipp: nur 2–3 Werte gleichzeitig variieren; Divergenz-Signale sind selten, nimm also genug Tage (60+ bei 15m). Zeitlimit etwa 70 Sekunden.
+  </div>
+  <table style="margin-bottom:12px;">
+    <thead><tr><th>Variieren</th><th>Wert</th><th>von</th><th>bis</th></tr></thead>
+    <tbody>
+    <tr><td><input type="checkbox" id="wdmc-on-n1"></td><td>Kanal-Länge n1 (10)</td>
+      <td><input type="number" step="1" id="wdmc-min-n1" value="6" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-n1" value="16" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-n2"></td><td>Durchschnitt-Länge n2 (21)</td>
+      <td><input type="number" step="1" id="wdmc-min-n2" value="14" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-n2" value="30" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-sig"></td><td>Signallinie-Glättung (4)</td>
+      <td><input type="number" step="1" id="wdmc-min-sig" value="2" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-sig" value="8" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-scale"></td><td>Wellen-Skalierung (1,35)</td>
+      <td><input type="number" step="0.05" id="wdmc-min-scale" value="1.0" style="width:80px;"></td>
+      <td><input type="number" step="0.05" id="wdmc-max-scale" value="2.0" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-pl" checked></td><td>Pivot links (5)</td>
+      <td><input type="number" step="1" id="wdmc-min-pl" value="3" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-pl" value="10" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-pr" checked></td><td>Pivot rechts (3)</td>
+      <td><input type="number" step="1" id="wdmc-min-pr" value="2" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-pr" value="6" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-minr"></td><td>Min. Abstand der Pivots (5)</td>
+      <td><input type="number" step="1" id="wdmc-min-minr" value="3" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-minr" value="10" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-maxr" checked></td><td>Max. Abstand der Pivots (60)</td>
+      <td><input type="number" step="1" id="wdmc-min-maxr" value="30" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-maxr" value="120" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-zone"></td><td>Zonen-Bedingung (0 = aus)</td>
+      <td><input type="number" step="1" id="wdmc-min-zone" value="0" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-zone" value="60" style="width:80px;"></td></tr>
+    </tbody>
+  </table>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="wdmc-days" value="60" style="width:90px;"></div>
+    <div><label>Durchläufe (max. 1000)</label><input type="number" step="50" min="1" max="1000" id="wdmc-runs" value="200" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="wdmc-seed" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="wdmc-exclude-top-n" value="1" style="width:90px;"></div>
+    <div><label>Max. Drawdown $ (0 = egal)</label><input type="number" step="1" min="0" id="wdmc-max-dd" value="0" style="width:90px;"></div>
+    <button id="btn-wd-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="wdmc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <div id="wdmc-baseline" style="color:var(--text-dim); font-size:13px; margin-top:6px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="wdmc-lowdd-title">🧯 Geringes Risiko (nur Gewinn-Kombinationen, sortiert nach PnL / Max-Drawdown)</h3>
+  <table id="wdmc-lowdd-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="wdmc-robust-title">🛡️ Robuste Kombinationen (Training UND Test im Plus, sortiert nach Test-PnL)</h3>
+  <table id="wdmc-robust-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="wdmc-top-title">📈 Die 30 besten Kombinationen (nach Gesamt-PnL)</h3>
+  <table id="wdmc-top-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="wdmc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="wdmc-worst-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="wae_ema" style="display:none;">
 <h2 class="section-title">🎲 WAE-Zonen Monte-Carlo (frei wählbare Werte)</h2>
 <div class="panel-card">
@@ -4355,7 +4471,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -4668,6 +4784,79 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
       renderDvMcWorst();
       Object.values(tables).forEach(t => t.style.display = '');
       Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["zone", "wd_zone", "Zonen-Bedingung"]];
+window.wdMcData = {lowdd: [], robust: [], top: [], worst: []};
+window.wdMcVaried = [];
+const wdMcHead = (withRatio) => WD_MC_PARAMS.filter(p => window.wdMcVaried.includes(p[1])).map(p => `<th class="sortable" data-key="${p[1]}">${p[2]} ⇅</th>`).join('')
+  + '<th class="sortable" data-key="trades">Trades ⇅</th><th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th><th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th><th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th><th class="sortable" data-key="pnl_train">PnL Training $ ⇅</th><th class="sortable" data-key="pnl_test">PnL Test $ ⇅</th><th class="sortable" data-key="trades_test">Trades Test ⇅</th><th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>'
+  + (withRatio ? '<th class="sortable" data-key="pnl_dd_ratio">PnL / DD ⇅</th>' : '') + '<th></th>';
+const wdMcRowHtml = (r) => {
+  const vk = WD_MC_PARAMS.filter(p => window.wdMcVaried.includes(p[1])).map(p => p[1]);
+  const apply = {}; vk.forEach(k => { apply[k] = r[k]; });
+  return `<tr>${vk.map(k => `<td>${r[k]}</td>`).join('')}
+    <td>${r.trades}</td><td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td class="${r.pnl_train >= 0 ? 'green' : 'red'}">${r.pnl_train}</td>
+    <td class="${r.pnl_test >= 0 ? 'green' : 'red'}">${r.pnl_test}</td>
+    <td>${r.trades_test}</td><td>${r.max_drawdown_usd}</td>
+    ${r.pnl_dd_ratio !== undefined ? `<td>${r.pnl_dd_ratio}</td>` : ''}
+    ${applyBtn(apply)}
+  </tr>`;
+};
+const wdMcKinds = ['lowdd', 'robust', 'top', 'worst'];
+document.getElementById('btn-wd-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-wd-mc');
+  const statusEl = document.getElementById('wdmc-status');
+  const baseEl = document.getElementById('wdmc-baseline');
+  const sweepSymbol = currentSymbol;
+  const vary = {};
+  WD_MC_PARAMS.forEach(p => {
+    if (document.getElementById(`wdmc-on-${p[0]}`).checked) {
+      vary[p[0]] = [parseFloat(document.getElementById(`wdmc-min-${p[0]}`).value), parseFloat(document.getElementById(`wdmc-max-${p[0]}`).value)];
+    }
+  });
+  if (!Object.keys(vary).length) { statusEl.innerText = '❌ Bitte mindestens einen Wert zum Variieren anhaken.'; return; }
+  const payload = {
+    vary, days: parseInt(document.getElementById('wdmc-days').value) || 60,
+    runs: parseInt(document.getElementById('wdmc-runs').value) || 200,
+    seed: document.getElementById('wdmc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('wdmc-exclude-top-n').value) || 0,
+    max_dd_usd: parseFloat(document.getElementById('wdmc-max-dd').value) || 0,
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  wdMcKinds.forEach(k => { document.getElementById(`wdmc-${k}-table`).style.display = 'none'; document.getElementById(`wdmc-${k}-title`).style.display = 'none'; });
+  baseEl.innerText = '';
+  statusEl.innerText = `⏳ Lade Kerzen und teste die Zufalls-Kombinationen...`;
+  try {
+    const res = await fetch(`/api/wd_mc?symbol=${sweepSymbol}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage geladen, getestet wird das Fenster der letzten ${data.usable_days} Tage - der Rest ist Einlaufzeit; ${data.resolution}, Ausstieg ${data.exit_mode}) - ${data.profitable_pct}% der Kombinationen (mit mind. ${data.min_reliable_trades} Trades) im Plus, Median ${data.median_pnl_usd} $. Test = letzte ${data.test_fraction_pct}% des Zeitraums. ${data.note ? data.note + ' ' : ''}Robust (Training UND Test im Plus): ${data.robust_count}. Gewinn-Kombinationen${data.max_dd_limit > 0 ? ' mit Max-DD ≤ ' + data.max_dd_limit + ' $' : ''}: ${data.lowdd_count}.`;
+      const b = data.baseline;
+      baseEl.innerText = `Referenz (aktuelle Einstellungen): ${b.trades} Trades, PnL ${b.total_pnl_usd} $ (Training ${b.pnl_train} / Test ${b.pnl_test}), Max DD ${b.max_drawdown_usd} $`;
+      window.wdMcVaried = data.varied || [];
+      window.wdMcData = {lowdd: data.lowdd_results || [], robust: data.robust_results || [], top: data.results || [], worst: data.worst_results || []};
+      wdMcKinds.forEach(k => {
+        document.querySelector(`#wdmc-${k}-table thead`).innerHTML = `<tr>${wdMcHead(k === 'lowdd')}</tr>`;
+        makeSortableTable(`wdmc-${k}-table`, () => window.wdMcData[k], wdMcRowHtml)();
+        if (window.wdMcData[k].length) {
+          document.getElementById(`wdmc-${k}-table`).style.display = '';
+          document.getElementById(`wdmc-${k}-title`).style.display = '';
+        }
+      });
     }
   } catch (e) {
     if (sweepSymbol !== currentSymbol) return;
@@ -5438,6 +5627,25 @@ async function refresh() {
     document.getElementById('we_zone_mode').value = data.config.we_zone_mode;
     document.getElementById('we_exit_mode').value = data.config.we_exit_mode;
     document.getElementById('we_direction_mode').value = data.config.we_direction_mode;
+    setResolutionField('wd_resolution', data.config.wd_resolution);
+    document.getElementById('wd_n1').value = data.config.wd_n1;
+    document.getElementById('wd_n2').value = data.config.wd_n2;
+    document.getElementById('wd_sig_len').value = data.config.wd_sig_len;
+    document.getElementById('wd_wave_scale').value = data.config.wd_wave_scale;
+    document.getElementById('wd_pivot_left').value = data.config.wd_pivot_left;
+    document.getElementById('wd_pivot_right').value = data.config.wd_pivot_right;
+    document.getElementById('wd_min_range').value = data.config.wd_min_range;
+    document.getElementById('wd_max_range').value = data.config.wd_max_range;
+    document.getElementById('wd_zone').value = data.config.wd_zone;
+    document.getElementById('wd_sl_usd').value = data.config.wd_sl_usd;
+    document.getElementById('wd_tp_usd').value = data.config.wd_tp_usd;
+    document.getElementById('wd_sl_cooldown_seconds').value = data.config.wd_sl_cooldown_seconds;
+    document.getElementById('wd_src').value = data.config.wd_src;
+    document.getElementById('wd_line').value = data.config.wd_line;
+    document.getElementById('wd_exit_mode').value = data.config.wd_exit_mode;
+    document.getElementById('wd_direction_mode').value = data.config.wd_direction_mode;
+    document.getElementById('wd_use_regular').value = String(data.config.wd_use_regular !== false);
+    document.getElementById('wd_use_hidden').value = String(!!data.config.wd_use_hidden);
     document.getElementById('tfl_resolution').value = data.config.tfl_resolution || '1m';
     document.getElementById('tfl_trend_tf').value = data.config.tfl_trend_tf || '5m';
     document.getElementById('tfl_trend_mode').value = data.config.tfl_trend_mode || 'swing';
@@ -5950,6 +6158,25 @@ function buildConfigPayload() {
     we_sl_usd: parseFloat(document.getElementById('we_sl_usd').value) || 0,
     we_tp_usd: parseFloat(document.getElementById('we_tp_usd').value) || 0,
     we_sl_cooldown_seconds: parseFloat(document.getElementById('we_sl_cooldown_seconds').value),
+    wd_resolution: getResolutionField('wd_resolution'),
+    wd_n1: parseInt(document.getElementById('wd_n1').value) || 10,
+    wd_n2: parseInt(document.getElementById('wd_n2').value) || 21,
+    wd_sig_len: parseInt(document.getElementById('wd_sig_len').value) || 4,
+    wd_pivot_left: parseInt(document.getElementById('wd_pivot_left').value) || 5,
+    wd_pivot_right: parseInt(document.getElementById('wd_pivot_right').value) || 3,
+    wd_min_range: parseInt(document.getElementById('wd_min_range').value) || 5,
+    wd_max_range: parseInt(document.getElementById('wd_max_range').value) || 60,
+    wd_wave_scale: parseFloat(document.getElementById('wd_wave_scale').value) || 1.35,
+    wd_zone: parseFloat(document.getElementById('wd_zone').value) || 0,
+    wd_src: document.getElementById('wd_src').value,
+    wd_line: document.getElementById('wd_line').value,
+    wd_exit_mode: document.getElementById('wd_exit_mode').value,
+    wd_direction_mode: document.getElementById('wd_direction_mode').value,
+    wd_use_regular: document.getElementById('wd_use_regular').value === 'true',
+    wd_use_hidden: document.getElementById('wd_use_hidden').value === 'true',
+    wd_sl_usd: parseFloat(document.getElementById('wd_sl_usd').value) || 0,
+    wd_tp_usd: parseFloat(document.getElementById('wd_tp_usd').value) || 0,
+    wd_sl_cooldown_seconds: parseFloat(document.getElementById('wd_sl_cooldown_seconds').value),
     tfl_resolution: document.getElementById('tfl_resolution').value,
     tfl_trend_tf: document.getElementById('tfl_trend_tf').value,
     tfl_trend_mode: document.getElementById('tfl_trend_mode').value,
@@ -6455,7 +6682,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_zone", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
@@ -6595,13 +6822,14 @@ async def handle_wa_live_chart(request):
     is_dv = cfg.get("entry_mode") == "dollar701"
     is_pa = cfg.get("entry_mode") == "punk_algo"
     is_we = cfg.get("entry_mode") == "wae_ema"
+    is_wd = cfg.get("entry_mode") == "wt_div"
     is_tfl = cfg.get("entry_mode") == "trendfolge"
     is_rlm = cfg.get("entry_mode") == "rlm"
     is_vc = cfg.get("entry_mode") == "vwap_cross"
     tf = request.query.get("tf", "")
     SUBMIN = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
-        tf = cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
+        tf = cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
             tf = "5m"
     if tf in SUBMIN:
@@ -6626,6 +6854,9 @@ async def handle_wa_live_chart(request):
     elif is_tfl:
         from trendfolge import tfl_chart_payload
         payload = await asyncio.to_thread(tfl_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_wd:
+        from wt_div import wd_chart_payload
+        payload = await asyncio.to_thread(wd_chart_payload, ts, o, h, l, c, cfg, 1000)
     elif is_we:
         from wae_ema import we_chart_payload
         payload = await we_chart_payload(symbol, cfg, ts, o, h, l, c, tf)
@@ -6987,6 +7218,37 @@ async def handle_pa_montecarlo(request):
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] Punk-Algo-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_wd_montecarlo(request):
+    """Monte-Carlo fuer WT-Divergenz: zufaellige Kombinationen der ausgewaehlten Werte mit Training/Test-Trennung."""
+    from wt_div import run_wd_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 60))))
+        runs = max(1, min(1000, int(body.get("runs", 200))))
+        vary = {str(k): (float(v[0]), float(v[1])) for k, v in (body.get("vary") or {}).items()}
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        max_dd_usd = max(0.0, float(body.get("max_dd_usd") or 0))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(run_wd_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n, seed, max_dd_usd), timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] WT-Divergenz-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
