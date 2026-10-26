@@ -574,6 +574,19 @@ async def _we_cold_fetch(key, symbol, res, days, max_candles, market_type):
     return cs, err
 
 
+def _lead_days(p, zone_s, resolution):
+    """Vorlauf (Tage), der ZUSAETZLICH zum Testzeitraum geladen wird, damit die Zone (EMA/RMA) schon beim ersten Test-Tag eingeschwungen ist.
+    Sekunden-Zeitrahmen holen die Zonen-Kerzen separat, dort ist kein Vorlauf der Signal-Kerzen noetig."""
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        return 0.0
+    return ((_we_warm_htf(p) + 5) * zone_s) / 86400 + 0.25
+
+
+def _window_start(ts, days):
+    """Index der ersten Kerze im Testfenster 'letzte N Tage'."""
+    return bisect_left(ts, ts[-1] - int(days * 86_400_000))
+
+
 def _first_valid_index(zone):
     for i, z in enumerate(zone):
         if z != 0:
@@ -605,8 +618,9 @@ async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
     res_s, zone_s = _res_seconds(resolution), _res_seconds(p["zone_tf"])
     if res_s >= zone_s:
         return {"error": f"Der Signal-Zeitrahmen ({resolution}) muss kleiner sein als der Zonen-Zeitrahmen ({p['zone_tf']})."}
+    lead = _lead_days(p, zone_s, resolution)
     t_fetch = time.time()
-    candles, err, src = await _we_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    candles, err, src = await _we_candles(symbol, resolution, days + lead, max_candles, market_type=cfg.get("binance_market_type", "spot"))
     t_fetch = time.time() - t_fetch
     if err:
         return {"error": err}
@@ -623,18 +637,18 @@ async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
         return {"error": herr}
     t_calc = time.time()
     zone, ema, call, put = await asyncio.to_thread(we_compute, ts, c, h, l, htf, p, zone_ms)
-    start_i = _first_valid_index(zone)
+    start_i = max(_first_valid_index(zone), _window_start(ts, days))   # gehandelt wird nur im Fenster "letzte N Tage" (Vorlauf nur zum Einlaufen)
     trades = _we_simulate(candles, cfg, zone, ema, call, put, start_i, p)
     t_calc = time.time() - t_calc
     stats = summarize_backtest_trades(trades, exclude_top_n)
-    actual_days = (ts[-1] - ts[0]) / 86_400_000
     usable_days = (ts[-1] - ts[start_i]) / 86_400_000 if start_i < len(ts) else 0
+    actual_days = usable_days
     return {
         "symbol": symbol, "entry_mode": "wae_ema", "resolution": resolution,
         "requested_days": days, "actual_days_covered": round(actual_days, 1),
-        "candles_processed": len(ts), "candle_cap": max_candles, "cache_used": src != "neu",
+        "candles_processed": len(ts) - start_i, "candle_cap": max_candles, "cache_used": src != "neu",
         "note": f"Kerzen holen {t_fetch:.1f}s ({ {'cache': 'Cache', 'abgeleitet': 'aus feinerem Zeitrahmen berechnet', 'neu': 'neu von Binance'}[src] }), Berechnung {t_calc:.1f}s. "
-                f"Nutzbar ab Einlaufzeit der Zone: {round(usable_days, 1)} Tage ({p['zone_mode']}-Modus, Ausstieg: {p['exit_mode']}).",
+                f"Getestet wird das Fenster der letzten {round(usable_days, 1)} Tage (die Zone läuft vorher ~{round(lead, 1)} Tage ein); {p['zone_mode']}-Modus, Ausstieg: {p['exit_mode']}.",
         "signals_buy": sum(call), "signals_sell": sum(put),
         "stats": stats,
         "stats_long": summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n),
@@ -683,7 +697,7 @@ WE_MC_PARAMS = {   # kurzer Schluessel -> (Config-Schluessel, Typ, Nachkommastel
 WE_MC_MAX_RUNS = 1000
 WE_MC_MIN_RELIABLE_TRADES = 5
 WE_MC_TEST_FRACTION = 0.3
-WE_MC_MAX_CANDLES = 40_000
+WE_MC_MAX_CANDLES = 80_000
 WE_MC_TIME_BUDGET = 70       # Sekunden; der Aufruf im Dashboard bricht nach 90 s ab - lieber weniger Kombinationen als gar kein Ergebnis
 
 
@@ -739,7 +753,9 @@ async def run_we_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
     max_candles = BACKTEST_MAX_CANDLES.get("wae_ema", 100_000)
     if resolution in SUB_MINUTE_RESOLUTIONS:
         max_candles = min(max_candles, 5000)
-    candles, err, src = await _we_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    p_max = dict(base_p, **{k: ranges[k][1] for k in ranges})
+    lead = _lead_days(p_max, zone_s, resolution)
+    candles, err, src = await _we_candles(symbol, resolution, days + lead, max_candles, market_type=cfg.get("binance_market_type", "spot"))
     if err:
         return {"error": err}
     n = len(candles[4]) if candles else 0
@@ -760,7 +776,8 @@ async def run_we_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
         if bisect_left(hts, ts[i] // zone_ms * zone_ms) - 1 >= max_warm:
             start_i = max(i - 1, 1)
             break
-    if n < 400 or start_i > n * 0.6:
+    start_i = max(start_i, _window_start(ts, days)) if start_i < len(ts) else start_i   # gehandelt wird nur im Fenster "letzte N Tage" - genau wie im Backtest
+    if n < 400 or n - start_i < 300:
         return {"error": f"Zu wenig Kerzen: die Zone braucht bis zu {max_warm} {base_p['zone_tf']}-Kerzen Einlaufzeit, danach sollte noch genug Zeitraum zum Testen übrig sein. "
                          f"Mehr Tage wählen (Richtwert: mind. {int(max_warm * zone_s / 86400 / 0.4) + 1}) oder kleinere Dead-Zone-Länge."}
     runs = max(1, min(WE_MC_MAX_RUNS, int(runs)))
