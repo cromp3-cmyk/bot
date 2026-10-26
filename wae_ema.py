@@ -439,6 +439,21 @@ def _first_valid_index(zone):
     return len(zone)
 
 
+async def _we_get_htf(symbol, cfg, p, resolution, ts, o, h, l, c):
+    """Zonen-Kerzen (hts, hh, hl, hc). Normalfall: aus den Signal-Kerzen zusammengefasst. Bei Sekunden-Zeitrahmen reichen die (auf 5000
+    begrenzten) Signal-Kerzen nicht fuer die Einlaufzeit der Zone -> dann werden die Zonen-Kerzen separat und mit Vorlauf geholt."""
+    zone_s = _res_seconds(p["zone_tf"])
+    if resolution not in SUB_MINUTE_RESOLUTIONS:
+        hts, ho, hh, hl, hc = await asyncio.to_thread(we_aggregate, ts, o, h, l, c, zone_s * 1000)
+        return (hts, hh, hl, hc), None
+    span_s = (ts[-1] - ts[0]) / 1000
+    htf_days = int((span_s + (_we_warm_htf(p) + 30) * zone_s) / 86400) + 2
+    hc_data, err = await _fetch_cached_mo7_backtest_candles(symbol, p["zone_tf"], htf_days, 100_000, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return None, f"Zonen-Kerzen ({p['zone_tf']}) konnten nicht geladen werden: {err}"
+    return (hc_data[0], hc_data[2], hc_data[3], hc_data[4]), None
+
+
 async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
     max_candles = BACKTEST_MAX_CANDLES.get("wae_ema", 100_000)
     resolution = cfg.get("we_resolution", "5m")
@@ -451,7 +466,7 @@ async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
     candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
     if err:
         return {"error": err}
-    need_candles = (_we_warm_htf(p) + 20) * zone_s // res_s
+    need_candles = (_we_warm_htf(p) + 20) * zone_s // res_s if resolution not in SUB_MINUTE_RESOLUTIONS else 200
     if not candles or len(candles[4]) < need_candles + 50:
         have = len(candles[4]) if candles else 0
         return {"error": f"Zu wenig Kerzen: die Zone braucht ca. {_we_warm_htf(p)} {p['zone_tf']}-Kerzen Einlaufzeit (~{need_candles} {resolution}-Kerzen), erhalten {have}. "
@@ -459,10 +474,10 @@ async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
     ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     zone_ms = zone_s * 1000
 
-    def _calc():
-        hts, ho, hh, hl, hc = we_aggregate(ts, o, h, l, c, zone_ms)
-        return we_compute(ts, c, h, l, (hts, hh, hl, hc), p, zone_ms)
-    zone, ema, call, put = await asyncio.to_thread(_calc)
+    htf, herr = await _we_get_htf(symbol, cfg, p, resolution, ts, o, h, l, c)
+    if herr:
+        return {"error": herr}
+    zone, ema, call, put = await asyncio.to_thread(we_compute, ts, c, h, l, htf, p, zone_ms)
     start_i = _first_valid_index(zone)
     trades = _we_simulate(candles, cfg, zone, ema, call, put, start_i, p)
     stats = summarize_backtest_trades(trades, exclude_top_n)
@@ -589,7 +604,10 @@ async def run_we_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
     ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     zone_ms = zone_s * 1000
     max_warm = max(_we_warm_htf(dict(base_p, **{k: ranges[k][1] for k in ranges})), _we_warm_htf(base_p))
-    hts, ho, hh, hl, hc = we_aggregate(ts, o, h, l, c, zone_ms)
+    htf, herr = await _we_get_htf(symbol, cfg, base_p, resolution, ts, o, h, l, c)
+    if herr:
+        return {"error": herr}
+    hts, hh, hl, hc = htf
     start_i = len(ts)
     for i in range(len(ts)):
         if bisect_left(hts, ts[i] // zone_ms * zone_ms) - 1 >= max_warm:
@@ -619,7 +637,6 @@ async def run_we_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
         if key not in seen:
             seen.add(key)
             combos.append(over)
-    htf = (hts, hh, hl, hc)
     deadline = time.time() + WE_MC_TIME_BUDGET
     results, baseline = await asyncio.to_thread(_we_mc_compute, candles, cfg, combos, base_p, htf, zone_ms, start_i, exclude_top_n, deadline)
     reliable = [r for r in results if r["trades"] >= WE_MC_MIN_RELIABLE_TRADES]
