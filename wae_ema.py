@@ -462,10 +462,12 @@ def _slice(data, days, max_candles):
     return _lists(data, lo)
 
 
-def _covers(data, days, res_s, max_candles):
+def _covers(entry, days, res_s, max_candles):
+    """start_req = bis wohin zurueck der damalige Abruf angefragt war. Hat ein Coin kuerzere Historie (z.B. neu gelistet),
+    liegt die erste Kerze spaeter - das darf NICHT als 'nicht abgedeckt' gelten, sonst wuerde jedes Mal neu geladen."""
     need_start = time.time() * 1000 - days * 86_400_000
     tol = max(3 * res_s * 1000, days * 86_400_000 * 0.03)
-    return len(data[0]) > 100 and (data[0][0] <= need_start + tol or len(data[0]) >= max_candles)
+    return len(entry["data"][0]) > 100 and (entry.get("start_req", entry["data"][0][0]) <= need_start + tol or len(entry["data"][0]) >= max_candles)
 
 
 def _resample(data, res_s):
@@ -518,27 +520,30 @@ async def _we_candles(symbol, res, days, max_candles, market_type="spot"):
     res_s = _NATIVE_RES_S[res]
     key = (symbol, res, market_type)
     entry = _WE_CACHE.get(key)
-    if entry and _covers(entry["data"], days, res_s, max_candles):
+    if entry and _covers(entry, days, res_s, max_candles):
         if time.time() - entry["fetched_at"] > WE_CACHE_FRESH_S:
             await _topup(key, symbol, res, market_type)
         entry = _WE_CACHE.get(key)
         _WE_CACHE.move_to_end(key)
+        debug_log(f"⚡ WAE-Kerzen-Cache: {symbol} {res} aus dem Cache ({len(entry['data'][0])} Kerzen)")
         return _slice(entry["data"], days, max_candles), None, "cache"
     for (sym2, res2, mk2), e2 in list(_WE_CACHE.items()):     # aus feinerem Cache ableiten
         fs = _NATIVE_RES_S[res2]
-        if sym2 == symbol and mk2 == market_type and fs < res_s and res_s % fs == 0 and _covers(e2["data"], days, fs, max_candles * res_s // fs):
+        if sym2 == symbol and mk2 == market_type and fs < res_s and res_s % fs == 0 and _covers(e2, days, fs, max_candles * res_s // fs):
             if time.time() - e2["fetched_at"] > WE_CACHE_FRESH_S:
                 await _topup((sym2, res2, mk2), symbol, res2, market_type)
             data = _resample(_lists(_WE_CACHE[(sym2, res2, mk2)]["data"]), res_s)
             if len(data[0]) > 100:
                 packed = _pack(data)
-                _WE_CACHE[key] = {"data": packed, "fetched_at": _WE_CACHE[(sym2, res2, mk2)]["fetched_at"]}
+                _WE_CACHE[key] = {"data": packed, "fetched_at": _WE_CACHE[(sym2, res2, mk2)]["fetched_at"], "start_req": _WE_CACHE[(sym2, res2, mk2)].get("start_req")}
+                debug_log(f"⚡ WAE-Kerzen-Cache: {symbol} {res} aus {res2} abgeleitet (kein Binance-Abruf)")
                 while len(_WE_CACHE) > WE_CACHE_MAX:
                     _WE_CACHE.popitem(last=False)
                 return _slice(packed, days, max_candles), None, "abgeleitet"
     cs, err = await fetch_historical_candles_binance_vol(symbol, res, days, max_candles, market_type=market_type)
     if cs and len(cs[0]) > 100:
-        _WE_CACHE[key] = {"data": _pack(cs), "fetched_at": time.time()}
+        _WE_CACHE[key] = {"data": _pack(cs), "fetched_at": time.time(), "start_req": time.time() * 1000 - days * 86_400_000}
+        debug_log(f"📡 WAE-Kerzen-Cache: {symbol} {res} {days} Tage neu von Binance geladen ({len(cs[0])} Kerzen)")
         _WE_CACHE.move_to_end(key)
         while len(_WE_CACHE) > WE_CACHE_MAX:
             _WE_CACHE.popitem(last=False)
@@ -709,7 +714,7 @@ async def run_we_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
     if err:
         return {"error": err}
     n = len(candles[4]) if candles else 0
-    note = {"cache": "Kerzen aus dem Cache.", "abgeleitet": "Kerzen aus einem feineren Zeitrahmen im Cache berechnet.", "neu": None}[src]
+    note = {"cache": "Kerzen aus dem Cache.", "abgeleitet": "Kerzen aus einem feineren Zeitrahmen im Cache berechnet.", "neu": "Kerzen neu von Binance geladen."}[src]
     if n > WE_MC_MAX_CANDLES:
         candles = tuple(x[-WE_MC_MAX_CANDLES:] for x in candles)
         note = ((note + " ") if note else "") + f"Hinweis: aus Speichergründen wurden nur die jüngsten {WE_MC_MAX_CANDLES} von {n} Kerzen getestet."
