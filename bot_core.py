@@ -455,13 +455,13 @@ def default_config():
         "we_sl_cooldown_seconds": float(os.getenv("WE_SL_COOLDOWN_SECONDS", "30.0")),
         # ===== WT-Divergenz (entry_mode wt_div): WaveTrend-Divergenzen (Welle des Wellenankers) als Einstieg =====
         "wd_resolution": os.getenv("WD_RESOLUTION", "15m"),
-        "wd_src": os.getenv("WD_SRC", "close"),
-        "wd_n1": int(os.getenv("WD_N1", "10")), "wd_n2": int(os.getenv("WD_N2", "21")),
-        "wd_sig_len": int(os.getenv("WD_SIG_LEN", "4")), "wd_wave_scale": float(os.getenv("WD_WAVE_SCALE", "1.35")),
+        "wd_src": os.getenv("WD_SRC", "hlc3"),
+        "wd_n1": int(os.getenv("WD_N1", "9")), "wd_n2": int(os.getenv("WD_N2", "12")),
+        "wd_sig_len": int(os.getenv("WD_SIG_LEN", "3")), "wd_wave_scale": float(os.getenv("WD_WAVE_SCALE", "1.0")),
         "wd_line": os.getenv("WD_LINE", "wt2"),
-        "wd_pivot_left": int(os.getenv("WD_PIVOT_LEFT", "5")), "wd_pivot_right": int(os.getenv("WD_PIVOT_RIGHT", "3")),
-        "wd_min_range": int(os.getenv("WD_MIN_RANGE", "5")), "wd_max_range": int(os.getenv("WD_MAX_RANGE", "60")),
-        "wd_zone": float(os.getenv("WD_ZONE", "0")),   # 0 = keine Zonen-Bedingung, sonst muss mind. ein Pivot bei <= -Zone (Long) bzw. >= +Zone (Short) liegen
+        "wd_pivot_left": int(os.getenv("WD_PIVOT_LEFT", "2")), "wd_pivot_right": int(os.getenv("WD_PIVOT_RIGHT", "2")),
+        "wd_min_range": int(os.getenv("WD_MIN_RANGE", "1")), "wd_max_range": int(os.getenv("WD_MAX_RANGE", "120")),
+        "wd_div_ob": float(os.getenv("WD_DIV_OB", "45")), "wd_div_os": float(os.getenv("WD_DIV_OS", "-65")),   # Pine: Baerische Div. ab Welle >= 45, bullische ab <= -65
         "wd_use_regular": os.getenv("WD_USE_REGULAR", "true").lower() == "true",
         "wd_use_hidden": os.getenv("WD_USE_HIDDEN", "false").lower() == "true",
         "wd_exit_mode": os.getenv("WD_EXIT_MODE", "flip"),
@@ -2192,7 +2192,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wt_div"><label>Pivot rechts (Bestätigung, Kerzen)</label><input type="number" step="1" min="1" id="wd_pivot_right"></div>
   <div data-mode="wt_div"><label>Abstand zum vorigen Pivot: mind. (Kerzen)</label><input type="number" step="1" min="1" id="wd_min_range"></div>
   <div data-mode="wt_div"><label>Abstand zum vorigen Pivot: max. (Kerzen)</label><input type="number" step="1" min="2" id="wd_max_range"></div>
-  <div data-mode="wt_div"><label>Zonen-Bedingung (0 = aus, z.B. 40)</label><input type="number" step="1" min="0" id="wd_zone"></div>
+  <div data-mode="wt_div"><label>Bullische Divergenz ab Welle ≤ (Pine: -65)</label><input type="number" step="1" id="wd_div_os"></div>
+  <div data-mode="wt_div"><label>Bärische Divergenz ab Welle ≥ (Pine: 45)</label><input type="number" step="1" id="wd_div_ob"></div>
   <div data-mode="wt_div"><label>Reguläre Divergenz</label><select class="cfg" id="wd_use_regular"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="wt_div"><label>Hidden-Divergenz</label><select class="cfg" id="wd_use_hidden"><option value="false">Aus</option><option value="true">An</option></select></div>
   <div data-mode="wt_div"><label>Ausstieg</label><select class="cfg" id="wd_exit_mode"><option value="flip">Gegen-Divergenz = Flip (Long↔Short in einer Order)</option><option value="wt_cross">Welle kreuzt Signallinie zurück (Gegen-Divergenz hat Vorrang)</option><option value="sltp_only">Nur SL/TP (Gegen-Divergenzen ignoriert)</option></select></div>
@@ -3501,9 +3502,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <tr><td><input type="checkbox" id="wdmc-on-maxr" checked></td><td>Max. Abstand der Pivots (60)</td>
       <td><input type="number" step="1" id="wdmc-min-maxr" value="30" style="width:80px;"></td>
       <td><input type="number" step="1" id="wdmc-max-maxr" value="120" style="width:80px;"></td></tr>
-    <tr><td><input type="checkbox" id="wdmc-on-zone"></td><td>Zonen-Bedingung (0 = aus)</td>
-      <td><input type="number" step="1" id="wdmc-min-zone" value="0" style="width:80px;"></td>
-      <td><input type="number" step="1" id="wdmc-max-zone" value="60" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-os"></td><td>Bullisch ab Welle ≤ (Pine: -65)</td>
+      <td><input type="number" step="1" id="wdmc-min-os" value="-80" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-os" value="-40" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-ob"></td><td>Bärisch ab Welle ≥ (Pine: 45)</td>
+      <td><input type="number" step="1" id="wdmc-min-ob" value="30" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-ob" value="70" style="width:80px;"></td></tr>
     </tbody>
   </table>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
@@ -4792,7 +4796,7 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
   if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
-const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["zone", "wd_zone", "Zonen-Bedingung"]];
+const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["os", "wd_div_os", "Bullisch ab Welle ≤"], ["ob", "wd_div_ob", "Bärisch ab Welle ≥"]];
 window.wdMcData = {lowdd: [], robust: [], top: [], worst: []};
 window.wdMcVaried = [];
 const wdMcHead = (withRatio) => WD_MC_PARAMS.filter(p => window.wdMcVaried.includes(p[1])).map(p => `<th class="sortable" data-key="${p[1]}">${p[2]} ⇅</th>`).join('')
@@ -5636,7 +5640,8 @@ async function refresh() {
     document.getElementById('wd_pivot_right').value = data.config.wd_pivot_right;
     document.getElementById('wd_min_range').value = data.config.wd_min_range;
     document.getElementById('wd_max_range').value = data.config.wd_max_range;
-    document.getElementById('wd_zone').value = data.config.wd_zone;
+    document.getElementById('wd_div_ob').value = data.config.wd_div_ob;
+    document.getElementById('wd_div_os').value = data.config.wd_div_os;
     document.getElementById('wd_sl_usd').value = data.config.wd_sl_usd;
     document.getElementById('wd_tp_usd').value = data.config.wd_tp_usd;
     document.getElementById('wd_sl_cooldown_seconds').value = data.config.wd_sl_cooldown_seconds;
@@ -6167,7 +6172,8 @@ function buildConfigPayload() {
     wd_min_range: parseInt(document.getElementById('wd_min_range').value) || 5,
     wd_max_range: parseInt(document.getElementById('wd_max_range').value) || 60,
     wd_wave_scale: parseFloat(document.getElementById('wd_wave_scale').value) || 1.35,
-    wd_zone: parseFloat(document.getElementById('wd_zone').value) || 0,
+    wd_div_ob: parseFloat(document.getElementById('wd_div_ob').value),
+    wd_div_os: parseFloat(document.getElementById('wd_div_os').value),
     wd_src: document.getElementById('wd_src').value,
     wd_line: document.getElementById('wd_line').value,
     wd_exit_mode: document.getElementById('wd_exit_mode').value,
@@ -6682,7 +6688,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_zone", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",

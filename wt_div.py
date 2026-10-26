@@ -12,8 +12,10 @@ erst nach "rechts" weiteren GESCHLOSSENEN Kerzen bestaetigt - das Signal kommt a
                   hidden   : Welle tieferes Tief  UND Kurs hoeheres Tief   (Trendfortsetzung)
   Bearish (Short) regulaer : Welle tieferes Hoch  UND Kurs hoeheres Hoch
                   hidden   : Welle hoeheres Hoch  UND Kurs tieferes Hoch
-Der vorherige Pivot muss zwischen min_range und max_range Kerzen zurueckliegen. Optional (zone > 0) muss mindestens einer der beiden
-Pivots in der Zone liegen (Long: Welle <= -zone, Short: Welle >= +zone).
+Wie im Original-Pine (Wellenanker, Abschnitt 4 Divergenzen): Ein Pivot zaehlt NUR, wenn er extrem genug ist (Pivot-Tief der Welle <= "Bullisch ab" = -65,
+Pivot-Hoch >= "Baerisch ab" = 45); nur solche Pivots werden gemerkt und mit dem jeweils vorigen gemerkten Pivot verglichen. Der vorige Pivot darf
+hoechstens max_range Kerzen zurueckliegen (min_range 1 = kein Minimum wie im Pine). Defaults = Pine-Defaults: Welle 9/12/3, Skalierung 1,0, HLC3,
+Pivot 2/2, Linie wt2, nur regulaere Divergenz.
 
 Ausstieg (wd_exit_mode):
   flip        Gegen-Divergenz dreht die Position (Standard)
@@ -44,12 +46,13 @@ def _wd_params(cfg):
     src = cfg.get("wd_src", "close")
     return {
         "src": src if src in ("close", "hlc3", "ohlc4", "hl2") else "close",
-        "n1": max(2, int(cfg.get("wd_n1", 10) or 10)), "n2": max(2, int(cfg.get("wd_n2", 21) or 21)),
-        "sig": max(1, int(cfg.get("wd_sig_len", 4) or 4)), "scale": float(cfg.get("wd_wave_scale", 1.35) or 1.35),
+        "n1": max(2, int(cfg.get("wd_n1", 9) or 9)), "n2": max(2, int(cfg.get("wd_n2", 12) or 12)),
+        "sig": max(1, int(cfg.get("wd_sig_len", 3) or 3)), "scale": float(cfg.get("wd_wave_scale", 1.0) or 1.0),
         "line": line if line in ("wt1", "wt2") else "wt2",
-        "pl": max(1, int(cfg.get("wd_pivot_left", 5) or 5)), "pr": max(1, int(cfg.get("wd_pivot_right", 3) or 3)),
-        "minr": max(1, int(cfg.get("wd_min_range", 5) or 5)), "maxr": max(2, int(cfg.get("wd_max_range", 60) or 60)),
-        "zone": max(0.0, float(cfg.get("wd_zone", 0) or 0)),
+        "pl": max(1, int(cfg.get("wd_pivot_left", 2) or 2)), "pr": max(1, int(cfg.get("wd_pivot_right", 2) or 2)),
+        "minr": max(1, int(cfg.get("wd_min_range", 1) or 1)), "maxr": max(2, int(cfg.get("wd_max_range", 120) or 120)),
+        "ob": float(cfg.get("wd_div_ob", 45) if cfg.get("wd_div_ob") not in (None, "") else 45),
+        "os": float(cfg.get("wd_div_os", -65) if cfg.get("wd_div_os") not in (None, "") else -65),
         "regular": bool(cfg.get("wd_use_regular", True)), "hidden": bool(cfg.get("wd_use_hidden", False)),
         "exit_mode": em if em in EXIT_MODES else "flip",
         "direction": mode if mode in ("both", "long_only", "short_only") else "both",
@@ -74,22 +77,22 @@ def wd_divergences(h, l, osc, p, start=0):
     """-> (bull[], bear[]) - True auf der BESTAETIGUNGS-Kerze (Pivot-Kerze + 'rechts'). Pivots werden ab 'start' gesammelt."""
     n = len(osc)
     bull, bear = [False] * n, [False] * n
-    pl, pr, minr, maxr, zone = p["pl"], p["pr"], p["minr"], p["maxr"], p["zone"]
+    pl, pr, minr, maxr, ob, os_ = p["pl"], p["pr"], p["minr"], p["maxr"], p["ob"], p["os"]
     last_lo = last_hi = None          # (index, osc, kurs)
     for i in range(max(pl, start), n - pr):
         v = osc[i]
         left = osc[i - pl:i]
         right = osc[i + 1:i + pr + 1]
         j = i + pr
-        if v < min(left) and v <= min(right):                      # Pivot-Tief der Welle
-            if last_lo is not None and minr <= i - last_lo[0] <= maxr and (zone == 0 or min(v, last_lo[1]) <= -zone):
+        if v < min(left) and v <= min(right) and v <= os_:         # Pivot-Tief der Welle, nur wenn extrem genug (Pine: plWt <= divOS)
+            if last_lo is not None and minr <= i - last_lo[0] <= maxr:
                 reg = v > last_lo[1] and l[i] < last_lo[2]
                 hid = v < last_lo[1] and l[i] > last_lo[2]
                 if (p["regular"] and reg) or (p["hidden"] and hid):
                     bull[j] = True
             last_lo = (i, v, l[i])
-        if v > max(left) and v >= max(right):                      # Pivot-Hoch der Welle
-            if last_hi is not None and minr <= i - last_hi[0] <= maxr and (zone == 0 or max(v, last_hi[1]) >= zone):
+        if v > max(left) and v >= max(right) and v >= ob:          # Pivot-Hoch der Welle, nur wenn extrem genug (Pine: phWt >= divOB)
+            if last_hi is not None and minr <= i - last_hi[0] <= maxr:
                 reg = v < last_hi[1] and h[i] > last_hi[2]
                 hid = v > last_hi[1] and h[i] < last_hi[2]
                 if (p["regular"] and reg) or (p["hidden"] and hid):
@@ -401,7 +404,7 @@ def wd_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
 WD_MC_PARAMS = {   # Kurzschluessel -> (Config-Schluessel, Typ, Nachkommastellen)
     "n1": ("wd_n1", int, 0), "n2": ("wd_n2", int, 0), "sig": ("wd_sig_len", int, 0), "scale": ("wd_wave_scale", float, 2),
     "pl": ("wd_pivot_left", int, 0), "pr": ("wd_pivot_right", int, 0), "minr": ("wd_min_range", int, 0),
-    "maxr": ("wd_max_range", int, 0), "zone": ("wd_zone", float, 0),
+    "maxr": ("wd_max_range", int, 0), "ob": ("wd_div_ob", float, 0), "os": ("wd_div_os", float, 0),
 }
 WD_MC_MAX_RUNS = 1000
 WD_MC_MIN_RELIABLE_TRADES = 5
@@ -451,7 +454,7 @@ async def run_wd_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
                 return {"error": f"Unbekannter Wert '{k}'."}
             typ = WD_MC_PARAMS[k][1]
             lo, hi = sorted((typ(a), typ(b)))
-            if lo < 0 or (lo == 0 and k != "zone"):
+            if k not in ("ob", "os") and lo <= 0:
                 return {"error": "Alle Bereiche müssen größer als 0 sein."}
             ranges[k] = (lo, hi)
     except (TypeError, ValueError):
