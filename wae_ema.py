@@ -29,12 +29,15 @@ import asyncio
 import math
 import time
 import traceback
+from array import array
 from bisect import bisect_left
+from collections import OrderedDict
 
 from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_reverse
 from strategies import (
     SUB_MINUTE_RESOLUTIONS, get_seconds_candles, fetch_candles_binance_multi, _ema_series,
     summarize_backtest_trades, _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
+    fetch_historical_candles_binance_vol,
 )
 
 EXIT_MODES = ("flip", "ema_cross", "zone_end", "sltp_only")
@@ -432,6 +435,116 @@ def _we_simulate(candles, cfg, zone, ema, call, put, start_i, p):
     return trades
 
 
+
+# ============================================================================
+# KERZEN-CACHE fuer Backtest/Monte-Carlo: nicht bei jedem Klick neu von Binance holen
+#  - eine Kopie je (Coin, Zeitrahmen), kompakt als array gespeichert (4x weniger Speicher als Listen)
+#  - aktuell genug (< 10 Min) -> sofort aus dem Cache; aelter -> nur die fehlenden neuen Kerzen nachladen und anhaengen
+#  - groeberer Zeitrahmen (z.B. 15m, 1h) wird aus einem feineren Cache (z.B. 5m, 1m) berechnet - ohne Abruf
+# ============================================================================
+_WE_CACHE = OrderedDict()   # (coin, zeitrahmen, markt) -> {"data": (ts, o, h, l, c, v) als array, "fetched_at": ...}
+WE_CACHE_MAX = 3
+WE_CACHE_FRESH_S = 600
+_NATIVE_RES_S = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800, "12h": 43200, "1d": 86400}
+
+
+def _pack(cs):
+    return (array("q", [int(x) for x in cs[0]]),) + tuple(array("d", x) for x in cs[1:6])
+
+
+def _lists(data, lo=0):
+    return tuple(list(x[lo:]) for x in data)
+
+
+def _slice(data, days, max_candles):
+    ts = data[0]
+    lo = max(bisect_left(ts, ts[-1] - int(days * 86_400_000)), len(ts) - max_candles, 0)
+    return _lists(data, lo)
+
+
+def _covers(data, days, res_s, max_candles):
+    need_start = time.time() * 1000 - days * 86_400_000
+    tol = max(3 * res_s * 1000, days * 86_400_000 * 0.03)
+    return len(data[0]) > 100 and (data[0][0] <= need_start + tol or len(data[0]) >= max_candles)
+
+
+def _resample(data, res_s):
+    """Feinere (epoch-ausgerichtete) Kerzen -> groebere. Eine angefangene erste Kerze wird verworfen."""
+    ms = res_s * 1000
+    ts, o, h, l, c, v = data
+    out = ([], [], [], [], [], [])
+    cur = None
+    for i in range(len(ts)):
+        b = ts[i] // ms * ms
+        if b != cur:
+            cur = b
+            out[0].append(b); out[1].append(o[i]); out[2].append(h[i]); out[3].append(l[i]); out[4].append(c[i]); out[5].append(v[i])
+        else:
+            if h[i] > out[2][-1]:
+                out[2][-1] = h[i]
+            if l[i] < out[3][-1]:
+                out[3][-1] = l[i]
+            out[4][-1] = c[i]; out[5][-1] += v[i]
+    if ts and ts[0] % ms != 0 and out[0]:
+        out = tuple(x[1:] for x in out)
+    return out
+
+
+async def _topup(key, symbol, res, market):
+    """Haengt die seit dem Abruf neu entstandenen Kerzen an. -> True bei Erfolg."""
+    entry = _WE_CACHE.get(key)
+    if not entry:
+        return False
+    res_s = _NATIVE_RES_S[res]
+    data = entry["data"]
+    gap_days = (time.time() * 1000 - data[0][-1]) / 86_400_000 + 3 * res_s / 86400
+    if gap_days * 86400 / res_s > 4000:
+        return False                       # zu lange her -> lieber komplett neu holen
+    new, err = await fetch_historical_candles_binance_vol(symbol, res, gap_days, 5000, market_type=market)
+    if err or not new or len(new[0]) == 0:
+        return False
+    keep = bisect_left(data[0], new[0][0])   # die damals noch laufende letzte Kerze wird durch die neue ersetzt
+    merged = tuple(list(data[i][:keep]) + list(new[i]) for i in range(6))
+    entry["data"] = _pack(merged)
+    entry["fetched_at"] = time.time()
+    return True
+
+
+async def _we_candles(symbol, res, days, max_candles, market_type="spot"):
+    """-> (candles, err, quelle) mit quelle in {"cache", "abgeleitet", "neu"}."""
+    if res not in _NATIVE_RES_S:   # eigene Minuten / Sekunden: bestehender Cache der Bot-Basis
+        cs, err = await _fetch_cached_mo7_backtest_candles(symbol, res, days, max_candles, market_type=market_type)
+        return cs, err, "neu"
+    res_s = _NATIVE_RES_S[res]
+    key = (symbol, res, market_type)
+    entry = _WE_CACHE.get(key)
+    if entry and _covers(entry["data"], days, res_s, max_candles):
+        if time.time() - entry["fetched_at"] > WE_CACHE_FRESH_S:
+            await _topup(key, symbol, res, market_type)
+        entry = _WE_CACHE.get(key)
+        _WE_CACHE.move_to_end(key)
+        return _slice(entry["data"], days, max_candles), None, "cache"
+    for (sym2, res2, mk2), e2 in list(_WE_CACHE.items()):     # aus feinerem Cache ableiten
+        fs = _NATIVE_RES_S[res2]
+        if sym2 == symbol and mk2 == market_type and fs < res_s and res_s % fs == 0 and _covers(e2["data"], days, fs, max_candles * res_s // fs):
+            if time.time() - e2["fetched_at"] > WE_CACHE_FRESH_S:
+                await _topup((sym2, res2, mk2), symbol, res2, market_type)
+            data = _resample(_lists(_WE_CACHE[(sym2, res2, mk2)]["data"]), res_s)
+            if len(data[0]) > 100:
+                packed = _pack(data)
+                _WE_CACHE[key] = {"data": packed, "fetched_at": _WE_CACHE[(sym2, res2, mk2)]["fetched_at"]}
+                while len(_WE_CACHE) > WE_CACHE_MAX:
+                    _WE_CACHE.popitem(last=False)
+                return _slice(packed, days, max_candles), None, "abgeleitet"
+    cs, err = await fetch_historical_candles_binance_vol(symbol, res, days, max_candles, market_type=market_type)
+    if cs and len(cs[0]) > 100:
+        _WE_CACHE[key] = {"data": _pack(cs), "fetched_at": time.time()}
+        _WE_CACHE.move_to_end(key)
+        while len(_WE_CACHE) > WE_CACHE_MAX:
+            _WE_CACHE.popitem(last=False)
+    return cs, err, "neu"
+
+
 def _first_valid_index(zone):
     for i, z in enumerate(zone):
         if z != 0:
@@ -448,7 +561,7 @@ async def _we_get_htf(symbol, cfg, p, resolution, ts, o, h, l, c):
         return (hts, hh, hl, hc), None
     span_s = (ts[-1] - ts[0]) / 1000
     htf_days = int((span_s + (_we_warm_htf(p) + 30) * zone_s) / 86400) + 2
-    hc_data, err = await _fetch_cached_mo7_backtest_candles(symbol, p["zone_tf"], htf_days, 100_000, market_type=cfg.get("binance_market_type", "spot"))
+    hc_data, err, _src = await _we_candles(symbol, p["zone_tf"], htf_days, 100_000, market_type=cfg.get("binance_market_type", "spot"))
     if err:
         return None, f"Zonen-Kerzen ({p['zone_tf']}) konnten nicht geladen werden: {err}"
     return (hc_data[0], hc_data[2], hc_data[3], hc_data[4]), None
@@ -463,7 +576,7 @@ async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
     res_s, zone_s = _res_seconds(resolution), _res_seconds(p["zone_tf"])
     if res_s >= zone_s:
         return {"error": f"Der Signal-Zeitrahmen ({resolution}) muss kleiner sein als der Zonen-Zeitrahmen ({p['zone_tf']})."}
-    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    candles, err, src = await _we_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
     if err:
         return {"error": err}
     need_candles = (_we_warm_htf(p) + 20) * zone_s // res_s if resolution not in SUB_MINUTE_RESOLUTIONS else 200
@@ -486,7 +599,7 @@ async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
     return {
         "symbol": symbol, "entry_mode": "wae_ema", "resolution": resolution,
         "requested_days": days, "actual_days_covered": round(actual_days, 1),
-        "candles_processed": len(ts), "candle_cap": max_candles, "cache_used": False,
+        "candles_processed": len(ts), "candle_cap": max_candles, "cache_used": src != "neu",
         "note": f"Davon ab der Einlaufzeit der Zone nutzbar: {round(usable_days, 1)} Tage ({p['zone_mode']}-Modus, Ausstieg: {p['exit_mode']}).",
         "signals_buy": sum(call), "signals_sell": sum(put),
         "stats": stats,
@@ -592,14 +705,14 @@ async def run_we_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
     max_candles = BACKTEST_MAX_CANDLES.get("wae_ema", 100_000)
     if resolution in SUB_MINUTE_RESOLUTIONS:
         max_candles = min(max_candles, 5000)
-    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    candles, err, src = await _we_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
     if err:
         return {"error": err}
     n = len(candles[4]) if candles else 0
-    note = None
+    note = {"cache": "Kerzen aus dem Cache.", "abgeleitet": "Kerzen aus einem feineren Zeitrahmen im Cache berechnet.", "neu": None}[src]
     if n > WE_MC_MAX_CANDLES:
         candles = tuple(x[-WE_MC_MAX_CANDLES:] for x in candles)
-        note = f"Hinweis: aus Speichergründen wurden nur die jüngsten {WE_MC_MAX_CANDLES} von {n} Kerzen getestet."
+        note = ((note + " ") if note else "") + f"Hinweis: aus Speichergründen wurden nur die jüngsten {WE_MC_MAX_CANDLES} von {n} Kerzen getestet."
         n = WE_MC_MAX_CANDLES
     ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     zone_ms = zone_s * 1000
