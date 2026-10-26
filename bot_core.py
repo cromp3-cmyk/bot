@@ -3086,6 +3086,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <th class="sortable" data-key="exit">Ausstieg $ ⇅</th>
         <th class="sortable" data-key="reason">Grund ⇅</th>
         <th class="sortable" data-key="pnl">PnL $ ⇅</th>
+        <th class="sortable" data-key="mae_usd" title="Tiefster Stand des offenen PnL während der Position (aus 1m-Kerzen, Näherung)">Tiefster Stand $ ⇅</th>
+        <th class="sortable" data-key="mfe_usd" title="Höchster Stand des offenen PnL während der Position (aus 1m-Kerzen, Näherung)">Höchster Stand $ ⇅</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -4439,6 +4441,8 @@ const renderBtTrades = makeSortableTable('bt-trades-table', () => window.btTrade
     <td>${isOpenRow ? '–' : r.exit}</td>
     <td>${r.reason}</td>
     <td class="${pnlClass}">${isOpenRow ? '–' : r.pnl.toFixed(2)}</td>
+    <td class="${r.mae_usd < 0 ? 'red' : ''}">${(isOpenRow || r.mae_usd === undefined) ? '–' : r.mae_usd.toFixed(2)}</td>
+    <td class="${r.mfe_usd > 0 ? 'green' : ''}">${(isOpenRow || r.mfe_usd === undefined) ? '–' : r.mfe_usd.toFixed(2)}</td>
   </tr>`;
 });
 
@@ -6982,6 +6986,60 @@ async def handle_wa_live_chart(request):
     return web.json_response(payload)
 
 
+async def _enrich_trade_excursions(symbol, cfg, result, max_days=60):
+    """Ergaenzt jeden geschlossenen Backtest-Trade um den tiefsten (mae_usd, <= 0) und hoechsten (mfe_usd, >= 0) Stand
+    des offenen PnL waehrend der Haltedauer - berechnet aus 1-Minuten-Kerzen (Hoch/Tief). Generisch fuer alle Strategien:
+    Positionsgroesse = pnl / (Ausstieg - Einstieg), Kerzenlaenge = Median aus (exit_ts - entry_ts) / bars_held.
+    Annahme: Einstieg zum Schluss der Signalkerze (entry_ts + Kerzenlaenge) - wie bei den Strategien ueblich; es ist eine NAEHERUNG
+    (1m-Kerzen, keine Ticks). Gibt einen Hinweistext (oder '') zurueck; Fehler brechen den Backtest nie ab."""
+    import bisect, statistics, time as _t
+    trades = result.get("trades") if isinstance(result, dict) else None
+    closed = [t for t in (trades or []) if t.get("pnl") is not None and t.get("exit") is not None and t.get("entry_ts") and t.get("exit_ts")]
+    if not closed:
+        return ""
+    first = min(t["entry_ts"] for t in closed)
+    need_days = (_t.time() * 1000 - first) / 86400000 + 0.2
+    if need_days > max_days:
+        return f"Tiefster/höchster Stand je Trade: nur bis {max_days} Tage verfügbar."
+    lens = [(t["exit_ts"] - t["entry_ts"]) / t["bars_held"] for t in closed if t.get("bars_held")]
+    bar_ms = statistics.median(lens) if lens else 0
+    from wae_ema import _we_candles
+    candles, err, _src = await _we_candles(symbol, "1m", need_days, 100_000, market_type=cfg.get("binance_market_type", "spot"))
+    if err or not candles or not candles[0]:
+        return "Tiefster/höchster Stand je Trade: 1-Minuten-Kerzen nicht verfügbar."
+    ts, _o, hi, lo, _c = candles
+    n_ok = 0
+    for t in closed:
+        entry, ex, pnl = float(t["entry"]), float(t["exit"]), float(t["pnl"])
+        long_ = t.get("dir") == "long"
+        diff = (ex - entry) if long_ else (entry - ex)
+        if abs(diff) > 1e-12 and abs(pnl) > 0:
+            size = pnl / diff
+        else:
+            m, lev = cfg.get("margin"), cfg.get("leverage")
+            size = (float(m) * float(lev) / entry) if (m and lev and entry) else 0.0
+        a = bisect.bisect_left(ts, t["entry_ts"] + bar_ms)
+        b = bisect.bisect_right(ts, t["exit_ts"] + bar_ms - 1)
+        if size <= 0 or b <= a:
+            continue
+        hmax, lmin = max(hi[a:b]), min(lo[a:b])
+        best = (hmax - entry) * size if long_ else (entry - lmin) * size
+        worst = (lmin - entry) * size if long_ else (entry - hmax) * size
+        t["mfe_usd"] = round(max(best, pnl, 0.0), 2)
+        t["mae_usd"] = round(min(worst, pnl, 0.0), 2)
+        n_ok += 1
+    if not n_ok:
+        return ""
+    w = [t["mae_usd"] for t in closed if "mae_usd" in t and t["pnl"] > 0]
+    l = [t["mfe_usd"] for t in closed if "mfe_usd" in t and t["pnl"] < 0]
+    txt = "Tiefster/höchster Stand je Trade aus 1m-Kerzen (Näherung)."
+    if w:
+        txt += f" Gewinner-Trades waren im Schnitt bis {round(sum(w) / len(w), 2)} $ im Minus (SL darunter würde sie abschneiden)."
+    if l:
+        txt += f" Verlierer-Trades waren im Schnitt bis +{round(sum(l) / len(l), 2)} $ im Plus."
+    return txt
+
+
 async def handle_backtest(request):
     from strategies import run_backtest
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()
@@ -7034,6 +7092,15 @@ async def handle_backtest(request):
         # "JSON.parse"-Fehler ab, statt die eigentliche Ursache anzuzeigen.
         debug_log(f"⚠️ [{symbol}] Backtest ({entry_mode}) fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Backtest fehlgeschlagen: {e}"}, status=500)
+    if isinstance(result, dict) and not result.get("error"):
+        try:
+            extra = await asyncio.wait_for(_enrich_trade_excursions(symbol, cfg, result), timeout=25)
+            if extra:
+                result["note"] = (result.get("note", "") + " " + extra).strip()
+        except asyncio.TimeoutError:
+            result["note"] = (result.get("note", "") + " Tiefster/höchster Stand je Trade: 1m-Kerzen laden dauert noch (beim nächsten Backtest aus dem Cache).").strip()
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Trade-Extremwerte fehlgeschlagen", {"error": str(e)})
     return web.json_response(result)
 
 
