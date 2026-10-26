@@ -445,6 +445,7 @@ def _we_simulate(candles, cfg, zone, ema, call, put, start_i, p):
 _WE_CACHE = OrderedDict()   # (coin, zeitrahmen, markt) -> {"data": (ts, o, h, l, c, v) als array, "fetched_at": ...}
 WE_CACHE_MAX = 3
 WE_CACHE_FRESH_S = 600
+_WE_INFLIGHT = {}           # laufende Abrufe (verhindert doppeltes Laden bei erneutem Klick)
 _NATIVE_RES_S = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800, "12h": 43200, "1d": 86400}
 
 
@@ -540,14 +541,37 @@ async def _we_candles(symbol, res, days, max_candles, market_type="spot"):
                 while len(_WE_CACHE) > WE_CACHE_MAX:
                     _WE_CACHE.popitem(last=False)
                 return _slice(packed, days, max_candles), None, "abgeleitet"
-    cs, err = await fetch_historical_candles_binance_vol(symbol, res, days, max_candles, market_type=market_type)
+    # Der Abruf laeuft als eigene Aufgabe, die ein Abbruch der Anfrage (Dashboard-Zeitlimit 90 s) ueberlebt: bei langen Zeitraeumen
+    # braucht Binance laenger als das Limit - ohne das wuerde NIE etwas im Cache landen und jeder Klick fiele wieder ins Zeitlimit.
+    fk = (key, days, max_candles)
+    task = _WE_INFLIGHT.get(fk)
+    if task is None:
+        task = asyncio.ensure_future(_we_cold_fetch(key, symbol, res, days, max_candles, market_type))
+        _WE_INFLIGHT[fk] = task
+        task.add_done_callback(lambda _t, _fk=fk: _WE_INFLIGHT.pop(_fk, None))
+    else:
+        debug_log(f"⏳ WAE-Kerzen-Cache: {symbol} {res} {days} Tage werden schon geladen - warte darauf")
+    try:
+        cs, err = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        debug_log(f"⏱️ WAE-Kerzen-Cache: {symbol} {res} {days} Tage - Anfrage abgebrochen, der Abruf läuft im Hintergrund weiter; "
+                  f"nach einigen Sekunden den Test nochmal starten (dann aus dem Cache)")
+        raise
+    return cs, err, "neu"
+
+
+async def _we_cold_fetch(key, symbol, res, days, max_candles, market_type):
+    try:
+        cs, err = await fetch_historical_candles_binance_vol(symbol, res, days, max_candles, market_type=market_type)
+    except Exception as e:                      # nie unbehandelt in der Aufgabe lassen
+        return None, f"Kerzen-Abruf fehlgeschlagen: {e}"
     if cs and len(cs[0]) > 100:
         _WE_CACHE[key] = {"data": _pack(cs), "fetched_at": time.time(), "start_req": time.time() * 1000 - days * 86_400_000}
         debug_log(f"📡 WAE-Kerzen-Cache: {symbol} {res} {days} Tage neu von Binance geladen ({len(cs[0])} Kerzen)")
         _WE_CACHE.move_to_end(key)
         while len(_WE_CACHE) > WE_CACHE_MAX:
             _WE_CACHE.popitem(last=False)
-    return cs, err, "neu"
+    return cs, err
 
 
 def _first_valid_index(zone):
@@ -581,7 +605,9 @@ async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
     res_s, zone_s = _res_seconds(resolution), _res_seconds(p["zone_tf"])
     if res_s >= zone_s:
         return {"error": f"Der Signal-Zeitrahmen ({resolution}) muss kleiner sein als der Zonen-Zeitrahmen ({p['zone_tf']})."}
+    t_fetch = time.time()
     candles, err, src = await _we_candles(symbol, resolution, days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    t_fetch = time.time() - t_fetch
     if err:
         return {"error": err}
     need_candles = (_we_warm_htf(p) + 20) * zone_s // res_s if resolution not in SUB_MINUTE_RESOLUTIONS else 200
@@ -595,9 +621,11 @@ async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
     htf, herr = await _we_get_htf(symbol, cfg, p, resolution, ts, o, h, l, c)
     if herr:
         return {"error": herr}
+    t_calc = time.time()
     zone, ema, call, put = await asyncio.to_thread(we_compute, ts, c, h, l, htf, p, zone_ms)
     start_i = _first_valid_index(zone)
     trades = _we_simulate(candles, cfg, zone, ema, call, put, start_i, p)
+    t_calc = time.time() - t_calc
     stats = summarize_backtest_trades(trades, exclude_top_n)
     actual_days = (ts[-1] - ts[0]) / 86_400_000
     usable_days = (ts[-1] - ts[start_i]) / 86_400_000 if start_i < len(ts) else 0
@@ -605,7 +633,8 @@ async def run_we_backtest(symbol, cfg, days, exclude_top_n=1):
         "symbol": symbol, "entry_mode": "wae_ema", "resolution": resolution,
         "requested_days": days, "actual_days_covered": round(actual_days, 1),
         "candles_processed": len(ts), "candle_cap": max_candles, "cache_used": src != "neu",
-        "note": f"Davon ab der Einlaufzeit der Zone nutzbar: {round(usable_days, 1)} Tage ({p['zone_mode']}-Modus, Ausstieg: {p['exit_mode']}).",
+        "note": f"Kerzen holen {t_fetch:.1f}s ({ {'cache': 'Cache', 'abgeleitet': 'aus feinerem Zeitrahmen berechnet', 'neu': 'neu von Binance'}[src] }), Berechnung {t_calc:.1f}s. "
+                f"Nutzbar ab Einlaufzeit der Zone: {round(usable_days, 1)} Tage ({p['zone_mode']}-Modus, Ausstieg: {p['exit_mode']}).",
         "signals_buy": sum(call), "signals_sell": sum(put),
         "stats": stats,
         "stats_long": summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n),

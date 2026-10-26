@@ -3969,7 +3969,8 @@ document.getElementById('btn-backtest').addEventListener('click', async () => {
     } else {
       const coveredLabel = unit === 'hours' ? `${(data.actual_days_covered * 24).toFixed(1)} Stunden` : `${data.actual_days_covered} Tage`;
       statusEl.innerText = `${data.cache_used ? '⚡ aus Cache' : '📡 neu von Binance geladen'} - ${data.candles_processed} Kerzen verarbeitet (${coveredLabel}, Zeitrahmen ${data.resolution})` +
-        (data.candles_processed >= data.candle_cap ? ` - auf ${data.candle_cap} Kerzen begrenzt (Performance-Schutz)` : '');
+        (data.candles_processed >= data.candle_cap ? ` - auf ${data.candle_cap} Kerzen begrenzt (Performance-Schutz)` : '') +
+        (data.note ? ` | ${data.note}` : '');
       document.getElementById('bt-candles').innerText = data.candles_processed;
       document.getElementById('bt-days').innerText = coveredLabel;
       document.getElementById('bt-trades').innerText = data.stats.trades;
