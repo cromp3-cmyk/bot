@@ -3701,6 +3701,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
+
+// === Traffic sparen (Render rechnet ausgehende Daten ab): Aktualisierungen pausieren, solange der Tab NICHT sichtbar ist ===
+(() => {
+  const _si = window.setInterval.bind(window);
+  window.setInterval = (fn, ms, ...args) => _si(() => { if (!document.hidden) fn(...args); }, ms);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && typeof refresh === 'function') { try { refresh(); } catch (e) {} } });
+})();
 let priceChart;
 let obiChart;
 let quadStochChart;
@@ -4227,7 +4234,7 @@ async function scalpPollTrend() {
   } catch (e) {}
 }
 setInterval(scalpPollTrend, 10000); setTimeout(scalpPollTrend, 3000);
-setInterval(wacPollLive, 2000);
+setInterval(wacPollLive, 4000);   // war 2000: Live-Chart sendet bis zu 1000 Kerzen je Abruf (Render rechnet ausgehenden Traffic ab)
 setInterval(wacPollTrend, 30000); setTimeout(wacPollTrend, 3000);
 document.getElementById('bt-trades-table').addEventListener('click', ev => {
   const tr = ev.target.closest('tbody tr'); if (!tr) return;

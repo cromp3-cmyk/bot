@@ -46,7 +46,7 @@ from scalp import (
 
 
 async def start_web_server():
-    app = web.Application(middlewares=[basic_auth_middleware])
+    app = web.Application(middlewares=[basic_auth_middleware, compress_middleware])
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/symbols", handle_symbols)
     app.router.add_get("/api/overview", handle_overview)
@@ -110,6 +110,20 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     debug_log(f"🌐 Dashboard läuft auf Port {PORT}")
+
+
+@web.middleware
+async def compress_middleware(request, handler):
+    """Antworten (HTML/JSON) komprimieren - Render rechnet die ausgehende Datenmenge ab; JSON schrumpft dabei auf ca. 10-20 %."""
+    resp = await handler(request)
+    try:
+        if isinstance(resp, web.Response) and not resp.prepared and not resp.headers.get("Content-Encoding"):
+            ct = resp.content_type or ""
+            if ct.startswith("text/") or ct in ("application/json", "application/javascript"):
+                resp.enable_compression()
+    except Exception:
+        pass
+    return resp
 
 
 async def main():
