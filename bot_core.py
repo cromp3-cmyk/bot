@@ -3514,6 +3514,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="wdmc-days" value="60" style="width:90px;"></div>
     <div><label>Durchläufe (max. 1000)</label><input type="number" step="50" min="1" max="1000" id="wdmc-runs" value="200" style="width:90px;"></div>
     <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="wdmc-seed" style="width:110px;"></div>
+    <div><label>bis Seed (leer = nur einer, max. 20 Seeds)</label><input type="number" step="1" id="wdmc-seed-to" style="width:110px;"></div>
     <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="wdmc-exclude-top-n" value="1" style="width:90px;"></div>
     <div><label>Max. Drawdown $ (0 = egal)</label><input type="number" step="1" min="0" id="wdmc-max-dd" value="0" style="width:90px;"></div>
     <button id="btn-wd-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
@@ -4817,6 +4818,23 @@ const wdMcRowHtml = (r) => {
   </tr>`;
 };
 const wdMcKinds = ['lowdd', 'robust', 'top', 'worst'];
+function wdMergeMc(a, b) {
+  const vk = (b.varied || a.varied || []);
+  const key = r => vk.map(k => r[k]).join('|');
+  const merge = (x, y, cmp, lim) => {
+    const seen = new Set(), out = [];
+    [...(x || []), ...(y || [])].forEach(r => { const k = key(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
+    return out.sort(cmp).slice(0, lim);
+  };
+  a.lowdd_results = merge(a.lowdd_results, b.lowdd_results, (p, q) => q.pnl_dd_ratio - p.pnl_dd_ratio, 30);
+  a.robust_results = merge(a.robust_results, b.robust_results, (p, q) => q.pnl_test - p.pnl_test, 30);
+  a.results = merge(a.results, b.results, (p, q) => q.total_pnl_usd - p.total_pnl_usd, 30);
+  a.worst_results = merge(a.worst_results, b.worst_results, (p, q) => p.total_pnl_usd - q.total_pnl_usd, 20);
+  a.combos_tested += b.combos_tested; a.combos_requested += b.combos_requested;
+  a.robust_count += b.robust_count; a.lowdd_count += b.lowdd_count;
+  a.profitable_pct = Math.round((a.profitable_pct + b.profitable_pct) * 5) / 10;
+  return a;
+}
 document.getElementById('btn-wd-mc').addEventListener('click', async () => {
   const btn = document.getElementById('btn-wd-mc');
   const statusEl = document.getElementById('wdmc-status');
@@ -4842,9 +4860,18 @@ document.getElementById('btn-wd-mc').addEventListener('click', async () => {
   baseEl.innerText = '';
   statusEl.innerText = `⏳ Lade Kerzen und teste die Zufalls-Kombinationen...`;
   try {
-    const res = await fetch(`/api/wd_mc?symbol=${sweepSymbol}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-    const data = await res.json();
-    if (sweepSymbol !== currentSymbol) return;
+    const s1 = parseInt(payload.seed), s2 = parseInt(document.getElementById('wdmc-seed-to').value);
+    const seeds = (!isNaN(s1) && !isNaN(s2) && s2 > s1) ? Array.from({length: Math.min(s2 - s1 + 1, 20)}, (_, i) => s1 + i) : [payload.seed];
+    let data = null;
+    for (let si = 0; si < seeds.length; si++) {
+      if (seeds.length > 1) statusEl.innerText = `⏳ Seed ${seeds[si]} (${si + 1} von ${seeds.length})...`;
+      const res = await fetch(`/api/wd_mc?symbol=${sweepSymbol}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...payload, seed: seeds[si]})});
+      const d = await res.json();
+      if (sweepSymbol !== currentSymbol) return;
+      if (d.error) { data = d; break; }
+      data = si === 0 ? d : wdMergeMc(data, d);
+    }
+    if (seeds.length > 1 && data && !data.error) data.note = `Seeds ${seeds[0]} bis ${seeds[seeds.length - 1]} zusammengeführt (Listen = die besten über alle Seeds, doppelte Kombinationen entfernt). ` + (data.note || '');
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
