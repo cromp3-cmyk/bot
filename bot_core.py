@@ -464,7 +464,7 @@ def default_config():
         "wd_div_ob": float(os.getenv("WD_DIV_OB", "45")), "wd_div_os": float(os.getenv("WD_DIV_OS", "-65")),   # Pine: Baerische Div. ab Welle >= 45, bullische ab <= -65
         "wd_use_regular": os.getenv("WD_USE_REGULAR", "true").lower() == "true",
         "wd_use_hidden": os.getenv("WD_USE_HIDDEN", "false").lower() == "true",
-        "wd_exit_mode": os.getenv("WD_EXIT_MODE", "flip"),
+        "wd_exit_mode": os.getenv("WD_EXIT_MODE", "flip"), "wd_exit_zone": float(os.getenv("WD_EXIT_ZONE", "53")),
         "wd_direction_mode": os.getenv("WD_DIRECTION_MODE", "both"),
         "wd_sl_usd": float(os.getenv("WD_SL_USD", "0")), "wd_tp_usd": float(os.getenv("WD_TP_USD", "0")),
         "wd_sl_cooldown_seconds": float(os.getenv("WD_SL_COOLDOWN_SECONDS", "30.0")),
@@ -2196,7 +2196,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wt_div"><label>Bärische Divergenz ab Welle ≥ (Pine: 45)</label><input type="number" step="1" id="wd_div_ob"></div>
   <div data-mode="wt_div"><label>Reguläre Divergenz</label><select class="cfg" id="wd_use_regular"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="wt_div"><label>Hidden-Divergenz</label><select class="cfg" id="wd_use_hidden"><option value="false">Aus</option><option value="true">An</option></select></div>
-  <div data-mode="wt_div"><label>Ausstieg</label><select class="cfg" id="wd_exit_mode"><option value="flip">Gegen-Divergenz = Flip (Long↔Short in einer Order)</option><option value="wt_cross">Welle kreuzt Signallinie zurück (Gegen-Divergenz hat Vorrang)</option><option value="sltp_only">Nur SL/TP (Gegen-Divergenzen ignoriert)</option></select></div>
+  <div data-mode="wt_div"><label>Ausstieg</label><select class="cfg" id="wd_exit_mode"><option value="flip">Gegen-Divergenz = Flip (Long↔Short in einer Order)</option><option value="wt_cross">Welle kreuzt Signallinie zurück (Gegen-Divergenz hat Vorrang)</option><option value="wt_cross_zone">Cross der Linien auf der anderen Seite (ab Ausstiegs-Zone, Gegen-Divergenz hat Vorrang)</option><option value="sltp_only">Nur SL/TP (Gegen-Divergenzen ignoriert)</option></select></div>
+  <div data-mode="wt_div"><label>Ausstiegs-Zone für „Cross auf der anderen Seite" (Long endet bei Cross abwärts über +X, Short bei Cross aufwärts unter −X; Wellenanker: 53)</label><input type="number" step="1" min="0" id="wd_exit_zone"></div>
   <div data-mode="wt_div"><label>Richtung</label><select class="cfg" id="wd_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
   <div data-mode="wt_div"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="wd_sl_usd"></div>
   <div data-mode="wt_div"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="wd_tp_usd"></div>
@@ -3510,6 +3511,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <tr><td><input type="checkbox" id="wdmc-on-ob"></td><td>Bärisch ab Welle ≥ (Pine: 45)</td>
       <td><input type="number" step="1" id="wdmc-min-ob" value="30" style="width:80px;"></td>
       <td><input type="number" step="1" id="wdmc-max-ob" value="70" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-exit_zone"></td><td>Ausstiegs-Zone (nur bei „Cross auf der anderen Seite", Wellenanker: 53)</td>
+      <td><input type="number" step="1" id="wdmc-min-exit_zone" value="30" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-exit_zone" value="70" style="width:80px;"></td></tr>
     <tr><td><input type="checkbox" id="wdmc-on-sl_usd"></td><td>Stop-Loss $ pro Position (0 = kein SL)</td>
       <td><input type="number" step="1" id="wdmc-min-sl_usd" value="5" style="width:80px;"></td>
       <td><input type="number" step="1" id="wdmc-max-sl_usd" value="40" style="width:80px;"></td></tr>
@@ -4207,6 +4211,18 @@ function wacSetOverlays(list) {
   });
   Object.keys(wacOvSeries).forEach(k => { if (!seen[k]) wacOvSeries[k].setData([]); });
 }
+// Divergenz-Linien (WT-Divergenz): je Divergenz eine Linie im Kurs-Fenster und eine im Wellen-Fenster
+let wacDivSeries = [];
+function wacSetDivLines(list) {
+  const sig = JSON.stringify(list || []); if (sig === WAC.divSig) return; WAC.divSig = sig;
+  wacDivSeries.forEach(([chart, s]) => { try { chart.removeSeries(s); } catch (e) {} }); wacDivSeries = [];
+  (list || []).forEach(dv => {
+    const col = dv.kind === 'long' ? '#22c55e' : '#ef4444';
+    const opt = {color: col, lineWidth: 2, lineStyle: dv.hidden ? 2 : 0, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false};
+    const sp = WAC.price.addLineSeries(opt); sp.setData([{time: dv.t1, value: dv.p1}, {time: dv.t2, value: dv.p2}]); wacDivSeries.push([WAC.price, sp]);
+    const sw = WAC.wt.addLineSeries(opt); sw.setData([{time: dv.t1, value: dv.w1}, {time: dv.t2, value: dv.w2}]); wacDivSeries.push([WAC.wt, sw]);
+  });
+}
 let wacPosLines = [], wacGridLines = [];
 function wacSetPosition(p) {
   wacPosLines.forEach(x => WAC.cs.removePriceLine(x)); wacPosLines = [];
@@ -4254,10 +4270,11 @@ async function wacPollLive() {
   const isWa = document.getElementById('entry_mode').value === 'wellenanker';
   const isPm = document.getElementById('entry_mode').value === 'pure_momentum';
   const isMt = document.getElementById('entry_mode').value === 'mtf_spread' || isPm;
-  document.getElementById('wac-wtbox').style.display = (isWa || isMt) ? '' : 'none';
+  const isWd = document.getElementById('entry_mode').value === 'wt_div';
+  document.getElementById('wac-wtbox').style.display = (isWa || isMt || isWd) ? '' : 'none';
   document.getElementById('wac-tab-bt').style.display = isWa ? '' : 'none';
   const wtLab = document.querySelector('#wac-wtbox > div');
-  if (wtLab) wtLab.textContent = isPm ? 'MOMENTUM (Pure Momentum Oscillator) – gestrichelt: Short-/Long-Schwelle, Pfeil bei jedem Farbwechsel' : isMt ? 'TREND % (Ø der Blöcke, MTF Spread) – gestrichelt: Schwellen Rot/Grün bzw. Buy-/Sell-Level' : 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels';
+  if (wtLab) wtLab.textContent = isPm ? 'MOMENTUM (Pure Momentum Oscillator) – gestrichelt: Short-/Long-Schwelle, Pfeil bei jedem Farbwechsel' : isMt ? 'TREND % (Ø der Blöcke, MTF Spread) – gestrichelt: Schwellen Rot/Grün bzw. Buy-/Sell-Level' : (isWd ? 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Divergenz-Schwellen · Divergenz-Linien: grün = bullisch, rot = bärisch, gestrichelt = hidden' : 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels');
   wacInit(); if (!WAC.inited) return;
   const sym = currentSymbol, tf = document.getElementById('wac-tf').value;
   try {
@@ -4273,8 +4290,9 @@ async function wacPollLive() {
     wacSetGrid(d.grid);
     wacSetRlm(d.rlm_levels);
     wacSetOverlays(d.overlays);
+    wacSetDivLines(d.div_lines);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
-    const wtTxt = isWa ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
+    const wtTxt = (isWa || isWd) ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
     const p = d.position;
     info.innerText = `${sym} ${d.resolution} · Kurs ${d.price ?? '-'}` + wtTxt + (p ? ` · ${p.dir.toUpperCase()} Ø ${p.avg.toFixed(2)} PnL ${p.pnl.toFixed(2)} $` : ' · flat') + (d.active ? '' : ' · Bot nicht aktiv (nur Anzeige)');
   } catch (e) { /* naechster Versuch */ }
@@ -4807,7 +4825,7 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
   if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
-const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["os", "wd_div_os", "Bullisch ab Welle ≤"], ["ob", "wd_div_ob", "Bärisch ab Welle ≥"], ["sl_usd", "wd_sl_usd", "Stop-Loss $"], ["tp_usd", "wd_tp_usd", "Take-Profit $"]];
+const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["os", "wd_div_os", "Bullisch ab Welle ≤"], ["ob", "wd_div_ob", "Bärisch ab Welle ≥"], ["exit_zone", "wd_exit_zone", "Ausstiegs-Zone"], ["sl_usd", "wd_sl_usd", "Stop-Loss $"], ["tp_usd", "wd_tp_usd", "Take-Profit $"]];
 window.wdMcData = {lowdd: [], robust: [], top: [], worst: []};
 window.wdMcVaried = [];
 const wdMcHead = (withRatio) => WD_MC_PARAMS.filter(p => window.wdMcVaried.includes(p[1])).map(p => `<th class="sortable" data-key="${p[1]}">${p[2]} ⇅</th>`).join('')
@@ -5678,6 +5696,7 @@ async function refresh() {
     document.getElementById('wd_min_range').value = data.config.wd_min_range;
     document.getElementById('wd_max_range').value = data.config.wd_max_range;
     document.getElementById('wd_div_ob').value = data.config.wd_div_ob;
+    document.getElementById('wd_exit_zone').value = data.config.wd_exit_zone;
     document.getElementById('wd_div_os').value = data.config.wd_div_os;
     document.getElementById('wd_sl_usd').value = data.config.wd_sl_usd;
     document.getElementById('wd_tp_usd').value = data.config.wd_tp_usd;
@@ -6210,6 +6229,7 @@ function buildConfigPayload() {
     wd_max_range: parseInt(document.getElementById('wd_max_range').value) || 60,
     wd_wave_scale: parseFloat(document.getElementById('wd_wave_scale').value) || 1.35,
     wd_div_ob: parseFloat(document.getElementById('wd_div_ob').value),
+    wd_exit_zone: parseFloat(document.getElementById('wd_exit_zone').value),
     wd_div_os: parseFloat(document.getElementById('wd_div_os').value),
     wd_src: document.getElementById('wd_src').value,
     wd_line: document.getElementById('wd_line').value,
@@ -6725,7 +6745,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",

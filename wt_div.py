@@ -20,6 +20,8 @@ Pivot 2/2, Linie wt2, nur regulaere Divergenz.
 Ausstieg (wd_exit_mode):
   flip        Gegen-Divergenz dreht die Position (Standard)
   wt_cross    Long endet, wenn wt1 unter wt2 kreuzt; Short, wenn wt1 ueber wt2 kreuzt (Gegen-Divergenz hat Vorrang)
+  wt_cross_zone  wie wt_cross, aber nur wenn der Cross auf der ANDEREN Seite passiert (wie der Short-/Long-Punkt im Wellenanker):
+              Long endet bei wt1 unter wt2 UND wt2 > +exit_zone; Short endet bei wt1 ueber wt2 UND wt2 < -exit_zone (Gegen-Divergenz hat Vorrang)
   sltp_only   keine Signal-Ausstiege, nur SL/TP (Gegen-Divergenzen werden ignoriert)
   dazu immer optional fester $-SL/-TP (0 = aus), Cooldown nach SL, Richtungswahl.
 """
@@ -36,7 +38,7 @@ from strategies import (
 )
 from wae_ema import _we_candles, _res_seconds, _poll_delay
 
-EXIT_MODES = ("flip", "wt_cross", "sltp_only")
+EXIT_MODES = ("flip", "wt_cross", "wt_cross_zone", "sltp_only")
 
 
 def _wd_params(cfg):
@@ -55,6 +57,7 @@ def _wd_params(cfg):
         "os": float(cfg.get("wd_div_os", -65) if cfg.get("wd_div_os") not in (None, "") else -65),
         "regular": bool(cfg.get("wd_use_regular", True)), "hidden": bool(cfg.get("wd_use_hidden", False)),
         "exit_mode": em if em in EXIT_MODES else "flip",
+        "exit_zone": abs(float(cfg.get("wd_exit_zone", 53) if cfg.get("wd_exit_zone") not in (None, "") else 53)),
         "direction": mode if mode in ("both", "long_only", "short_only") else "both",
         "sl_usd": max(0.0, float(cfg.get("wd_sl_usd", 0.0) or 0.0)),
         "tp_usd": max(0.0, float(cfg.get("wd_tp_usd", 0.0) or 0.0)),
@@ -73,7 +76,7 @@ def wd_wave(o, h, l, c, p):
     return compute_wavetrend_series(o, h, l, c, p["n1"], p["n2"], p["sig"], p["src"], p["scale"])
 
 
-def wd_divergences(h, l, osc, p, start=0):
+def wd_divergences(h, l, osc, p, start=0, pairs=None):
     """-> (bull[], bear[]) - True auf der BESTAETIGUNGS-Kerze (Pivot-Kerze + 'rechts'). Pivots werden ab 'start' gesammelt."""
     n = len(osc)
     bull, bear = [False] * n, [False] * n
@@ -90,6 +93,8 @@ def wd_divergences(h, l, osc, p, start=0):
                 hid = v < last_lo[1] and l[i] > last_lo[2]
                 if (p["regular"] and reg) or (p["hidden"] and hid):
                     bull[j] = True
+                    if pairs is not None:
+                        pairs.append({"kind": "long", "hidden": not reg, "i1": last_lo[0], "i2": i, "w1": last_lo[1], "w2": v, "p1": last_lo[2], "p2": l[i], "conf": j})
             last_lo = (i, v, l[i])
         if v > max(left) and v >= max(right) and v >= ob:          # Pivot-Hoch der Welle, nur wenn extrem genug (Pine: phWt >= divOB)
             if last_hi is not None and minr <= i - last_hi[0] <= maxr:
@@ -97,6 +102,8 @@ def wd_divergences(h, l, osc, p, start=0):
                 hid = v > last_hi[1] and h[i] < last_hi[2]
                 if (p["regular"] and reg) or (p["hidden"] and hid):
                     bear[j] = True
+                    if pairs is not None:
+                        pairs.append({"kind": "short", "hidden": not reg, "i1": last_hi[0], "i2": i, "w1": last_hi[1], "w2": v, "p1": last_hi[2], "p2": h[i], "conf": j})
             last_hi = (i, v, h[i])
     return bull, bear
 
@@ -108,11 +115,12 @@ def wd_compute(o, h, l, c, p):
     bull, bear = wd_divergences(h, l, osc, p)
     n = len(c)
     xdn, xup = [False] * n, [False] * n
+    zoned, xz = p["exit_mode"] == "wt_cross_zone", p["exit_zone"]
     for i in range(1, n):
         if wt1[i] < wt2[i] and wt1[i - 1] >= wt2[i - 1]:
-            xdn[i] = True
+            xdn[i] = (not zoned) or wt2[i] > xz
         elif wt1[i] > wt2[i] and wt1[i - 1] <= wt2[i - 1]:
-            xup[i] = True
+            xup[i] = (not zoned) or wt2[i] < -xz
     return bull, bear, xdn, xup, wt1, wt2
 
 
@@ -130,7 +138,7 @@ def _allowed(target, p):
 
 
 def _signal_exit(pos, xdn_i, xup_i, p):
-    if p["exit_mode"] == "wt_cross" and ((pos == "long" and xdn_i) or (pos == "short" and xup_i)):
+    if p["exit_mode"] in ("wt_cross", "wt_cross_zone") and ((pos == "long" and xdn_i) or (pos == "short" and xup_i)):
         return "WD-WT-X"
     return None
 
@@ -380,12 +388,16 @@ async def run_wd_backtest(symbol, cfg, days, exclude_top_n=1):
 # CHART
 # ============================================================================
 def wd_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
-    """Kerzen + Divergenz-Marker (nur geschlossene Kerzen). Die Marker sitzen auf der Bestaetigungs-Kerze, dort wuerde der Bot einsteigen."""
+    """Kerzen + Welle (wt1/wt2) + Divergenz-Linien + Marker (nur geschlossene Kerzen). Die Marker sitzen auf der Bestaetigungs-Kerze,
+    dort steigt der Bot ein. Je Divergenz eine Linie im Kurs-Fenster (Tief->Tief bzw. Hoch->Hoch) und eine im Wellen-Fenster."""
     p = _wd_params(cfg)
     n = len(c)
     if n < 20:
         return None
-    bull, bear, _xd, _xu, _w1, _w2 = wd_compute(o[:-1], h[:-1], l[:-1], c[:-1], p)
+    wt1, wt2 = wd_wave(o[:-1], h[:-1], l[:-1], c[:-1], p)
+    osc = wt1 if p["line"] == "wt1" else wt2
+    pairs = []
+    bull, bear = wd_divergences(h[:-1], l[:-1], osc, p, 0, pairs)
     bull, bear = bull + [False], bear + [False]
     off = max(0, n - max_bars)
     candles = [{"time": ts[i] // 1000, "open": o[i], "high": h[i], "low": l[i], "close": c[i]} for i in range(off, n)]
@@ -395,7 +407,14 @@ def wd_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
             markers.append({"time": ts[i] // 1000, "kind": "long", "price": c[i]})
         if bear[i]:
             markers.append({"time": ts[i] // 1000, "kind": "short", "price": c[i]})
-    return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "entry_mode": "wd", "wt1v": 0, "wt2v": 0, "bars": n}
+    div_lines = [{"kind": d["kind"], "hidden": d["hidden"], "t1": ts[d["i1"]] // 1000, "t2": ts[d["i2"]] // 1000,
+                  "w1": round(d["w1"], 2), "w2": round(d["w2"], 2), "p1": d["p1"], "p2": d["p2"]}
+                 for d in pairs if d["i1"] >= off][-60:]
+    wt1l = [{"time": ts[i] // 1000, "value": round(wt1[i], 2)} for i in range(off, n - 1)]
+    wt2l = [{"time": ts[i] // 1000, "value": round(wt2[i], 2)} for i in range(off, n - 1)]
+    levels = sorted({p["os"], p["ob"]} | ({p["exit_zone"], -p["exit_zone"]} if p["exit_mode"] == "wt_cross_zone" else set()))
+    return {"candles": candles, "wt1": wt1l, "wt2": wt2l, "markers": markers, "levels": levels, "div_lines": div_lines, "entry_mode": "wd",
+            "wt1v": round(wt1[-1], 2), "wt2v": round(wt2[-1], 2), "bars": n}
 
 
 # ============================================================================
@@ -405,7 +424,7 @@ WD_MC_PARAMS = {   # Kurzschluessel -> (Config-Schluessel, Typ, Nachkommastellen
     "n1": ("wd_n1", int, 0), "n2": ("wd_n2", int, 0), "sig": ("wd_sig_len", int, 0), "scale": ("wd_wave_scale", float, 2),
     "pl": ("wd_pivot_left", int, 0), "pr": ("wd_pivot_right", int, 0), "minr": ("wd_min_range", int, 0),
     "maxr": ("wd_max_range", int, 0), "ob": ("wd_div_ob", float, 0), "os": ("wd_div_os", float, 0),
-    "sl_usd": ("wd_sl_usd", float, 2), "tp_usd": ("wd_tp_usd", float, 2),
+    "exit_zone": ("wd_exit_zone", float, 0), "sl_usd": ("wd_sl_usd", float, 2), "tp_usd": ("wd_tp_usd", float, 2),
 }
 WD_MC_MAX_RUNS = 1000
 WD_MC_MIN_RELIABLE_TRADES = 5
@@ -455,7 +474,7 @@ async def run_wd_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
                 return {"error": f"Unbekannter Wert '{k}'."}
             typ = WD_MC_PARAMS[k][1]
             lo, hi = sorted((typ(a), typ(b)))
-            if (k in ("sl_usd", "tp_usd") and lo < 0) or (k not in ("ob", "os", "sl_usd", "tp_usd") and lo <= 0):
+            if (k in ("sl_usd", "tp_usd", "exit_zone") and lo < 0) or (k not in ("ob", "os", "sl_usd", "tp_usd", "exit_zone") and lo <= 0):
                 return {"error": "Alle Bereiche müssen größer als 0 sein."}
             ranges[k] = (lo, hi)
     except (TypeError, ValueError):
