@@ -3510,6 +3510,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <tr><td><input type="checkbox" id="wdmc-on-ob"></td><td>Bärisch ab Welle ≥ (Pine: 45)</td>
       <td><input type="number" step="1" id="wdmc-min-ob" value="30" style="width:80px;"></td>
       <td><input type="number" step="1" id="wdmc-max-ob" value="70" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-sl_usd"></td><td>Stop-Loss $ pro Position (0 = kein SL)</td>
+      <td><input type="number" step="1" id="wdmc-min-sl_usd" value="5" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-sl_usd" value="40" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-tp_usd"></td><td>Take-Profit $ pro Position (0 = kein TP)</td>
+      <td><input type="number" step="1" id="wdmc-min-tp_usd" value="5" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-tp_usd" value="40" style="width:80px;"></td></tr>
     </tbody>
   </table>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
@@ -4801,7 +4807,7 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
   if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
-const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["os", "wd_div_os", "Bullisch ab Welle ≤"], ["ob", "wd_div_ob", "Bärisch ab Welle ≥"]];
+const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["os", "wd_div_os", "Bullisch ab Welle ≤"], ["ob", "wd_div_ob", "Bärisch ab Welle ≥"], ["sl_usd", "wd_sl_usd", "Stop-Loss $"], ["tp_usd", "wd_tp_usd", "Take-Profit $"]];
 window.wdMcData = {lowdd: [], robust: [], top: [], worst: []};
 window.wdMcVaried = [];
 const wdMcHead = (withRatio) => WD_MC_PARAMS.filter(p => window.wdMcVaried.includes(p[1])).map(p => `<th class="sortable" data-key="${p[1]}">${p[2]} ⇅</th>`).join('')

@@ -405,6 +405,7 @@ WD_MC_PARAMS = {   # Kurzschluessel -> (Config-Schluessel, Typ, Nachkommastellen
     "n1": ("wd_n1", int, 0), "n2": ("wd_n2", int, 0), "sig": ("wd_sig_len", int, 0), "scale": ("wd_wave_scale", float, 2),
     "pl": ("wd_pivot_left", int, 0), "pr": ("wd_pivot_right", int, 0), "minr": ("wd_min_range", int, 0),
     "maxr": ("wd_max_range", int, 0), "ob": ("wd_div_ob", float, 0), "os": ("wd_div_os", float, 0),
+    "sl_usd": ("wd_sl_usd", float, 2), "tp_usd": ("wd_tp_usd", float, 2),
 }
 WD_MC_MAX_RUNS = 1000
 WD_MC_MIN_RELIABLE_TRADES = 5
@@ -454,7 +455,7 @@ async def run_wd_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
                 return {"error": f"Unbekannter Wert '{k}'."}
             typ = WD_MC_PARAMS[k][1]
             lo, hi = sorted((typ(a), typ(b)))
-            if k not in ("ob", "os") and lo <= 0:
+            if (k in ("sl_usd", "tp_usd") and lo < 0) or (k not in ("ob", "os", "sl_usd", "tp_usd") and lo <= 0):
                 return {"error": "Alle Bereiche müssen größer als 0 sein."}
             ranges[k] = (lo, hi)
     except (TypeError, ValueError):
