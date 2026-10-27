@@ -7007,7 +7007,7 @@ async def _enrich_trade_excursions(symbol, cfg, result, max_days=60):
     candles, err, _src = await _we_candles(symbol, "1m", need_days, 100_000, market_type=cfg.get("binance_market_type", "spot"))
     if err or not candles or not candles[0]:
         return "Tiefster/höchster Stand je Trade: 1-Minuten-Kerzen nicht verfügbar."
-    ts, _o, hi, lo, _c = candles
+    ts, hi, lo = candles[0], candles[2], candles[3]   # Kerzen-Tupel hat 6 Felder (ts, o, h, l, c, Volumen)
     n_ok = 0
     for t in closed:
         entry, ex, pnl = float(t["entry"]), float(t["exit"]), float(t["pnl"])
