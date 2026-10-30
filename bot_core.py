@@ -467,6 +467,11 @@ def default_config():
         "wd_exit_mode": os.getenv("WD_EXIT_MODE", "flip"), "wd_exit_zone": float(os.getenv("WD_EXIT_ZONE", "53")),
         "wd_direction_mode": os.getenv("WD_DIRECTION_MODE", "both"),
         "wd_sl_usd": float(os.getenv("WD_SL_USD", "0")), "wd_tp_usd": float(os.getenv("WD_TP_USD", "0")),
+        "wd_tp_mode": os.getenv("WD_TP_MODE", "single"),   # single = ein TP, partial = Teil-TPs TP1/TP2/TP3
+        "wd_tp1_usd": float(os.getenv("WD_TP1_USD", "5")), "wd_tp2_usd": float(os.getenv("WD_TP2_USD", "10")), "wd_tp3_usd": float(os.getenv("WD_TP3_USD", "15")),
+        "wd_tp1_pct": float(os.getenv("WD_TP1_PCT", "33")), "wd_tp2_pct": float(os.getenv("WD_TP2_PCT", "33")),
+        "wd_be_after_tp1": os.getenv("WD_BE_AFTER_TP1", "true").lower() == "true",
+        "wd_sl_to_tp1_on_tp2": os.getenv("WD_SL_TO_TP1_ON_TP2", "true").lower() == "true",
         "wd_sl_cooldown_seconds": float(os.getenv("WD_SL_COOLDOWN_SECONDS", "30.0")),
 
         # ===== Trendfolge (entry_mode trendfolge): Marktstruktur-Trend + rote/gruene Kerzen =====
@@ -862,7 +867,7 @@ PERSISTED_STATE_KEYS = [
     "dv_sl_price", "dv_tp_price", "dv_trail_extreme", "dv_sl_cooldown_until",
     "pa_sl_price", "pa_tp_price", "pa_sl_cooldown_until",
     "we_sl_price", "we_tp_price", "we_sl_cooldown_until",
-    "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until",
+    "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until", "wd_tps", "wd_tp_pcts", "wd_tp_done", "wd_be",
     "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
@@ -2201,6 +2206,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wt_div"><label>Richtung</label><select class="cfg" id="wd_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
   <div data-mode="wt_div"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="wd_sl_usd"></div>
   <div data-mode="wt_div"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="wd_tp_usd"></div>
+  <div data-mode="wt_div"><label>Take-Profit-Art</label><select class="cfg" id="wd_tp_mode"><option value="single">Ein TP (schließt alles)</option><option value="partial">Teil-TPs (TP1 / TP2 / TP3)</option></select></div>
+  <div data-mode="wt_div" data-requires="wd_tp_mode" data-requires-value="partial"><label>TP1 ($ Gewinn der ganzen Position, 0 = aus)</label><input type="number" step="0.1" min="0" id="wd_tp1_usd"></div>
+  <div data-mode="wt_div" data-requires="wd_tp_mode" data-requires-value="partial"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="100" id="wd_tp1_pct"></div>
+  <div data-mode="wt_div" data-requires="wd_tp_mode" data-requires-value="partial"><label>TP2 ($ Gewinn, muss größer als TP1 sein, 0 = aus)</label><input type="number" step="0.1" min="0" id="wd_tp2_usd"></div>
+  <div data-mode="wt_div" data-requires="wd_tp_mode" data-requires-value="partial"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="100" id="wd_tp2_pct"></div>
+  <div data-mode="wt_div" data-requires="wd_tp_mode" data-requires-value="partial"><label>TP3 ($ Gewinn, muss größer als TP2 sein, 0 = aus) - schließt den Rest</label><input type="number" step="0.1" min="0" id="wd_tp3_usd"></div>
+  <div data-mode="wt_div" data-requires="wd_tp_mode" data-requires-value="partial"><label>SL auf Break-Even nach TP1</label><select class="cfg" id="wd_be_after_tp1"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="wt_div" data-requires="wd_tp_mode" data-requires-value="partial"><label>SL auf TP1 nach TP2</label><select class="cfg" id="wd_sl_to_tp1_on_tp2"><option value="true">An</option><option value="false">Aus</option></select></div>
+
   <div data-mode="wt_div"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="wd_sl_cooldown_seconds"></div>
 
   <div data-mode="trendfolge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -3520,6 +3534,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <tr><td><input type="checkbox" id="wdmc-on-tp_usd"></td><td>Take-Profit $ pro Position (0 = kein TP)</td>
       <td><input type="number" step="1" id="wdmc-min-tp_usd" value="5" style="width:80px;"></td>
       <td><input type="number" step="1" id="wdmc-max-tp_usd" value="40" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-tp1_usd"></td><td>Teil-TPs: TP1 $ (nur bei Take-Profit-Art „Teil-TPs“)</td>
+      <td><input type="number" step="1" id="wdmc-min-tp1_usd" value="3" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-tp1_usd" value="15" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-tp2_usd"></td><td>Teil-TPs: TP2 $ (muss größer als TP1 sein)</td>
+      <td><input type="number" step="1" id="wdmc-min-tp2_usd" value="8" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-tp2_usd" value="30" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-tp3_usd"></td><td>Teil-TPs: TP3 $ (schließt den Rest, größer als TP2)</td>
+      <td><input type="number" step="1" id="wdmc-min-tp3_usd" value="15" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-tp3_usd" value="60" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-tp1_pct"></td><td>Teil-TPs: TP1 Teilverkauf % der Position</td>
+      <td><input type="number" step="1" id="wdmc-min-tp1_pct" value="20" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-tp1_pct" value="50" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-tp2_pct"></td><td>Teil-TPs: TP2 Teilverkauf % der Restposition</td>
+      <td><input type="number" step="1" id="wdmc-min-tp2_pct" value="20" style="width:80px;"></td>
+      <td><input type="number" step="1" id="wdmc-max-tp2_pct" value="60" style="width:80px;"></td></tr>
     </tbody>
   </table>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
@@ -4825,7 +4854,7 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
   if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
-const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["os", "wd_div_os", "Bullisch ab Welle ≤"], ["ob", "wd_div_ob", "Bärisch ab Welle ≥"], ["exit_zone", "wd_exit_zone", "Ausstiegs-Zone"], ["sl_usd", "wd_sl_usd", "Stop-Loss $"], ["tp_usd", "wd_tp_usd", "Take-Profit $"]];
+const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["os", "wd_div_os", "Bullisch ab Welle ≤"], ["ob", "wd_div_ob", "Bärisch ab Welle ≥"], ["exit_zone", "wd_exit_zone", "Ausstiegs-Zone"], ["sl_usd", "wd_sl_usd", "Stop-Loss $"], ["tp_usd", "wd_tp_usd", "Take-Profit $"], ["tp1_usd", "wd_tp1_usd", "TP1 $"], ["tp2_usd", "wd_tp2_usd", "TP2 $"], ["tp3_usd", "wd_tp3_usd", "TP3 $"], ["tp1_pct", "wd_tp1_pct", "TP1 %"], ["tp2_pct", "wd_tp2_pct", "TP2 %"]];
 window.wdMcData = {lowdd: [], robust: [], top: [], worst: []};
 window.wdMcVaried = [];
 const wdMcHead = (withRatio) => WD_MC_PARAMS.filter(p => window.wdMcVaried.includes(p[1])).map(p => `<th class="sortable" data-key="${p[1]}">${p[2]} ⇅</th>`).join('')
@@ -5697,6 +5726,10 @@ async function refresh() {
     document.getElementById('wd_max_range').value = data.config.wd_max_range;
     document.getElementById('wd_div_ob').value = data.config.wd_div_ob;
     document.getElementById('wd_exit_zone').value = data.config.wd_exit_zone;
+    document.getElementById('wd_tp_mode').value = data.config.wd_tp_mode || 'single';
+    ['wd_tp1_usd', 'wd_tp2_usd', 'wd_tp3_usd', 'wd_tp1_pct', 'wd_tp2_pct'].forEach(k => { document.getElementById(k).value = data.config[k]; });
+    document.getElementById('wd_be_after_tp1').value = String(data.config.wd_be_after_tp1 !== false);
+    document.getElementById('wd_sl_to_tp1_on_tp2').value = String(data.config.wd_sl_to_tp1_on_tp2 !== false);
     document.getElementById('wd_div_os').value = data.config.wd_div_os;
     document.getElementById('wd_sl_usd').value = data.config.wd_sl_usd;
     document.getElementById('wd_tp_usd').value = data.config.wd_tp_usd;
@@ -6230,6 +6263,11 @@ function buildConfigPayload() {
     wd_wave_scale: parseFloat(document.getElementById('wd_wave_scale').value) || 1.35,
     wd_div_ob: parseFloat(document.getElementById('wd_div_ob').value),
     wd_exit_zone: parseFloat(document.getElementById('wd_exit_zone').value),
+    wd_tp_mode: document.getElementById('wd_tp_mode').value,
+    wd_tp1_usd: parseFloat(document.getElementById('wd_tp1_usd').value) || 0, wd_tp2_usd: parseFloat(document.getElementById('wd_tp2_usd').value) || 0, wd_tp3_usd: parseFloat(document.getElementById('wd_tp3_usd').value) || 0,
+    wd_tp1_pct: parseFloat(document.getElementById('wd_tp1_pct').value) || 33, wd_tp2_pct: parseFloat(document.getElementById('wd_tp2_pct').value) || 33,
+    wd_be_after_tp1: document.getElementById('wd_be_after_tp1').value === 'true',
+    wd_sl_to_tp1_on_tp2: document.getElementById('wd_sl_to_tp1_on_tp2').value === 'true',
     wd_div_os: parseFloat(document.getElementById('wd_div_os').value),
     wd_src: document.getElementById('wd_src').value,
     wd_line: document.getElementById('wd_line').value,
@@ -6745,7 +6783,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
@@ -6945,8 +6983,8 @@ async def handle_wa_live_chart(request):
         sl_usd = float(cfg.get("wa_sl_usd", 5.0))
         d = (sl_usd / size) if size else 0
         pos = {"dir": st["position"], "avg": avg, "size": size, "pnl": ((st.get("last_price") or avg) - avg) * size * (1 if st["position"] == "long" else -1),
-               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else None),
-               "tps": (st.get("rlm_tps") or []) if is_rlm else []}
+               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else st.get("wd_sl_price") if is_wd else None),
+               "tps": (st.get("rlm_tps") or []) if is_rlm else ((list((st.get("wd_tps") or [])[int(st.get("wd_tp_done") or 0):]) or ([st["wd_tp_price"]] if st.get("wd_tp_price") else [])) if is_wd else [])}
     gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
     grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
     structure = []

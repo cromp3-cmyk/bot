@@ -24,6 +24,12 @@ Ausstieg (wd_exit_mode):
               Long endet bei wt1 unter wt2 UND wt2 > +exit_zone; Short endet bei wt1 ueber wt2 UND wt2 < -exit_zone (Gegen-Divergenz hat Vorrang)
   sltp_only   keine Signal-Ausstiege, nur SL/TP (Gegen-Divergenzen werden ignoriert)
   dazu immer optional fester $-SL/-TP (0 = aus), Cooldown nach SL, Richtungswahl.
+
+Take-Profit-Art (wd_tp_mode):
+  single   ein fester $-TP (wd_tp_usd) schliesst die ganze Position (wie bisher)
+  partial  Teil-TPs wie beim RLM / Ema-RSI: TP1, TP2, TP3 je als $-Gewinn der GANZEN Position (0 = Stufe aus). TP1 schliesst wd_tp1_pct %
+           der Position, TP2 wd_tp2_pct % der VERBLEIBENDEN Position, die letzte aktive Stufe immer den Rest. Nach TP1 rutscht der SL auf
+           Break-Even (optional), nach TP2 auf TP1 (optional). Signal-Ausstiege (Flip, Cross) schliessen jederzeit den Rest.
 """
 
 import asyncio
@@ -31,7 +37,7 @@ import random
 import time
 import traceback
 
-from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_reverse
+from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_reverse, execute_partial_exit
 from strategies import (
     SUB_MINUTE_RESOLUTIONS, get_seconds_candles, fetch_candles_binance_multi, compute_wavetrend_series,
     summarize_backtest_trades, BACKTEST_MAX_CANDLES, _bt_close_trade,
@@ -61,6 +67,11 @@ def _wd_params(cfg):
         "direction": mode if mode in ("both", "long_only", "short_only") else "both",
         "sl_usd": max(0.0, float(cfg.get("wd_sl_usd", 0.0) or 0.0)),
         "tp_usd": max(0.0, float(cfg.get("wd_tp_usd", 0.0) or 0.0)),
+        "tp_mode": "partial" if cfg.get("wd_tp_mode", "single") == "partial" else "single",
+        "tp1_usd": max(0.0, float(cfg.get("wd_tp1_usd", 5.0) or 0.0)), "tp2_usd": max(0.0, float(cfg.get("wd_tp2_usd", 10.0) or 0.0)),
+        "tp3_usd": max(0.0, float(cfg.get("wd_tp3_usd", 15.0) or 0.0)),
+        "tp1_pct": max(1.0, min(100.0, float(cfg.get("wd_tp1_pct", 33) or 33))), "tp2_pct": max(1.0, min(100.0, float(cfg.get("wd_tp2_pct", 33) or 33))),
+        "be": bool(cfg.get("wd_be_after_tp1", True)), "sl_to_tp1": bool(cfg.get("wd_sl_to_tp1_on_tp2", True)),
     }
 
 
@@ -129,8 +140,24 @@ def _wd_levels(direction, entry, size, p):
         return None, None
     sgn = 1 if direction == "long" else -1
     sl = entry - sgn * p["sl_usd"] / size if p["sl_usd"] > 0 else None
-    tp = entry + sgn * p["tp_usd"] / size if p["tp_usd"] > 0 else None
+    tp = entry + sgn * p["tp_usd"] / size if (p["tp_usd"] > 0 and p["tp_mode"] != "partial") else None
     return sl, tp
+
+
+def _wd_ladder(direction, entry, size, p):
+    """Teil-TP-Leiter -> [(Preis, Prozent), ...] der aktiven Stufen (nur im Modus 'partial'). Eine Stufe zaehlt nur, wenn ihr $-Wert > 0 UND
+    groesser als der der vorigen aktiven Stufe ist. Die LETZTE Stufe schliesst immer den Rest (Prozent 100)."""
+    if p["tp_mode"] != "partial" or not size or size <= 0:
+        return []
+    sgn = 1 if direction == "long" else -1
+    out, prev = [], 0.0
+    for usd, pct in ((p["tp1_usd"], p["tp1_pct"]), (p["tp2_usd"], p["tp2_pct"]), (p["tp3_usd"], 100.0)):
+        if usd > prev:
+            out.append([entry + sgn * usd / size, pct])
+            prev = usd
+    if out:
+        out[-1][1] = 100.0
+    return [(px, pc) for px, pc in out]
 
 
 def _allowed(target, p):
@@ -149,6 +176,10 @@ def _signal_exit(pos, xdn_i, xup_i, p):
 def _wd_reset_state(st):
     st["wd_sl_price"] = None
     st["wd_tp_price"] = None
+    st["wd_tps"] = []
+    st["wd_tp_pcts"] = []
+    st["wd_tp_done"] = 0
+    st["wd_be"] = False
 
 
 async def check_wd_sl_tp(symbol, price):
@@ -157,13 +188,41 @@ async def check_wd_sl_tp(symbol, price):
     pos = st["position"]
     if pos is None or price is None:
         return
+    p = _wd_params(cfg)
     sl, tp = st.get("wd_sl_price"), st.get("wd_tp_price")
     if sl is not None and ((pos == "long" and price <= sl) or (pos == "short" and price >= sl)):
-        debug_log(f"🚪 [{symbol}] WT-Divergenz SL: {pos.upper()} @ {price} (Ziel war {round(sl, 6)})")
-        await execute_exit(symbol, price, "SL")
+        prot = st.get("wd_be")
+        reason = "SL-TP1" if prot == "tp1" else "BREAKEVEN" if prot else "SL"
+        debug_log(f"🚪 [{symbol}] WT-Divergenz {reason}: {pos.upper()} @ {price} (Ziel war {round(sl, 6)})")
+        await execute_exit(symbol, price, reason)
         if st["position"] is None:
-            st["wd_sl_cooldown_until"] = time.time() + cfg.get("wd_sl_cooldown_seconds", 30)
+            if not prot:
+                st["wd_sl_cooldown_until"] = time.time() + cfg.get("wd_sl_cooldown_seconds", 30)
             _wd_reset_state(st)
+        return
+    tps = st.get("wd_tps") or []
+    if tps:
+        pcts = st.get("wd_tp_pcts") or []
+        done = int(st.get("wd_tp_done") or 0)
+        while done < len(tps) and ((pos == "long" and price >= tps[done]) or (pos == "short" and price <= tps[done])):
+            pct = pcts[done] if done < len(pcts) else 100.0
+            if done == len(tps) - 1 or pct >= 99.5:
+                debug_log(f"🎯 [{symbol}] WT-Divergenz TP{done + 1} (Rest): {pos.upper()} @ {price}")
+                await execute_exit(symbol, price, f"TP{done + 1}")
+                if st["position"] is None:
+                    _wd_reset_state(st)
+                return
+            if not await execute_partial_exit(symbol, price, pct / 100.0, f"TP{done + 1}"):
+                return
+            done += 1
+            st["wd_tp_done"] = done
+            debug_log(f"📡 [{symbol}] WT-Divergenz TP{done} erreicht - {pct:g}% geschlossen")
+            if done == 1 and p["be"] and st.get("avg_entry_price"):
+                st["wd_sl_price"], st["wd_be"] = st["avg_entry_price"], "be"
+                debug_log(f"📡 [{symbol}] WT-Divergenz TP1 erreicht - SL auf Break-Even")
+            elif done == 2 and p["sl_to_tp1"]:
+                st["wd_sl_price"], st["wd_be"] = tps[0], "tp1"
+                debug_log(f"📡 [{symbol}] WT-Divergenz TP2 erreicht - SL auf TP1")
         return
     if tp is not None and ((pos == "long" and price >= tp) or (pos == "short" and price <= tp)):
         debug_log(f"🎯 [{symbol}] WT-Divergenz TP: {pos.upper()} @ {price} (Ziel war {round(tp, 6)})")
@@ -174,7 +233,11 @@ async def check_wd_sl_tp(symbol, price):
 
 def _set_levels(st, cfg, target, price):
     entry = st.get("avg_entry_price") or price
-    st["wd_sl_price"], st["wd_tp_price"] = _wd_levels(target, entry, st.get("total_coin_size") or 0, _wd_params(cfg))
+    size = st.get("total_coin_size") or 0
+    p = _wd_params(cfg)
+    st["wd_sl_price"], st["wd_tp_price"] = _wd_levels(target, entry, size, p)
+    lad = _wd_ladder(target, entry, size, p)
+    st["wd_tps"], st["wd_tp_pcts"], st["wd_tp_done"], st["wd_be"] = [x[0] for x in lad], [x[1] for x in lad], 0, False
 
 
 async def check_wd_signal(symbol, bull_i, bear_i, xdn_i, xup_i, price):
@@ -301,15 +364,37 @@ def _wd_simulate(candles, cfg, bull, bear, xdn, xup, start_i, p):
     def open_pos(direction, price, i):
         size = (margin * leverage) / price
         sl, tp = _wd_levels(direction, price, size, p)
-        return {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl": sl, "tp": tp}
+        return {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl": sl, "tp": tp,
+                "tps": _wd_ladder(direction, price, size, p), "done": 0, "prot": False}
 
     for i in range(max(start_i, 1), n):
         if position is not None and position["entry_i"] < i:
             d, e, sl, tp = position["dir"], position["entry"], position["sl"], position["tp"]
             if sl is not None and ((d == "long" and l[i] <= sl) or (d == "short" and h[i] >= sl)):
-                _bt_close_trade(trades, d, e, sl, position["size"], i, position["entry_i"], "SL", ts=ts)
+                prot = position["prot"]
+                _bt_close_trade(trades, d, e, sl, position["size"], i, position["entry_i"], "SL-TP1" if prot == "tp1" else "BREAKEVEN" if prot else "SL", ts=ts)
                 position = None
-                cool_until = ts[i] + cooldown_ms
+                if not prot:
+                    cool_until = ts[i] + cooldown_ms
+            elif position["tps"]:
+                lad = position["tps"]
+                while position is not None and position["done"] < len(lad):
+                    px, pct = lad[position["done"]]
+                    if not ((d == "long" and h[i] >= px) or (d == "short" and l[i] <= px)):
+                        break
+                    k = position["done"]
+                    if k == len(lad) - 1 or pct >= 99.5:
+                        _bt_close_trade(trades, d, e, px, position["size"], i, position["entry_i"], f"TP{k + 1}", ts=ts)
+                        position = None
+                        break
+                    cs = position["size"] * pct / 100.0
+                    _bt_close_trade(trades, d, e, px, cs, i, position["entry_i"], f"TP{k + 1}", ts=ts)
+                    position["size"] -= cs
+                    position["done"] = k + 1
+                    if k == 0 and p["be"]:
+                        position["sl"], position["prot"] = e, "be"
+                    elif k == 1 and p["sl_to_tp1"]:
+                        position["sl"], position["prot"] = lad[0][0], "tp1"
             elif tp is not None and ((d == "long" and h[i] >= tp) or (d == "short" and l[i] <= tp)):
                 _bt_close_trade(trades, d, e, tp, position["size"], i, position["entry_i"], "TP", ts=ts)
                 position = None
@@ -425,6 +510,8 @@ WD_MC_PARAMS = {   # Kurzschluessel -> (Config-Schluessel, Typ, Nachkommastellen
     "pl": ("wd_pivot_left", int, 0), "pr": ("wd_pivot_right", int, 0), "minr": ("wd_min_range", int, 0),
     "maxr": ("wd_max_range", int, 0), "ob": ("wd_div_ob", float, 0), "os": ("wd_div_os", float, 0),
     "exit_zone": ("wd_exit_zone", float, 0), "sl_usd": ("wd_sl_usd", float, 2), "tp_usd": ("wd_tp_usd", float, 2),
+    "tp1_usd": ("wd_tp1_usd", float, 2), "tp2_usd": ("wd_tp2_usd", float, 2), "tp3_usd": ("wd_tp3_usd", float, 2),
+    "tp1_pct": ("wd_tp1_pct", float, 0), "tp2_pct": ("wd_tp2_pct", float, 0),
 }
 WD_MC_MAX_RUNS = 1000
 WD_MC_MIN_RELIABLE_TRADES = 5
@@ -474,11 +561,15 @@ async def run_wd_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
                 return {"error": f"Unbekannter Wert '{k}'."}
             typ = WD_MC_PARAMS[k][1]
             lo, hi = sorted((typ(a), typ(b)))
-            if (k in ("sl_usd", "tp_usd", "exit_zone") and lo < 0) or (k not in ("ob", "os", "sl_usd", "tp_usd", "exit_zone") and lo <= 0):
+            if (k in ("sl_usd", "tp_usd", "tp1_usd", "tp2_usd", "tp3_usd", "exit_zone") and lo < 0) or (k not in ("ob", "os", "sl_usd", "tp_usd", "tp1_usd", "tp2_usd", "tp3_usd", "exit_zone") and lo <= 0):
                 return {"error": "Alle Bereiche müssen größer als 0 sein."}
             ranges[k] = (lo, hi)
     except (TypeError, ValueError):
         return {"error": "Ungültige Bereiche für die Parameter."}
+    if base_p["tp_mode"] != "partial" and any(k in ranges for k in ("tp1_usd", "tp2_usd", "tp3_usd", "tp1_pct", "tp2_pct")):
+        return {"error": "TP1/TP2/TP3 wirken nur, wenn oben bei „Take-Profit-Art“ „Teil-TPs“ gewählt ist. Bitte dort umstellen (oder die Haken entfernen)."}
+    if base_p["tp_mode"] == "partial" and "tp_usd" in ranges:
+        return {"error": "Der einzelne Take-Profit wirkt im Modus „Teil-TPs“ nicht - bitte stattdessen TP1/TP2/TP3 variieren."}
     max_candles = BACKTEST_MAX_CANDLES.get("wt_div", 100_000)
     if resolution in SUB_MINUTE_RESOLUTIONS:
         max_candles = min(max_candles, 5000)
@@ -514,6 +605,9 @@ async def run_wd_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
         eff = dict(base_p, **over)
         if eff["minr"] >= eff["maxr"]:
             continue
+        if eff["tp_mode"] == "partial" and not (eff["tp1_usd"] > 0 and (eff["tp2_usd"] == 0 or eff["tp2_usd"] > eff["tp1_usd"])
+                                                and (eff["tp3_usd"] == 0 or eff["tp3_usd"] > max(eff["tp1_usd"], eff["tp2_usd"]))):
+            continue   # TP-Stufen muessen aufsteigend sein (TP1 < TP2 < TP3)
         key = tuple(over[k] for k in keys)
         if key not in seen:
             seen.add(key)
