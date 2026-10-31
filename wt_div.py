@@ -32,6 +32,9 @@ Einstiegs-Art (wd_entry_type):
   both        beides (Divergenz ODER Cross loest den Einstieg aus)
 Mehrfach-Einstiege (wd_max_entries > 1): Jedes weitere Signal in DIESELBE Richtung kauft nach (gleiche Groesse, bis max. Anzahl Einstiege); der
 Ø-Einstieg wird neu berechnet, SL/TP haengen am neuen Ø und der Gesamtgroesse (solange noch kein TP erreicht wurde).
+Mindestabstand fuer Nachkaeufe (wd_add_dist_pct, 0 = aus): Ein weiteres Signal kauft nur nach, wenn der Kurs mindestens so viel Prozent vom LETZTEN
+Einstiegspreis entfernt ist. wd_add_dist_dir: any = in beide Richtungen, against = nur gegen die Position (Long: tiefer, Short: hoeher; Durchschnittskosten
+senken), with = nur in Gewinnrichtung (Pyramide). Zu nahe Signale werden uebersprungen (zaehlen NICHT als Einstieg).
 Nur im Plus schliessen (wd_profit_only_close): Signal-Ausstiege (Cross-Ausstieg) UND Signal-Flips werden nur ausgefuehrt, wenn die Position im Plus ist -
 im Minus wartet der Bot auf das naechste gueltige Signal (oder SL). SL/TP/Break-Even sind davon NICHT betroffen.
 
@@ -81,6 +84,8 @@ def _wd_params(cfg):
         "cross_zone": abs(float(cfg.get("wd_cross_zone", 53) if cfg.get("wd_cross_zone") not in (None, "") else 53)),
         "max_entries": max(1, min(20, int(cfg.get("wd_max_entries", 1) or 1))),
         "profit_only": bool(cfg.get("wd_profit_only_close", False)),
+        "add_dist_pct": max(0.0, float(cfg.get("wd_add_dist_pct", 0) or 0)),
+        "add_dist_dir": cfg.get("wd_add_dist_dir", "any") if cfg.get("wd_add_dist_dir", "any") in ("any", "against", "with") else "any",
         "tp_mode": "partial" if cfg.get("wd_tp_mode", "single") == "partial" else "single",
         "tp1_usd": max(0.0, float(cfg.get("wd_tp1_usd", 5.0) or 0.0)), "tp2_usd": max(0.0, float(cfg.get("wd_tp2_usd", 10.0) or 0.0)),
         "tp3_usd": max(0.0, float(cfg.get("wd_tp3_usd", 15.0) or 0.0)),
@@ -204,6 +209,7 @@ def _wd_reset_state(st):
     st["wd_tp_done"] = 0
     st["wd_be"] = False
     st["wd_entries"] = 0
+    st["wd_last_entry"] = None
 
 
 async def check_wd_sl_tp(symbol, price):
@@ -263,6 +269,7 @@ def _set_levels(st, cfg, target, price):
     lad = _wd_ladder(target, entry, size, p)
     st["wd_tps"], st["wd_tp_pcts"], st["wd_tp_done"], st["wd_be"] = [x[0] for x in lad], [x[1] for x in lad], 0, False
     st["wd_entries"] = 1
+    st["wd_last_entry"] = price
 
 
 def _refresh_levels(st, cfg, target, price):
@@ -275,6 +282,18 @@ def _refresh_levels(st, cfg, target, price):
     st["wd_sl_price"], st["wd_tp_price"] = _wd_levels(target, entry, size, p)
     lad = _wd_ladder(target, entry, size, p)
     st["wd_tps"], st["wd_tp_pcts"] = [x[0] for x in lad], [x[1] for x in lad]
+
+
+def _dist_ok(direction, last, price, p):
+    """Mindestabstand fuer einen Nachkauf erfuellt? (Prozent vom letzten Einstiegspreis, Richtung laut wd_add_dist_dir)"""
+    if p["add_dist_pct"] <= 0 or not last:
+        return True
+    move = (price - last) / last * 100.0 * (1 if direction == "long" else -1)   # + = in Gewinnrichtung
+    if p["add_dist_dir"] == "against":
+        return -move >= p["add_dist_pct"]
+    if p["add_dist_dir"] == "with":
+        return move >= p["add_dist_pct"]
+    return abs(move) >= p["add_dist_pct"]
 
 
 def _in_profit(st, pos, price):
@@ -306,11 +325,16 @@ async def check_wd_signal(symbol, bull_i, bear_i, xdn_i, xup_i, price):
     if tri is not None and tri == pos:   # weiteres Signal in dieselbe Richtung -> Nachkauf (wenn erlaubt)
         n_ent = int(st.get("wd_entries") or 1)
         if p["max_entries"] > 1 and n_ent < p["max_entries"] and _allowed(tri, p):
+            last = st.get("wd_last_entry") or st.get("avg_entry_price")
+            if not _dist_ok(tri, last, price, p):
+                debug_log(f"⏭️ [{symbol}] WT-Divergenz Nachkauf übersprungen - Abstand zum letzten Einstieg ({last}) kleiner als {p['add_dist_pct']}% ({p['add_dist_dir']})")
+                return
             before = st.get("total_coin_size") or 0
             debug_log(f"➕ [{symbol}] WT-Divergenz Nachkauf #{n_ent + 1}/{p['max_entries']}: {tri.upper()} @ {price}")
             await execute_entry(symbol, tri, price, is_add_on=True)
             if (st.get("total_coin_size") or 0) > before:
                 st["wd_entries"] = n_ent + 1
+                st["wd_last_entry"] = price
                 _refresh_levels(st, cfg, tri, price)
         return
     if p["exit_mode"] == "sltp_only":
@@ -425,7 +449,7 @@ def _wd_simulate(candles, cfg, bull, bear, xdn, xup, start_i, p):
         size = (margin * leverage) / price
         sl, tp = _wd_levels(direction, price, size, p)
         return {"dir": direction, "entry": price, "size": size, "entry_i": i, "sl": sl, "tp": tp,
-                "tps": _wd_ladder(direction, price, size, p), "done": 0, "prot": False, "entries": 1}
+                "tps": _wd_ladder(direction, price, size, p), "done": 0, "prot": False, "entries": 1, "last": price}
 
     for i in range(max(start_i, 1), n):
         if position is not None and position["entry_i"] < i:
@@ -467,7 +491,8 @@ def _wd_simulate(candles, cfg, bull, bear, xdn, xup, start_i, p):
             continue
         d = position["dir"]
         if tri == d:   # Nachkauf
-            if p["max_entries"] > 1 and position["entries"] < p["max_entries"] and _allowed(tri, p):
+            if p["max_entries"] > 1 and position["entries"] < p["max_entries"] and _allowed(tri, p) and _dist_ok(d, position["last"], price, p):
+                position["last"] = price
                 add = (margin * leverage) / price
                 tot = position["size"] + add
                 position["entry"] = (position["entry"] * position["size"] + price * add) / tot
@@ -586,7 +611,7 @@ WD_MC_PARAMS = {   # Kurzschluessel -> (Config-Schluessel, Typ, Nachkommastellen
     "pl": ("wd_pivot_left", int, 0), "pr": ("wd_pivot_right", int, 0), "minr": ("wd_min_range", int, 0),
     "maxr": ("wd_max_range", int, 0), "ob": ("wd_div_ob", float, 0), "os": ("wd_div_os", float, 0),
     "exit_zone": ("wd_exit_zone", float, 0), "sl_usd": ("wd_sl_usd", float, 2), "tp_usd": ("wd_tp_usd", float, 2),
-    "cross_zone": ("wd_cross_zone", float, 0), "max_entries": ("wd_max_entries", int, 0),
+    "cross_zone": ("wd_cross_zone", float, 0), "add_dist_pct": ("wd_add_dist_pct", float, 2), "max_entries": ("wd_max_entries", int, 0),
     "tp1_usd": ("wd_tp1_usd", float, 2), "tp2_usd": ("wd_tp2_usd", float, 2), "tp3_usd": ("wd_tp3_usd", float, 2),
     "tp1_pct": ("wd_tp1_pct", float, 0), "tp2_pct": ("wd_tp2_pct", float, 0),
 }
@@ -638,11 +663,13 @@ async def run_wd_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed
                 return {"error": f"Unbekannter Wert '{k}'."}
             typ = WD_MC_PARAMS[k][1]
             lo, hi = sorted((typ(a), typ(b)))
-            if (k in ("sl_usd", "tp_usd", "tp1_usd", "tp2_usd", "tp3_usd", "exit_zone", "cross_zone") and lo < 0) or (k not in ("ob", "os", "sl_usd", "tp_usd", "tp1_usd", "tp2_usd", "tp3_usd", "exit_zone", "cross_zone") and lo <= 0):
+            if (k in ("sl_usd", "tp_usd", "tp1_usd", "tp2_usd", "tp3_usd", "exit_zone", "cross_zone", "add_dist_pct") and lo < 0) or (k not in ("ob", "os", "sl_usd", "tp_usd", "tp1_usd", "tp2_usd", "tp3_usd", "exit_zone", "cross_zone", "add_dist_pct") and lo <= 0):
                 return {"error": "Alle Bereiche müssen größer als 0 sein."}
             ranges[k] = (lo, hi)
     except (TypeError, ValueError):
         return {"error": "Ungültige Bereiche für die Parameter."}
+    if base_p["max_entries"] <= 1 and "add_dist_pct" in ranges and "max_entries" not in ranges:
+        return {"error": "Der Mindestabstand wirkt nur bei Nachkäufen - bitte „Max. Einstiege“ über 1 stellen (oder mit variieren)."}
     if base_p["entry_type"] == "divergence" and "cross_zone" in ranges:
         return {"error": "Die Cross-Zone wirkt nur, wenn oben bei „Einstiegs-Art“ „Cross“ oder „Beides“ gewählt ist."}
     if base_p["tp_mode"] != "partial" and any(k in ranges for k in ("tp1_usd", "tp2_usd", "tp3_usd", "tp1_pct", "tp2_pct")):

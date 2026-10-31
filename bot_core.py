@@ -470,6 +470,7 @@ def default_config():
         "wd_entry_type": os.getenv("WD_ENTRY_TYPE", "divergence"),   # divergence | cross | both
         "wd_cross_zone": float(os.getenv("WD_CROSS_ZONE", "53")), "wd_max_entries": int(os.getenv("WD_MAX_ENTRIES", "1")),
         "wd_profit_only_close": os.getenv("WD_PROFIT_ONLY_CLOSE", "false").lower() == "true",
+        "wd_add_dist_pct": float(os.getenv("WD_ADD_DIST_PCT", "0")), "wd_add_dist_dir": os.getenv("WD_ADD_DIST_DIR", "any"),
         "wd_tp_mode": os.getenv("WD_TP_MODE", "single"),   # single = ein TP, partial = Teil-TPs TP1/TP2/TP3
         "wd_tp1_usd": float(os.getenv("WD_TP1_USD", "5")), "wd_tp2_usd": float(os.getenv("WD_TP2_USD", "10")), "wd_tp3_usd": float(os.getenv("WD_TP3_USD", "15")),
         "wd_tp1_pct": float(os.getenv("WD_TP1_PCT", "33")), "wd_tp2_pct": float(os.getenv("WD_TP2_PCT", "33")),
@@ -870,7 +871,7 @@ PERSISTED_STATE_KEYS = [
     "dv_sl_price", "dv_tp_price", "dv_trail_extreme", "dv_sl_cooldown_until",
     "pa_sl_price", "pa_tp_price", "pa_sl_cooldown_until",
     "we_sl_price", "we_tp_price", "we_sl_cooldown_until",
-    "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until", "wd_tps", "wd_tp_pcts", "wd_tp_done", "wd_be", "wd_entries",
+    "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until", "wd_tps", "wd_tp_pcts", "wd_tp_done", "wd_be", "wd_entries", "wd_last_entry",
     "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
@@ -2207,6 +2208,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wt_div"><label>Einstiegs-Art</label><select class="cfg" id="wd_entry_type"><option value="divergence">Divergenz</option><option value="cross">Cross der Linien (wie Long-/Short-Punkt im Wellenanker)</option><option value="both">Beides (Divergenz oder Cross)</option></select></div>
   <div data-mode="wt_div" data-requires="wd_entry_type" data-requires-not="divergence"><label>Cross-Zone für den Einstieg (Long: Signallinie unter −X, Short: über +X, 0 = überall; Wellenanker: 53)</label><input type="number" step="1" min="0" id="wd_cross_zone"></div>
   <div data-mode="wt_div"><label>Max. Einstiege (1 = kein Nachkauf; weitere Signale in dieselbe Richtung kaufen nach)</label><input type="number" step="1" min="1" max="20" id="wd_max_entries"></div>
+  <div data-mode="wt_div"><label>Mindestabstand für Nachkäufe (% vom letzten Einstiegspreis, 0 = aus)</label><input type="number" step="0.01" min="0" id="wd_add_dist_pct"></div>
+  <div data-mode="wt_div"><label>Mindestabstand gilt</label><select class="cfg" id="wd_add_dist_dir"><option value="any">in beide Richtungen</option><option value="against">nur gegen die Position (Long: tiefer, Short: höher)</option><option value="with">nur in Gewinnrichtung</option></select></div>
   <div data-mode="wt_div"><label>Signal-Ausstiege nur im Plus (Cross-Ausstieg / Gegen-Signal erst wenn die Position im Plus ist)</label><select class="cfg" id="wd_profit_only_close"><option value="false">Aus</option><option value="true">An</option></select></div>
   <div data-mode="wt_div"><label>Ausstieg</label><select class="cfg" id="wd_exit_mode"><option value="flip">Gegen-Divergenz = Flip (Long↔Short in einer Order)</option><option value="wt_cross">Welle kreuzt Signallinie zurück (Gegen-Divergenz hat Vorrang)</option><option value="wt_cross_zone">Cross der Linien auf der anderen Seite (ab Ausstiegs-Zone, Gegen-Divergenz hat Vorrang)</option><option value="sltp_only">Nur SL/TP (Gegen-Divergenzen ignoriert)</option></select></div>
   <div data-mode="wt_div"><label>Ausstiegs-Zone für „Cross auf der anderen Seite" (Long endet bei Cross abwärts über +X, Short bei Cross aufwärts unter −X; Wellenanker: 53)</label><input type="number" step="1" min="0" id="wd_exit_zone"></div>
@@ -3541,6 +3544,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <tr><td><input type="checkbox" id="wdmc-on-max_entries"></td><td>Max. Einstiege (Nachkäufe, 1 = keine)</td>
       <td><input type="number" step="1" id="wdmc-min-max_entries" value="1" style="width:80px;"></td>
       <td><input type="number" step="1" id="wdmc-max-max_entries" value="4" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="wdmc-on-add_dist_pct"></td><td>Mindestabstand der Nachkäufe in % (0 = aus; nur sinnvoll bei Max. Einstiege &gt; 1)</td>
+      <td><input type="number" step="0.01" id="wdmc-min-add_dist_pct" value="0" style="width:80px;"></td>
+      <td><input type="number" step="0.01" id="wdmc-max-add_dist_pct" value="1" style="width:80px;"></td></tr>
     <tr><td><input type="checkbox" id="wdmc-on-sl_usd"></td><td>Stop-Loss $ pro Position (0 = kein SL)</td>
       <td><input type="number" step="1" id="wdmc-min-sl_usd" value="5" style="width:80px;"></td>
       <td><input type="number" step="1" id="wdmc-max-sl_usd" value="40" style="width:80px;"></td></tr>
@@ -4867,7 +4873,7 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
   if (sweepSymbol === currentSymbol) btn.disabled = false;
 });
 
-const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["os", "wd_div_os", "Bullisch ab Welle ≤"], ["ob", "wd_div_ob", "Bärisch ab Welle ≥"], ["exit_zone", "wd_exit_zone", "Ausstiegs-Zone"], ["cross_zone", "wd_cross_zone", "Cross-Zone (Einstieg)"], ["max_entries", "wd_max_entries", "Max. Einstiege"], ["sl_usd", "wd_sl_usd", "Stop-Loss $"], ["tp_usd", "wd_tp_usd", "Take-Profit $"], ["tp1_usd", "wd_tp1_usd", "TP1 $"], ["tp2_usd", "wd_tp2_usd", "TP2 $"], ["tp3_usd", "wd_tp3_usd", "TP3 $"], ["tp1_pct", "wd_tp1_pct", "TP1 %"], ["tp2_pct", "wd_tp2_pct", "TP2 %"]];
+const WD_MC_PARAMS = [["n1", "wd_n1", "Kanal-Länge n1"], ["n2", "wd_n2", "Durchschnitt-Länge n2"], ["sig", "wd_sig_len", "Signallinie-Glättung"], ["scale", "wd_wave_scale", "Wellen-Skalierung"], ["pl", "wd_pivot_left", "Pivot links"], ["pr", "wd_pivot_right", "Pivot rechts"], ["minr", "wd_min_range", "Min. Abstand der Pivots"], ["maxr", "wd_max_range", "Max. Abstand der Pivots"], ["os", "wd_div_os", "Bullisch ab Welle ≤"], ["ob", "wd_div_ob", "Bärisch ab Welle ≥"], ["exit_zone", "wd_exit_zone", "Ausstiegs-Zone"], ["cross_zone", "wd_cross_zone", "Cross-Zone (Einstieg)"], ["max_entries", "wd_max_entries", "Max. Einstiege"], ["add_dist_pct", "wd_add_dist_pct", "Mindestabstand Nachkauf %"], ["sl_usd", "wd_sl_usd", "Stop-Loss $"], ["tp_usd", "wd_tp_usd", "Take-Profit $"], ["tp1_usd", "wd_tp1_usd", "TP1 $"], ["tp2_usd", "wd_tp2_usd", "TP2 $"], ["tp3_usd", "wd_tp3_usd", "TP3 $"], ["tp1_pct", "wd_tp1_pct", "TP1 %"], ["tp2_pct", "wd_tp2_pct", "TP2 %"]];
 window.wdMcData = {lowdd: [], robust: [], top: [], worst: []};
 window.wdMcVaried = [];
 const wdMcHead = (withRatio) => WD_MC_PARAMS.filter(p => window.wdMcVaried.includes(p[1])).map(p => `<th class="sortable" data-key="${p[1]}">${p[2]} ⇅</th>`).join('')
@@ -5743,6 +5749,8 @@ async function refresh() {
     document.getElementById('wd_cross_zone').value = data.config.wd_cross_zone;
     document.getElementById('wd_max_entries').value = data.config.wd_max_entries || 1;
     document.getElementById('wd_profit_only_close').value = String(!!data.config.wd_profit_only_close);
+    document.getElementById('wd_add_dist_pct').value = data.config.wd_add_dist_pct;
+    document.getElementById('wd_add_dist_dir').value = data.config.wd_add_dist_dir || 'any';
     document.getElementById('wd_tp_mode').value = data.config.wd_tp_mode || 'single';
     ['wd_tp1_usd', 'wd_tp2_usd', 'wd_tp3_usd', 'wd_tp1_pct', 'wd_tp2_pct'].forEach(k => { document.getElementById(k).value = data.config[k]; });
     document.getElementById('wd_be_after_tp1').value = String(data.config.wd_be_after_tp1 !== false);
@@ -6284,6 +6292,8 @@ function buildConfigPayload() {
     wd_cross_zone: parseFloat(document.getElementById('wd_cross_zone').value) || 0,
     wd_max_entries: parseInt(document.getElementById('wd_max_entries').value) || 1,
     wd_profit_only_close: document.getElementById('wd_profit_only_close').value === 'true',
+    wd_add_dist_pct: parseFloat(document.getElementById('wd_add_dist_pct').value) || 0,
+    wd_add_dist_dir: document.getElementById('wd_add_dist_dir').value,
     wd_tp_mode: document.getElementById('wd_tp_mode').value,
     wd_tp1_usd: parseFloat(document.getElementById('wd_tp1_usd').value) || 0, wd_tp2_usd: parseFloat(document.getElementById('wd_tp2_usd').value) || 0, wd_tp3_usd: parseFloat(document.getElementById('wd_tp3_usd').value) || 0,
     wd_tp1_pct: parseFloat(document.getElementById('wd_tp1_pct').value) || 33, wd_tp2_pct: parseFloat(document.getElementById('wd_tp2_pct').value) || 33,
@@ -6804,7 +6814,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
