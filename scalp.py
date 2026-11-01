@@ -72,7 +72,8 @@ AUTO = {}        # sym -> Autotrade-Einstellungen
 AUTO_LOG = []    # neueste zuerst
 WA_SOURCES = ("close", "hlc3", "ohlc4", "hl2")
 WA_CFG = {"n1": WA_N1, "n2": WA_N2, "z1": WA_Z1, "src": "close",
-          "strat": "wa", "candles": "normal", "w2_level": 10.0, "w2_line": "signal", "w2_profit": False}   # strat: "wa" = Wellenanker-Signale, "ha" = Heikin-Ashi-Farbwechsel, "w2" = Wellenanker 2 (Level-Durchbruch)
+          "strat": "wa", "candles": "normal", "w2_level": 10.0, "w2_line": "signal", "w2_profit": False,
+          "wd_ob": 45.0, "wd_os": -65.0, "wd_pivot": 2, "wd_maxr": 120, "wd_hidden": False, "wd_line": "wt2"}   # strat: "wd" = Wellenanker-Divergenz (wie wt_div-Bot/Pine), "wa" = Wellenanker-Signale, "ha" = Heikin-Ashi-Farbwechsel, "w2" = Wellenanker 2 (Level-Durchbruch)
 WA_FILE = os.getenv("SCALP_SETTINGS_FILE", "scalp_settings.json")
 
 
@@ -175,6 +176,29 @@ def _validate_wa(d, base):
         new["w2_profit"] = d["w2_profit"] in (True, "true", "1", 1)
     if not 0 <= new["w2_level"] <= 30:
         raise ValueError("Wellenanker 2: Level 0 bis 30")
+    try:
+        if "wd_ob" in d:
+            new["wd_ob"] = float(d["wd_ob"])
+        if "wd_os" in d:
+            new["wd_os"] = float(d["wd_os"])
+        if "wd_pivot" in d:
+            new["wd_pivot"] = int(d["wd_pivot"])
+        if "wd_maxr" in d:
+            new["wd_maxr"] = int(d["wd_maxr"])
+    except (TypeError, ValueError):
+        raise ValueError("Divergenz: Level, Pivot-Länge und Max-Abstand müssen Zahlen sein")
+    if "wd_hidden" in d:
+        new["wd_hidden"] = d["wd_hidden"] in (True, "true", "1", 1)
+    if "wd_line" in d:
+        if d["wd_line"] not in ("wt1", "wt2"):
+            raise ValueError("Divergenz: Linie = WT1 oder WT2")
+        new["wd_line"] = d["wd_line"]
+    if not 0 <= new["wd_ob"] <= 100 or not -100 <= new["wd_os"] <= 0:
+        raise ValueError("Divergenz: Überkauft 0 bis 100, Überverkauft -100 bis 0")
+    if not 1 <= new["wd_pivot"] <= 10:
+        raise ValueError("Divergenz: Pivot-Länge 1 bis 10")
+    if not 5 <= new["wd_maxr"] <= 500:
+        raise ValueError("Divergenz: Max-Abstand 5 bis 500 Kerzen")
     if "candles" in d:
         if d["candles"] not in ("normal", "ha"):
             raise ValueError("Kerzen: normal oder Heikin-Ashi")
@@ -182,8 +206,8 @@ def _validate_wa(d, base):
     if "strat" in d:
         if d["strat"] == "st":   # alte Supertrend-Einstellung -> jetzt Heikin-Ashi-Wechsel
             d = dict(d, strat="ha")
-        if d["strat"] not in ("wa", "ha", "w2", "wx"):
-            raise ValueError("Strategie muss Wellenanker, Wellenanker 2 oder Heikin-Ashi sein")
+        if d["strat"] not in ("wa", "ha", "w2", "wx", "wd"):
+            raise ValueError("Strategie muss Wellenanker, Wellenanker 2, Kreuzung zu Kreuzung, Divergenz oder Heikin-Ashi sein")
         new["strat"] = d["strat"]
     if not 2 <= new["n1"] <= 100:
         raise ValueError("Kanal-Länge: 2 bis 100")
@@ -342,18 +366,47 @@ def _w2_series(cs, cfg):
     return wt1, wt2, events, cu, cd
 
 
+def _wd_series(cs, cfg, pairs=None):
+    """Wellenanker-Divergenz (wie Bot wt_div / Pine): Pivots der Welle (WT2 oder WT1), nur extreme (<= Unterverkauft / >= Ueberkauft),
+    Vergleich mit dem vorigen gespeicherten Pivot. Signal auf der BESTAETIGUNGS-Kerze (Pivot + rechts).
+    Regulaer: Long = Welle hoeher, Kurs tiefer; Short = Welle tiefer, Kurs hoeher. Optional auch versteckte.
+    -> (wt1, wt2, events)"""
+    from wt_div import wd_divergences
+    o = [x["o"] for x in cs]
+    h = [x["h"] for x in cs]
+    l = [x["l"] for x in cs]
+    c = [x["c"] for x in cs]
+    wt1, wt2 = compute_wavetrend_series(o, h, l, c, cfg["n1"], cfg["n2"], WA_SIG, cfg["src"], WA_SCALE)
+    p = {"pl": cfg["wd_pivot"], "pr": cfg["wd_pivot"], "minr": 1, "maxr": cfg["wd_maxr"],
+         "ob": cfg["wd_ob"], "os": cfg["wd_os"], "regular": True, "hidden": bool(cfg["wd_hidden"])}
+    osc = wt1 if cfg["wd_line"] == "wt1" else wt2
+    bull, bear = wd_divergences(h, l, osc, p, 0, pairs)
+    events = []
+    for i in range(len(c)):
+        if bull[i]:
+            events.append({"kind": "long", "idx": i, "flip": i, "ext": False, "strong": False})
+        elif bear[i]:
+            events.append({"kind": "short", "idx": i, "flip": i, "ext": False, "strong": False})
+    return wt1, wt2, events
+
+
 def _signal_events(cs, cfg):
     """Signale der gewaehlten Strategie (Autotrade nutzt nur diese)."""
     if cfg["strat"] == "ha":
         return _ha_series(cs)[2]
     if cfg["strat"] in ("w2", "wx"):
         return _w2_series(cs, cfg)[2]
+    if cfg["strat"] == "wd":
+        return _wd_series(cs, cfg)[2]
     return _wa_series(cs, cfg)[2]
 
 
 def _tf_state(cs, cfg):
     if cfg["strat"] == "ha":
         return _ha_series(cs)[1][-1]
+    if cfg["strat"] == "wd":
+        evs = _wd_series(cs, cfg)[2]
+        return evs[-1]["kind"] == "long" and 1 or -1 if evs else 0   # letzte Divergenz bestimmt die Richtung
     if cfg["strat"] in ("w2", "wx"):
         w1, w2 = _w2_series(cs, cfg)[:2]
         return 1 if w1[-1] > w2[-1] else -1 if w1[-1] < w2[-1] else 0
@@ -594,6 +647,8 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
         events = _ha_series(cs)[2]   # Marker/Signale = HA-Farbwechsel, die Welle bleibt nur als Anzeige
     elif cfg["strat"] in ("w2", "wx"):
         events = _w2_series(cs, cfg)[2]   # Marker = Level-Durchbruch
+    elif cfg["strat"] == "wd":
+        events = _wd_series(cs, cfg)[2]   # Marker = Divergenz (Bestaetigungs-Kerze)
     markers = []
     for e in events:
         if e["idx"] >= off:
@@ -780,11 +835,11 @@ async def _run_auto(sym):
     if cfg["strat"] in ("w2", "wx"):
         await _run_auto_w2(sym, a, ev, cfg)
         return
-    st_mode = cfg["strat"] == "ha"
+    st_mode = cfg["strat"] in ("ha", "wd")
     kind_ok = st_mode or (a["normal"] and not ev["strong"] and not ev["ext"]) or (a["strong"] and ev["strong"]) or (a["ext"] and ev["ext"])
     if not kind_ok or not a[ev["kind"]]:
         return
-    sig = "HA" if st_mode else ("◆" if ev["ext"] else "◉" if ev["strong"] else "●")
+    sig = "DIV" if cfg["strat"] == "wd" else "HA" if st_mode else ("◆" if ev["ext"] else "◉" if ev["strong"] else "●")
     st = BOTS[sym]["state"]
     if st.get("position") == ev["kind"]:
         _log(sym, f"{a['tf']} {ev['kind'].capitalize()} {sig} – Position läuft schon in diese Richtung, übersprungen")
@@ -1119,7 +1174,7 @@ async def _wa_update(b, sym):
     a = AUTO.get(sym)
     if a:
         a["last_ts"] = None   # neue Basislinie: Signale mit den neuen Einstellungen zaehlen erst ab jetzt
-    _log(sym, f"Strategie: {'Heikin-Ashi-Wechsel' if c['strat'] == 'ha' else 'Kreuzung zu Kreuzung' + (', nicht im Minus schließen' if c['w2_profit'] else '') if c['strat'] == 'wx' else 'Wellenanker 2 (Level ±' + format(c['w2_level'], 'g') + ', ' + c['w2_line'] + ', TP Gegenkreuzung' + (', nicht im Minus schließen' if c['w2_profit'] else '') + ')' if c['strat'] == 'w2' else 'Wellenanker'} · Kerzen {c['candles']} · Wellenanker: Kanal {c['n1']}, Durchschnitt {c['n2']}, Zone ±{c['z1']:g}, Quelle {c['src']}")
+    _log(sym, f"Strategie: {'Wellenanker-Divergenz (' + c['wd_line'].upper() + ', Pivot ' + str(c['wd_pivot']) + ', ' + format(c['wd_os'], 'g') + '/' + format(c['wd_ob'], 'g') + ', max ' + str(c['wd_maxr']) + (', + versteckte' if c['wd_hidden'] else '') + ')' if c['strat'] == 'wd' else 'Heikin-Ashi-Wechsel' if c['strat'] == 'ha' else 'Kreuzung zu Kreuzung' + (', nicht im Minus schließen' if c['w2_profit'] else '') if c['strat'] == 'wx' else 'Wellenanker 2 (Level ±' + format(c['w2_level'], 'g') + ', ' + c['w2_line'] + ', TP Gegenkreuzung' + (', nicht im Minus schließen' if c['w2_profit'] else '') + ')' if c['strat'] == 'w2' else 'Wellenanker'} · Kerzen {c['candles']} · Wellenanker: Kanal {c['n1']}, Durchschnitt {c['n2']}, Zone ±{c['z1']:g}, Quelle {c['src']}")
     return web.json_response({"success": True, "persistent": saved, "wa": dict(c, z3=_z3(c), own=True)})
 
 
@@ -1252,10 +1307,16 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
    </div>
    <details id="cfgbox" class="cfgbox"><summary>⚙ Einstellungen · Strategie &amp; Wellenanker</summary>
    <div class="row" style="gap:8px;padding-bottom:6px">
-    <label class="wafld" style="flex:0 0 210px"><span class="lab">Strategie (Signale)</span><select class="inp" id="st-strat"><option value="wa">Wellenanker</option><option value="w2">Wellenanker 2 (Level)</option><option value="wx">Kreuzung zu Kreuzung</option><option value="ha">Heikin-Ashi Wechsel</option></select></label>
+    <label class="wafld" style="flex:0 0 210px"><span class="lab">Strategie (Signale)</span><select class="inp" id="st-strat"><option value="wa">Wellenanker</option><option value="w2">Wellenanker 2 (Level)</option><option value="wx">Kreuzung zu Kreuzung</option><option value="wd">Wellenanker Divergenz</option><option value="ha">Heikin-Ashi Wechsel</option></select></label>
     <label class="wafld w2f w2lf" style="flex:0 0 130px"><span class="lab">Level ± (0–30)</span><input class="inp" id="w2-level" type="number" step="0.5" min="0" max="30"></label>
     <label class="wafld w2f w2lf" style="flex:0 0 150px"><span class="lab">Linie</span><select class="inp" id="w2-line"><option value="signal">Signallinie</option><option value="wave">Welle</option><option value="both">Beide</option></select></label>
     <label class="wafld w2f" style="flex:0 0 200px"><span class="lab">Nicht im Minus schließen</span><select class="inp" id="w2-profit"><option value="false">Aus</option><option value="true">An</option></select></label>
+    <label class="wafld wdf" style="flex:0 0 130px"><span class="lab">Überverkauft (≤)</span><input class="inp" id="wd-os" type="number" step="1" min="-100" max="0"></label>
+    <label class="wafld wdf" style="flex:0 0 130px"><span class="lab">Überkauft (≥)</span><input class="inp" id="wd-ob" type="number" step="1" min="0" max="100"></label>
+    <label class="wafld wdf" style="flex:0 0 120px"><span class="lab">Pivot-Länge</span><input class="inp" id="wd-pivot" type="number" step="1" min="1" max="10"></label>
+    <label class="wafld wdf" style="flex:0 0 140px"><span class="lab">Max. Abstand (Kerzen)</span><input class="inp" id="wd-maxr" type="number" step="1" min="5" max="500"></label>
+    <label class="wafld wdf" style="flex:0 0 120px"><span class="lab">Linie</span><select class="inp" id="wd-line"><option value="wt2">WT2</option><option value="wt1">WT1</option></select></label>
+    <label class="wafld wdf" style="flex:0 0 170px"><span class="lab">Versteckte Divergenz</span><select class="inp" id="wd-hidden"><option value="false">Aus</option><option value="true">An</option></select></label>
     <label class="wafld" style="flex:0 0 150px"><span class="lab">Kerzen</span><select class="inp" id="st-candles"><option value="normal">Normal</option><option value="ha">Heikin-Ashi</option></select></label>
    </div>
    <div class="row" style="gap:8px">
@@ -1448,7 +1509,7 @@ function shift(arr){return arr.map(x=>Object.assign({},x,{time:x.time+tzoff}))}
 function applyChart(d,key){
  renderTfStates(d.tfstates||{});renderTrend(d.trend||{});renderMtf(d.mtf);
  if(d.wa){
-  const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.candles+'|'+d.wa.w2_level+'|'+d.wa.w2_line+'|'+d.wa.w2_profit;
+  const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.candles+'|'+d.wa.w2_level+'|'+d.wa.w2_line+'|'+d.wa.w2_profit+'|'+d.wa.wd_os+'|'+d.wa.wd_ob+'|'+d.wa.wd_pivot+'|'+d.wa.wd_maxr+'|'+d.wa.wd_line+'|'+d.wa.wd_hidden;
   if(k!==waKey){if(waKey!=='')loadedKey=null;waKey=k;applyMode(d.wa.strat);if(d.wa.strat==='w2')setZones(d.wa.w2_level,d.wa.w2_level,true);else setZones(d.wa.z1,d.wa.z3);if(!waBusy())fillWa(d.wa)}
  }
  const msg=$('cmsg');
@@ -1475,7 +1536,7 @@ function applyChart(d,key){
  $('wt1v').textContent='WT1 '+(d.wt1v>0?'+':'')+d.wt1v;$('wt2v').textContent='WT2 '+(d.wt2v>0?'+':'')+d.wt2v;$('wdv').textContent='Δ '+(d.diff>0?'+':'')+d.diff+(d.warm?'':'  ⚠ nur '+d.bars+' Kerzen Historie – Indikator noch ungenau');
  const f=d.markers.slice(-5).reverse();
  $('feed').innerHTML=f.length?f.map(m=>{const l=m.kind==='long',t=new Date(m.time*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  return '<div class="feed"><span class="mono" style="color:var(--mut)">'+t+' · '+d.tf+'</span><span class="pill '+(l?'g':'r')+'" style="padding:3px 10px">'+(l?'Long':'Short')+' '+(d.strat==='ha'?'HA':m.ext?'◆':m.strong?'◉':'●')+'</span><span class="mono" style="color:#cfd5e0">'+fmtP(m.price)+'</span></div>'}).join(''):'<div class="small">Noch keine Signale im sichtbaren Bereich.</div>';
+  return '<div class="feed"><span class="mono" style="color:var(--mut)">'+t+' · '+d.tf+'</span><span class="pill '+(l?'g':'r')+'" style="padding:3px 10px">'+(l?'Long':'Short')+' '+(d.strat==='ha'?'HA':d.strat==='wd'?'DIV':m.ext?'◆':m.strong?'◉':'●')+'</span><span class="mono" style="color:#cfd5e0">'+fmtP(m.price)+'</span></div>'}).join(''):'<div class="small">Noch keine Signale im sichtbaren Bereich.</div>';
 }
 function renderTfStates(s){
  $('tfs').innerHTML=TFS.map(t=>{const v=s[t];const txt=v===undefined||v===null?'…':v===1?'LONG':v===-1?'SHORT':'ABWARTEN';const c=v===1?G:v===-1?R:'#7d8696';
@@ -1572,12 +1633,12 @@ async function pollStatusOnce(){
 async function pollStatus(){await pollStatusOnce();setTimeout(pollStatus,1000)}
 
 /* ---------- Wellenanker-Einstellungen ---------- */
-const WA_IDS=['wa-n1','wa-n2','wa-z1','wa-src','st-strat','st-candles','w2-level','w2-line','w2-profit'];
-function applyMode(s){const st=s==='ha'||s==='w2'||s==='wx';document.querySelectorAll('.w2f').forEach(e=>e.style.display=(s==='w2'||s==='wx')?'':'none');document.querySelectorAll('.w2lf').forEach(e=>{if(s==='wx')e.style.display='none'});document.querySelectorAll('.zonef').forEach(e=>e.style.display=(s==='w2'||s==='wx')?'none':'');$('sigrow').style.display=st?'none':'';$('siglab').textContent=s==='ha'?'Einstieg bei Heikin-Ashi-Farbwechsel (grün = Long, rot = Short)':s==='w2'?'Einstieg bei Level-Durchbruch · TP bei Gegenkreuzung der Linien':s==='wx'?'Jede Kreuzung der beiden Linien = Wechsel (Long ↔ Short), egal wo':'Einstieg bei Signal';['leg1','leg2'].forEach(i=>$(i).style.display=st?'none':'')}
+const WA_IDS=['wd-os','wd-ob','wd-pivot','wd-maxr','wd-line','wd-hidden','wa-n1','wa-n2','wa-z1','wa-src','st-strat','st-candles','w2-level','w2-line','w2-profit'];
+function applyMode(s){const st=s==='ha'||s==='w2'||s==='wx'||s==='wd';document.querySelectorAll('.wdf').forEach(e=>e.style.display=s==='wd'?'':'none');document.querySelectorAll('.w2f').forEach(e=>e.style.display=(s==='w2'||s==='wx')?'':'none');document.querySelectorAll('.w2lf').forEach(e=>{if(s==='wx')e.style.display='none'});document.querySelectorAll('.zonef').forEach(e=>e.style.display=(s==='w2'||s==='wx'||s==='wd')?'none':'');$('sigrow').style.display=st?'none':'';$('siglab').textContent=s==='wd'?'Einstieg bei Wellenanker-Divergenz (Bestätigungs-Kerze): Long = Kurs tiefer, Welle höher · Short = Kurs höher, Welle tiefer':s==='ha'?'Einstieg bei Heikin-Ashi-Farbwechsel (grün = Long, rot = Short)':s==='w2'?'Einstieg bei Level-Durchbruch · TP bei Gegenkreuzung der Linien':s==='wx'?'Jede Kreuzung der beiden Linien = Wechsel (Long ↔ Short), egal wo':'Einstieg bei Signal';['leg1','leg2'].forEach(i=>$(i).style.display=st?'none':'')}
 function waBusy(){return WA_IDS.some(i=>document.activeElement===$(i))}
-function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src;$('st-strat').value=w.strat||'wa';$('st-candles').value=w.candles||'normal';$('w2-level').value=w.w2_level;$('w2-line').value=w.w2_line||'signal';$('w2-profit').value=String(!!w.w2_profit)}
+function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src;$('st-strat').value=w.strat||'wa';$('st-candles').value=w.candles||'normal';$('w2-level').value=w.w2_level;$('w2-line').value=w.w2_line||'signal';$('w2-profit').value=String(!!w.w2_profit);$('wd-os').value=w.wd_os;$('wd-ob').value=w.wd_ob;$('wd-pivot').value=w.wd_pivot;$('wd-maxr').value=w.wd_maxr;$('wd-line').value=w.wd_line||'wt2';$('wd-hidden').value=String(!!w.wd_hidden)}
 async function saveWa(){
- const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value,strat:$('st-strat').value,candles:$('st-candles').value,w2_level:String($('w2-level').value).replace(',','.'),w2_line:$('w2-line').value,w2_profit:$('w2-profit').value};
+ const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value,strat:$('st-strat').value,candles:$('st-candles').value,w2_level:String($('w2-level').value).replace(',','.'),w2_line:$('w2-line').value,w2_profit:$('w2-profit').value,wd_os:String($('wd-os').value).replace(',','.'),wd_ob:String($('wd-ob').value).replace(',','.'),wd_pivot:$('wd-pivot').value,wd_maxr:$('wd-maxr').value,wd_line:$('wd-line').value,wd_hidden:$('wd-hidden').value};
  try{const r=await api('/api/scalp/auto',{coin,wa:body});toast(r.persistent?'Einstellungen für '+coin+' gespeichert (Autotrade startet mit neuer Basislinie)':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);loadedKey=null;waKey='';loadChart()}
  catch(e){toast(e.message,true)}
 }
