@@ -346,6 +346,11 @@ async def mf_poll_loop(symbol):
                     local = get_seconds_candles(st, SUB_MINUTE_RESOLUTIONS[resolution], needed_bars)
                     if local:
                         closed_ts, closed_o, closed_h, closed_l, closed_c = local
+                        # Sekunden-Kerzen: die letzte ist meist noch die LAUFENDE (nicht fertige) - die darf nie ausgewertet werden,
+                        # sonst flackert das Momentum und der Bot steigt auf ein Signal ein, das bei Kerzenschluss wieder verschwindet.
+                        sec_len = SUB_MINUTE_RESOLUTIONS[resolution]
+                        if closed_ts and closed_ts[-1] + sec_len * 1000 > time.time() * 1000:
+                            closed_ts, closed_o, closed_h, closed_l, closed_c = closed_ts[:-1], closed_o[:-1], closed_h[:-1], closed_l[:-1], closed_c[:-1]
                 else:
                     _need_fetch = last_processed_ts is None or (time.time() % res_s) < 6 or res_s <= 60
                     data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot")) if _need_fetch else None
@@ -536,6 +541,14 @@ def mf_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
     if n < 30:
         return None
     bull, bear, m, mp, fields = mf_series(h[:-1], l[:-1], p)
+    if p["entry"] == "color":
+        # Im Farb-Modus entspricht das Feld dem, was der Bot handelt: Wechsel der Richtung = neues Feld (Beginn = Signalkerze)
+        fields, cur = [], None
+        for i in range(len(bull)):
+            k = "long" if bull[i] else "short" if bear[i] else None
+            if k and k != cur:
+                fields.append({"kind": k, "start": i, "cross": i})
+                cur = k
     off = max(0, n - max_bars)
     candles = [{"time": ts[i] // 1000, "open": o[i], "high": h[i], "low": l[i], "close": c[i]} for i in range(off, n)]
     markers, bg = [], []
