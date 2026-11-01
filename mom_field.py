@@ -13,7 +13,9 @@ Nachbau des Pine-Skripts "Momentum: Kerzenfaerbung + Punkte + Wert + MTF", Hinte
   kreuzte (mindestens 1 Kerze nach dem Start des vorigen Feldes). BUY/SELL-Label sitzen im Chart auf diesem Feldbeginn (wie im Pine).
   Der BOT handelt aber nicht rueckwirkend, sondern beim Schlusskurs der Kerze, auf der der Wert die 0 kreuzt (kein Repaint, nur geschlossene Kerzen).
 
-Einstieg (mf_entry_mode): color (Standard) = sobald die Kerzenfarbe gegen das aktuelle Vorzeichen kippt (Feld "wird rot/gruen"), zusaetzlich beim Nulldurchgang;
+Einstieg (mf_entry_mode): candle (Standard) = Hintergrund = Kerzenfarbe (Momentum steigt = gruen, faellt = rot), Signal bei JEDEM Farbwechsel
+der geschlossenen Kerze (kein Repaint, keine Rueckwirkung). color = sobald die Kerzenfarbe kippt (Feld "wird rot/gruen"), solange |Wert| <= mf_early_max (nah an der 0); kippt sie zurueck,
+dreht das Signal zurueck; zusaetzlich immer beim Nulldurchgang;
 cross = nur beim Nulldurchgang (wie das Pine-Signal live, ohne Rueckwirkung).
 
 Ausstieg (mf_exit_mode): flip = Gegensignal dreht die Position (Standard); sltp_only = nur SL/TP (Gegensignale werden ignoriert).
@@ -40,7 +42,8 @@ def _mf_params(cfg):
     mode = cfg.get("mf_direction_mode", "both")
     return {
         "mom": max(1, int(cfg.get("mf_mom_len", 12) or 12)), "smooth": max(1, int(cfg.get("mf_smooth_len", 21) or 21)),
-        "entry": "cross" if cfg.get("mf_entry_mode", "color") == "cross" else "color",
+        "early_max": max(1.0, min(100.0, float(cfg.get("mf_early_max", 30) or 30))),
+        "entry": cfg.get("mf_entry_mode", "candle") if cfg.get("mf_entry_mode", "candle") in ("candle", "color", "cross") else "candle",
         "exit_mode": em if em in EXIT_MODES else "flip",
         "direction": mode if mode in ("both", "long_only", "short_only") else "both",
         "sl_usd": max(0.0, float(cfg.get("mf_sl_usd", 0.0) or 0.0)),
@@ -109,16 +112,29 @@ def mf_series(h, l, p):
                 bull[i] = True
             else:
                 bear[i] = True
-    if p.get("entry") == "color":
-        # Fruehes Signal: sobald die Kerzenfarbe (Momentum steigt/faellt) GEGEN das aktuelle Vorzeichen kippt - Wert noch > 0 und faellt -> SELL,
-        # Wert noch < 0 und steigt -> BUY. Das ist der Moment, in dem das Feld im Chart "rot/gruen wird"; der Nulldurchgang folgt spaeter.
-        # Faellt ein Nulldurchgang auf dieselbe Kerze, gilt der Nulldurchgang.
+    if p.get("entry") == "candle":
+        # Kerzenfarbe: Hintergrund = Farbe der (geschlossenen) Kerze, Signal bei jedem Farbwechsel. Kein Nulldurchgang, keine Rueckwirkung.
+        bull, bear = [False] * n, [False] * n
         for i in range(1, n):
-            if up[i] != up[i - 1] and not bull[i] and not bear[i]:
-                if not up[i] and m[i] > 0:
-                    bear[i] = True
-                elif up[i] and m[i] < 0:
-                    bull[i] = True
+            if up[i] != up[i - 1]:
+                (bull if up[i] else bear)[i] = True
+    elif p.get("entry") == "color":
+        # Fruehes Signal beim Kippen der Kerzenfarbe (Momentum steigt/faellt), BEVOR der Wert die 0 kreuzt - aber nur, wenn der Wert schon nah an der 0
+        # liegt (|Wert| <= early_max); sonst waere es Rauschen mitten im Feld. Kippt die Farbe danach ZURUECK (ohne Nulldurchgang), kehrt das Signal
+        # zur Richtung des Vorzeichens zurueck (die fruehe Annahme war falsch). Nulldurchgaenge bleiben immer Signale.
+        xm, dirpos = p.get("early_max", 30.0), None
+        for i in range(n):
+            if bull[i] or bear[i]:
+                dirpos = "long" if bull[i] else "short"
+                continue
+            if i == 0 or up[i] == up[i - 1]:
+                continue
+            if not up[i]:   # Farbe kippt auf "faellt"
+                if dirpos != "short" and ((0 < m[i] <= xm) or (m[i] < 0 and dirpos == "long")):
+                    bear[i], dirpos = True, "short"
+            else:           # Farbe kippt auf "steigt"
+                if dirpos != "long" and ((-xm <= m[i] < 0) or (m[i] > 0 and dirpos == "short")):
+                    bull[i], dirpos = True, "long"
     return bull, bear, m, mp, fields
 
 
@@ -541,7 +557,7 @@ def mf_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
     if n < 30:
         return None
     bull, bear, m, mp, fields = mf_series(h[:-1], l[:-1], p)
-    if p["entry"] == "color":
+    if p["entry"] in ("color", "candle"):
         # Im Farb-Modus entspricht das Feld dem, was der Bot handelt: Wechsel der Richtung = neues Feld (Beginn = Signalkerze)
         fields, cur = [], None
         for i in range(len(bull)):
