@@ -647,8 +647,13 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
         events = _ha_series(cs)[2]   # Marker/Signale = HA-Farbwechsel, die Welle bleibt nur als Anzeige
     elif cfg["strat"] in ("w2", "wx"):
         events = _w2_series(cs, cfg)[2]   # Marker = Level-Durchbruch
-    elif cfg["strat"] == "wd":
-        events = _wd_series(cs, cfg)[2]   # Marker = Divergenz (Bestaetigungs-Kerze)
+    div_lines = []
+    if cfg["strat"] == "wd":
+        pairs = []
+        events = _wd_series(cs, cfg, pairs)[2]   # Marker = Divergenz (Bestaetigungs-Kerze)
+        div_lines = [{"kind": d["kind"], "hidden": d["hidden"], "t1": cs[d["i1"]]["ts"] // 1000, "t2": cs[d["i2"]]["ts"] // 1000,
+                      "w1": _r(d["w1"], 2), "w2": _r(d["w2"], 2), "p1": d["p1"], "p2": d["p2"]}
+                     for d in pairs if d["i1"] >= off][-60:]
     markers = []
     for e in events:
         if e["idx"] >= off:
@@ -656,7 +661,7 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
             markers.append({"time": x["ts"] // 1000, "kind": e["kind"], "strong": bool(e["strong"]),
                             "ext": bool(e["ext"]), "price": x["c"], "live": e["idx"] == n - 1})
     a, b = wt1[-1], wt2[-1]
-    return {"candles": candles, "wt1": w1, "wt2": w2, "vix": vix, "markers": markers, "warm": n >= MIN_BARS, "bars": n,
+    return {"candles": candles, "wt1": w1, "wt2": w2, "vix": vix, "markers": markers, "div_lines": div_lines, "warm": n >= MIN_BARS, "bars": n,
             "wt1v": _r(a, 1), "wt2v": _r(b, 1), "diff": _r(a - b, 1),
             "strat": cfg["strat"]}, states
 
@@ -1505,6 +1510,12 @@ document.querySelectorAll('.q button[data-k]').forEach(b=>b.addEventListener('cl
  vals[b.dataset.k]=b.dataset.k==='tp'?pos.avg+d*off:pos.avg-d*off;await saveTpsl()}));
 
 /* ---------- Chart-Daten ---------- */
+let divSeries=[],divSig='';
+function setDivLines(list){const sig=JSON.stringify(list)+tzoff;if(sig===divSig)return;divSig=sig;
+ divSeries.forEach(([ch,se])=>{try{ch.removeSeries(se)}catch(e){}});divSeries=[];
+ list.forEach(dv=>{const opt={color:dv.kind==='long'?G:R,lineWidth:2,lineStyle:dv.hidden?2:0,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false};
+  const a=pc.addLineSeries(opt);a.setData([{time:dv.t1+tzoff,value:dv.p1},{time:dv.t2+tzoff,value:dv.p2}]);divSeries.push([pc,a]);
+  const b=wc.addLineSeries(opt);b.setData([{time:dv.t1+tzoff,value:dv.w1},{time:dv.t2+tzoff,value:dv.w2}]);divSeries.push([wc,b])})}
 function shift(arr){return arr.map(x=>Object.assign({},x,{time:x.time+tzoff}))}
 function applyChart(d,key){
  renderTfStates(d.tfstates||{});renderTrend(d.trend||{});renderMtf(d.mtf);
@@ -1530,6 +1541,7 @@ function applyChart(d,key){
   catch(e){candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);vixs.setData(vx);}
   lastT=cd[cd.length-1].time;
  }
+ setDivLines(d.div_lines||[]);
  const ms=d.markers.map(m=>({time:m.time+tzoff,pos:m.kind==='long'?'belowBar':'aboveBar',color:m.kind==='long'?G:R,shape:m.kind==='long'?'arrowUp':'arrowDown',text:m.ext?'◆':m.strong?'◉':''}));
  candle.setMarkers(ms.map(m=>({time:m.time,position:m.pos,color:m.color,shape:m.shape,text:m.text})));
  wt2s.setMarkers(d.strat==='ha'?[]:d.markers.map(m=>({time:m.time+tzoff,position:'inBar',color:m.kind==='long'?G:R,shape:m.ext?'square':'circle',size:m.strong?2:1})));
