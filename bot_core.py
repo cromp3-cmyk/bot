@@ -478,6 +478,19 @@ def default_config():
         "wd_sl_to_tp1_on_tp2": os.getenv("WD_SL_TO_TP1_ON_TP2", "true").lower() == "true",
         "wd_sl_cooldown_seconds": float(os.getenv("WD_SL_COOLDOWN_SECONDS", "30.0")),
 
+        # ===== Momentum-Feld (entry_mode mom_field): Nachbau des Pine "Momentum ... Durchgehend (Feld)" - BUY/SELL beim Nulldurchgang =====
+        "mf_resolution": os.getenv("MF_RESOLUTION", "15m"),
+        "mf_mom_len": int(os.getenv("MF_MOM_LEN", "12")), "mf_smooth_len": int(os.getenv("MF_SMOOTH_LEN", "21")),
+        "mf_exit_mode": os.getenv("MF_EXIT_MODE", "flip"), "mf_direction_mode": os.getenv("MF_DIRECTION_MODE", "both"),
+        "mf_sl_usd": float(os.getenv("MF_SL_USD", "0")), "mf_tp_usd": float(os.getenv("MF_TP_USD", "0")),
+        "mf_profit_only_close": os.getenv("MF_PROFIT_ONLY_CLOSE", "false").lower() == "true",
+        "mf_tp_mode": os.getenv("MF_TP_MODE", "single"),
+        "mf_tp1_usd": float(os.getenv("MF_TP1_USD", "5")), "mf_tp2_usd": float(os.getenv("MF_TP2_USD", "10")), "mf_tp3_usd": float(os.getenv("MF_TP3_USD", "15")),
+        "mf_tp1_pct": float(os.getenv("MF_TP1_PCT", "33")), "mf_tp2_pct": float(os.getenv("MF_TP2_PCT", "33")),
+        "mf_be_after_tp1": os.getenv("MF_BE_AFTER_TP1", "true").lower() == "true",
+        "mf_sl_to_tp1_on_tp2": os.getenv("MF_SL_TO_TP1_ON_TP2", "true").lower() == "true",
+        "mf_sl_cooldown_seconds": float(os.getenv("MF_SL_COOLDOWN_SECONDS", "30.0")),
+
         # ===== Trendfolge (entry_mode trendfolge): Marktstruktur-Trend + rote/gruene Kerzen =====
         "tfl_resolution": os.getenv("TFL_RESOLUTION", "1m"),        # Kerzen-Zeitebene (rot/gruen), ab 10s
         "tfl_trend_tf": os.getenv("TFL_TREND_TF", "5m"),            # Trend-Zeitebene, ab 10s
@@ -872,6 +885,7 @@ PERSISTED_STATE_KEYS = [
     "pa_sl_price", "pa_tp_price", "pa_sl_cooldown_until",
     "we_sl_price", "we_tp_price", "we_sl_cooldown_until",
     "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until", "wd_tps", "wd_tp_pcts", "wd_tp_done", "wd_be", "wd_entries", "wd_last_entry",
+    "mf_sl_price", "mf_tp_price", "mf_sl_cooldown_until", "mf_tps", "mf_tp_pcts", "mf_tp_done", "mf_be", "mf_entries", "mf_last_entry",
     "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
@@ -1780,6 +1794,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="wt_div">WT-Divergenz (WaveTrend-Divergenzen als Einstieg, Welle wie im Wellenanker, wählbarer Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
+      <option value="mom_field">Momentum-Feld (BUY/SELL beim Nulldurchgang des Momentums, Hintergrund rot/grün, SL/TP, Teil-TPs)</option>
       <option value="wae_ema">WAE-Zonen + EMA9 (WAE-Zone aus höherem Zeitrahmen, CALL/PUT bei Zone + EMA, wählbarer Ausstieg, optional $-SL/-TP)</option>
       <option value="punk_algo">Punk Algo (Range-Filter-Dreiecke ▲/▼ als Einstieg, Gegen-Dreieck = Flip, WaveTrend-X = Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="vwap_cross">EMA 9 + VWAP (Einstieg bei Kreuzung EMA9 / Day-Week-Month-VWAP, SL hinter letzter Kerze, TP Kreuzung/Fest/Gegentrade, Backtest)</option>
@@ -2226,6 +2241,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="wt_div" data-requires="wd_tp_mode" data-requires-value="partial"><label>SL auf TP1 nach TP2</label><select class="cfg" id="wd_sl_to_tp1_on_tp2"><option value="true">An</option><option value="false">Aus</option></select></div>
 
   <div data-mode="wt_div"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="wd_sl_cooldown_seconds"></div>
+
+  <div data-mode="mom_field" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🟩🟥 <b>Momentum-Feld</b>: Nachbau des Pine „Momentum: Kerzenfärbung + Punkte + Wert + MTF“ im Modus <b>Durchgehend (Feld)</b>. Das Momentum ist eine doppelt geglättete Kerzen-Änderung (Hoch+Tief)/2 in %. Kreuzt der Wert die <b>0</b> nach oben → grünes Feld + <b>BUY</b> (Long), nach unten → rotes Feld + <b>SELL</b> (Short). Im Chart beginnt das Feld wie im Pine rückwirkend bei der Kerze, an der die Kerzenfarbe zuletzt gewechselt hat; der Bot selbst steigt beim Schlusskurs der Kerze ein, auf der der Wert die 0 kreuzt (keine Rückwirkung, nur geschlossene Kerzen).
+  </div>
+  <div data-mode="mom_field"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="mf_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <input type="number" step="1" min="1" id="mf_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="mom_field"><label>MomLength (Pine: 12)</label><input type="number" step="1" min="1" id="mf_mom_len"></div>
+  <div data-mode="mom_field"><label>SmoothLength (Pine: 21)</label><input type="number" step="1" min="1" id="mf_smooth_len"></div>
+  <div data-mode="mom_field"><label>Gegensignal (Flip) nur im Plus ausführen (im Minus wartet der Bot auf das nächste Signal oder den SL)</label><select class="cfg" id="mf_profit_only_close"><option value="false">Aus</option><option value="true">An</option></select></div>
+  <div data-mode="mom_field"><label>Ausstieg</label><select class="cfg" id="mf_exit_mode"><option value="flip">Gegensignal = Flip (BUY↔SELL in einer Order)</option><option value="sltp_only">Nur SL/TP (Gegensignale ignoriert)</option></select></div>
+  <div data-mode="mom_field"><label>Richtung</label><select class="cfg" id="mf_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="mom_field"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="mf_sl_usd"></div>
+  <div data-mode="mom_field"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="mf_tp_usd"></div>
+  <div data-mode="mom_field"><label>Take-Profit-Art</label><select class="cfg" id="mf_tp_mode"><option value="single">Ein TP (schließt alles)</option><option value="partial">Teil-TPs (TP1 / TP2 / TP3)</option></select></div>
+  <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>TP1 ($ Gewinn der ganzen Position, 0 = aus)</label><input type="number" step="0.1" min="0" id="mf_tp1_usd"></div>
+  <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="100" id="mf_tp1_pct"></div>
+  <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>TP2 ($ Gewinn, muss größer als TP1 sein, 0 = aus)</label><input type="number" step="0.1" min="0" id="mf_tp2_usd"></div>
+  <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="100" id="mf_tp2_pct"></div>
+  <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>TP3 ($ Gewinn, muss größer als TP2 sein, 0 = aus) - schließt den Rest</label><input type="number" step="0.1" min="0" id="mf_tp3_usd"></div>
+  <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>SL auf Break-Even nach TP1</label><select class="cfg" id="mf_be_after_tp1"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>SL auf TP1 nach TP2</label><select class="cfg" id="mf_sl_to_tp1_on_tp2"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="mom_field"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mf_sl_cooldown_seconds"></div>
 
   <div data-mode="trendfolge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧭 <b>Trendfolge</b>: Der Trend kommt aus der Marktstruktur (BOS/CHoCH). <b>Aufwärtstrend: bei jeder roten Kerze Kauf</b> (Nachkauf, solange die Position läuft), <b>Abwärtstrend: bei jeder grünen Kerze Short</b>. Ausstieg: fester $-TP auf die gesamte Position, optional fester $-SL. <b>Trendwechsel = Position drehen</b> (beenden und sofort im neuen Trend einsteigen, oder nur schließen). Kerzen- und Trend-Zeitebene sind getrennt wählbar (ab 10 Sekunden).
@@ -4213,6 +4252,9 @@ function wacInit() {
                handleScale: {mouseWheel: true, pinch: true, axisPressedMouseMove: true, axisDoubleClickReset: true}};
   WAC.price = LW.createChart(document.getElementById('wac-price'), Object.assign({autoSize: true}, opt));
   WAC.wt = LW.createChart(document.getElementById('wac-wt'), Object.assign({autoSize: true}, opt));
+  // Hintergrund-Felder (Momentum-Feld): Histogramm ueber die volle Hoehe, VOR den Kerzen angelegt -> liegt dahinter
+  WAC.bg = WAC.price.addHistogramSeries({priceScaleId: 'bgf', priceLineVisible: false, lastValueVisible: false, base: 0, autoscaleInfoProvider: () => ({priceRange: {minValue: 0, maxValue: 1}})});
+  WAC.price.priceScale('bgf').applyOptions({scaleMargins: {top: 0, bottom: 0}, visible: false});
   WAC.cs = WAC.price.addCandlestickSeries({upColor: '#1fcf6e', downColor: '#f0354b', borderVisible: false, wickUpColor: '#1fcf6e', wickDownColor: '#f0354b'});
   WAC.l1 = WAC.wt.addLineSeries({color: '#3b82f6', lineWidth: 2, priceLineVisible: false});
   WAC.l2 = WAC.wt.addLineSeries({color: '#eab308', lineWidth: 1, priceLineVisible: false});
@@ -4220,6 +4262,20 @@ function wacInit() {
   const sync = (from, to) => from.timeScale().subscribeVisibleLogicalRangeChange(r => { if (busy || !r) return; busy = true; try { to.timeScale().setVisibleLogicalRange(r); } catch (e) {} busy = false; });
   sync(WAC.price, WAC.wt); sync(WAC.wt, WAC.price);
   WAC.inited = true;
+}
+function wacSetBgFields(fields, candles) {
+  if (!WAC.bg) return;
+  if (!fields && !WAC.bgOn) return;
+  WAC.bgOn = !!(fields && fields.length);
+  const out = [];
+  let k = 0;
+  const fl = fields || [];
+  (candles || []).forEach(c => {
+    while (k < fl.length && fl[k].t2 < c.time) k++;
+    const f = (k < fl.length && fl[k].t1 <= c.time && c.time <= fl[k].t2) ? fl[k] : null;
+    out.push(f ? {time: c.time, value: 1, color: f.kind === 'long' ? 'rgba(34,197,94,0.16)' : 'rgba(239,68,68,0.16)'} : {time: c.time});
+  });
+  WAC.bg.setData(out);
 }
 function wacSetLevels(levels) {
   WAC.lines.forEach(x => WAC.l1.removePriceLine(x)); WAC.lines = [];
@@ -4302,8 +4358,8 @@ function wacRender(d, markers, keepRange) {
 }
 function wacSigMarkers(d) {
   const sig = (d.markers || []).map(m => m.kind === 'long'
-    ? {time: m.time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: ''}
-    : {time: m.time, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: ''});
+    ? {time: m.time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: m.text || ''}
+    : {time: m.time, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: m.text || ''});
   const st = (d.structure || []).map(e => ({time: e.time, position: e.dir > 0 ? 'belowBar' : 'aboveBar', color: e.dir > 0 ? '#1fcf6e' : '#f0354b',
     shape: e.kind === 'CHoCH' ? 'square' : 'circle', text: e.kind}));
   const tm = (d.trade_marks || []).map(m => m.kind === 'entry'
@@ -4319,10 +4375,11 @@ async function wacPollLive() {
   const isPm = document.getElementById('entry_mode').value === 'pure_momentum';
   const isMt = document.getElementById('entry_mode').value === 'mtf_spread' || isPm;
   const isWd = document.getElementById('entry_mode').value === 'wt_div';
-  document.getElementById('wac-wtbox').style.display = (isWa || isMt || isWd) ? '' : 'none';
+  const isMf = document.getElementById('entry_mode').value === 'mom_field';
+  document.getElementById('wac-wtbox').style.display = (isWa || isMt || isWd || isMf) ? '' : 'none';
   document.getElementById('wac-tab-bt').style.display = isWa ? '' : 'none';
   const wtLab = document.querySelector('#wac-wtbox > div');
-  if (wtLab) wtLab.textContent = isPm ? 'MOMENTUM (Pure Momentum Oscillator) – gestrichelt: Short-/Long-Schwelle, Pfeil bei jedem Farbwechsel' : isMt ? 'TREND % (Ø der Blöcke, MTF Spread) – gestrichelt: Schwellen Rot/Grün bzw. Buy-/Sell-Level' : (isWd ? 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Divergenz-Schwellen · Divergenz-Linien: grün = bullisch, rot = bärisch, gestrichelt = hidden' : 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels');
+  if (wtLab) wtLab.textContent = isMf ? 'MOMENTUM (blau, Nulllinie) – grüner Hintergrund = Wert über 0 (BUY), roter Hintergrund = Wert unter 0 (SELL)' : isPm ? 'MOMENTUM (Pure Momentum Oscillator) – gestrichelt: Short-/Long-Schwelle, Pfeil bei jedem Farbwechsel' : isMt ? 'TREND % (Ø der Blöcke, MTF Spread) – gestrichelt: Schwellen Rot/Grün bzw. Buy-/Sell-Level' : (isWd ? 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Divergenz-Schwellen · Divergenz-Linien: grün = bullisch, rot = bärisch, gestrichelt = hidden' : 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels');
   wacInit(); if (!WAC.inited) return;
   const sym = currentSymbol, tf = document.getElementById('wac-tf').value;
   try {
@@ -4339,8 +4396,9 @@ async function wacPollLive() {
     wacSetRlm(d.rlm_levels);
     wacSetOverlays(d.overlays);
     wacSetDivLines(d.div_lines);
+    wacSetBgFields(d.bg_fields, d.candles);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
-    const wtTxt = (isWa || isWd) ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
+    const wtTxt = isMf ? ` · Momentum ${d.wt1v} (vorher ${d.wt2v})` : (isWa || isWd) ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
     const p = d.position;
     info.innerText = `${sym} ${d.resolution} · Kurs ${d.price ?? '-'}` + wtTxt + (p ? ` · ${p.dir.toUpperCase()} Ø ${p.avg.toFixed(2)} PnL ${p.pnl.toFixed(2)} $` : ' · flat') + (d.active ? '' : ' · Bot nicht aktiv (nur Anzeige)');
   } catch (e) { /* naechster Versuch */ }
@@ -4552,7 +4610,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #mf_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -5765,6 +5823,16 @@ async function refresh() {
     document.getElementById('wd_direction_mode').value = data.config.wd_direction_mode;
     document.getElementById('wd_use_regular').value = String(data.config.wd_use_regular !== false);
     document.getElementById('wd_use_hidden').value = String(!!data.config.wd_use_hidden);
+    setResolutionField('mf_resolution', data.config.mf_resolution);
+    document.getElementById('mf_mom_len').value = data.config.mf_mom_len;
+    document.getElementById('mf_smooth_len').value = data.config.mf_smooth_len;
+    document.getElementById('mf_exit_mode').value = data.config.mf_exit_mode || 'flip';
+    document.getElementById('mf_direction_mode').value = data.config.mf_direction_mode || 'both';
+    document.getElementById('mf_profit_only_close').value = String(!!data.config.mf_profit_only_close);
+    document.getElementById('mf_tp_mode').value = data.config.mf_tp_mode || 'single';
+    ['mf_tp1_usd', 'mf_tp2_usd', 'mf_tp3_usd', 'mf_tp1_pct', 'mf_tp2_pct', 'mf_sl_usd', 'mf_tp_usd', 'mf_sl_cooldown_seconds'].forEach(k => { document.getElementById(k).value = data.config[k]; });
+    document.getElementById('mf_be_after_tp1').value = String(data.config.mf_be_after_tp1 !== false);
+    document.getElementById('mf_sl_to_tp1_on_tp2').value = String(data.config.mf_sl_to_tp1_on_tp2 !== false);
     document.getElementById('tfl_resolution').value = data.config.tfl_resolution || '1m';
     document.getElementById('tfl_trend_tf').value = data.config.tfl_trend_tf || '5m';
     document.getElementById('tfl_trend_mode').value = data.config.tfl_trend_mode || 'swing';
@@ -6306,6 +6374,20 @@ function buildConfigPayload() {
     wd_direction_mode: document.getElementById('wd_direction_mode').value,
     wd_use_regular: document.getElementById('wd_use_regular').value === 'true',
     wd_use_hidden: document.getElementById('wd_use_hidden').value === 'true',
+    mf_resolution: getResolutionField('mf_resolution'),
+    mf_mom_len: parseInt(document.getElementById('mf_mom_len').value) || 12,
+    mf_smooth_len: parseInt(document.getElementById('mf_smooth_len').value) || 21,
+    mf_exit_mode: document.getElementById('mf_exit_mode').value,
+    mf_direction_mode: document.getElementById('mf_direction_mode').value,
+    mf_profit_only_close: document.getElementById('mf_profit_only_close').value === 'true',
+    mf_tp_mode: document.getElementById('mf_tp_mode').value,
+    mf_tp1_usd: parseFloat(document.getElementById('mf_tp1_usd').value) || 0, mf_tp2_usd: parseFloat(document.getElementById('mf_tp2_usd').value) || 0, mf_tp3_usd: parseFloat(document.getElementById('mf_tp3_usd').value) || 0,
+    mf_tp1_pct: parseFloat(document.getElementById('mf_tp1_pct').value) || 33, mf_tp2_pct: parseFloat(document.getElementById('mf_tp2_pct').value) || 33,
+    mf_be_after_tp1: document.getElementById('mf_be_after_tp1').value === 'true',
+    mf_sl_to_tp1_on_tp2: document.getElementById('mf_sl_to_tp1_on_tp2').value === 'true',
+    mf_sl_usd: parseFloat(document.getElementById('mf_sl_usd').value) || 0,
+    mf_tp_usd: parseFloat(document.getElementById('mf_tp_usd').value) || 0,
+    mf_sl_cooldown_seconds: parseFloat(document.getElementById('mf_sl_cooldown_seconds').value),
     wd_sl_usd: parseFloat(document.getElementById('wd_sl_usd').value) || 0,
     wd_tp_usd: parseFloat(document.getElementById('wd_tp_usd').value) || 0,
     wd_sl_cooldown_seconds: parseFloat(document.getElementById('wd_sl_cooldown_seconds').value),
@@ -6814,7 +6896,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "mf_resolution", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
@@ -6955,13 +7037,14 @@ async def handle_wa_live_chart(request):
     is_pa = cfg.get("entry_mode") == "punk_algo"
     is_we = cfg.get("entry_mode") == "wae_ema"
     is_wd = cfg.get("entry_mode") == "wt_div"
+    is_mf = cfg.get("entry_mode") == "mom_field"
     is_tfl = cfg.get("entry_mode") == "trendfolge"
     is_rlm = cfg.get("entry_mode") == "rlm"
     is_vc = cfg.get("entry_mode") == "vwap_cross"
     tf = request.query.get("tf", "")
     SUBMIN = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
-        tf = cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
+        tf = cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
             tf = "5m"
     if tf in SUBMIN:
@@ -6986,6 +7069,9 @@ async def handle_wa_live_chart(request):
     elif is_tfl:
         from trendfolge import tfl_chart_payload
         payload = await asyncio.to_thread(tfl_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_mf:
+        from mom_field import mf_chart_payload
+        payload = await asyncio.to_thread(mf_chart_payload, ts, o, h, l, c, cfg, 1000)
     elif is_wd:
         from wt_div import wd_chart_payload
         payload = await asyncio.to_thread(wd_chart_payload, ts, o, h, l, c, cfg, 1000)
@@ -7014,8 +7100,8 @@ async def handle_wa_live_chart(request):
         sl_usd = float(cfg.get("wa_sl_usd", 5.0))
         d = (sl_usd / size) if size else 0
         pos = {"dir": st["position"], "avg": avg, "size": size, "pnl": ((st.get("last_price") or avg) - avg) * size * (1 if st["position"] == "long" else -1),
-               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else st.get("wd_sl_price") if is_wd else None),
-               "tps": (st.get("rlm_tps") or []) if is_rlm else ((list((st.get("wd_tps") or [])[int(st.get("wd_tp_done") or 0):]) or ([st["wd_tp_price"]] if st.get("wd_tp_price") else [])) if is_wd else [])}
+               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else st.get("wd_sl_price") if is_wd else st.get("mf_sl_price") if is_mf else None),
+               "tps": (st.get("rlm_tps") or []) if is_rlm else ((list((st.get("wd_tps") or [])[int(st.get("wd_tp_done") or 0):]) or ([st["wd_tp_price"]] if st.get("wd_tp_price") else [])) if is_wd else (list((st.get("mf_tps") or [])[int(st.get("mf_tp_done") or 0):]) or ([st["mf_tp_price"]] if st.get("mf_tp_price") else [])) if is_mf else [])}
     gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
     grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
     structure = []

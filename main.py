@@ -25,6 +25,7 @@ from dollar701 import dv_poll_loop
 from punk_algo import pa_poll_loop
 from wae_ema import we_poll_loop
 from wt_div import wd_poll_loop
+from mom_field import mf_poll_loop
 from trendfolge import tfl_poll_loop
 from rlm import rlm_poll_loop
 from copytrade import (
@@ -178,6 +179,7 @@ async def main():
         *[pa_poll_loop(s) for s in SYMBOLS],
         *[we_poll_loop(s) for s in SYMBOLS],
         *[wd_poll_loop(s) for s in SYMBOLS],
+        *[mf_poll_loop(s) for s in SYMBOLS],
         *[tfl_poll_loop(s) for s in SYMBOLS],
         *[rlm_poll_loop(s) for s in SYMBOLS],
         *[rsi_poll_loop(s) for s in SYMBOLS],
