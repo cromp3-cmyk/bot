@@ -13,6 +13,9 @@ Nachbau des Pine-Skripts "Momentum: Kerzenfaerbung + Punkte + Wert + MTF", Hinte
   kreuzte (mindestens 1 Kerze nach dem Start des vorigen Feldes). BUY/SELL-Label sitzen im Chart auf diesem Feldbeginn (wie im Pine).
   Der BOT handelt aber nicht rueckwirkend, sondern beim Schlusskurs der Kerze, auf der der Wert die 0 kreuzt (kein Repaint, nur geschlossene Kerzen).
 
+Einstieg (mf_entry_mode): color (Standard) = sobald die Kerzenfarbe gegen das aktuelle Vorzeichen kippt (Feld "wird rot/gruen"), zusaetzlich beim Nulldurchgang;
+cross = nur beim Nulldurchgang (wie das Pine-Signal live, ohne Rueckwirkung).
+
 Ausstieg (mf_exit_mode): flip = Gegensignal dreht die Position (Standard); sltp_only = nur SL/TP (Gegensignale werden ignoriert).
 Alles andere (SL/TP in $, Teil-TPs mit Break-Even, Mehrfach-Einstiege, Mindestabstand, nur im Plus schliessen, Cooldown nach SL, Richtungswahl)
 funktioniert wie bei Momentum-Feld.
@@ -37,6 +40,7 @@ def _mf_params(cfg):
     mode = cfg.get("mf_direction_mode", "both")
     return {
         "mom": max(1, int(cfg.get("mf_mom_len", 12) or 12)), "smooth": max(1, int(cfg.get("mf_smooth_len", 21) or 21)),
+        "entry": "cross" if cfg.get("mf_entry_mode", "color") == "cross" else "color",
         "exit_mode": em if em in EXIT_MODES else "flip",
         "direction": mode if mode in ("both", "long_only", "short_only") else "both",
         "sl_usd": max(0.0, float(cfg.get("mf_sl_usd", 0.0) or 0.0)),
@@ -105,6 +109,16 @@ def mf_series(h, l, p):
                 bull[i] = True
             else:
                 bear[i] = True
+    if p.get("entry") == "color":
+        # Fruehes Signal: sobald die Kerzenfarbe (Momentum steigt/faellt) GEGEN das aktuelle Vorzeichen kippt - Wert noch > 0 und faellt -> SELL,
+        # Wert noch < 0 und steigt -> BUY. Das ist der Moment, in dem das Feld im Chart "rot/gruen wird"; der Nulldurchgang folgt spaeter.
+        # Faellt ein Nulldurchgang auf dieselbe Kerze, gilt der Nulldurchgang.
+        for i in range(1, n):
+            if up[i] != up[i - 1] and not bull[i] and not bear[i]:
+                if not up[i] and m[i] > 0:
+                    bear[i] = True
+                elif up[i] and m[i] < 0:
+                    bull[i] = True
     return bull, bear, m, mp, fields
 
 

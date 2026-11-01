@@ -480,7 +480,7 @@ def default_config():
 
         # ===== Momentum-Feld (entry_mode mom_field): Nachbau des Pine "Momentum ... Durchgehend (Feld)" - BUY/SELL beim Nulldurchgang =====
         "mf_resolution": os.getenv("MF_RESOLUTION", "15m"),
-        "mf_mom_len": int(os.getenv("MF_MOM_LEN", "12")), "mf_smooth_len": int(os.getenv("MF_SMOOTH_LEN", "21")),
+        "mf_entry_mode": os.getenv("MF_ENTRY_MODE", "color"), "mf_mom_len": int(os.getenv("MF_MOM_LEN", "12")), "mf_smooth_len": int(os.getenv("MF_SMOOTH_LEN", "21")),
         "mf_exit_mode": os.getenv("MF_EXIT_MODE", "flip"), "mf_direction_mode": os.getenv("MF_DIRECTION_MODE", "both"),
         "mf_sl_usd": float(os.getenv("MF_SL_USD", "0")), "mf_tp_usd": float(os.getenv("MF_TP_USD", "0")),
         "mf_profit_only_close": os.getenv("MF_PROFIT_ONLY_CLOSE", "false").lower() == "true",
@@ -2249,6 +2249,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="mf_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
     <input type="number" step="1" min="1" id="mf_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
+  <div data-mode="mom_field"><label>Einstieg</label><select class="cfg" id="mf_entry_mode"><option value="color">Sobald das Feld rot/grün wird (Kerzenfarbe kippt, noch vor dem Nulldurchgang)</option><option value="cross">Erst beim Nulldurchgang des Werts</option></select></div>
   <div data-mode="mom_field"><label>MomLength (Pine: 12)</label><input type="number" step="1" min="1" id="mf_mom_len"></div>
   <div data-mode="mom_field"><label>SmoothLength (Pine: 21)</label><input type="number" step="1" min="1" id="mf_smooth_len"></div>
   <div data-mode="mom_field"><label>Gegensignal (Flip) nur im Plus ausführen (im Minus wartet der Bot auf das nächste Signal oder den SL)</label><select class="cfg" id="mf_profit_only_close"><option value="false">Aus</option><option value="true">An</option></select></div>
@@ -5824,6 +5825,7 @@ async function refresh() {
     document.getElementById('wd_use_regular').value = String(data.config.wd_use_regular !== false);
     document.getElementById('wd_use_hidden').value = String(!!data.config.wd_use_hidden);
     setResolutionField('mf_resolution', data.config.mf_resolution);
+    document.getElementById('mf_entry_mode').value = data.config.mf_entry_mode || 'color';
     document.getElementById('mf_mom_len').value = data.config.mf_mom_len;
     document.getElementById('mf_smooth_len').value = data.config.mf_smooth_len;
     document.getElementById('mf_exit_mode').value = data.config.mf_exit_mode || 'flip';
@@ -6375,6 +6377,7 @@ function buildConfigPayload() {
     wd_use_regular: document.getElementById('wd_use_regular').value === 'true',
     wd_use_hidden: document.getElementById('wd_use_hidden').value === 'true',
     mf_resolution: getResolutionField('mf_resolution'),
+    mf_entry_mode: document.getElementById('mf_entry_mode').value,
     mf_mom_len: parseInt(document.getElementById('mf_mom_len').value) || 12,
     mf_smooth_len: parseInt(document.getElementById('mf_smooth_len').value) || 21,
     mf_exit_mode: document.getElementById('mf_exit_mode').value,
@@ -6896,7 +6899,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "mf_resolution", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
