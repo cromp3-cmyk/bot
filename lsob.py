@@ -1,18 +1,19 @@
 """
 lsob.py - eigene Strategie "LSOB" (entry_mode "lsob", Config-Praefix lb_*).
 
-Regeln (so wie der Nutzer sie beschrieben hat; die Toleranz-Einstellungen entsprechen den Eingaben des Original-Indikators LSOB 3.0):
-  1. NEUES TIEF: Ein Pivot-Tief (tiefste Kerze aus 'links' Kerzen davor und 'rechts' Kerzen danach) das UNTER dem vorigen Pivot-Tief liegt
-     (lb_require_sweep, Standard an) bildet eine BOX (Long-Box): Kerzen-Spanne Tief..Hoch der tiefsten Kerze (oder nur Kerzenkoerper).
-     Analog fuer ein NEUES HOCH -> Short-Box (Hoch ..Tief der hoechsten Kerze).
-  2. EINSTIEG: Sticht der Kurs spaeter noch einmal in die Box (Docht beruehrt die Box) und/oder schliesst kurz ein bisschen in ihr
-     (lb_entry_mode: touch / close_in / both) -> Einstieg zum SCHLUSSKURS dieser Kerze. Schliesst eine Kerze mehr als "Invalidierungs-Toleranz" (% der Boxhoehe)
-     jenseits der Box (Long: unter dem Boxende, Short: darueber), ist die Box gebrochen (strict_wick: schon der Docht). Retest-Toleranz: der Kurs muss die Box
-     nicht ganz erreichen (% der Boxhoehe davor); Max. Docht-Eindringtiefe: ein Docht, der tiefer als dieser Anteil der Boxhoehe in die Box ragt, zaehlt nicht als Retest. Jede Box loest hoechstens einmal aus.
-  3. SL = unteres Ende der Box (Long) bzw. oberes Ende (Short), optional + Puffer in %.
-     TP = Risiko x lb_rr (Standard 1:2). Bei lb_be_frac (Standard 0,5) des Weges zum TP rutscht der SL auf den Einstieg (Break-Even).
-Kein Blick in die Zukunft: Ein Pivot ist erst nach 'rechts' geschlossenen Kerzen bestaetigt, Boxen werden erst ab der Bestaetigung gehandelt,
-Signale kommen nur auf geschlossenen Kerzen. Es gibt keinen Signal-Ausstieg - nur SL / TP / Break-Even.
+Regeln nach dem Bootcamp-Video von Claudius Vertesi (Tag 7) und den Eingaben des Original-Indikators LSOB 3.0 (Long; Short spiegelverkehrt):
+  1. SWEEP: Pivot-Tief, das UNTER dem vorigen Pivot-Tief liegt (lb_require_sweep).
+  2. REAKTION: 1-2 bullische Kerzen direkt danach (lb_need_reaction).
+  3. BOX: Tief..Hoch der tiefsten Kerze (lb_box_mode: range / body).
+  4. AUSBRUCH: eine Kerze schliesst UEBER der Box (lb_need_breakout) -> Box ist 'scharf'.
+  5. RETEST: Docht sticht in die Box und/oder Koerper schliesst am Rand; ein Schluss darf hoechstens lb_retest_tol_pct % der Boxhoehe in die Box
+     (tiefer = Box ungueltig); Docht hoechstens lb_max_pen_pct %; Schluss weiter als lb_inval_tol_pct % jenseits der Box = gebrochen.
+  6. ABLEHNUNGSKERZE: bullisch mit Docht nach unten (lb_need_rejection). Einstieg = OPEN der Folgekerze (Market).
+  7. SL = Boxende (lb_sl_mode "box", wie vom Nutzer beschrieben) oder Docht der Ablehnungskerze ("wick", wie im Video); TP = lb_rr x Risiko;
+     bei lb_be_frac des Weges SL auf Einstieg (+ lb_be_offset_pct fuer Gebuehren); Mindest-TP-Abstand lb_min_tp_pct (Video: 0,5 %);
+     optionaler Zeitfilter (lb_session_*, Europa/Berlin). Kein Signal-Ausstieg, keine Teil-TPs.
+Nicht umgesetzt: Risiko-basierte Positionsgroesse, Limit-Order-TP, Wall-/Widerstandsfilter (subjektiv).
+Kein Blick in die Zukunft: Pivot erst nach 'rechts' Kerzen bestaetigt, Signale nur auf geschlossenen Kerzen.
 """
 
 import asyncio
@@ -40,14 +41,20 @@ def _lb_params(cfg):
         "inval": max(0.0, _f(cfg, "lb_inval_tol_pct", 20)) / 100.0, "retest": max(0.0, _f(cfg, "lb_retest_tol_pct", 10)) / 100.0,
         "strict": bool(cfg.get("lb_strict_wick", False)), "max_pen": max(0.0, _f(cfg, "lb_max_pen_pct", 50)) / 100.0,
         "sweep": bool(cfg.get("lb_require_sweep", True)),
+        "need_reaction": bool(cfg.get("lb_need_reaction", True)), "need_breakout": bool(cfg.get("lb_need_breakout", True)),
+        "need_rejection": bool(cfg.get("lb_need_rejection", True)),
         "box": "body" if cfg.get("lb_box_mode", "range") == "body" else "range",
         "entry": ent if ent in ("touch", "close_in", "both") else "both",
+        "sl_mode": "wick" if cfg.get("lb_sl_mode", "box") == "wick" else "box",
         "max_age": max(5, int(_f(cfg, "lb_max_age", 2000))),
         "direction": mode if mode in ("both", "long_only", "short_only") else "both",
         "rr": max(0.1, _f(cfg, "lb_rr", 2.0)),
-        "be_frac": max(0.0, min(0.99, _f(cfg, "lb_be_frac", 0.5))),
+        "be_frac": max(0.0, min(0.99, _f(cfg, "lb_be_frac", 0.5))), "be_offset_pct": max(0.0, _f(cfg, "lb_be_offset_pct", 0.0)),
         "buffer_pct": max(0.0, _f(cfg, "lb_sl_buffer_pct", 0.0)),
         "min_risk_pct": max(0.0, _f(cfg, "lb_min_risk_pct", 0.0)), "max_risk_pct": max(0.0, _f(cfg, "lb_max_risk_pct", 0.0)),
+        "min_tp_pct": max(0.0, _f(cfg, "lb_min_tp_pct", 0.5)),
+        "session_on": bool(cfg.get("lb_session_on", False)),
+        "session_from": int(_f(cfg, "lb_session_from", 9)), "session_to": int(_f(cfg, "lb_session_to", 23)),
     }
 
 
@@ -55,12 +62,40 @@ def _lb_warm(p):
     return p["pl"] + p["pr"] + min(p["max_age"], 300) + 10   # Boxen aelter als die geladene Historie (max. ~1000 Kerzen live) sieht der Bot nicht
 
 
+def _in_session(ts_ms, p):
+    """Einstiege nur zwischen session_from und session_to Uhr (Europe/Berlin), falls aktiviert."""
+    if not p["session_on"]:
+        return True
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime
+        hr = datetime.fromtimestamp(ts_ms / 1000.0, ZoneInfo("Europe/Berlin")).hour
+    except Exception:
+        return True
+    a, b = p["session_from"], p["session_to"]
+    return (a <= hr < b) if a <= b else (hr >= a or hr < b)
+
+
+def _entry_check(direction, entry, stop, p):
+    """-> 'ok' | 'wrong_side' (Einstieg schon jenseits des SL) | 'filter' (Risiko-/Mindest-TP-Filter)."""
+    risk = (entry - stop) if direction == "long" else (stop - entry)
+    if not entry or risk <= 0:
+        return "wrong_side"
+    rp = risk / entry * 100.0
+    if (p["min_risk_pct"] > 0 and rp < p["min_risk_pct"]) or (p["max_risk_pct"] > 0 and rp > p["max_risk_pct"]) or (p["min_tp_pct"] > 0 and rp * p["rr"] < p["min_tp_pct"]):
+        return "filter"
+    return "ok"
+
+
 # ============================================================================
 # RECHNUNG (rein, ohne Netzwerk)
 # ============================================================================
 def lb_signals(o, h, l, c, p):
-    """-> (sig[], sl[], boxes[]). sig[j] = +1 Long / -1 Short / 0 auf der Kerze, die in eine Box sticht / in ihr schliesst; sl[j] = Stop-Preis.
-    boxes = alle Boxen: {kind, i0 (Pivot-Kerze), conf (Bestaetigung), top, bottom, end (Index des Endes oder None), state: open/used/broken/expired/skipped}."""
+    """-> (sig[], sl[], boxes[]). sig[j] = +1 Long / -1 Short auf der Ablehnungskerze des Retests (Einstieg dann zum OPEN der naechsten Kerze);
+    sl[j] = Stop-Preis. boxes = alle Boxen: {kind, i0, conf, top, bottom, armed, end, state: open/used/broken/expired/skipped}.
+    Ablauf (Long): Sweep (neues Pivot-Tief unter dem vorigen) -> 1-2 bullische Reaktionskerzen -> Box um die tiefste Kerze (Tief..Hoch) -> eine Kerze schliesst
+    UEBER der Box (Ausbruch, 'armed') -> Retest: Docht sticht in die Box und/oder Koerper schliesst an der Kante, hoechstens 'retest' % der Boxhoehe hinein
+    (tiefer = Box ungueltig) -> bullische Ablehnungskerze mit Docht nach unten. Short spiegelverkehrt."""
     n = len(c)
     pl, pr = p["pl"], p["pr"]
     sig, sl = [0] * n, [None] * n
@@ -75,23 +110,33 @@ def lb_signals(o, h, l, c, p):
                 active.remove(b)
                 continue
             hb = max(b["top"] - b["bottom"], 1e-12)
-            if b["kind"] == "long":
-                # gebrochen: Schluss (bzw. bei "strenger Docht-Invalidierung" schon der Docht) mehr als die Toleranz unter dem Boxende
-                if (l[j] if p["strict"] else c[j]) < b["bottom"] - p["inval"] * hb:
-                    b["state"], b["end"] = "broken", j
-                    active.remove(b)
-                    continue
-                touch = l[j] <= b["top"] + p["retest"] * hb and (b["top"] - l[j]) <= p["max_pen"] * hb        # Retest (Docht), nicht tiefer als max. Eindringtiefe
-                close_in = b["bottom"] < c[j] <= b["top"] + p["retest"] * hb                                    # Schluss in der Box (+ Retest-Toleranz)
+            long_ = b["kind"] == "long"
+            far_break = ((l[j] if p["strict"] else c[j]) < b["bottom"] - p["inval"] * hb) if long_ else ((h[j] if p["strict"] else c[j]) > b["top"] + p["inval"] * hb)
+            if far_break:
+                b["state"], b["end"] = "broken", j
+                active.remove(b)
+                continue
+            if not b["armed"]:
+                if (c[j] > b["top"]) if long_ else (c[j] < b["bottom"]):
+                    b["armed"] = True   # Ausbruch: Kerze schliesst jenseits der Box -> ab der naechsten Kerze zaehlt ein Retest
+                continue
+            if long_:
+                depth = b["top"] - c[j]                                  # > 0: Schluss in der Box
+                pen = b["top"] - l[j]                                    # Eindringtiefe des Dochts
+                touch = l[j] <= b["top"] and pen <= p["max_pen"] * hb
+                close_ok = c[j] <= b["top"]
+                rej = (not p["need_rejection"]) or (c[j] > o[j] and min(o[j], c[j]) - l[j] > 0)
             else:
-                if (h[j] if p["strict"] else c[j]) > b["top"] + p["inval"] * hb:
-                    b["state"], b["end"] = "broken", j
-                    active.remove(b)
-                    continue
-                touch = h[j] >= b["bottom"] - p["retest"] * hb and (h[j] - b["bottom"]) <= p["max_pen"] * hb
-                close_in = b["bottom"] - p["retest"] * hb <= c[j] < b["top"]
-            hit = (p["entry"] in ("touch", "both") and touch) or (p["entry"] in ("close_in", "both") and close_in)
-            if hit:
+                depth = c[j] - b["bottom"]
+                pen = h[j] - b["bottom"]
+                touch = h[j] >= b["bottom"] and pen <= p["max_pen"] * hb
+                close_ok = c[j] >= b["bottom"]
+                rej = (not p["need_rejection"]) or (c[j] < o[j] and h[j] - max(o[j], c[j]) > 0)
+            if depth > p["retest"] * hb:           # Schluss tiefer als erlaubt in der Box -> Setup ungueltig
+                b["state"], b["end"] = "broken", j
+                active.remove(b)
+                continue
+            if ((p["entry"] in ("touch", "both") and touch) or (p["entry"] in ("close_in", "both") and close_ok)) and rej:
                 b["state"], b["end"] = "used", j
                 active.remove(b)
                 hits.append(b)
@@ -104,16 +149,16 @@ def lb_signals(o, h, l, c, p):
             pick = max(sh, key=lambda b: b["conf"])
         if pick is not None:
             if pick["kind"] == "long":
-                stop = pick["bottom"] * (1 - p["buffer_pct"] / 100.0)
-                risk = c[j] - stop
+                base = l[j] if p["sl_mode"] == "wick" else pick["bottom"]
+                stop = base * (1 - p["buffer_pct"] / 100.0)
             else:
-                stop = pick["top"] * (1 + p["buffer_pct"] / 100.0)
-                risk = stop - c[j]
-            rp = risk / c[j] * 100.0 if c[j] else 0.0
-            if risk <= 0:
-                pick["state"], pick["end"] = "open", None   # Schluss schon jenseits des SL (nur innerhalb der Toleranz): kein Einstieg, Box bleibt lebendig
+                base = h[j] if p["sl_mode"] == "wick" else pick["top"]
+                stop = base * (1 + p["buffer_pct"] / 100.0)
+            chk = _entry_check(pick["kind"], c[j], stop, p)
+            if chk == "wrong_side":
+                pick["state"], pick["end"] = "open", None   # Schluss schon jenseits des SL: kein Einstieg, Box bleibt lebendig
                 active.append(pick)
-            elif (p["min_risk_pct"] > 0 and rp < p["min_risk_pct"]) or (p["max_risk_pct"] > 0 and rp > p["max_risk_pct"]):
+            elif chk == "filter":
                 pick["state"] = "skipped"
             else:
                 sig[j] = 1 if pick["kind"] == "long" else -1
@@ -126,16 +171,22 @@ def lb_signals(o, h, l, c, p):
             if l[i] < min(l[i - pl:i]) and l[i] <= min(l[i + 1:i + pr + 1]):
                 if (not p["sweep"]) or last_lo is None or l[i] < last_lo:
                     top, bot = (h[i], l[i]) if p["box"] == "range" else (body_hi, body_lo)
-                    bx = {"kind": "long", "i0": i, "conf": j, "top": top, "bottom": bot, "end": None, "state": "open"}
-                    boxes.append(bx)
-                    active.append(bx)
+                    react = (not p["need_reaction"]) or any(c[k] > o[k] for k in range(i + 1, min(i + 2, j) + 1))
+                    if react:
+                        armed = (not p["need_breakout"]) or any(c[k] > top for k in range(i + 1, j + 1))
+                        bx = {"kind": "long", "i0": i, "conf": j, "top": top, "bottom": bot, "armed": armed, "end": None, "state": "open"}
+                        boxes.append(bx)
+                        active.append(bx)
                 last_lo = l[i]
             if h[i] > max(h[i - pl:i]) and h[i] >= max(h[i + 1:i + pr + 1]):
                 if (not p["sweep"]) or last_hi is None or h[i] > last_hi:
                     top, bot = (h[i], l[i]) if p["box"] == "range" else (body_hi, body_lo)
-                    bx = {"kind": "short", "i0": i, "conf": j, "top": top, "bottom": bot, "end": None, "state": "open"}
-                    boxes.append(bx)
-                    active.append(bx)
+                    react = (not p["need_reaction"]) or any(c[k] < o[k] for k in range(i + 1, min(i + 2, j) + 1))
+                    if react:
+                        armed = (not p["need_breakout"]) or any(c[k] < bot for k in range(i + 1, j + 1))
+                        bx = {"kind": "short", "i0": i, "conf": j, "top": top, "bottom": bot, "armed": armed, "end": None, "state": "open"}
+                        boxes.append(bx)
+                        active.append(bx)
                 last_hi = h[i]
     return sig, sl, boxes
 
@@ -145,12 +196,18 @@ def _allowed(target, p):
 
 
 def _levels(direction, entry, stop, p):
-    """-> (sl, tp, be_trigger) aus Einstieg und Box-Ende."""
+    """-> (sl, tp, be_trigger) aus Einstieg und Stop."""
     risk = abs(entry - stop)
     sgn = 1 if direction == "long" else -1
     tp = entry + sgn * risk * p["rr"]
     be = entry + sgn * risk * p["rr"] * p["be_frac"] if p["be_frac"] > 0 else None
     return stop, tp, be
+
+
+def _be_price(direction, entry, p):
+    """Stop nach dem Break-Even-Schritt: Einstieg, optional ein paar Cent (Prozent) im Gewinn, um Gebuehren abzudecken."""
+    sgn = 1 if direction == "long" else -1
+    return entry * (1 + sgn * p["be_offset_pct"] / 100.0)
 
 
 # ============================================================================
@@ -187,8 +244,8 @@ async def check_lb_sl_tp(symbol, price):
             _lb_reset_state(st)
         return
     if be_px is not None and not st.get("lb_be") and st.get("avg_entry_price") and ((pos == "long" and price >= be_px) or (pos == "short" and price <= be_px)):
-        st["lb_sl_price"], st["lb_be"] = st["avg_entry_price"], True
-        debug_log(f"📡 [{symbol}] LSOB halbes Ziel erreicht - SL auf Einstieg ({st['avg_entry_price']})")
+        st["lb_sl_price"], st["lb_be"] = _be_price(pos, st["avg_entry_price"], _lb_params(cfg)), True
+        debug_log(f"📡 [{symbol}] LSOB Break-Even-Schritt erreicht - SL auf Einstieg ({round(st['lb_sl_price'], 6)})")
 
 
 async def check_lb_signal(symbol, sig_i, sl_i, price):
@@ -202,7 +259,14 @@ async def check_lb_signal(symbol, sig_i, sl_i, price):
     tri = "long" if sig_i > 0 else "short"
     if not _allowed(tri, p) or time.time() < st.get("lb_sl_cooldown_until", 0.0):
         return
-    debug_log(f"📡 [{symbol}] LSOB Einstieg: {tri.upper()} @ {price}, SL = Box-Ende {round(sl_i, 6)}")
+    if not _in_session(time.time() * 1000, p):
+        debug_log(f"⏭️ [{symbol}] LSOB Signal {tri.upper()} außerhalb der Handelszeit ({p['session_from']}-{p['session_to']} Uhr) übersprungen")
+        return
+    chk = _entry_check(tri, price, sl_i, p)
+    if chk != "ok":
+        debug_log(f"⏭️ [{symbol}] LSOB Signal {tri.upper()} übersprungen ({'Preis schon jenseits des SL' if chk == 'wrong_side' else 'Risiko-/Mindest-TP-Filter'}): Preis {price}, SL {round(sl_i, 6)}")
+        return
+    debug_log(f"📡 [{symbol}] LSOB Einstieg: {tri.upper()} @ {price}, SL {round(sl_i, 6)} ({p['sl_mode']})")
     await execute_entry(symbol, tri, price, is_add_on=False)
     if st["position"] is not None:
         _lb_reset_state(st)
@@ -285,15 +349,22 @@ async def lb_poll_loop(symbol):
 # BACKTEST
 # ============================================================================
 def _lb_simulate(candles, cfg, sig, slv, start_i, p):
-    """Gegenstueck zu check_lb_signal / check_lb_sl_tp: Einstieg zum Schlusskurs der Signalkerze, ab der NAECHSTEN Kerze SL/TP/Break-Even ueber Hoch/Tief.
-    Bei Gleichzeitigkeit gewinnt der SL; Break-Even gilt erst ab der Kerze NACH dem Erreichen des halben Ziels. Cooldown nach SL wie live."""
-    ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
+    """Gegenstueck zu check_lb_signal / check_lb_sl_tp: Signal auf der Ablehnungskerze i -> Einstieg zum OPEN der Kerze i+1 (Market). Ab dieser Kerze
+    (inklusive ihr selbst) SL/TP/Break-Even ueber Hoch/Tief; bei Gleichzeitigkeit gewinnt der SL; Break-Even gilt erst ab der Kerze NACH dem Erreichen des
+    Break-Even-Schritts. Cooldown nach SL wie live."""
+    ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
     n = len(c)
     margin, leverage = cfg["margin"], cfg["leverage"]
     cooldown_ms = cfg.get("lb_sl_cooldown_seconds", 30) * 1000
     pos, trades, cool_until = None, [], None
     for i in range(max(start_i, 1), n):
-        if pos is not None and pos["entry_i"] < i:
+        if pos is None and sig[i - 1] and slv[i - 1] is not None and i - 1 >= start_i - 1:
+            d = "long" if sig[i - 1] > 0 else "short"
+            entry = o[i]
+            if _allowed(d, p) and not (cool_until is not None and ts[i] < cool_until) and _in_session(ts[i], p) and _entry_check(d, entry, slv[i - 1], p) == "ok":
+                sl, tp, be_px = _levels(d, entry, slv[i - 1], p)
+                pos = {"dir": d, "entry": entry, "size": (margin * leverage) / entry, "entry_i": i, "sl": sl, "tp": tp, "be_px": be_px, "be": False}
+        if pos is not None:
             d, e = pos["dir"], pos["entry"]
             if (d == "long" and l[i] <= pos["sl"]) or (d == "short" and h[i] >= pos["sl"]):
                 be = pos["be"]
@@ -305,14 +376,7 @@ def _lb_simulate(candles, cfg, sig, slv, start_i, p):
                 _bt_close_trade(trades, d, e, pos["tp"], pos["size"], i, pos["entry_i"], "TP", ts=ts)
                 pos = None
             elif pos["be_px"] is not None and not pos["be"] and ((d == "long" and h[i] >= pos["be_px"]) or (d == "short" and l[i] <= pos["be_px"])):
-                pos["sl"], pos["be"] = e, True
-        if pos is None and sig[i] and slv[i] is not None:
-            d = "long" if sig[i] > 0 else "short"
-            if not _allowed(d, p) or (cool_until is not None and ts[i] < cool_until):
-                continue
-            entry = c[i]
-            sl, tp, be_px = _levels(d, entry, slv[i], p)
-            pos = {"dir": d, "entry": entry, "size": (margin * leverage) / entry, "entry_i": i, "sl": sl, "tp": tp, "be_px": be_px, "be": False}
+                pos["sl"], pos["be"] = _be_price(d, e, p), True
     if pos is not None:
         _bt_close_trade(trades, pos["dir"], pos["entry"], c[n - 1], pos["size"], n - 1, pos["entry_i"], "END-OF-BACKTEST", ts=ts)
     return trades
@@ -392,6 +456,6 @@ def lb_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
         end = bx["end"] if bx["end"] is not None else n - 1
         if end < off:
             continue
-        out.append({"kind": bx["kind"], "t1": ts[max(bx["i0"], off)] // 1000, "t2": ts[end] // 1000, "top": bx["top"], "bottom": bx["bottom"], "state": bx["state"]})
+        out.append({"kind": bx["kind"], "t1": ts[max(bx["i0"], off)] // 1000, "t2": ts[end] // 1000, "top": bx["top"], "bottom": bx["bottom"], "state": bx["state"], "armed": bool(bx.get("armed"))})
     out = out[-20:]
     return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "boxes": out, "entry_mode": "lsob", "bars": n}

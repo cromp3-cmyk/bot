@@ -502,6 +502,10 @@ def default_config():
         "lb_rr": float(os.getenv("LB_RR", "2.0")), "lb_be_frac": float(os.getenv("LB_BE_FRAC", "0.5")),
         "lb_sl_buffer_pct": float(os.getenv("LB_SL_BUFFER_PCT", "0")),
         "lb_min_risk_pct": float(os.getenv("LB_MIN_RISK_PCT", "0")), "lb_max_risk_pct": float(os.getenv("LB_MAX_RISK_PCT", "0")),
+        "lb_need_reaction": os.getenv("LB_NEED_REACTION", "true").lower() == "true", "lb_need_breakout": os.getenv("LB_NEED_BREAKOUT", "true").lower() == "true",
+        "lb_need_rejection": os.getenv("LB_NEED_REJECTION", "true").lower() == "true", "lb_sl_mode": os.getenv("LB_SL_MODE", "box"),
+        "lb_min_tp_pct": float(os.getenv("LB_MIN_TP_PCT", "0.5")), "lb_be_offset_pct": float(os.getenv("LB_BE_OFFSET_PCT", "0")),
+        "lb_session_on": os.getenv("LB_SESSION_ON", "false").lower() == "true", "lb_session_from": int(os.getenv("LB_SESSION_FROM", "9")), "lb_session_to": int(os.getenv("LB_SESSION_TO", "23")),
         "lb_sl_cooldown_seconds": float(os.getenv("LB_SL_COOLDOWN_SECONDS", "30.0")),
 
         # ===== Trendfolge (entry_mode trendfolge): Marktstruktur-Trend + rote/gruene Kerzen =====
@@ -1809,7 +1813,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="wt_div">WT-Divergenz (WaveTrend-Divergenzen als Einstieg, Welle wie im Wellenanker, wählbarer Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="mom_field">Momentum-Feld (BUY/SELL beim Nulldurchgang des Momentums, Hintergrund rot/grün, SL/TP, Teil-TPs)</option>
-      <option value="lsob">LSOB (neues Tief/Hoch → Box, Einstieg beim erneuten Eintauchen, SL = Box-Ende, TP 1:2, Break-Even bei halbem Ziel)</option>
+      <option value="lsob">LSOB (Sweep → Box → Ausbruch → Retest → Ablehnungskerze, TP 1:2, Break-Even bei halbem Ziel)</option>
       <option value="wae_ema">WAE-Zonen + EMA9 (WAE-Zone aus höherem Zeitrahmen, CALL/PUT bei Zone + EMA, wählbarer Ausstieg, optional $-SL/-TP)</option>
       <option value="punk_algo">Punk Algo (Range-Filter-Dreiecke ▲/▼ als Einstieg, Gegen-Dreieck = Flip, WaveTrend-X = Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="vwap_cross">EMA 9 + VWAP (Einstieg bei Kreuzung EMA9 / Day-Week-Month-VWAP, SL hinter letzter Kerze, TP Kreuzung/Fest/Gegentrade, Backtest)</option>
@@ -2284,7 +2288,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="mom_field"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mf_sl_cooldown_seconds"></div>
 
   <div data-mode="lsob" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    📦 <b>LSOB</b>: Ein <b>neues Tief</b> (tiefste Kerze, bestätigt nach „Pivot rechts“ Kerzen, und tiefer als das vorige Tief) macht eine <b>Long-Box</b>; ein <b>neues Hoch</b> eine <b>Short-Box</b>. Sticht der Kurs später noch einmal in die Box (oder schließt kurz in ihr), steigt der Bot zum Schlusskurs dieser Kerze ein. <b>SL</b> = unteres Ende der Box (Long) bzw. oberes Ende (Short), <b>TP</b> = Risiko × RR (Standard 1:2). Bei der Hälfte des Wegs zum TP rutscht der SL auf den Einstieg. Schließt eine Kerze jenseits der Box, ist sie gebrochen. Kein Signal-Ausstieg, nur SL/TP/Break-Even.
+    📦 <b>LSOB</b> (Regeln aus dem Bootcamp-Video): <b>Sweep</b> (neues Tief/Hoch) → 1–2 Reaktionskerzen → <b>Box</b> um die extreme Kerze → <b>Ausbruch</b> (Kerze schließt jenseits der Box) → <b>Retest</b> (Docht sticht hinein und/oder Körper schließt am Rand, höchstens 10 % der Boxhöhe tief, tiefer = ungültig) → <b>Ablehnungskerze</b> mit Docht (Long: unten) → Einstieg zum <b>Open der nächsten Kerze</b>. <b>SL</b> = Boxende oder Docht der Ablehnungskerze (wählbar), <b>TP</b> = Risiko × RR (1:2), bei halbem Weg SL auf Einstieg (+ Aufschlag für Gebühren). Mindest-TP-Abstand 0,5 %, optional Handelszeit. Nicht enthalten: Risiko-Positionsgröße, Limit-TP, Widerstands-Filter. Kein Signal-Ausstieg.
   </div>
   <div data-mode="lsob"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="lb_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
@@ -2296,7 +2300,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="lsob"><label>Box aus</label><select class="cfg" id="lb_box_mode"><option value="range">ganzer Kerze (Tief bis Hoch)</option><option value="body">nur Kerzenkörper</option></select></div>
   <div data-mode="lsob"><label>Einstieg, wenn der Kurs …</label><select class="cfg" id="lb_entry_mode"><option value="both">in die Box sticht ODER in ihr schließt</option><option value="touch">nur in die Box sticht (Docht)</option><option value="close_in">nur in der Box schließt</option></select></div>
   <div data-mode="lsob"><label>Invalidierungs-Toleranz (% der Boxhöhe: so weit darf der Schluss über das Boxende hinaus, bevor die Box gebrochen ist; Original: 20)</label><input type="number" step="1" min="0" id="lb_inval_tol_pct"></div>
-  <div data-mode="lsob"><label>Retest-Toleranz (% der Boxhöhe: der Kurs muss die Box nicht ganz erreichen; Original: 10)</label><input type="number" step="1" min="0" id="lb_retest_tol_pct"></div>
+  <div data-mode="lsob"><label>Retest-Toleranz (max. Tiefe des Schlusses in der Box, % der Boxhöhe; Video/Original: 10, tiefer = Box ungültig)</label><input type="number" step="1" min="0" id="lb_retest_tol_pct"></div>
   <div data-mode="lsob"><label>Strenge Docht-Invalidierung (schon ein Docht jenseits der Toleranz bricht die Box)</label><select class="cfg" id="lb_strict_wick"><option value="false">Aus</option><option value="true">An</option></select></div>
   <div data-mode="lsob"><label>Max. Docht-Eindringtiefe (% der Boxhöhe: tiefer in die Box ragende Dochte zählen nicht als Retest; Original: 50)</label><input type="number" step="1" min="0" id="lb_max_pen_pct"></div>
   <div data-mode="lsob"><label>Box gültig für (Kerzen, danach verfällt sie; Original: Max. Historie 2000)</label><input type="number" step="1" min="5" id="lb_max_age"></div>
@@ -2306,6 +2310,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="lsob"><label>SL-Puffer jenseits des Box-Endes (%, 0 = genau am Boxende)</label><input type="number" step="0.01" min="0" id="lb_sl_buffer_pct"></div>
   <div data-mode="lsob"><label>Mindest-Risiko (SL-Abstand in % vom Einstieg, 0 = aus; zu kleine Boxen überspringen)</label><input type="number" step="0.01" min="0" id="lb_min_risk_pct"></div>
   <div data-mode="lsob"><label>Maximal-Risiko (SL-Abstand in % vom Einstieg, 0 = aus; zu große Boxen überspringen)</label><input type="number" step="0.01" min="0" id="lb_max_risk_pct"></div>
+  <div data-mode="lsob"><label>Reaktion nötig (1–2 bullische/bärische Kerzen nach dem Sweep)</label><select class="cfg" id="lb_need_reaction"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="lsob"><label>Ausbruch nötig (Kerze schließt jenseits der Box, bevor ein Retest zählt)</label><select class="cfg" id="lb_need_breakout"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="lsob"><label>Ablehnungskerze nötig (bullisch mit Docht unten / short: bärisch mit Docht oben); Einstieg zum Open der nächsten Kerze</label><select class="cfg" id="lb_need_rejection"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="lsob"><label>Stop-Loss</label><select class="cfg" id="lb_sl_mode"><option value="box">Boxende (unten bei Long, oben bei Short)</option><option value="wick">Docht der Ablehnungskerze (Video)</option></select></div>
+  <div data-mode="lsob"><label>Mindest-Abstand zum TP (% vom Einstieg, Video: 0,5; 0 = aus)</label><input type="number" step="0.05" min="0" id="lb_min_tp_pct"></div>
+  <div data-mode="lsob"><label>Break-Even-Aufschlag (% im Gewinn, deckt Gebühren; 0 = genau Einstieg)</label><input type="number" step="0.01" min="0" id="lb_be_offset_pct"></div>
+  <div data-mode="lsob"><label>Handelszeit-Filter (Europe/Berlin)</label><select class="cfg" id="lb_session_on"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="lsob"><label>Handelszeit von (Uhr)</label><input type="number" step="1" min="0" max="23" id="lb_session_from"></div>
+  <div data-mode="lsob"><label>Handelszeit bis (Uhr)</label><input type="number" step="1" min="0" max="24" id="lb_session_to"></div>
   <div data-mode="lsob"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="lb_sl_cooldown_seconds"></div>
 
   <div data-mode="trendfolge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -4311,7 +4324,7 @@ function wacSetBoxes(list) {
   wacBoxSeries.forEach(s => { try { WAC.price.removeSeries(s); } catch (e) {} }); wacBoxSeries = [];
   (list || []).forEach(b => {
     const col = b.kind === 'long' ? '34,197,94' : '239,68,68';
-    const a = b.state === 'open' ? 0.24 : 0.10, e = b.state === 'open' ? 0.95 : 0.45;
+    const live = b.state === 'open', a = live ? (b.armed ? 0.26 : 0.12) : 0.08, e = live ? (b.armed ? 0.95 : 0.55) : 0.4;
     const bs = WAC.price.addBaselineSeries({baseValue: {type: 'price', price: b.bottom}, topFillColor1: `rgba(${col},${a})`, topFillColor2: `rgba(${col},${a})`,
       bottomFillColor1: 'rgba(0,0,0,0)', bottomFillColor2: 'rgba(0,0,0,0)', topLineColor: `rgba(${col},${e})`, bottomLineColor: 'rgba(0,0,0,0)', lineWidth: 1,
       priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
@@ -5883,9 +5896,12 @@ async function refresh() {
     document.getElementById('wd_use_hidden').value = String(!!data.config.wd_use_hidden);
     setResolutionField('mf_resolution', data.config.mf_resolution);
     setResolutionField('lb_resolution', data.config.lb_resolution);
-    ['lb_pivot_left', 'lb_pivot_right', 'lb_inval_tol_pct', 'lb_retest_tol_pct', 'lb_max_pen_pct', 'lb_max_age', 'lb_rr', 'lb_be_frac', 'lb_sl_buffer_pct', 'lb_min_risk_pct', 'lb_max_risk_pct', 'lb_sl_cooldown_seconds'].forEach(k => { document.getElementById(k).value = data.config[k]; });
+    ['lb_pivot_left', 'lb_pivot_right', 'lb_inval_tol_pct', 'lb_retest_tol_pct', 'lb_max_pen_pct', 'lb_max_age', 'lb_rr', 'lb_be_frac', 'lb_sl_buffer_pct', 'lb_min_risk_pct', 'lb_max_risk_pct', 'lb_min_tp_pct', 'lb_be_offset_pct', 'lb_session_from', 'lb_session_to', 'lb_sl_cooldown_seconds'].forEach(k => { document.getElementById(k).value = data.config[k]; });
     document.getElementById('lb_strict_wick').value = String(!!data.config.lb_strict_wick);
     document.getElementById('lb_require_sweep').value = String(data.config.lb_require_sweep !== false);
+    ['lb_need_reaction', 'lb_need_breakout', 'lb_need_rejection'].forEach(k => { document.getElementById(k).value = String(data.config[k] !== false); });
+    document.getElementById('lb_session_on').value = String(!!data.config.lb_session_on);
+    document.getElementById('lb_sl_mode').value = data.config.lb_sl_mode || 'box';
     document.getElementById('lb_box_mode').value = data.config.lb_box_mode || 'range';
     document.getElementById('lb_entry_mode').value = data.config.lb_entry_mode || 'both';
     document.getElementById('lb_direction_mode').value = data.config.lb_direction_mode || 'both';
@@ -6451,6 +6467,15 @@ function buildConfigPayload() {
     lb_max_pen_pct: parseFloat(document.getElementById('lb_max_pen_pct').value) || 0,
     lb_require_sweep: document.getElementById('lb_require_sweep').value === 'true',
     lb_box_mode: document.getElementById('lb_box_mode').value,
+    lb_need_reaction: document.getElementById('lb_need_reaction').value === 'true',
+    lb_need_breakout: document.getElementById('lb_need_breakout').value === 'true',
+    lb_need_rejection: document.getElementById('lb_need_rejection').value === 'true',
+    lb_sl_mode: document.getElementById('lb_sl_mode').value,
+    lb_min_tp_pct: parseFloat(document.getElementById('lb_min_tp_pct').value) || 0,
+    lb_be_offset_pct: parseFloat(document.getElementById('lb_be_offset_pct').value) || 0,
+    lb_session_on: document.getElementById('lb_session_on').value === 'true',
+    lb_session_from: parseInt(document.getElementById('lb_session_from').value) || 0,
+    lb_session_to: parseInt(document.getElementById('lb_session_to').value) || 0,
     lb_entry_mode: document.getElementById('lb_entry_mode').value,
     lb_max_age: parseInt(document.getElementById('lb_max_age').value) || 2000,
     lb_direction_mode: document.getElementById('lb_direction_mode').value,
@@ -6983,7 +7008,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
