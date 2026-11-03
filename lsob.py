@@ -460,6 +460,7 @@ def lb_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
     off = max(0, n - max_bars)
     candles = [{"time": ts[i] // 1000, "open": o[i], "high": h[i], "low": l[i], "close": c[i]} for i in range(off, n)]
     markers, trades = [], []
+    bx_by_sig = {bx["trig"]: bx for bx in boxes if "trig" in bx}
     busy_until = -1   # solange ein Trade laeuft (bis SL/TP/Break-Even), kommt kein neuer
     for i in range(max(off, 1), n - 1):
         if sig[i] and i + 1 > busy_until:
@@ -482,8 +483,15 @@ def lb_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
                 if be_px is not None and not be and (h[k] >= be_px if d == "long" else l[k] <= be_px):
                     sl, be = _be_price(d, entry, p), True
             busy_until = x_i
+            bx = bx_by_sig.get(i)
+            box_info = {}
+            if bx is not None:
+                box_info = {"box_t": ts[bx["i0"]] // 1000, "box_top": bx["top"], "box_bottom": bx["bottom"]}
+                if bx["i0"] >= off:
+                    markers.append({"time": ts[bx["i0"]] // 1000, "kind": "pivot_low" if d == "long" else "pivot_high", "price": bx["bottom"] if d == "long" else bx["top"],
+                                    "text": "Tief (Box)" if d == "long" else "Hoch (Box)"})
             markers.append({"time": ts[e_i] // 1000, "kind": d, "price": entry, "text": "LSOB " + ("LONG" if d == "long" else "SHORT")})
-            trades.append({"kind": d, "t1": ts[e_i] // 1000, "t2": ts[x_i] // 1000, "entry": entry, "sl": sl0, "tp": tp, "result": res})
+            trades.append({"kind": d, "t1": ts[e_i] // 1000, "t2": ts[x_i] // 1000, "entry": entry, "sl": sl0, "tp": tp, "result": res, **box_info})
     out = []
     for bx in boxes:
         if bx["state"] in ("broken", "expired", "skipped"):

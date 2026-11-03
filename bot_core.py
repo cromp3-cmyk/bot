@@ -4348,6 +4348,15 @@ function wacSetLbTrades(list) {
       bs.setData([{time: t.t1, value: val}, {time: t.t2 > t.t1 ? t.t2 : t.t1 + 1, value: val}]); wacTradeSeries.push(bs);
     };
     zone(t.tp, '34,197,94'); zone(t.sl, '239,68,68');
+    if (t.box_t) {   // die Box dieses Trades: von der Sweep-Kerze bis zum Einstieg, gelb umrandet
+      const cb = t.kind === 'long' ? '34,197,94' : '239,68,68';
+      const bb = WAC.price.addBaselineSeries({baseValue: {type: 'price', price: t.box_bottom}, topFillColor1: 'rgba(250,204,21,0.18)', topFillColor2: 'rgba(250,204,21,0.18)',
+        bottomFillColor1: 'rgba(0,0,0,0)', bottomFillColor2: 'rgba(0,0,0,0)', topLineColor: 'rgba(250,204,21,0.95)', bottomLineColor: 'rgba(0,0,0,0)', lineWidth: 1,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
+      bb.setData([{time: t.box_t, value: t.box_top}, {time: t.t1, value: t.box_top}]); wacTradeSeries.push(bb);
+      const bl = WAC.price.addLineSeries({color: 'rgba(250,204,21,0.95)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
+      bl.setData([{time: t.box_t, value: t.box_bottom}, {time: t.t1, value: t.box_bottom}]); wacTradeSeries.push(bl);
+    }
     const ls = WAC.price.addLineSeries({color: 'rgba(230,230,230,0.9)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, title: t.result});
     ls.setData([{time: t.t1, value: t.entry}, {time: t.t2 > t.t1 ? t.t2 : t.t1 + 1, value: t.entry}]); wacTradeSeries.push(ls);
   });
@@ -4446,7 +4455,9 @@ function wacRender(d, markers, keepRange) {
   wacSetLevels(d.levels);
 }
 function wacSigMarkers(d) {
-  const sig = (d.markers || []).map(m => m.kind === 'long'
+  const sig = (d.markers || []).map(m => m.kind === 'pivot_low' ? {time: m.time, position: 'belowBar', color: '#facc15', shape: 'circle', text: m.text || ''}
+    : m.kind === 'pivot_high' ? {time: m.time, position: 'aboveBar', color: '#facc15', shape: 'circle', text: m.text || ''}
+    : m.kind === 'long'
     ? {time: m.time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: m.text || ''}
     : {time: m.time, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: m.text || ''});
   const st = (d.structure || []).map(e => ({time: e.time, position: e.dir > 0 ? 'belowBar' : 'aboveBar', color: e.dir > 0 ? '#1fcf6e' : '#f0354b',
