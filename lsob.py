@@ -123,15 +123,19 @@ def lb_signals(o, h, l, c, p):
             if long_:
                 depth = b["top"] - c[j]                                  # > 0: Schluss in der Box
                 pen = b["top"] - l[j]                                    # Eindringtiefe des Dochts
-                touch = l[j] <= b["top"] and pen <= p["max_pen"] * hb
+                touch = l[j] <= b["top"]
                 close_ok = c[j] <= b["top"]
                 rej = (not p["need_rejection"]) or (c[j] > o[j] and min(o[j], c[j]) - l[j] > 0)
             else:
                 depth = c[j] - b["bottom"]
                 pen = h[j] - b["bottom"]
-                touch = h[j] >= b["bottom"] and pen <= p["max_pen"] * hb
+                touch = h[j] >= b["bottom"]
                 close_ok = c[j] >= b["bottom"]
                 rej = (not p["need_rejection"]) or (c[j] < o[j] and h[j] - max(o[j], c[j]) > 0)
+            if pen > 0 and pen >= p["max_pen"] * hb:   # Docht stoesst mindestens bis zur Haelfte (lb_max_pen_pct) in die Box oder ganz durch -> Box ungueltig
+                b["state"], b["end"] = "broken", j
+                active.remove(b)
+                continue
             if depth > p["retest"] * hb:           # Schluss tiefer als erlaubt in der Box -> Setup ungueltig
                 b["state"], b["end"] = "broken", j
                 active.remove(b)
