@@ -52,7 +52,7 @@ def _lb_params(cfg):
         "be_frac": max(0.0, min(0.99, _f(cfg, "lb_be_frac", 0.5))), "be_offset_pct": max(0.0, _f(cfg, "lb_be_offset_pct", 0.0)),
         "buffer_pct": max(0.0, _f(cfg, "lb_sl_buffer_pct", 0.0)),
         "min_risk_pct": max(0.0, _f(cfg, "lb_min_risk_pct", 0.0)), "max_risk_pct": max(0.0, _f(cfg, "lb_max_risk_pct", 0.0)),
-        "min_tp_pct": max(0.0, _f(cfg, "lb_min_tp_pct", 0.5)),
+        "min_tp_pct": max(0.0, _f(cfg, "lb_min_tp_pct", 0.0)),
         "session_on": bool(cfg.get("lb_session_on", False)),
         "session_from": int(_f(cfg, "lb_session_from", 9)), "session_to": int(_f(cfg, "lb_session_to", 23)),
     }

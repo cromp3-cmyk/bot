@@ -504,7 +504,7 @@ def default_config():
         "lb_min_risk_pct": float(os.getenv("LB_MIN_RISK_PCT", "0")), "lb_max_risk_pct": float(os.getenv("LB_MAX_RISK_PCT", "0")),
         "lb_need_reaction": os.getenv("LB_NEED_REACTION", "true").lower() == "true", "lb_need_breakout": os.getenv("LB_NEED_BREAKOUT", "true").lower() == "true",
         "lb_need_rejection": os.getenv("LB_NEED_REJECTION", "true").lower() == "true", "lb_sl_mode": os.getenv("LB_SL_MODE", "box"),
-        "lb_min_tp_pct": float(os.getenv("LB_MIN_TP_PCT", "0.5")), "lb_be_offset_pct": float(os.getenv("LB_BE_OFFSET_PCT", "0")),
+        "lb_min_tp_pct": float(os.getenv("LB_MIN_TP_PCT", "0")), "lb_be_offset_pct": float(os.getenv("LB_BE_OFFSET_PCT", "0")),
         "lb_session_on": os.getenv("LB_SESSION_ON", "false").lower() == "true", "lb_session_from": int(os.getenv("LB_SESSION_FROM", "9")), "lb_session_to": int(os.getenv("LB_SESSION_TO", "23")),
         "lb_sl_cooldown_seconds": float(os.getenv("LB_SL_COOLDOWN_SECONDS", "30.0")),
 
@@ -2314,7 +2314,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="lsob"><label>Ausbruch nötig (Kerze schließt jenseits der Box, bevor ein Retest zählt)</label><select class="cfg" id="lb_need_breakout"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="lsob"><label>Ablehnungskerze nötig (bullisch mit Docht unten / short: bärisch mit Docht oben); Einstieg zum Open der nächsten Kerze</label><select class="cfg" id="lb_need_rejection"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="lsob"><label>Stop-Loss</label><select class="cfg" id="lb_sl_mode"><option value="box">Boxende (unten bei Long, oben bei Short)</option><option value="wick">Docht der Ablehnungskerze (Video)</option></select></div>
-  <div data-mode="lsob"><label>Mindest-Abstand zum TP (% vom Einstieg, Video: 0,5; 0 = aus)</label><input type="number" step="0.05" min="0" id="lb_min_tp_pct"></div>
+  <div data-mode="lsob"><label>Mindest-Abstand zum TP (% vom Einstieg, Video: 0,5; 0 = aus; auf kleinen Timeframes filtert 0,5 fast alles weg)</label><input type="number" step="0.05" min="0" id="lb_min_tp_pct"></div>
   <div data-mode="lsob"><label>Break-Even-Aufschlag (% im Gewinn, deckt Gebühren; 0 = genau Einstieg)</label><input type="number" step="0.01" min="0" id="lb_be_offset_pct"></div>
   <div data-mode="lsob"><label>Handelszeit-Filter (Europe/Berlin)</label><select class="cfg" id="lb_session_on"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="lsob"><label>Handelszeit von (Uhr)</label><input type="number" step="1" min="0" max="23" id="lb_session_from"></div>
