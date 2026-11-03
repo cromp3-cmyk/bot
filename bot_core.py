@@ -491,6 +491,19 @@ def default_config():
         "mf_sl_to_tp1_on_tp2": os.getenv("MF_SL_TO_TP1_ON_TP2", "true").lower() == "true",
         "mf_sl_cooldown_seconds": float(os.getenv("MF_SL_COOLDOWN_SECONDS", "30.0")),
 
+        # ===== LSOB (entry_mode lsob): neues Tief/Hoch -> Box der extremen Kerze; Einstieg bei erneutem Eintauchen; SL = Box-Ende, TP = 1:RR =====
+        "lb_resolution": os.getenv("LB_RESOLUTION", "15m"),
+        "lb_pivot_left": int(os.getenv("LB_PIVOT_LEFT", "5")), "lb_pivot_right": int(os.getenv("LB_PIVOT_RIGHT", "5")),
+        "lb_inval_tol_pct": float(os.getenv("LB_INVAL_TOL_PCT", "20")), "lb_retest_tol_pct": float(os.getenv("LB_RETEST_TOL_PCT", "10")),
+        "lb_strict_wick": os.getenv("LB_STRICT_WICK", "false").lower() == "true", "lb_max_pen_pct": float(os.getenv("LB_MAX_PEN_PCT", "50")),
+        "lb_require_sweep": os.getenv("LB_REQUIRE_SWEEP", "true").lower() == "true",
+        "lb_box_mode": os.getenv("LB_BOX_MODE", "range"), "lb_entry_mode": os.getenv("LB_ENTRY_MODE", "both"),
+        "lb_max_age": int(os.getenv("LB_MAX_AGE", "2000")), "lb_direction_mode": os.getenv("LB_DIRECTION_MODE", "both"),
+        "lb_rr": float(os.getenv("LB_RR", "2.0")), "lb_be_frac": float(os.getenv("LB_BE_FRAC", "0.5")),
+        "lb_sl_buffer_pct": float(os.getenv("LB_SL_BUFFER_PCT", "0")),
+        "lb_min_risk_pct": float(os.getenv("LB_MIN_RISK_PCT", "0")), "lb_max_risk_pct": float(os.getenv("LB_MAX_RISK_PCT", "0")),
+        "lb_sl_cooldown_seconds": float(os.getenv("LB_SL_COOLDOWN_SECONDS", "30.0")),
+
         # ===== Trendfolge (entry_mode trendfolge): Marktstruktur-Trend + rote/gruene Kerzen =====
         "tfl_resolution": os.getenv("TFL_RESOLUTION", "1m"),        # Kerzen-Zeitebene (rot/gruen), ab 10s
         "tfl_trend_tf": os.getenv("TFL_TREND_TF", "5m"),            # Trend-Zeitebene, ab 10s
@@ -885,6 +898,7 @@ PERSISTED_STATE_KEYS = [
     "pa_sl_price", "pa_tp_price", "pa_sl_cooldown_until",
     "we_sl_price", "we_tp_price", "we_sl_cooldown_until",
     "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until", "wd_tps", "wd_tp_pcts", "wd_tp_done", "wd_be", "wd_entries", "wd_last_entry",
+    "lb_sl_price", "lb_tp_price", "lb_be_price", "lb_be", "lb_sl_cooldown_until",
     "mf_sl_price", "mf_tp_price", "mf_sl_cooldown_until", "mf_tps", "mf_tp_pcts", "mf_tp_done", "mf_be", "mf_entries", "mf_last_entry",
     "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
@@ -1795,6 +1809,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="wt_div">WT-Divergenz (WaveTrend-Divergenzen als Einstieg, Welle wie im Wellenanker, wählbarer Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="mom_field">Momentum-Feld (BUY/SELL beim Nulldurchgang des Momentums, Hintergrund rot/grün, SL/TP, Teil-TPs)</option>
+      <option value="lsob">LSOB (neues Tief/Hoch → Box, Einstieg beim erneuten Eintauchen, SL = Box-Ende, TP 1:2, Break-Even bei halbem Ziel)</option>
       <option value="wae_ema">WAE-Zonen + EMA9 (WAE-Zone aus höherem Zeitrahmen, CALL/PUT bei Zone + EMA, wählbarer Ausstieg, optional $-SL/-TP)</option>
       <option value="punk_algo">Punk Algo (Range-Filter-Dreiecke ▲/▼ als Einstieg, Gegen-Dreieck = Flip, WaveTrend-X = Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="vwap_cross">EMA 9 + VWAP (Einstieg bei Kreuzung EMA9 / Day-Week-Month-VWAP, SL hinter letzter Kerze, TP Kreuzung/Fest/Gegentrade, Backtest)</option>
@@ -2267,6 +2282,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>SL auf Break-Even nach TP1</label><select class="cfg" id="mf_be_after_tp1"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>SL auf TP1 nach TP2</label><select class="cfg" id="mf_sl_to_tp1_on_tp2"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="mom_field"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mf_sl_cooldown_seconds"></div>
+
+  <div data-mode="lsob" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    📦 <b>LSOB</b>: Ein <b>neues Tief</b> (tiefste Kerze, bestätigt nach „Pivot rechts“ Kerzen, und tiefer als das vorige Tief) macht eine <b>Long-Box</b>; ein <b>neues Hoch</b> eine <b>Short-Box</b>. Sticht der Kurs später noch einmal in die Box (oder schließt kurz in ihr), steigt der Bot zum Schlusskurs dieser Kerze ein. <b>SL</b> = unteres Ende der Box (Long) bzw. oberes Ende (Short), <b>TP</b> = Risiko × RR (Standard 1:2). Bei der Hälfte des Wegs zum TP rutscht der SL auf den Einstieg. Schließt eine Kerze jenseits der Box, ist sie gebrochen. Kein Signal-Ausstieg, nur SL/TP/Break-Even.
+  </div>
+  <div data-mode="lsob"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="lb_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <input type="number" step="1" min="1" id="lb_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="lsob"><label>Pivot links (Kerzen; die Kerze muss das tiefste/höchste dieser Kerzen davor sein)</label><input type="number" step="1" min="1" id="lb_pivot_left"></div>
+  <div data-mode="lsob"><label>Pivot rechts (Bestätigung, Kerzen)</label><input type="number" step="1" min="1" id="lb_pivot_right"></div>
+  <div data-mode="lsob"><label>Nur „neues“ Tief/Hoch (muss unter dem vorigen Tief bzw. über dem vorigen Hoch liegen)</label><select class="cfg" id="lb_require_sweep"><option value="true">An</option><option value="false">Aus (jeder Pivot macht eine Box)</option></select></div>
+  <div data-mode="lsob"><label>Box aus</label><select class="cfg" id="lb_box_mode"><option value="range">ganzer Kerze (Tief bis Hoch)</option><option value="body">nur Kerzenkörper</option></select></div>
+  <div data-mode="lsob"><label>Einstieg, wenn der Kurs …</label><select class="cfg" id="lb_entry_mode"><option value="both">in die Box sticht ODER in ihr schließt</option><option value="touch">nur in die Box sticht (Docht)</option><option value="close_in">nur in der Box schließt</option></select></div>
+  <div data-mode="lsob"><label>Invalidierungs-Toleranz (% der Boxhöhe: so weit darf der Schluss über das Boxende hinaus, bevor die Box gebrochen ist; Original: 20)</label><input type="number" step="1" min="0" id="lb_inval_tol_pct"></div>
+  <div data-mode="lsob"><label>Retest-Toleranz (% der Boxhöhe: der Kurs muss die Box nicht ganz erreichen; Original: 10)</label><input type="number" step="1" min="0" id="lb_retest_tol_pct"></div>
+  <div data-mode="lsob"><label>Strenge Docht-Invalidierung (schon ein Docht jenseits der Toleranz bricht die Box)</label><select class="cfg" id="lb_strict_wick"><option value="false">Aus</option><option value="true">An</option></select></div>
+  <div data-mode="lsob"><label>Max. Docht-Eindringtiefe (% der Boxhöhe: tiefer in die Box ragende Dochte zählen nicht als Retest; Original: 50)</label><input type="number" step="1" min="0" id="lb_max_pen_pct"></div>
+  <div data-mode="lsob"><label>Box gültig für (Kerzen, danach verfällt sie; Original: Max. Historie 2000)</label><input type="number" step="1" min="5" id="lb_max_age"></div>
+  <div data-mode="lsob"><label>Richtung</label><select class="cfg" id="lb_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="lsob"><label>Take-Profit: Verhältnis zum Risiko (2 = 1:2)</label><input type="number" step="0.1" min="0.1" id="lb_rr"></div>
+  <div data-mode="lsob"><label>SL auf Einstieg (Break-Even) bei diesem Anteil des Wegs zum TP (0,5 = Hälfte, 0 = aus)</label><input type="number" step="0.05" min="0" max="0.99" id="lb_be_frac"></div>
+  <div data-mode="lsob"><label>SL-Puffer jenseits des Box-Endes (%, 0 = genau am Boxende)</label><input type="number" step="0.01" min="0" id="lb_sl_buffer_pct"></div>
+  <div data-mode="lsob"><label>Mindest-Risiko (SL-Abstand in % vom Einstieg, 0 = aus; zu kleine Boxen überspringen)</label><input type="number" step="0.01" min="0" id="lb_min_risk_pct"></div>
+  <div data-mode="lsob"><label>Maximal-Risiko (SL-Abstand in % vom Einstieg, 0 = aus; zu große Boxen überspringen)</label><input type="number" step="0.01" min="0" id="lb_max_risk_pct"></div>
+  <div data-mode="lsob"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="lb_sl_cooldown_seconds"></div>
 
   <div data-mode="trendfolge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧭 <b>Trendfolge</b>: Der Trend kommt aus der Marktstruktur (BOS/CHoCH). <b>Aufwärtstrend: bei jeder roten Kerze Kauf</b> (Nachkauf, solange die Position läuft), <b>Abwärtstrend: bei jeder grünen Kerze Short</b>. Ausstieg: fester $-TP auf die gesamte Position, optional fester $-SL. <b>Trendwechsel = Position drehen</b> (beenden und sofort im neuen Trend einsteigen, oder nur schließen). Kerzen- und Trend-Zeitebene sind getrennt wählbar (ab 10 Sekunden).
@@ -4265,6 +4305,21 @@ function wacInit() {
   sync(WAC.price, WAC.wt); sync(WAC.wt, WAC.price);
   WAC.inited = true;
 }
+let wacBoxSeries = [];
+function wacSetBoxes(list) {
+  const sig = JSON.stringify(list || []); if (sig === WAC.boxSig) return; WAC.boxSig = sig;
+  wacBoxSeries.forEach(s => { try { WAC.price.removeSeries(s); } catch (e) {} }); wacBoxSeries = [];
+  (list || []).forEach(b => {
+    const col = b.kind === 'long' ? '34,197,94' : '239,68,68';
+    const a = b.state === 'open' ? 0.24 : 0.10, e = b.state === 'open' ? 0.95 : 0.45;
+    const bs = WAC.price.addBaselineSeries({baseValue: {type: 'price', price: b.bottom}, topFillColor1: `rgba(${col},${a})`, topFillColor2: `rgba(${col},${a})`,
+      bottomFillColor1: 'rgba(0,0,0,0)', bottomFillColor2: 'rgba(0,0,0,0)', topLineColor: `rgba(${col},${e})`, bottomLineColor: 'rgba(0,0,0,0)', lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
+    bs.setData([{time: b.t1, value: b.top}, {time: b.t2, value: b.top}]); wacBoxSeries.push(bs);
+    const ls = WAC.price.addLineSeries({color: `rgba(${col},${e})`, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
+    ls.setData([{time: b.t1, value: b.bottom}, {time: b.t2, value: b.bottom}]); wacBoxSeries.push(ls);
+  });
+}
 function wacSetBgFields(fields, candles) {
   if (!WAC.bg) return;
   if (!fields && !WAC.bgOn) return;
@@ -4399,6 +4454,7 @@ async function wacPollLive() {
     wacSetOverlays(d.overlays);
     wacSetDivLines(d.div_lines);
     wacSetBgFields(d.bg_fields, d.candles);
+    wacSetBoxes(d.boxes);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
     const wtTxt = isMf ? ` · Momentum ${d.wt1v} (vorher ${d.wt2v})` : (isWa || isWd) ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
     const p = d.position;
@@ -4612,7 +4668,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #mf_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #mf_resolution, #lb_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -5826,6 +5882,13 @@ async function refresh() {
     document.getElementById('wd_use_regular').value = String(data.config.wd_use_regular !== false);
     document.getElementById('wd_use_hidden').value = String(!!data.config.wd_use_hidden);
     setResolutionField('mf_resolution', data.config.mf_resolution);
+    setResolutionField('lb_resolution', data.config.lb_resolution);
+    ['lb_pivot_left', 'lb_pivot_right', 'lb_inval_tol_pct', 'lb_retest_tol_pct', 'lb_max_pen_pct', 'lb_max_age', 'lb_rr', 'lb_be_frac', 'lb_sl_buffer_pct', 'lb_min_risk_pct', 'lb_max_risk_pct', 'lb_sl_cooldown_seconds'].forEach(k => { document.getElementById(k).value = data.config[k]; });
+    document.getElementById('lb_strict_wick').value = String(!!data.config.lb_strict_wick);
+    document.getElementById('lb_require_sweep').value = String(data.config.lb_require_sweep !== false);
+    document.getElementById('lb_box_mode').value = data.config.lb_box_mode || 'range';
+    document.getElementById('lb_entry_mode').value = data.config.lb_entry_mode || 'both';
+    document.getElementById('lb_direction_mode').value = data.config.lb_direction_mode || 'both';
     document.getElementById('mf_entry_mode').value = data.config.mf_entry_mode || 'candle';
     document.getElementById('mf_early_max').value = data.config.mf_early_max ?? 30;
     document.getElementById('mf_mom_len').value = data.config.mf_mom_len;
@@ -6379,6 +6442,24 @@ function buildConfigPayload() {
     wd_use_regular: document.getElementById('wd_use_regular').value === 'true',
     wd_use_hidden: document.getElementById('wd_use_hidden').value === 'true',
     mf_resolution: getResolutionField('mf_resolution'),
+    lb_resolution: getResolutionField('lb_resolution'),
+    lb_pivot_left: parseInt(document.getElementById('lb_pivot_left').value) || 5,
+    lb_pivot_right: parseInt(document.getElementById('lb_pivot_right').value) || 5,
+    lb_inval_tol_pct: parseFloat(document.getElementById('lb_inval_tol_pct').value) || 0,
+    lb_retest_tol_pct: parseFloat(document.getElementById('lb_retest_tol_pct').value) || 0,
+    lb_strict_wick: document.getElementById('lb_strict_wick').value === 'true',
+    lb_max_pen_pct: parseFloat(document.getElementById('lb_max_pen_pct').value) || 0,
+    lb_require_sweep: document.getElementById('lb_require_sweep').value === 'true',
+    lb_box_mode: document.getElementById('lb_box_mode').value,
+    lb_entry_mode: document.getElementById('lb_entry_mode').value,
+    lb_max_age: parseInt(document.getElementById('lb_max_age').value) || 2000,
+    lb_direction_mode: document.getElementById('lb_direction_mode').value,
+    lb_rr: parseFloat(document.getElementById('lb_rr').value) || 2,
+    lb_be_frac: parseFloat(document.getElementById('lb_be_frac').value) || 0,
+    lb_sl_buffer_pct: parseFloat(document.getElementById('lb_sl_buffer_pct').value) || 0,
+    lb_min_risk_pct: parseFloat(document.getElementById('lb_min_risk_pct').value) || 0,
+    lb_max_risk_pct: parseFloat(document.getElementById('lb_max_risk_pct').value) || 0,
+    lb_sl_cooldown_seconds: parseFloat(document.getElementById('lb_sl_cooldown_seconds').value),
     mf_entry_mode: document.getElementById('mf_entry_mode').value,
     mf_early_max: parseFloat(document.getElementById('mf_early_max').value) || 30,
     mf_mom_len: parseInt(document.getElementById('mf_mom_len').value) || 12,
@@ -6902,7 +6983,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
@@ -7044,13 +7125,14 @@ async def handle_wa_live_chart(request):
     is_we = cfg.get("entry_mode") == "wae_ema"
     is_wd = cfg.get("entry_mode") == "wt_div"
     is_mf = cfg.get("entry_mode") == "mom_field"
+    is_lb = cfg.get("entry_mode") == "lsob"
     is_tfl = cfg.get("entry_mode") == "trendfolge"
     is_rlm = cfg.get("entry_mode") == "rlm"
     is_vc = cfg.get("entry_mode") == "vwap_cross"
     tf = request.query.get("tf", "")
     SUBMIN = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
-        tf = cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
+        tf = cfg.get("lb_resolution", "15m") if is_lb else cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
             tf = "5m"
     if tf in SUBMIN:
@@ -7075,6 +7157,11 @@ async def handle_wa_live_chart(request):
     elif is_tfl:
         from trendfolge import tfl_chart_payload
         payload = await asyncio.to_thread(tfl_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_lb:
+        from lsob import lb_chart_payload
+        payload = await asyncio.to_thread(lb_chart_payload, ts, o, h, l, c, cfg, 1000)
+        if payload is None:
+            return web.json_response({"ok": False, "reason": "lädt noch … (zu wenig Kerzen für LSOB)"})
     elif is_mf:
         from mom_field import mf_chart_payload
         payload = await asyncio.to_thread(mf_chart_payload, ts, o, h, l, c, cfg, 1000)
@@ -7106,8 +7193,8 @@ async def handle_wa_live_chart(request):
         sl_usd = float(cfg.get("wa_sl_usd", 5.0))
         d = (sl_usd / size) if size else 0
         pos = {"dir": st["position"], "avg": avg, "size": size, "pnl": ((st.get("last_price") or avg) - avg) * size * (1 if st["position"] == "long" else -1),
-               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else st.get("wd_sl_price") if is_wd else st.get("mf_sl_price") if is_mf else None),
-               "tps": (st.get("rlm_tps") or []) if is_rlm else ((list((st.get("wd_tps") or [])[int(st.get("wd_tp_done") or 0):]) or ([st["wd_tp_price"]] if st.get("wd_tp_price") else [])) if is_wd else (list((st.get("mf_tps") or [])[int(st.get("mf_tp_done") or 0):]) or ([st["mf_tp_price"]] if st.get("mf_tp_price") else [])) if is_mf else [])}
+               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else st.get("wd_sl_price") if is_wd else st.get("mf_sl_price") if is_mf else st.get("lb_sl_price") if is_lb else None),
+               "tps": (st.get("rlm_tps") or []) if is_rlm else ((list((st.get("wd_tps") or [])[int(st.get("wd_tp_done") or 0):]) or ([st["wd_tp_price"]] if st.get("wd_tp_price") else [])) if is_wd else (list((st.get("mf_tps") or [])[int(st.get("mf_tp_done") or 0):]) or ([st["mf_tp_price"]] if st.get("mf_tp_price") else [])) if is_mf else ([st["lb_tp_price"]] if (is_lb and st.get("lb_tp_price")) else []))}
     gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
     grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
     structure = []
