@@ -1761,9 +1761,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select>
     <button type="button" id="wac-center" class="pill" title="Aktuelle Kerze in die Mitte des Charts setzen">🎯 Mitte</button>
     <button type="button" id="wac-fit" class="pill" title="Gesamten Verlauf einpassen">⤢ Alles</button>
+    <button type="button" id="wac-tvbtn" class="pill" title="Original-TradingView-Chart zum bequemen Scrollen/Zoomen (ohne Bot-Boxen/Signale)">📈 TradingView</button>
     <span id="wac-info" class="chart-info"></span>
   </div>
   <details id="ov-box" class="ov-box"><summary>📐 Linien &amp; Farben</summary><div id="ov-list"></div></details>
+  <div id="wac-tv" style="display:none; height:620px;"></div>
   <div id="wac-price" style="height:420px;"></div>
   <div id="wac-wtbox" style="display:none;">
     <div style="font-size:12px; color:var(--text-dim); margin:8px 0 4px;">WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels</div>
@@ -4454,7 +4456,7 @@ function wacSigMarkers(d) {
   return sig.concat(st, tm).sort((a, b) => a.time - b.time);
 }
 async function wacPollLive() {
-  if (WAC.mode !== 'live') return;
+  if (WAC.mode !== 'live' || (typeof TVW !== 'undefined' && TVW.on)) return;
   const sec = document.querySelector('#wac-price');
   if (!sec || sec.offsetParent === null) return;   // nicht sichtbar -> nichts abfragen
   const isWa = document.getElementById('entry_mode').value === 'wellenanker';
@@ -4540,6 +4542,40 @@ function wacCenter() {
   try { WAC.price.priceScale('right').applyOptions({autoScale: true}); } catch (e) {}
 }
 document.getElementById('wac-center').addEventListener('click', wacCenter);
+
+// ===== Original-TradingView-Chart (Advanced-Chart-Widget) zum Scrollen/Zoomen =====
+const TVW = {on: false, key: null};
+function tvInterval(tf) {
+  const m = {'1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '4h': '240', '1d': 'D'};
+  if (m[tf]) return m[tf];
+  const mm = /^([0-9]+)m$/.exec(tf || ''); if (mm) return mm[1];
+  return '1';   // Sekunden-Kerzen gibt es im freien Widget nicht
+}
+function tvRender() {
+  const box = document.getElementById('wac-tv'); if (!box) return;
+  const tfSel = document.getElementById('wac-tf').value;
+  const mode = document.getElementById('entry_mode').value;
+  const fallback = {lsob: 'lb_resolution', mom_field: 'mf_resolution', wt_div: 'wd_resolution', wellenanker: 'wa_timeframe'}[mode];
+  const tf = tfSel || (fallback && document.getElementById(fallback) ? document.getElementById(fallback).value : '15m');
+  const key = currentSymbol + '|' + tvInterval(tf);
+  if (TVW.key === key && box.firstChild) return;
+  TVW.key = key; box.innerHTML = '';
+  const mk = () => new TradingView.widget({container_id: 'wac-tv', autosize: true, symbol: 'BINANCE:' + currentSymbol + 'USDT.P', interval: tvInterval(tf),
+    timezone: 'Europe/Berlin', theme: 'dark', style: '1', locale: 'de_DE', toolbar_bg: '#11141a', enable_publishing: false, allow_symbol_change: true, hide_side_toolbar: false, withdateranges: true, save_image: true});
+  if (window.TradingView) { mk(); return; }
+  const s = document.createElement('script'); s.src = 'https://s3.tradingview.com/tv.js'; s.onload = mk; document.head.appendChild(s);
+}
+document.getElementById('wac-tvbtn').addEventListener('click', () => {
+  TVW.on = !TVW.on;
+  document.getElementById('wac-tv').style.display = TVW.on ? '' : 'none';
+  document.getElementById('wac-price').style.display = TVW.on ? 'none' : '';
+  if (TVW.on) document.getElementById('wac-wtbox').style.display = 'none';
+  document.getElementById('wac-tvbtn').classList.toggle('on', TVW.on);
+  document.getElementById('wac-tvbtn').textContent = TVW.on ? '🤖 Bot-Chart' : '📈 TradingView';
+  if (TVW.on) tvRender();
+});
+document.getElementById('wac-tf').addEventListener('change', () => { if (TVW.on) tvRender(); });
+setInterval(() => { if (TVW.on) tvRender(); }, 3000);   // Symbolwechsel im Bot uebernehmen
 document.getElementById('wac-fit').addEventListener('click', () => { if (WAC.inited) { WAC.price.timeScale().fitContent(); try { WAC.price.priceScale('right').applyOptions({autoScale: true}); } catch (e) {} } });
 document.getElementById('wac-tf').addEventListener('change', () => { WAC.fitted = false; wacPollLive(); });
 document.getElementById('wac-tab-bt').addEventListener('click', wacShowBacktest);
