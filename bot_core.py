@@ -4333,6 +4333,22 @@ function wacSetBoxes(list) {
     ls.setData([{time: b.t1, value: b.bottom}, {time: b.t2, value: b.bottom}]); wacBoxSeries.push(ls);
   });
 }
+let wacTradeSeries = [];
+function wacSetLbTrades(list) {
+  const sig = JSON.stringify(list || []); if (sig === WAC.tradeSig) return; WAC.tradeSig = sig;
+  wacTradeSeries.forEach(s => { try { WAC.price.removeSeries(s); } catch (e) {} }); wacTradeSeries = [];
+  (list || []).forEach(t => {
+    const zone = (val, col) => {
+      const bs = WAC.price.addBaselineSeries({baseValue: {type: 'price', price: t.entry}, topFillColor1: `rgba(${col},0.18)`, topFillColor2: `rgba(${col},0.18)`,
+        bottomFillColor1: `rgba(${col},0.18)`, bottomFillColor2: `rgba(${col},0.18)`, topLineColor: `rgba(${col},0.9)`, bottomLineColor: `rgba(${col},0.9)`, lineWidth: 1,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
+      bs.setData([{time: t.t1, value: val}, {time: t.t2 > t.t1 ? t.t2 : t.t1 + 1, value: val}]); wacTradeSeries.push(bs);
+    };
+    zone(t.tp, '34,197,94'); zone(t.sl, '239,68,68');
+    const ls = WAC.price.addLineSeries({color: 'rgba(230,230,230,0.9)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, title: t.result});
+    ls.setData([{time: t.t1, value: t.entry}, {time: t.t2 > t.t1 ? t.t2 : t.t1 + 1, value: t.entry}]); wacTradeSeries.push(ls);
+  });
+}
 function wacSetBgFields(fields, candles) {
   if (!WAC.bg) return;
   if (!fields && !WAC.bgOn) return;
@@ -4468,6 +4484,7 @@ async function wacPollLive() {
     wacSetDivLines(d.div_lines);
     wacSetBgFields(d.bg_fields, d.candles);
     wacSetBoxes(d.boxes);
+    wacSetLbTrades(d.lb_trades);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
     const wtTxt = isMf ? ` · Momentum ${d.wt1v} (vorher ${d.wt2v})` : (isWa || isWd) ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
     const p = d.position;

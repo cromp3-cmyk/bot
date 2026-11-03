@@ -447,15 +447,36 @@ def lb_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
     sig, slv, boxes = lb_signals(o[:-1], h[:-1], l[:-1], c[:-1], p)
     off = max(0, n - max_bars)
     candles = [{"time": ts[i] // 1000, "open": o[i], "high": h[i], "low": l[i], "close": c[i]} for i in range(off, n)]
-    markers = []
-    for i in range(off, n - 1):
+    markers, trades = [], []
+    for i in range(max(off, 1), n - 1):
         if sig[i]:
-            markers.append({"time": ts[i] // 1000, "kind": "long" if sig[i] > 0 else "short", "price": c[i], "text": "LSOB"})
+            d = "long" if sig[i] > 0 else "short"
+            e_i = i + 1                      # Einstieg zum Open der Folgekerze
+            entry = o[e_i]
+            if slv[i] is None or _entry_check(d, entry, slv[i], p) != "ok":
+                continue
+            sl0, tp, be_px = _levels(d, entry, slv[i], p)
+            sl, be, res, x_i, x_px = sl0, False, "offen", n - 1, c[n - 1]
+            for k in range(e_i, n):
+                hit_sl = l[k] <= sl if d == "long" else h[k] >= sl
+                hit_tp = h[k] >= tp if d == "long" else l[k] <= tp
+                if hit_sl:
+                    res, x_i, x_px = ("BE" if be else "SL"), k, sl
+                    break
+                if hit_tp:
+                    res, x_i, x_px = "TP", k, tp
+                    break
+                if be_px is not None and not be and (h[k] >= be_px if d == "long" else l[k] <= be_px):
+                    sl, be = _be_price(d, entry, p), True
+            markers.append({"time": ts[e_i] // 1000, "kind": d, "price": entry, "text": "LSOB " + ("LONG" if d == "long" else "SHORT")})
+            trades.append({"kind": d, "t1": ts[e_i] // 1000, "t2": ts[x_i] // 1000, "entry": entry, "sl": sl0, "tp": tp, "result": res})
     out = []
     for bx in boxes:
+        if bx["state"] in ("broken", "expired", "skipped"):
+            continue   # ungueltige Boxen verschwinden wie im Original-Indikator
         end = bx["end"] if bx["end"] is not None else n - 1
         if end < off:
             continue
         out.append({"kind": bx["kind"], "t1": ts[max(bx["i0"], off)] // 1000, "t2": ts[end] // 1000, "top": bx["top"], "bottom": bx["bottom"], "state": bx["state"], "armed": bool(bx.get("armed"))})
-    out = out[-20:]
-    return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "boxes": out, "entry_mode": "lsob", "bars": n}
+    out = out[-8:]
+    return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "boxes": out, "lb_trades": trades[-12:], "entry_mode": "lsob", "bars": n}
