@@ -20,7 +20,7 @@ import asyncio
 import time
 import traceback
 
-from bot_core import BOTS, debug_log, execute_entry, execute_exit
+from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_partial_exit
 from strategies import (
     SUB_MINUTE_RESOLUTIONS, get_seconds_candles, fetch_candles_binance_multi,
     summarize_backtest_trades, BACKTEST_MAX_CANDLES, _bt_close_trade,
@@ -49,7 +49,7 @@ def _lb_params(cfg):
         "max_age": max(5, int(_f(cfg, "lb_max_age", 2000))),
         "direction": mode if mode in ("both", "long_only", "short_only") else "both",
         "rr": max(0.1, _f(cfg, "lb_rr", 2.0)),
-        "be_frac": max(0.0, min(0.99, _f(cfg, "lb_be_frac", 0.5))), "be_offset_pct": max(0.0, _f(cfg, "lb_be_offset_pct", 0.0)),
+        "be_frac": max(0.0, min(0.99, _f(cfg, "lb_be_frac", 0.5))), "be_offset_pct": max(0.0, _f(cfg, "lb_be_offset_pct", 0.0)), "tp1_pct": max(0.0, min(99.0, _f(cfg, "lb_tp1_pct", 50))),
         "buffer_pct": max(0.0, _f(cfg, "lb_sl_buffer_pct", 0.0)),
         "min_risk_pct": max(0.0, _f(cfg, "lb_min_risk_pct", 0.0)), "max_risk_pct": max(0.0, _f(cfg, "lb_max_risk_pct", 0.0)),
         "min_tp_pct": max(0.0, _f(cfg, "lb_min_tp_pct", 0.0)),
@@ -244,7 +244,15 @@ async def check_lb_sl_tp(symbol, price):
             _lb_reset_state(st)
         return
     if be_px is not None and not st.get("lb_be") and st.get("avg_entry_price") and ((pos == "long" and price >= be_px) or (pos == "short" and price <= be_px)):
-        st["lb_sl_price"], st["lb_be"] = _be_price(pos, st["avg_entry_price"], _lb_params(cfg)), True
+        p_ = _lb_params(cfg)
+        if p_["tp1_pct"] > 0:
+            if not await execute_partial_exit(symbol, price, p_["tp1_pct"] / 100.0, "TP1"):
+                return   # Teilverkauf fehlgeschlagen -> naechster Tick versucht es erneut
+            if st["position"] is None:
+                _lb_reset_state(st)
+                return
+            debug_log(f"🎯 [{symbol}] LSOB TP1 ({p_['tp1_pct']:g} %) bei halbem Weg erreicht")
+        st["lb_sl_price"], st["lb_be"] = _be_price(pos, st["avg_entry_price"], p_), True
         debug_log(f"📡 [{symbol}] LSOB Break-Even-Schritt erreicht - SL auf Einstieg ({round(st['lb_sl_price'], 6)})")
 
 
@@ -376,6 +384,10 @@ def _lb_simulate(candles, cfg, sig, slv, start_i, p):
                 _bt_close_trade(trades, d, e, pos["tp"], pos["size"], i, pos["entry_i"], "TP", ts=ts)
                 pos = None
             elif pos["be_px"] is not None and not pos["be"] and ((d == "long" and h[i] >= pos["be_px"]) or (d == "short" and l[i] <= pos["be_px"])):
+                if p["tp1_pct"] > 0:
+                    part = pos["size"] * p["tp1_pct"] / 100.0
+                    _bt_close_trade(trades, d, e, pos["be_px"], part, i, pos["entry_i"], "TP1", ts=ts)
+                    pos["size"] -= part
                 pos["sl"], pos["be"] = _be_price(d, e, p), True
     if pos is not None:
         _bt_close_trade(trades, pos["dir"], pos["entry"], c[n - 1], pos["size"], n - 1, pos["entry_i"], "END-OF-BACKTEST", ts=ts)
