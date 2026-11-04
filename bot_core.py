@@ -490,6 +490,21 @@ def default_config():
         "mf_be_after_tp1": os.getenv("MF_BE_AFTER_TP1", "true").lower() == "true",
         "mf_sl_to_tp1_on_tp2": os.getenv("MF_SL_TO_TP1_ON_TP2", "true").lower() == "true",
         "mf_sl_cooldown_seconds": float(os.getenv("MF_SL_COOLDOWN_SECONDS", "30.0")),
+        # ===== Auction Range Migration Trend (entry_mode auction_trend): Nachbau des Pine "Auction Range Migration Trend" - LONG/SHORT-Wechsel des Trend-Zustands =====
+        "ar_resolution": os.getenv("AR_RESOLUTION", "15m"),
+        "ar_atr_len": int(os.getenv("AR_ATR_LEN", "14")), "ar_center_inf": float(os.getenv("AR_CENTER_INF", "0.35")), "ar_territory_inf": float(os.getenv("AR_TERRITORY_INF", "0.45")),
+        "ar_shock": float(os.getenv("AR_SHOCK", "2.0")), "ar_drive_len": int(os.getenv("AR_DRIVE_LEN", "20")), "ar_persist_len": int(os.getenv("AR_PERSIST_LEN", "13")),
+        "ar_min_migration": float(os.getenv("AR_MIN_MIGRATION", "0.03")), "ar_persist_inf": float(os.getenv("AR_PERSIST_INF", "0.40")),
+        "ar_reversal_thr": float(os.getenv("AR_REVERSAL_THR", "0.19")), "ar_overlap_len": int(os.getenv("AR_OVERLAP_LEN", "2")), "ar_overlap_prot": float(os.getenv("AR_OVERLAP_PROT", "0.25")),
+        "ar_exit_mode": os.getenv("AR_EXIT_MODE", "flip"), "ar_direction_mode": os.getenv("AR_DIRECTION_MODE", "both"),
+        "ar_sl_usd": float(os.getenv("AR_SL_USD", "0")), "ar_tp_usd": float(os.getenv("AR_TP_USD", "0")),
+        "ar_profit_only_close": os.getenv("AR_PROFIT_ONLY_CLOSE", "false").lower() == "true",
+        "ar_tp_mode": os.getenv("AR_TP_MODE", "single"),
+        "ar_tp1_usd": float(os.getenv("AR_TP1_USD", "5")), "ar_tp2_usd": float(os.getenv("AR_TP2_USD", "10")), "ar_tp3_usd": float(os.getenv("AR_TP3_USD", "15")),
+        "ar_tp1_pct": float(os.getenv("AR_TP1_PCT", "33")), "ar_tp2_pct": float(os.getenv("AR_TP2_PCT", "33")),
+        "ar_be_after_tp1": os.getenv("AR_BE_AFTER_TP1", "true").lower() == "true",
+        "ar_sl_to_tp1_on_tp2": os.getenv("AR_SL_TO_TP1_ON_TP2", "true").lower() == "true",
+        "ar_sl_cooldown_seconds": float(os.getenv("AR_SL_COOLDOWN_SECONDS", "30.0")),
 
         # ===== LSOB (entry_mode lsob): neues Tief/Hoch -> Box der extremen Kerze; Einstieg bei erneutem Eintauchen; SL = Box-Ende, TP = 1:RR =====
         "lb_resolution": os.getenv("LB_RESOLUTION", "15m"),
@@ -904,6 +919,7 @@ PERSISTED_STATE_KEYS = [
     "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until", "wd_tps", "wd_tp_pcts", "wd_tp_done", "wd_be", "wd_entries", "wd_last_entry",
     "lb_sl_price", "lb_tp_price", "lb_be_price", "lb_be", "lb_sl_cooldown_until",
     "mf_sl_price", "mf_tp_price", "mf_sl_cooldown_until", "mf_tps", "mf_tp_pcts", "mf_tp_done", "mf_be", "mf_entries", "mf_last_entry",
+    "ar_sl_price", "ar_tp_price", "ar_sl_cooldown_until", "ar_tps", "ar_tp_pcts", "ar_tp_done", "ar_be", "ar_entries", "ar_last_entry",
     "mt_sl_price", "mt_tp1_price", "mt_tp2_price", "mt_tp3_price", "mt_tp1_done", "mt_tp2_done", "mt_sl_cooldown_until",
     "rsi_sl_price", "rsi_tp_price", "rsi_be_done", "rsi_sl_cooldown_until",
     "mvwap_sl_price", "mvwap_tp_price", "mvwap_be_done", "mvwap_sl_cooldown_until",
@@ -1814,6 +1830,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="wt_div">WT-Divergenz (WaveTrend-Divergenzen als Einstieg, Welle wie im Wellenanker, wählbarer Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
+      <option value="auction_trend">Auction Range Migration Trend (schneller LONG/SHORT-Wechsel bei Trendwechsel, Flip in einer Order, SL/TP, Teil-TPs)</option>
       <option value="mom_field">Momentum-Feld (BUY/SELL beim Nulldurchgang des Momentums, Hintergrund rot/grün, SL/TP, Teil-TPs)</option>
       <option value="lsob">LSOB (Sweep → Box → Ausbruch → Retest → Ablehnungskerze, TP 1:2, Break-Even bei halbem Ziel)</option>
       <option value="wae_ema">WAE-Zonen + EMA9 (WAE-Zone aus höherem Zeitrahmen, CALL/PUT bei Zone + EMA, wählbarer Ausstieg, optional $-SL/-TP)</option>
@@ -2288,6 +2305,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>SL auf Break-Even nach TP1</label><select class="cfg" id="mf_be_after_tp1"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="mom_field" data-requires="mf_tp_mode" data-requires-value="partial"><label>SL auf TP1 nach TP2</label><select class="cfg" id="mf_sl_to_tp1_on_tp2"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="mom_field"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mf_sl_cooldown_seconds"></div>
+  <div data-mode="auction_trend" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">📈 <b>Auction Range Migration Trend</b> (Pine „SchizoQuant“): Der Bot misst, wohin sich die Kerzen-Spannen verschieben (Mitte, Schluss, neues Terrain, Persistenz). Kippt der Trend-Score über die Schwelle, wechselt der Zustand LONG ↔ SHORT – das ist das Signal (nur auf geschlossenen Kerzen, kein Repaint). Der Bot dreht dann die Position in <b>einer</b> Order (Flip). Kleinere „Wechsel-Schwelle“ und kürzere Längen = schnellerer Wechsel, aber mehr Fehlsignale.</div>
+  <div data-mode="auction_trend"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="ar_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <input type="number" step="1" min="1" id="ar_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="auction_trend"><label>ATR-Länge (Pine: 14)</label><input type="number" step="1" min="1" id="ar_atr_len"></div>
+  <div data-mode="auction_trend"><label>Range-Center-Einfluss (Pine: 0,35)</label><input type="number" step="0.05" min="0" max="1" id="ar_center_inf"></div>
+  <div data-mode="auction_trend"><label>New-Territory-Einfluss (Pine: 0,45)</label><input type="number" step="0.05" min="0" max="2" id="ar_territory_inf"></div>
+  <div data-mode="auction_trend"><label>Maximaler Kerzen-Impact (Pine: 2,0)</label><input type="number" step="0.25" min="0.5" max="5" id="ar_shock"></div>
+  <div data-mode="auction_trend"><label>Migration-Glättung (Pine: 20; kleiner = schneller)</label><input type="number" step="1" min="1" id="ar_drive_len"></div>
+  <div data-mode="auction_trend"><label>Directional Persistence (Pine: 13)</label><input type="number" step="1" min="2" id="ar_persist_len"></div>
+  <div data-mode="auction_trend"><label>Meaningful Migration (ATR, Pine: 0,03)</label><input type="number" step="0.01" min="0" max="1" id="ar_min_migration"></div>
+  <div data-mode="auction_trend"><label>Persistence-Einfluss (Pine: 0,40)</label><input type="number" step="0.05" min="0" max="1" id="ar_persist_inf"></div>
+  <div data-mode="auction_trend"><label>Wechsel-Schwelle / Reversal Threshold (Pine: 0,19; kleiner = schnellerer Wechsel)</label><input type="number" step="0.01" min="0.01" max="1" id="ar_reversal_thr"></div>
+  <div data-mode="auction_trend"><label>Range-Overlap-Länge (Pine: 2)</label><input type="number" step="1" min="2" id="ar_overlap_len"></div>
+  <div data-mode="auction_trend"><label>Overlap-Schutz (Pine: 0,25; 0 = Schwelle ohne Seitwärts-Aufschlag)</label><input type="number" step="0.05" min="0" max="1" id="ar_overlap_prot"></div>
+  <div data-mode="auction_trend"><label>Gegensignal (Flip) nur im Plus ausführen (im Minus wartet der Bot auf das nächste Signal oder den SL)</label><select class="cfg" id="ar_profit_only_close"><option value="false">Aus</option><option value="true">An</option></select></div>
+  <div data-mode="auction_trend"><label>Ausstieg</label><select class="cfg" id="ar_exit_mode"><option value="flip">Gegensignal = Flip (BUY↔SELL in einer Order)</option><option value="sltp_only">Nur SL/TP (Gegensignale ignoriert)</option></select></div>
+  <div data-mode="auction_trend"><label>Richtung</label><select class="cfg" id="ar_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="auction_trend"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="ar_sl_usd"></div>
+  <div data-mode="auction_trend"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="ar_tp_usd"></div>
+  <div data-mode="auction_trend"><label>Take-Profit-Art</label><select class="cfg" id="ar_tp_mode"><option value="single">Ein TP (schließt alles)</option><option value="partial">Teil-TPs (TP1 / TP2 / TP3)</option></select></div>
+  <div data-mode="auction_trend" data-requires="ar_tp_mode" data-requires-value="partial"><label>TP1 ($ Gewinn der ganzen Position, 0 = aus)</label><input type="number" step="0.1" min="0" id="ar_tp1_usd"></div>
+  <div data-mode="auction_trend" data-requires="ar_tp_mode" data-requires-value="partial"><label>TP1 Teilverkauf (% der Position)</label><input type="number" step="1" min="1" max="100" id="ar_tp1_pct"></div>
+  <div data-mode="auction_trend" data-requires="ar_tp_mode" data-requires-value="partial"><label>TP2 ($ Gewinn, muss größer als TP1 sein, 0 = aus)</label><input type="number" step="0.1" min="0" id="ar_tp2_usd"></div>
+  <div data-mode="auction_trend" data-requires="ar_tp_mode" data-requires-value="partial"><label>TP2 Teilverkauf (% der verbleibenden Position)</label><input type="number" step="1" min="1" max="100" id="ar_tp2_pct"></div>
+  <div data-mode="auction_trend" data-requires="ar_tp_mode" data-requires-value="partial"><label>TP3 ($ Gewinn, muss größer als TP2 sein, 0 = aus) - schließt den Rest</label><input type="number" step="0.1" min="0" id="ar_tp3_usd"></div>
+  <div data-mode="auction_trend" data-requires="ar_tp_mode" data-requires-value="partial"><label>SL auf Break-Even nach TP1</label><select class="cfg" id="ar_be_after_tp1"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="auction_trend" data-requires="ar_tp_mode" data-requires-value="partial"><label>SL auf TP1 nach TP2</label><select class="cfg" id="ar_sl_to_tp1_on_tp2"><option value="true">An</option><option value="false">Aus</option></select></div>
+  <div data-mode="auction_trend"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ar_sl_cooldown_seconds"></div>
 
   <div data-mode="lsob" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📦 <b>LSOB</b> (Regeln aus dem Bootcamp-Video): <b>Sweep</b> (neues Tief/Hoch) → 1–2 Reaktionskerzen → <b>Box</b> um die extreme Kerze → <b>Ausbruch</b> (Kerze schließt jenseits der Box) → <b>Retest</b> (Docht sticht hinein und/oder Körper schließt am Rand, höchstens 10 % der Boxhöhe tief, tiefer = ungültig) → <b>Ablehnungskerze</b> mit Docht (Long: unten) → Einstieg zum <b>Open der nächsten Kerze</b>. <b>SL</b> = Boxende oder Docht der Ablehnungskerze (wählbar), <b>TP</b> = Risiko × RR (1:2), bei halbem Weg SL auf Einstieg (+ Aufschlag für Gebühren). Mindest-TP-Abstand 0,5 %, optional Handelszeit. Nicht enthalten: Risiko-Positionsgröße, Limit-TP, Widerstands-Filter. Kein Signal-Ausstieg.
@@ -2304,7 +2351,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="lsob"><label>Invalidierungs-Toleranz (% der Boxhöhe: so weit darf der Schluss über das Boxende hinaus, bevor die Box gebrochen ist; Original: 20)</label><input type="number" step="1" min="0" id="lb_inval_tol_pct"></div>
   <div data-mode="lsob"><label>Retest-Toleranz (max. Tiefe des Schlusses in der Box, % der Boxhöhe; Video/Original: 10, tiefer = Box ungültig)</label><input type="number" step="1" min="0" id="lb_retest_tol_pct"></div>
   <div data-mode="lsob"><label>Strenge Docht-Invalidierung (schon ein Docht jenseits der Toleranz bricht die Box)</label><select class="cfg" id="lb_strict_wick"><option value="false">Aus</option><option value="true">An</option></select></div>
-  <div data-mode="lsob"><label>Max. Docht-Eindringtiefe (% der Boxhöhe: tiefer in die Box ragende Dochte zählen nicht als Retest; Original: 50)</label><input type="number" step="1" min="0" id="lb_max_pen_pct"></div>
+  <div data-mode="lsob"><label>Max. Docht-Eindringtiefe (% der Boxhöhe: stößt ein Docht so weit oder weiter in die Box oder ganz durch, ist die Box ungültig; Original: 50)</label><input type="number" step="1" min="0" id="lb_max_pen_pct"></div>
   <div data-mode="lsob"><label>Box gültig für (Kerzen, danach verfällt sie; Original: Max. Historie 2000)</label><input type="number" step="1" min="5" id="lb_max_age"></div>
   <div data-mode="lsob"><label>Richtung</label><select class="cfg" id="lb_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
   <div data-mode="lsob"><label>Take-Profit: Verhältnis zum Risiko (2 = 1:2)</label><input type="number" step="0.1" min="0.1" id="lb_rr"></div>
@@ -4361,6 +4408,12 @@ function wacSetLbTrades(list) {
     ls.setData([{time: t.t1, value: t.entry}, {time: t.t2 > t.t1 ? t.t2 : t.t1 + 1, value: t.entry}]); wacTradeSeries.push(ls);
   });
 }
+let wacPathSeries = null;
+function wacSetPath(list) {
+  if (!list || !list.length) { if (wacPathSeries) { try { wacPathSeries.setData([]); } catch (e) {} } return; }
+  if (!wacPathSeries) wacPathSeries = WAC.price.addLineSeries({lineWidth: 3, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, title: 'Auction Path'});
+  wacPathSeries.setData(list);
+}
 function wacSetBgFields(fields, candles) {
   if (!WAC.bg) return;
   if (!fields && !WAC.bgOn) return;
@@ -4476,10 +4529,11 @@ async function wacPollLive() {
   const isMt = document.getElementById('entry_mode').value === 'mtf_spread' || isPm;
   const isWd = document.getElementById('entry_mode').value === 'wt_div';
   const isMf = document.getElementById('entry_mode').value === 'mom_field';
-  document.getElementById('wac-wtbox').style.display = (isWa || isMt || isWd || isMf) ? '' : 'none';
+  const isAr = document.getElementById('entry_mode').value === 'auction_trend';
+  document.getElementById('wac-wtbox').style.display = (isWa || isMt || isWd || isMf || isAr) ? '' : 'none';
   document.getElementById('wac-tab-bt').style.display = isWa ? '' : 'none';
   const wtLab = document.querySelector('#wac-wtbox > div');
-  if (wtLab) wtLab.textContent = isMf ? 'MOMENTUM (blau, Nulllinie) – grüner Hintergrund = Wert über 0 (BUY), roter Hintergrund = Wert unter 0 (SELL)' : isPm ? 'MOMENTUM (Pure Momentum Oscillator) – gestrichelt: Short-/Long-Schwelle, Pfeil bei jedem Farbwechsel' : isMt ? 'TREND % (Ø der Blöcke, MTF Spread) – gestrichelt: Schwellen Rot/Grün bzw. Buy-/Sell-Level' : (isWd ? 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Divergenz-Schwellen · Divergenz-Linien: grün = bullisch, rot = bärisch, gestrichelt = hidden' : 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels');
+  if (wtLab) wtLab.textContent = isAr ? 'TREND-SCORE (blau) und Wechsel-Schwelle (gelb, positiv/negativ spiegelt sich) – Zustand wechselt, wenn der Score die Schwelle der Gegenrichtung überschreitet · Hintergrund grün = LONG, rot = SHORT · Pfad: grün/lila' : isMf ? 'MOMENTUM (blau, Nulllinie) – grüner Hintergrund = Wert über 0 (BUY), roter Hintergrund = Wert unter 0 (SELL)' : isPm ? 'MOMENTUM (Pure Momentum Oscillator) – gestrichelt: Short-/Long-Schwelle, Pfeil bei jedem Farbwechsel' : isMt ? 'TREND % (Ø der Blöcke, MTF Spread) – gestrichelt: Schwellen Rot/Grün bzw. Buy-/Sell-Level' : (isWd ? 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Divergenz-Schwellen · Divergenz-Linien: grün = bullisch, rot = bärisch, gestrichelt = hidden' : 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels');
   wacInit(); if (!WAC.inited) return;
   const sym = currentSymbol, tf = document.getElementById('wac-tf').value;
   try {
@@ -4498,9 +4552,10 @@ async function wacPollLive() {
     wacSetDivLines(d.div_lines);
     wacSetBgFields(d.bg_fields, d.candles);
     wacSetBoxes(d.boxes);
+    wacSetPath(d.ar_path);
     wacSetLbTrades(d.lb_trades);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
-    const wtTxt = isMf ? ` · Momentum ${d.wt1v} (vorher ${d.wt2v})` : (isWa || isWd) ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
+    const wtTxt = isAr ? ` · Trend-Score ${d.wt1v} (Schwelle ${d.wt2v})` : isMf ? ` · Momentum ${d.wt1v} (vorher ${d.wt2v})` : (isWa || isWd) ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
     const p = d.position;
     info.innerText = `${sym} ${d.resolution} · Kurs ${d.price ?? '-'}` + wtTxt + (p ? ` · ${p.dir.toUpperCase()} Ø ${p.avg.toFixed(2)} PnL ${p.pnl.toFixed(2)} $` : ' · flat') + (d.active ? '' : ' · Bot nicht aktiv (nur Anzeige)');
   } catch (e) { /* naechster Versuch */ }
@@ -4567,7 +4622,7 @@ function tvRender() {
   const box = document.getElementById('wac-tv'); if (!box) return;
   const tfSel = document.getElementById('wac-tf').value;
   const mode = document.getElementById('entry_mode').value;
-  const fallback = {lsob: 'lb_resolution', mom_field: 'mf_resolution', wt_div: 'wd_resolution', wellenanker: 'wa_timeframe'}[mode];
+  const fallback = {lsob: 'lb_resolution', mom_field: 'mf_resolution', auction_trend: 'ar_resolution', wt_div: 'wd_resolution', wellenanker: 'wa_timeframe'}[mode];
   const tf = tfSel || (fallback && document.getElementById(fallback) ? document.getElementById(fallback).value : '15m');
   const key = currentSymbol + '|' + tvInterval(tf);
   if (TVW.key === key && box.firstChild) return;
@@ -4746,7 +4801,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #mf_resolution, #lb_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
+document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #mf_resolution, #ar_resolution, #lb_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -5959,6 +6014,15 @@ async function refresh() {
     document.getElementById('wd_direction_mode').value = data.config.wd_direction_mode;
     document.getElementById('wd_use_regular').value = String(data.config.wd_use_regular !== false);
     document.getElementById('wd_use_hidden').value = String(!!data.config.wd_use_hidden);
+    setResolutionField('ar_resolution', data.config.ar_resolution);
+    ['ar_atr_len', 'ar_center_inf', 'ar_territory_inf', 'ar_shock', 'ar_drive_len', 'ar_persist_len', 'ar_min_migration', 'ar_persist_inf', 'ar_reversal_thr', 'ar_overlap_len', 'ar_overlap_prot',
+     'ar_tp1_usd', 'ar_tp2_usd', 'ar_tp3_usd', 'ar_tp1_pct', 'ar_tp2_pct', 'ar_sl_usd', 'ar_tp_usd', 'ar_sl_cooldown_seconds'].forEach(k => { document.getElementById(k).value = data.config[k]; });
+    document.getElementById('ar_exit_mode').value = data.config.ar_exit_mode || 'flip';
+    document.getElementById('ar_direction_mode').value = data.config.ar_direction_mode || 'both';
+    document.getElementById('ar_profit_only_close').value = String(!!data.config.ar_profit_only_close);
+    document.getElementById('ar_tp_mode').value = data.config.ar_tp_mode || 'single';
+    document.getElementById('ar_be_after_tp1').value = String(data.config.ar_be_after_tp1 !== false);
+    document.getElementById('ar_sl_to_tp1_on_tp2').value = String(data.config.ar_sl_to_tp1_on_tp2 !== false);
     setResolutionField('mf_resolution', data.config.mf_resolution);
     setResolutionField('lb_resolution', data.config.lb_resolution);
     ['lb_pivot_left', 'lb_pivot_right', 'lb_inval_tol_pct', 'lb_retest_tol_pct', 'lb_max_pen_pct', 'lb_max_age', 'lb_rr', 'lb_be_frac', 'lb_sl_buffer_pct', 'lb_min_risk_pct', 'lb_max_risk_pct', 'lb_min_tp_pct', 'lb_be_offset_pct', 'lb_tp1_pct', 'lb_session_from', 'lb_session_to', 'lb_sl_cooldown_seconds'].forEach(k => { document.getElementById(k).value = data.config[k]; });
@@ -6522,6 +6586,32 @@ function buildConfigPayload() {
     wd_direction_mode: document.getElementById('wd_direction_mode').value,
     wd_use_regular: document.getElementById('wd_use_regular').value === 'true',
     wd_use_hidden: document.getElementById('wd_use_hidden').value === 'true',
+    ar_resolution: getResolutionField('ar_resolution'),
+    ar_atr_len: parseInt(document.getElementById('ar_atr_len').value) || 14,
+    ar_center_inf: parseFloat(document.getElementById('ar_center_inf').value) || 0.35,
+    ar_territory_inf: parseFloat(document.getElementById('ar_territory_inf').value) || 0.45,
+    ar_shock: parseFloat(document.getElementById('ar_shock').value) || 2,
+    ar_drive_len: parseInt(document.getElementById('ar_drive_len').value) || 20,
+    ar_persist_len: parseInt(document.getElementById('ar_persist_len').value) || 13,
+    ar_min_migration: parseFloat(document.getElementById('ar_min_migration').value) || 0.03,
+    ar_persist_inf: parseFloat(document.getElementById('ar_persist_inf').value) || 0.4,
+    ar_reversal_thr: parseFloat(document.getElementById('ar_reversal_thr').value) || 0.19,
+    ar_overlap_len: parseInt(document.getElementById('ar_overlap_len').value) || 2,
+    ar_overlap_prot: parseFloat(document.getElementById('ar_overlap_prot').value) || 0.25,
+    ar_tp1_usd: parseFloat(document.getElementById('ar_tp1_usd').value) || 0,
+    ar_tp2_usd: parseFloat(document.getElementById('ar_tp2_usd').value) || 0,
+    ar_tp3_usd: parseFloat(document.getElementById('ar_tp3_usd').value) || 0,
+    ar_tp1_pct: parseFloat(document.getElementById('ar_tp1_pct').value) || 33,
+    ar_tp2_pct: parseFloat(document.getElementById('ar_tp2_pct').value) || 33,
+    ar_sl_usd: parseFloat(document.getElementById('ar_sl_usd').value) || 0,
+    ar_tp_usd: parseFloat(document.getElementById('ar_tp_usd').value) || 0,
+    ar_exit_mode: document.getElementById('ar_exit_mode').value,
+    ar_direction_mode: document.getElementById('ar_direction_mode').value,
+    ar_profit_only_close: document.getElementById('ar_profit_only_close').value === 'true',
+    ar_tp_mode: document.getElementById('ar_tp_mode').value,
+    ar_be_after_tp1: document.getElementById('ar_be_after_tp1').value === 'true',
+    ar_sl_to_tp1_on_tp2: document.getElementById('ar_sl_to_tp1_on_tp2').value === 'true',
+    ar_sl_cooldown_seconds: parseFloat(document.getElementById('ar_sl_cooldown_seconds').value),
     mf_resolution: getResolutionField('mf_resolution'),
     lb_resolution: getResolutionField('lb_resolution'),
     lb_pivot_left: parseInt(document.getElementById('lb_pivot_left').value) || 5,
@@ -7074,7 +7164,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
@@ -7216,6 +7306,7 @@ async def handle_wa_live_chart(request):
     is_we = cfg.get("entry_mode") == "wae_ema"
     is_wd = cfg.get("entry_mode") == "wt_div"
     is_mf = cfg.get("entry_mode") == "mom_field"
+    is_ar = cfg.get("entry_mode") == "auction_trend"
     is_lb = cfg.get("entry_mode") == "lsob"
     is_tfl = cfg.get("entry_mode") == "trendfolge"
     is_rlm = cfg.get("entry_mode") == "rlm"
@@ -7223,7 +7314,7 @@ async def handle_wa_live_chart(request):
     tf = request.query.get("tf", "")
     SUBMIN = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
-        tf = cfg.get("lb_resolution", "15m") if is_lb else cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
+        tf = cfg.get("ar_resolution", "15m") if is_ar else cfg.get("lb_resolution", "15m") if is_lb else cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
             tf = "5m"
     if tf in SUBMIN:
@@ -7253,6 +7344,9 @@ async def handle_wa_live_chart(request):
         payload = await asyncio.to_thread(lb_chart_payload, ts, o, h, l, c, cfg, 1000)
         if payload is None:
             return web.json_response({"ok": False, "reason": "lädt noch … (zu wenig Kerzen für LSOB)"})
+    elif is_ar:
+        from auction import ar_chart_payload
+        payload = await asyncio.to_thread(ar_chart_payload, ts, o, h, l, c, cfg, 1000)
     elif is_mf:
         from mom_field import mf_chart_payload
         payload = await asyncio.to_thread(mf_chart_payload, ts, o, h, l, c, cfg, 1000)
@@ -7284,8 +7378,8 @@ async def handle_wa_live_chart(request):
         sl_usd = float(cfg.get("wa_sl_usd", 5.0))
         d = (sl_usd / size) if size else 0
         pos = {"dir": st["position"], "avg": avg, "size": size, "pnl": ((st.get("last_price") or avg) - avg) * size * (1 if st["position"] == "long" else -1),
-               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else st.get("wd_sl_price") if is_wd else st.get("mf_sl_price") if is_mf else st.get("lb_sl_price") if is_lb else None),
-               "tps": (st.get("rlm_tps") or []) if is_rlm else ((list((st.get("wd_tps") or [])[int(st.get("wd_tp_done") or 0):]) or ([st["wd_tp_price"]] if st.get("wd_tp_price") else [])) if is_wd else (list((st.get("mf_tps") or [])[int(st.get("mf_tp_done") or 0):]) or ([st["mf_tp_price"]] if st.get("mf_tp_price") else [])) if is_mf else ([st["lb_tp_price"]] if (is_lb and st.get("lb_tp_price")) else []))}
+               "sl": ((avg - d) if st["position"] == "long" else (avg + d)) if is_wa else (st.get("rlm_sl") if is_rlm else st.get("vc_sl") if is_vc else st.get("wd_sl_price") if is_wd else st.get("mf_sl_price") if is_mf else st.get("ar_sl_price") if is_ar else st.get("lb_sl_price") if is_lb else None),
+               "tps": (st.get("rlm_tps") or []) if is_rlm else ((list((st.get("wd_tps") or [])[int(st.get("wd_tp_done") or 0):]) or ([st["wd_tp_price"]] if st.get("wd_tp_price") else [])) if is_wd else (list((st.get("mf_tps") or [])[int(st.get("mf_tp_done") or 0):]) or ([st["mf_tp_price"]] if st.get("mf_tp_price") else [])) if is_mf else ((list((st.get("ar_tps") or [])[int(st.get("ar_tp_done") or 0):]) or ([st["ar_tp_price"]] if st.get("ar_tp_price") else [])) if is_ar else ([st["lb_tp_price"]] if (is_lb and st.get("lb_tp_price")) else [])))}
     gv = st.get("gc_view") if cfg.get("entry_mode") == "grid_classic" else None
     grid = {"levels": gv["levels"], "orders": gv["orders"], "lots": gv["lots"]} if gv else None
     structure = []
