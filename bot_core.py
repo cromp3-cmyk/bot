@@ -3748,6 +3748,107 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="auction_trend" style="display:none;">
+<h2 class="section-title">🎲 Auction Range Migration Monte-Carlo (frei wählbare Werte)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Hake an, <b>welche Werte</b> zufällig variiert werden sollen, und gib je einen Bereich an. Alles, was nicht angehakt ist, bleibt wie in den Einstellungen oben (Zeitrahmen, Ausstieg, Richtung, Margin, Hebel). Die aktuellen Einstellungen laufen immer als <b>Referenz</b> mit.
+    Alle Kombinationen handeln im selben Fenster (letzte N Tage, der Trend-Score läuft vorher ein). <b>Gegen Überanpassung:</b> die ersten 70 % sind „Training“, die letzten 30 % „Test“; „robust“ heißt: in Training UND Test im Plus, mit mindestens 3 Test-Trades. Achte auf eine <b>breite Hochebene</b> guter Werte, nicht auf einen einzelnen Spitzenwert.
+    Tipp: Variiere 2–3 Werte gleichzeitig (z. B. Wechsel-Schwelle × Migration-Glättung × Persistence). Zeitlimit etwa 70 Sekunden.
+  </div>
+  <table style="margin-bottom:12px;">
+    <thead><tr><th>Variieren</th><th>Wert</th><th>von</th><th>bis</th></tr></thead>
+    <tbody>
+    <tr><td><input type="checkbox" id="armc-on-atr"></td><td>ATR-Länge (14)</td>
+      <td><input type="number" step="1" id="armc-min-atr" value="10" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-atr" value="20" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-center"></td><td>Range-Center-Einfluss (0,35)</td>
+      <td><input type="number" step="0.05" id="armc-min-center" value="0.1" style="width:80px;"></td>
+      <td><input type="number" step="0.05" id="armc-max-center" value="0.8" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-terr"></td><td>New-Territory-Einfluss (0,45)</td>
+      <td><input type="number" step="0.05" id="armc-min-terr" value="0.1" style="width:80px;"></td>
+      <td><input type="number" step="0.05" id="armc-max-terr" value="1.0" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-shock"></td><td>Max. Kerzen-Impact (2,0)</td>
+      <td><input type="number" step="0.25" id="armc-min-shock" value="1.0" style="width:80px;"></td>
+      <td><input type="number" step="0.25" id="armc-max-shock" value="3.5" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-drive" checked></td><td>Migration-Glättung (20)</td>
+      <td><input type="number" step="1" id="armc-min-drive" value="6" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-drive" value="40" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-persist" checked></td><td>Directional Persistence (13)</td>
+      <td><input type="number" step="1" id="armc-min-persist" value="4" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-persist" value="30" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-min_mig"></td><td>Meaningful Migration (0,03)</td>
+      <td><input type="number" step="0.01" id="armc-min-min_mig" value="0.0" style="width:80px;"></td>
+      <td><input type="number" step="0.01" id="armc-max-min_mig" value="0.15" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-persist_inf"></td><td>Persistence-Einfluss (0,40)</td>
+      <td><input type="number" step="0.05" id="armc-min-persist_inf" value="0.1" style="width:80px;"></td>
+      <td><input type="number" step="0.05" id="armc-max-persist_inf" value="0.8" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-thr" checked></td><td>Wechsel-Schwelle / Reversal Threshold (0,19)</td>
+      <td><input type="number" step="0.01" id="armc-min-thr" value="0.06" style="width:80px;"></td>
+      <td><input type="number" step="0.01" id="armc-max-thr" value="0.4" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-overlap"></td><td>Range-Overlap-Länge (2)</td>
+      <td><input type="number" step="1" id="armc-min-overlap" value="2" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-overlap" value="8" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-prot"></td><td>Overlap-Schutz (0,25)</td>
+      <td><input type="number" step="0.05" id="armc-min-prot" value="0.0" style="width:80px;"></td>
+      <td><input type="number" step="0.05" id="armc-max-prot" value="0.7" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-sl_usd"></td><td>Stop-Loss $ pro Position (0 = kein SL)</td>
+      <td><input type="number" step="1" id="armc-min-sl_usd" value="5" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-sl_usd" value="40" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-tp_usd"></td><td>Take-Profit $ pro Position (0 = kein TP)</td>
+      <td><input type="number" step="1" id="armc-min-tp_usd" value="5" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-tp_usd" value="40" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-tp1_usd"></td><td>Teil-TPs: TP1 $ (nur bei „Teil-TPs“)</td>
+      <td><input type="number" step="1" id="armc-min-tp1_usd" value="3" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-tp1_usd" value="15" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-tp2_usd"></td><td>Teil-TPs: TP2 $ (größer als TP1)</td>
+      <td><input type="number" step="1" id="armc-min-tp2_usd" value="8" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-tp2_usd" value="30" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-tp3_usd"></td><td>Teil-TPs: TP3 $ (schließt den Rest)</td>
+      <td><input type="number" step="1" id="armc-min-tp3_usd" value="15" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-tp3_usd" value="60" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-tp1_pct"></td><td>Teil-TPs: TP1 Teilverkauf %</td>
+      <td><input type="number" step="1" id="armc-min-tp1_pct" value="20" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-tp1_pct" value="50" style="width:80px;"></td></tr>
+    <tr><td><input type="checkbox" id="armc-on-tp2_pct"></td><td>Teil-TPs: TP2 Teilverkauf % der Restposition</td>
+      <td><input type="number" step="1" id="armc-min-tp2_pct" value="20" style="width:80px;"></td>
+      <td><input type="number" step="1" id="armc-max-tp2_pct" value="60" style="width:80px;"></td></tr>
+    </tbody>
+  </table>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="armc-days" value="30" style="width:90px;"></div>
+    <div><label>Durchläufe (max. 1000)</label><input type="number" step="50" min="1" max="1000" id="armc-runs" value="200" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="armc-seed" style="width:110px;"></div>
+    <div><label>bis Seed (leer = nur einer, max. 20 Seeds)</label><input type="number" step="1" id="armc-seed-to" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="armc-exclude-top-n" value="1" style="width:90px;"></div>
+    <div><label>Max. Drawdown $ (0 = egal)</label><input type="number" step="1" min="0" id="armc-max-dd" value="0" style="width:90px;"></div>
+    <button id="btn-ar-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="armc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <div id="armc-baseline" style="color:var(--text-dim); font-size:13px; margin-top:6px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="armc-lowdd-title">🧯 Geringes Risiko (nur Gewinn-Kombinationen, sortiert nach PnL / Max-Drawdown)</h3>
+  <table id="armc-lowdd-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="armc-robust-title">🛡️ Robuste Kombinationen (Training UND Test im Plus, sortiert nach Test-PnL)</h3>
+  <table id="armc-robust-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="armc-top-title">📈 Die 30 besten Kombinationen (nach Gesamt-PnL)</h3>
+  <table id="armc-top-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="armc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="armc-worst-table" style="display:none; margin-top:8px;">
+    <thead></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="wae_ema" style="display:none;">
 <h2 class="section-title">🎲 WAE-Zonen Monte-Carlo (frei wählbare Werte)</h2>
 <div class="panel-card">
@@ -5211,6 +5312,105 @@ document.getElementById('btn-wd-mc').addEventListener('click', async () => {
         if (window.wdMcData[k].length) {
           document.getElementById(`wdmc-${k}-table`).style.display = '';
           document.getElementById(`wdmc-${k}-title`).style.display = '';
+        }
+      });
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+const AR_MC_PARAMS = [["atr", "ar_atr_len", "ATR-Länge"], ["center", "ar_center_inf", "Range-Center"], ["terr", "ar_territory_inf", "New-Territory"], ["shock", "ar_shock", "Max. Impact"], ["drive", "ar_drive_len", "Migration-Glättung"], ["persist", "ar_persist_len", "Persistence"], ["min_mig", "ar_min_migration", "Meaningful Migration"], ["persist_inf", "ar_persist_inf", "Persistence-Einfluss"], ["thr", "ar_reversal_thr", "Wechsel-Schwelle"], ["overlap", "ar_overlap_len", "Overlap-Länge"], ["prot", "ar_overlap_prot", "Overlap-Schutz"], ["sl_usd", "ar_sl_usd", "Stop-Loss $"], ["tp_usd", "ar_tp_usd", "Take-Profit $"], ["tp1_usd", "ar_tp1_usd", "TP1 $"], ["tp2_usd", "ar_tp2_usd", "TP2 $"], ["tp3_usd", "ar_tp3_usd", "TP3 $"], ["tp1_pct", "ar_tp1_pct", "TP1 %"], ["tp2_pct", "ar_tp2_pct", "TP2 %"]];
+window.arMcData = {lowdd: [], robust: [], top: [], worst: []};
+window.arMcVaried = [];
+const arMcHead = (withRatio) => AR_MC_PARAMS.filter(p => window.arMcVaried.includes(p[1])).map(p => `<th class="sortable" data-key="${p[1]}">${p[2]} ⇅</th>`).join('')
+  + '<th class="sortable" data-key="trades">Trades ⇅</th><th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th><th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th><th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th><th class="sortable" data-key="pnl_train">PnL Training $ ⇅</th><th class="sortable" data-key="pnl_test">PnL Test $ ⇅</th><th class="sortable" data-key="trades_test">Trades Test ⇅</th><th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>'
+  + (withRatio ? '<th class="sortable" data-key="pnl_dd_ratio">PnL / DD ⇅</th>' : '') + '<th></th>';
+const arMcRowHtml = (r) => {
+  const vk = AR_MC_PARAMS.filter(p => window.arMcVaried.includes(p[1])).map(p => p[1]);
+  const apply = {}; vk.forEach(k => { apply[k] = r[k]; });
+  return `<tr>${vk.map(k => `<td>${r[k]}</td>`).join('')}
+    <td>${r.trades}</td><td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td class="${r.pnl_train >= 0 ? 'green' : 'red'}">${r.pnl_train}</td>
+    <td class="${r.pnl_test >= 0 ? 'green' : 'red'}">${r.pnl_test}</td>
+    <td>${r.trades_test}</td><td>${r.max_drawdown_usd}</td>
+    ${r.pnl_dd_ratio !== undefined ? `<td>${r.pnl_dd_ratio}</td>` : ''}
+    ${applyBtn(apply)}
+  </tr>`;
+};
+const arMcKinds = ['lowdd', 'robust', 'top', 'worst'];
+function wdMergeMc(a, b) {
+  const vk = (b.varied || a.varied || []);
+  const key = r => vk.map(k => r[k]).join('|');
+  const merge = (x, y, cmp, lim) => {
+    const seen = new Set(), out = [];
+    [...(x || []), ...(y || [])].forEach(r => { const k = key(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
+    return out.sort(cmp).slice(0, lim);
+  };
+  a.lowdd_results = merge(a.lowdd_results, b.lowdd_results, (p, q) => q.pnl_dd_ratio - p.pnl_dd_ratio, 30);
+  a.robust_results = merge(a.robust_results, b.robust_results, (p, q) => q.pnl_test - p.pnl_test, 30);
+  a.results = merge(a.results, b.results, (p, q) => q.total_pnl_usd - p.total_pnl_usd, 30);
+  a.worst_results = merge(a.worst_results, b.worst_results, (p, q) => p.total_pnl_usd - q.total_pnl_usd, 20);
+  a.combos_tested += b.combos_tested; a.combos_requested += b.combos_requested;
+  a.robust_count += b.robust_count; a.lowdd_count += b.lowdd_count;
+  a.profitable_pct = Math.round((a.profitable_pct + b.profitable_pct) * 5) / 10;
+  return a;
+}
+document.getElementById('btn-ar-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-ar-mc');
+  const statusEl = document.getElementById('armc-status');
+  const baseEl = document.getElementById('armc-baseline');
+  const sweepSymbol = currentSymbol;
+  const vary = {};
+  AR_MC_PARAMS.forEach(p => {
+    if (document.getElementById(`armc-on-${p[0]}`).checked) {
+      vary[p[0]] = [parseFloat(document.getElementById(`armc-min-${p[0]}`).value), parseFloat(document.getElementById(`armc-max-${p[0]}`).value)];
+    }
+  });
+  if (!Object.keys(vary).length) { statusEl.innerText = '❌ Bitte mindestens einen Wert zum Variieren anhaken.'; return; }
+  const payload = {
+    vary, days: parseInt(document.getElementById('armc-days').value) || 60,
+    runs: parseInt(document.getElementById('armc-runs').value) || 200,
+    seed: document.getElementById('armc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('armc-exclude-top-n').value) || 0,
+    max_dd_usd: parseFloat(document.getElementById('armc-max-dd').value) || 0,
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  arMcKinds.forEach(k => { document.getElementById(`armc-${k}-table`).style.display = 'none'; document.getElementById(`armc-${k}-title`).style.display = 'none'; });
+  baseEl.innerText = '';
+  statusEl.innerText = `⏳ Lade Kerzen und teste die Zufalls-Kombinationen...`;
+  try {
+    const s1 = parseInt(payload.seed), s2 = parseInt(document.getElementById('armc-seed-to').value);
+    const seeds = (!isNaN(s1) && !isNaN(s2) && s2 > s1) ? Array.from({length: Math.min(s2 - s1 + 1, 20)}, (_, i) => s1 + i) : [payload.seed];
+    let data = null;
+    for (let si = 0; si < seeds.length; si++) {
+      if (seeds.length > 1) statusEl.innerText = `⏳ Seed ${seeds[si]} (${si + 1} von ${seeds.length})...`;
+      const res = await fetch(`/api/ar_mc?symbol=${sweepSymbol}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...payload, seed: seeds[si]})});
+      const d = await res.json();
+      if (sweepSymbol !== currentSymbol) return;
+      if (d.error) { data = d; break; }
+      data = si === 0 ? d : wdMergeMc(data, d);
+    }
+    if (seeds.length > 1 && data && !data.error) data.note = `Seeds ${seeds[0]} bis ${seeds[seeds.length - 1]} zusammengeführt (Listen = die besten über alle Seeds, doppelte Kombinationen entfernt). ` + (data.note || '');
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet auf ${data.candles_processed} Kerzen (${data.actual_days_covered} Tage geladen, getestet wird das Fenster der letzten ${data.usable_days} Tage - der Rest ist Einlaufzeit; ${data.resolution}, Ausstieg ${data.exit_mode}) - ${data.profitable_pct}% der Kombinationen (mit mind. ${data.min_reliable_trades} Trades) im Plus, Median ${data.median_pnl_usd} $. Test = letzte ${data.test_fraction_pct}% des Zeitraums. ${data.note ? data.note + ' ' : ''}Robust (Training UND Test im Plus): ${data.robust_count}. Gewinn-Kombinationen${data.max_dd_limit > 0 ? ' mit Max-DD ≤ ' + data.max_dd_limit + ' $' : ''}: ${data.lowdd_count}.`;
+      const b = data.baseline;
+      baseEl.innerText = `Referenz (aktuelle Einstellungen): ${b.trades} Trades, PnL ${b.total_pnl_usd} $ (Training ${b.pnl_train} / Test ${b.pnl_test}), Max DD ${b.max_drawdown_usd} $`;
+      window.arMcVaried = data.varied || [];
+      window.arMcData = {lowdd: data.lowdd_results || [], robust: data.robust_results || [], top: data.results || [], worst: data.worst_results || []};
+      arMcKinds.forEach(k => {
+        document.querySelector(`#armc-${k}-table thead`).innerHTML = `<tr>${arMcHead(k === 'lowdd')}</tr>`;
+        makeSortableTable(`armc-${k}-table`, () => window.arMcData[k], arMcRowHtml)();
+        if (window.arMcData[k].length) {
+          document.getElementById(`armc-${k}-table`).style.display = '';
+          document.getElementById(`armc-${k}-title`).style.display = '';
         }
       });
     }
@@ -7808,6 +8008,37 @@ async def handle_wd_montecarlo(request):
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] WT-Divergenz-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_ar_montecarlo(request):
+    """Monte-Carlo fuer Auction Range Migration: zufaellige Kombinationen der ausgewaehlten Werte mit Training/Test-Trennung."""
+    from auction import run_ar_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 60))))
+        runs = max(1, min(1000, int(body.get("runs", 200))))
+        vary = {str(k): (float(v[0]), float(v[1])) for k, v in (body.get("vary") or {}).items()}
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        max_dd_usd = max(0.0, float(body.get("max_dd_usd") or 0))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(run_ar_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n, seed, max_dd_usd), timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Auction-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 

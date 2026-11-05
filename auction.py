@@ -18,6 +18,7 @@ SL/TP in $, Teil-TPs mit Break-Even, Mehrfach-Einstiege, Richtungswahl und Coold
 """
 
 import asyncio
+import random
 import time
 import traceback
 
@@ -592,3 +593,148 @@ def ar_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
     wt2 = [{"time": ts[i] // 1000, "value": round(thr[i], 4)} for i in range(off, m)]
     return {"candles": candles, "wt1": wt1, "wt2": wt2, "markers": markers, "levels": [], "bg_fields": bg, "ar_path": ar_path, "entry_mode": "ar",
             "wt1v": round(score[m - 1], 3), "wt2v": round(thr[m - 1], 3), "bars": n}
+
+
+# ============================================================================
+# MONTE-CARLO: zufaellige Kombinationen der AUSGEWAEHLTEN Werte, Rest bleibt wie in den Einstellungen
+# ============================================================================
+AR_MC_PARAMS = {   # Kurzschluessel (= Schluessel in _ar_params) -> (Config-Schluessel, Typ, Nachkommastellen)
+    "atr": ("ar_atr_len", int, 0), "center": ("ar_center_inf", float, 2), "terr": ("ar_territory_inf", float, 2), "shock": ("ar_shock", float, 2),
+    "drive": ("ar_drive_len", int, 0), "persist": ("ar_persist_len", int, 0), "min_mig": ("ar_min_migration", float, 3),
+    "persist_inf": ("ar_persist_inf", float, 2), "thr": ("ar_reversal_thr", float, 3), "overlap": ("ar_overlap_len", int, 0),
+    "prot": ("ar_overlap_prot", float, 2),
+    "sl_usd": ("ar_sl_usd", float, 2), "tp_usd": ("ar_tp_usd", float, 2),
+    "tp1_usd": ("ar_tp1_usd", float, 2), "tp2_usd": ("ar_tp2_usd", float, 2), "tp3_usd": ("ar_tp3_usd", float, 2),
+    "tp1_pct": ("ar_tp1_pct", float, 0), "tp2_pct": ("ar_tp2_pct", float, 0),
+}
+AR_MC_MAX_RUNS = 1000
+AR_MC_MIN_RELIABLE_TRADES = 5
+AR_MC_TEST_FRACTION = 0.3
+AR_MC_MAX_CANDLES = 80_000
+AR_MC_TIME_BUDGET = 70
+_AR_MC_ZERO_OK = ("sl_usd", "tp_usd", "tp1_usd", "tp2_usd", "tp3_usd", "prot", "min_mig")
+
+
+def _ar_mc_compute(candles, cfg, combos, base_p, start_i, exclude_top_n, deadline):
+    ts, o, h, l, c = candles[0], candles[1], candles[2], candles[3], candles[4]
+    n = len(c)
+    split_ts = ts[start_i + int((n - start_i) * (1 - AR_MC_TEST_FRACTION))]
+
+    def run_one(over):
+        p = dict(base_p, **over)
+        bull, bear, xdn, xup, _s, _t = ar_compute(o, h, l, c, p)
+        trades = _ar_simulate(candles, cfg, bull, bear, xdn, xup, start_i, p)
+        st = summarize_backtest_trades(trades, exclude_top_n)
+        tr = summarize_backtest_trades([t for t in trades if t.get("entry_ts", 0) < split_ts], exclude_top_n)
+        te = summarize_backtest_trades([t for t in trades if t.get("entry_ts", 0) >= split_ts], exclude_top_n)
+        row = {AR_MC_PARAMS[k][0]: p[k] for k in AR_MC_PARAMS}
+        row.update({"trades": st["trades"], "win_rate_pct": st["win_rate_pct"], "total_pnl_usd": st["total_pnl_usd"],
+                    "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"], "max_drawdown_usd": st["max_drawdown_usd"],
+                    "pnl_train": tr["total_pnl_usd"], "pnl_test": te["total_pnl_usd"], "trades_test": te["trades"]})
+        return row
+
+    out = []
+    for over in combos:
+        if time.time() > deadline:
+            break
+        out.append(run_one(over))
+    return out, run_one({})
+
+
+async def run_ar_montecarlo(symbol, cfg, days, runs, vary, exclude_top_n=1, seed=None, max_dd_usd=0.0):
+    """vary: {'thr': (a, b), ...} - nur diese Werte werden zufaellig gezogen, alle anderen bleiben wie in der Config. Die aktuellen
+    Einstellungen laufen IMMER als Referenz (= identisch mit dem Backtest). Alle Kombinationen handeln im selben Fenster 'letzte N Tage'.
+    Training (erste 70 %) / Test (letzte 30 %): 'robust' = in beiden im Plus."""
+    base_p = _ar_params(cfg)
+    resolution = cfg.get("ar_resolution", "15m")
+    res_s = _res_seconds(resolution)
+    if not vary:
+        return {"error": "Bitte mindestens einen Wert zum Variieren auswählen."}
+    ranges = {}
+    try:
+        for k, (a, b) in vary.items():
+            if k not in AR_MC_PARAMS:
+                return {"error": f"Unbekannter Wert '{k}'."}
+            typ = AR_MC_PARAMS[k][1]
+            lo, hi = sorted((typ(a), typ(b)))
+            if (k in _AR_MC_ZERO_OK and lo < 0) or (k not in _AR_MC_ZERO_OK and lo <= 0):
+                return {"error": "Alle Bereiche müssen größer als 0 sein (SL/TP, Overlap-Schutz und Meaningful Migration dürfen 0 sein)."}
+            ranges[k] = (lo, hi)
+    except (TypeError, ValueError):
+        return {"error": "Ungültige Bereiche für die Parameter."}
+    if base_p["tp_mode"] != "partial" and any(k in ranges for k in ("tp1_usd", "tp2_usd", "tp3_usd", "tp1_pct", "tp2_pct")):
+        return {"error": "TP1/TP2/TP3 wirken nur, wenn oben bei „Take-Profit-Art“ „Teil-TPs“ gewählt ist. Bitte dort umstellen (oder die Haken entfernen)."}
+    if base_p["tp_mode"] == "partial" and "tp_usd" in ranges:
+        return {"error": "Der einzelne Take-Profit wirkt im Modus „Teil-TPs“ nicht - bitte stattdessen TP1/TP2/TP3 variieren."}
+    if "persist" in ranges and ranges["persist"][0] < 2:
+        return {"error": "Directional Persistence muss mindestens 2 sein."}
+    if "overlap" in ranges and ranges["overlap"][0] < 2:
+        return {"error": "Range-Overlap-Länge muss mindestens 2 sein."}
+    max_candles = BACKTEST_MAX_CANDLES.get("auction_trend", 100_000)
+    if resolution in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)
+    p_max = dict(base_p, **{k: ranges[k][1] for k in ranges if k in base_p})
+    lead = _lead_days(p_max, res_s) if resolution not in SUB_MINUTE_RESOLUTIONS else 0.0
+    candles, err, src = await _we_candles(symbol, resolution, days + lead, max_candles, market_type=cfg.get("binance_market_type", "spot"))
+    if err:
+        return {"error": err}
+    n = len(candles[4]) if candles else 0
+    note = {"cache": "Kerzen aus dem Cache.", "abgeleitet": "Kerzen aus einem feineren Zeitrahmen im Cache berechnet.", "neu": "Kerzen neu von Binance geladen."}[src]
+    if n > AR_MC_MAX_CANDLES:
+        candles = tuple(x[-AR_MC_MAX_CANDLES:] for x in candles)
+        note += f" Hinweis: aus Speichergründen wurden nur die jüngsten {AR_MC_MAX_CANDLES} von {n} Kerzen getestet."
+        n = AR_MC_MAX_CANDLES
+    ts = candles[0]
+    start_i = max(_ar_warm(p_max), _window_start(ts, days)) if n else 0
+    if n < 400 or n - start_i < 300:
+        return {"error": f"Zu wenig Kerzen: {n} erhalten, der Trend-Score braucht ~{_ar_warm(p_max)} Kerzen Einlaufzeit, danach sollten noch mind. 300 zum Testen übrig sein. Mehr Tage wählen."}
+    runs = max(1, min(AR_MC_MAX_RUNS, int(runs)))
+    rng = random.Random(seed)
+
+    def draw(k):
+        lo, hi = ranges[k]
+        typ, dec = AR_MC_PARAMS[k][1], AR_MC_PARAMS[k][2]
+        return rng.randint(lo, hi) if typ is int else round(rng.uniform(lo, hi), dec)
+
+    keys = sorted(ranges)
+    seen, combos = {tuple(base_p[k] for k in keys)}, []
+    for _ in range(runs * 30):
+        if len(combos) >= runs:
+            break
+        over = {k: draw(k) for k in ranges}
+        eff = dict(base_p, **over)
+        if eff["tp_mode"] == "partial" and not (eff["tp1_usd"] > 0 and (eff["tp2_usd"] == 0 or eff["tp2_usd"] > eff["tp1_usd"])
+                                                and (eff["tp3_usd"] == 0 or eff["tp3_usd"] > max(eff["tp1_usd"], eff["tp2_usd"]))):
+            continue   # TP-Stufen muessen aufsteigend sein (TP1 < TP2 < TP3)
+        key = tuple(over[k] for k in keys)
+        if key not in seen:
+            seen.add(key)
+            combos.append(over)
+    deadline = time.time() + AR_MC_TIME_BUDGET
+    results, baseline = await asyncio.to_thread(_ar_mc_compute, candles, cfg, combos, base_p, start_i, exclude_top_n, deadline)
+    reliable = [r for r in results if r["trades"] >= AR_MC_MIN_RELIABLE_TRADES]
+    robust = [r for r in reliable if r["pnl_train"] > 0 and r["pnl_test"] > 0 and r["trades_test"] >= 3]
+    best = sorted(results, key=lambda r: (r["trades"] >= AR_MC_MIN_RELIABLE_TRADES, r["total_pnl_usd"]), reverse=True)
+    robust_sorted = sorted(robust, key=lambda r: r["pnl_test"], reverse=True)
+    worst = sorted(results, key=lambda r: r["total_pnl_usd"])
+    lowdd = []
+    for r in reliable:
+        dd = abs(r["max_drawdown_usd"] or 0)
+        if r["total_pnl_usd"] <= 0 or (max_dd_usd > 0 and dd > max_dd_usd):
+            continue
+        lowdd.append(dict(r, pnl_dd_ratio=round(r["total_pnl_usd"] / dd, 2) if dd > 0 else 999.0))
+    lowdd.sort(key=lambda r: (r["pnl_dd_ratio"], r["pnl_test"]), reverse=True)
+    pnls = sorted(r["total_pnl_usd"] for r in reliable)
+    usable_days = (ts[-1] - ts[start_i]) / 86_400_000
+    return {
+        "symbol": symbol, "resolution": resolution, "exit_mode": base_p["exit_mode"],
+        "requested_days": days, "actual_days_covered": round((ts[-1] - ts[0]) / 86_400_000, 1), "usable_days": round(usable_days, 1),
+        "candles_processed": n, "min_reliable_trades": AR_MC_MIN_RELIABLE_TRADES,
+        "combos_tested": len(results), "combos_requested": len(combos), "test_fraction_pct": int(AR_MC_TEST_FRACTION * 100),
+        "varied": [AR_MC_PARAMS[k][0] for k in AR_MC_PARAMS if k in ranges], "note": note,
+        "baseline": baseline,
+        "profitable_pct": round(sum(1 for x in pnls if x > 0) / len(pnls) * 100, 1) if pnls else 0,
+        "median_pnl_usd": round(pnls[len(pnls) // 2], 2) if pnls else 0,
+        "robust_count": len(robust), "lowdd_count": len(lowdd), "max_dd_limit": max_dd_usd,
+        "lowdd_results": lowdd[:30], "robust_results": robust_sorted[:30], "results": best[:30], "worst_results": worst[:20],
+    }
