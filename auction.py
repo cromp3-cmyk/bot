@@ -57,6 +57,7 @@ def _ar_params(cfg):
         "tp_mode": "partial" if cfg.get("ar_tp_mode", "single") == "partial" else "single",
         "tp1_usd": max(0.0, _fl(cfg, "ar_tp1_usd", 5.0)), "tp2_usd": max(0.0, _fl(cfg, "ar_tp2_usd", 10.0)), "tp3_usd": max(0.0, _fl(cfg, "ar_tp3_usd", 15.0)),
         "tp1_pct": max(1.0, min(100.0, _fl(cfg, "ar_tp1_pct", 33))), "tp2_pct": max(1.0, min(100.0, _fl(cfg, "ar_tp2_pct", 33))),
+        "be_usd": max(0.0, _fl(cfg, "ar_be_trigger_usd", 0.0)),
         "be": bool(cfg.get("ar_be_after_tp1", True)), "sl_to_tp1": bool(cfg.get("ar_sl_to_tp1_on_tp2", True)),
     }
 
@@ -220,6 +221,12 @@ async def check_ar_sl_tp(symbol, price):
                 st["ar_sl_cooldown_until"] = time.time() + cfg.get("ar_sl_cooldown_seconds", 30)
             _ar_reset_state(st)
         return
+    if p["be_usd"] > 0 and not st.get("ar_be") and st.get("avg_entry_price") and (st.get("total_coin_size") or 0) > 0:
+        entry_, size_ = st["avg_entry_price"], st["total_coin_size"]
+        pnl_ = ((price - entry_) if pos == "long" else (entry_ - price)) * size_
+        if pnl_ >= p["be_usd"]:
+            st["ar_sl_price"], st["ar_be"] = entry_, "be"
+            debug_log(f"📡 [{symbol}] Auction Range Migration: {round(pnl_, 2)} $ Gewinn erreicht (Ziel {p['be_usd']:g} $) - SL auf Einstieg {round(entry_, 6)}")
     tps = st.get("ar_tps") or []
     if tps:
         pcts = st.get("ar_tp_pcts") or []
@@ -474,6 +481,11 @@ def _ar_simulate(candles, cfg, bull, bear, xdn, xup, start_i, p):
             elif tp is not None and ((d == "long" and h[i] >= tp) or (d == "short" and l[i] <= tp)):
                 _bt_close_trade(trades, d, e, tp, position["size"], i, position["entry_i"], "TP", ts=ts)
                 position = None
+            if position is not None and p["be_usd"] > 0 and not position["prot"]:
+                # Gewinn-Schwelle in $ erreicht (Hoch/Tief der Kerze) -> SL auf Einstieg, gilt ab der naechsten Kerze
+                move = p["be_usd"] / position["size"]
+                if (d == "long" and h[i] - position["entry"] >= move) or (d == "short" and position["entry"] - l[i] >= move):
+                    position["sl"], position["prot"] = position["entry"], "be"
         tri = None if (bull[i] and bear[i]) else "long" if bull[i] else "short" if bear[i] else None
         price = c[i]
         if position is None:
@@ -602,7 +614,7 @@ AR_MC_PARAMS = {   # Kurzschluessel (= Schluessel in _ar_params) -> (Config-Schl
     "atr": ("ar_atr_len", int, 0), "center": ("ar_center_inf", float, 2), "terr": ("ar_territory_inf", float, 2), "shock": ("ar_shock", float, 2),
     "drive": ("ar_drive_len", int, 0), "persist": ("ar_persist_len", int, 0), "min_mig": ("ar_min_migration", float, 3),
     "persist_inf": ("ar_persist_inf", float, 2), "thr": ("ar_reversal_thr", float, 3), "overlap": ("ar_overlap_len", int, 0),
-    "prot": ("ar_overlap_prot", float, 2),
+    "prot": ("ar_overlap_prot", float, 2), "be_usd": ("ar_be_trigger_usd", float, 2),
     "sl_usd": ("ar_sl_usd", float, 2), "tp_usd": ("ar_tp_usd", float, 2),
     "tp1_usd": ("ar_tp1_usd", float, 2), "tp2_usd": ("ar_tp2_usd", float, 2), "tp3_usd": ("ar_tp3_usd", float, 2),
     "tp1_pct": ("ar_tp1_pct", float, 0), "tp2_pct": ("ar_tp2_pct", float, 0),
@@ -612,7 +624,7 @@ AR_MC_MIN_RELIABLE_TRADES = 5
 AR_MC_TEST_FRACTION = 0.3
 AR_MC_MAX_CANDLES = 80_000
 AR_MC_TIME_BUDGET = 70
-_AR_MC_ZERO_OK = ("sl_usd", "tp_usd", "tp1_usd", "tp2_usd", "tp3_usd", "prot", "min_mig")
+_AR_MC_ZERO_OK = ("be_usd", "sl_usd", "tp_usd", "tp1_usd", "tp2_usd", "tp3_usd", "prot", "min_mig")
 
 
 def _ar_mc_compute(candles, cfg, combos, base_p, start_i, exclude_top_n, deadline):
