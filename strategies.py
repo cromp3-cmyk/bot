@@ -2006,6 +2006,9 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
     if entry_mode == "lsob":
         from lsob import run_lb_backtest
         return await run_lb_backtest(symbol, cfg, days, exclude_top_n)
+    if entry_mode == "pivot_reversal":
+        from pivot import run_pv_backtest
+        return await run_pv_backtest(symbol, cfg, days, exclude_top_n)
     if entry_mode == "auction_trend":
         from auction import run_ar_backtest
         return await run_ar_backtest(symbol, cfg, days, exclude_top_n)
@@ -2559,6 +2562,7 @@ BACKTEST_MAX_CANDLES = {
     "wt_div": 100_000,
     "mom_field": 100_000,
     "auction_trend": 100_000,
+    "pivot_reversal": 100_000,
     "lsob": 100_000,
     "trendfolge": 100_000,
     "rlm": 30_000,

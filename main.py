@@ -13,7 +13,7 @@ from bot_core import (
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reverse_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_gc_trend, handle_scalp_trend, handle_dv_montecarlo, handle_config_defaults, handle_rlm_montecarlo, handle_pa_montecarlo, handle_we_montecarlo, handle_wd_montecarlo, handle_ar_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
+    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_gc_trend, handle_scalp_trend, handle_dv_montecarlo, handle_config_defaults, handle_rlm_montecarlo, handle_pa_montecarlo, handle_we_montecarlo, handle_wd_montecarlo, handle_ar_montecarlo, handle_pv_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
 )
 from strategies import (
@@ -27,6 +27,7 @@ from wae_ema import we_poll_loop
 from wt_div import wd_poll_loop
 from mom_field import mf_poll_loop
 from auction import ar_poll_loop
+from pivot import pv_poll_loop
 from lsob import lb_poll_loop
 from trendfolge import tfl_poll_loop
 from rlm import rlm_poll_loop
@@ -75,6 +76,7 @@ async def start_web_server():
     app.router.add_post("/api/we_mc", handle_we_montecarlo)
     app.router.add_post("/api/wd_mc", handle_wd_montecarlo)
     app.router.add_post("/api/ar_mc", handle_ar_montecarlo)
+    app.router.add_post("/api/pv_mc", handle_pv_montecarlo)
     app.router.add_post("/api/er_sweep", handle_er_sweep)
     app.router.add_post("/api/ab_signal_sweep", handle_ab_signal_sweep)
     app.router.add_post("/api/liq_sweep", handle_liq_sweep)
@@ -184,6 +186,7 @@ async def main():
         *[wd_poll_loop(s) for s in SYMBOLS],
         *[mf_poll_loop(s) for s in SYMBOLS],
         *[ar_poll_loop(s) for s in SYMBOLS],
+        *[pv_poll_loop(s) for s in SYMBOLS],
         *[lb_poll_loop(s) for s in SYMBOLS],
         *[tfl_poll_loop(s) for s in SYMBOLS],
         *[rlm_poll_loop(s) for s in SYMBOLS],
