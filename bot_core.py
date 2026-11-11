@@ -124,7 +124,12 @@ def get_price_decimals(symbol):
 
 
 def get_min_base_amount(symbol):
-    return MIN_BASE_AMOUNT_MAP.get(symbol, 0.001)
+    # Bot-seitige Mindestgroesse entfernt: nur noch die kleinste handelbare Einheit (1 Tick der Mengen-Praezision).
+    # Die Boerse lehnt zu kleine Orders selbst ab (Log: "Order abgelehnt"). Alte Werte: MIN_BASE_AMOUNT_MAP.
+    try:
+        return 1.0 / float(get_precision(symbol))
+    except Exception:
+        return 0.0001
 
 
 PORT = int(os.getenv("PORT", "10000"))
