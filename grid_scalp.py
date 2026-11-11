@@ -1224,14 +1224,42 @@ def _gc_apply_fills(st, rng, levels, filled, prev):
         st["last_entry_price"] = lots[-1]["px"]
 
 
+def _gc_confirm_fills(pool, lots, pos_signed, d, lot_coin):
+    """pool: tag -> Order-Info der verschwundenen Orders. Gibt (bestaetigt, unbestaetigt) zurueck.
+    Vergleicht die Positionsaenderung der Boerse mit dem, was die Fills (Einstiege +, Ausstiege -) ausmachen wuerden."""
+    have = d * sum(float(l["size"]) for l in lots)
+    delta = pos_signed - have
+    ent = [t for t in pool if t[0] == "e"]
+    ex = [t for t in pool if t[0] == "x"]
+
+    def sz(t):
+        i = pool.get(t) or {}
+        return float(i.get("size0") or i.get("size") or 0)
+
+    se, sx = sum(sz(t) for t in ent), sum(sz(t) for t in ex)
+    best = None
+    for use_e in (True, False):
+        for use_x in (True, False):
+            net = d * ((se if use_e else 0.0) - (sx if use_x else 0.0))
+            key = (round(abs(delta - net) / max(lot_coin, 1e-12), 3), -(int(use_e) + int(use_x)))
+            if best is None or key < best[0]:
+                best = (key, use_e, use_x)
+    _, use_e, use_x = best
+    ok = (ent if use_e else []) + (ex if use_x else [])
+    bad = [t for t in pool if t not in ok]
+    return ok, bad
+
+
 def _gc_rebuild_lots(st, rng, levels, pos_signed, mid, lot_size_coin):
     """Notfall-Abgleich: Boersen-Position und Lot-Buch passen nicht zusammen (verpasste Fills, manueller Trade)."""
     d = 1 if rng["dir"] == "long" else -1
     n = len(levels) - 1
     held = abs(pos_signed) if pos_signed * d > 0 else 0.0
     cnt = int(round(held / lot_size_coin)) if lot_size_coin > 0 else 0
-    cand = [k for k in range(n + 1) if _gc_valid_entry(d, k, n) and ((levels[k] > mid) if d > 0 else (levels[k] < mid))]
-    cand.sort(key=lambda k: levels[k] if d > 0 else -levels[k])
+    # Long-Lots wurden UNTER dem Kurs gekauft (Einstiege liegen unter dem Markt), Short-Lots darueber.
+    # Frueher war das umgekehrt: Lots landeten ueber dem Kurs, ihre Verkaufs-Orders hingen weit weg und trafen nie.
+    cand = [k for k in range(n + 1) if _gc_valid_entry(d, k, n) and ((levels[k] <= mid) if d > 0 else (levels[k] >= mid))]
+    cand.sort(key=lambda k: -levels[k] if d > 0 else levels[k])
     lots = []
     for k in cand[:cnt]:
         lots.append({"k": k, "px": levels[k], "size": lot_size_coin, "t": now_local().isoformat()})
@@ -1243,7 +1271,7 @@ def _gc_rebuild_lots(st, rng, levels, pos_signed, mid, lot_size_coin):
 
 
 def gc_reset_state(st, keep_stats=True):
-    for k in ("gc_lots", "gc_prev", "gc_sim", "gc_range", "gc_sig", "gc_stopped"):
+    for k in ("gc_lots", "gc_prev", "gc_sim", "gc_range", "gc_sig", "gc_stopped", "gc_unconf"):
         st.pop(k, None)
     st["gc_lots"] = []
     st["entry_count"] = 0
@@ -1441,6 +1469,36 @@ async def grid_classic_tick(client, symbol):
     filled = {t for t in prev if t not in live}
     # Orders, die der Bot selbst nur umgesetzt hat, stehen nicht in prev-Verschwunden: prev wird unten immer mit dem
     # tatsaechlichen Stand nach dem Abgleich ueberschrieben.
+    # "Verschwunden" heisst nicht "gefuellt": eine Post-Only-Order, die den Spread kreuzt (Kurs lief zwischen Lesen und
+    # Setzen weg), wird von der Boerse verworfen. Frueher wurde das als Fill gebucht -> Lot verschwand ohne echten
+    # Verkauf, der Einstieg kam auf demselben Level erneut (nur Kaeufe, keine Verkaeufe). Jetzt zaehlt ein Fill nur,
+    # wenn die Boersen-Position die Aenderung auch bestaetigt.
+    unconf = st.setdefault("gc_unconf", {})
+    for t in list(unconf):
+        if t in filled:
+            unconf.pop(t)           # frisch verschwunden: wird unten neu bewertet
+    pool = {t: prev.get(t) or {} for t in filled}
+    for t, u in unconf.items():
+        pool.setdefault(t, u["info"])
+    if pool and pos_known and not dry:
+        lot_coin0 = (float(_gcv(cfg, "gc_size_usd")) / mid)
+        ok, bad = _gc_confirm_fills(pool, lots, pos_signed, d, lot_coin0)
+        for t in bad:
+            n_try = (unconf.get(t) or {}).get("n", 0) + 1
+            if n_try >= 3:
+                unconf.pop(t, None)
+                debug_log(f"⚠️ [{symbol}] Grid-Bot: Order {t} ist verschwunden, aber die Börsen-Position hat sich nicht geändert - "
+                          f"kein Fill (Post-Only vermutlich verworfen), Order wird neu gesetzt")
+            else:
+                unconf[t] = {"info": pool[t], "n": n_try}
+        for t in ok:
+            unconf.pop(t, None)
+        filled = set(ok)
+        prev = {**prev, **{t: pool[t] for t in ok}}
+    elif dry:
+        pass
+    else:
+        filled = set(filled)
     if filled and pos_known:
         before = len(lots)
         _gc_apply_fills(st, rng, levels, filled, prev)
