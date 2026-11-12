@@ -993,7 +993,7 @@ async def grid_scalp_tick(client, symbol):
 
         if d["size"] < min_base:
             continue
-        base_amount = int(d["size"] * precision)
+        base_amount = max(1, int(round(d["size"] * precision)))
         coi = int(time.time() * 1000) % (2 ** 40) + len(tag_map)
 
         if cfg["dry_run"]:
@@ -1645,7 +1645,7 @@ async def grid_classic_tick(client, symbol):
     for t, u in unconf.items():
         pool.setdefault(t, u["info"])
     if pool and pos_known and not dry:
-        lot_coin0 = (float(_gcv(cfg, "gc_size_usd")) / mid)
+        lot_coin0 = _gc_qty(symbol, float(_gcv(cfg, "gc_size_usd")), mid)
         ok, bad = _gc_confirm_fills(pool, lots, pos_signed, d, lot_coin0)
         for t in bad:
             n_try = (unconf.get(t) or {}).get("n", 0) + 1
@@ -1669,7 +1669,7 @@ async def grid_classic_tick(client, symbol):
 
     # Positions-Abgleich (nur live): Boerse ist die Wahrheit
     if not dry and pos_known:
-        lot_coin = (float(_gcv(cfg, "gc_size_usd")) / mid)
+        lot_coin = _gc_qty(symbol, float(_gcv(cfg, "gc_size_usd")), mid)   # gerundet wie die Einstiege (sonst falsche Lot-Groesse/Abgleich)
         have = d * sum(float(l["size"]) for l in lots)
         if abs(pos_signed - have) > 0.5 * lot_coin:
             if time.time() - float(st.get("gc_resync_log") or 0) > 30:
@@ -1724,7 +1724,7 @@ async def grid_classic_tick(client, symbol):
                     debug_log(f"⚠️ [{symbol}] Grid: Cancel {x['tag']} fehlgeschlagen", {"error": str(e)})
             if x["size"] * precision < max(1, min_base * precision) or actions >= 8:
                 continue
-            base_amount = int(x["size"] * precision)
+            base_amount = max(1, int(round(x["size"] * precision)))
             coi = _gc_coi(market_index, x["idx"], x["exit"])
             tx, tx_hash, err = await place_post_only_order(client, market_index, symbol, x["is_ask"], base_amount,
                                                            x["price"], coi, reduce_only=x["reduce_only"])
