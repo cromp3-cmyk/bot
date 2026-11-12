@@ -801,7 +801,7 @@ async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldo
         debug_log(f"⚠️ [{symbol}] Grid-Scalp: Orders vor Flatten nicht abraeumbar", {"error": str(e)})
 
     is_ask = pos_size > 0
-    base_amount = int(abs(pos_size) * get_precision(symbol))
+    base_amount = max(1, int(round(abs(pos_size) * get_precision(symbol))))   # runden statt abschneiden (sonst bleibt Rest-Position)
     price = st.get("last_price") or 0.0
 
     if cfg["dry_run"]:
@@ -809,12 +809,17 @@ async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldo
         _sim_close_market(st, st.get("last_bid") or price, st.get("last_ask") or price, reason)
         st["gs_sim_orders"] = []
     else:
-        async with _ORDER_LOCK:
-            tx, tx_hash, err = await place_market_order(
-                client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
+        err = None
+        for attempt in range(3):
+            async with _ORDER_LOCK:
+                tx, tx_hash, err = await place_market_order(
+                    client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
+            if not _is_nonce_err(err):
+                break
+            await asyncio.sleep(0.4 * (attempt + 1))
         if err:
             debug_log(f"⚠️ [{symbol}] Grid-Scalp FLATTEN FEHLGESCHLAGEN", {"error": str(err)})
-            return
+            return False
         debug_log(f"🚪 [{symbol}] Grid-Scalp FLATTEN ausgefuehrt ({reason})", {"tx_hash": str(tx_hash)})
 
     st["gs_tag_map"] = {}
@@ -823,6 +828,76 @@ async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldo
                                              else float(cfg.get("gs_cooldown_min", 30.0)) * 60)
     st["gs_anchor"] = None
     await save_bot_state()
+    return True
+
+
+async def gc_manual_close(symbol):
+    """Dashboard-Knopf "Position schliessen" fuer Grid Classic. Nimmt die ECHTE Boersen-Position (nicht die Summe der
+    virtuellen Lots), raeumt die eigenen Orders ab, schliesst per Markt-Order (reduce-only), bucht den Verlust/Gewinn
+    der Lots in gc_realized, leert das Lot-Buch und STOPPT den Bot (sonst wuerde das Gitter sofort wieder kaufen).
+    Gibt (ok, text) zurueck."""
+    st, cfg = BOTS[symbol]["state"], BOTS[symbol]["config"]
+    market_index = MARKET_INDICES[symbol]
+    lots = st.get("gc_lots") or []
+    rng = st.get("gc_range") or {}
+    d = 1 if rng.get("dir", "long") == "long" else -1
+    dry = bool(cfg.get("dry_run"))
+    client = None
+    if not dry:
+        client = get_shared_client(account_role(cfg))
+        if client is None:
+            return False, "Keine Verbindung zu Lighter (Client) - Konto/Schlüssel prüfen."
+        best_bid, best_ask = await read_best_bid_ask(client, market_index)
+        if best_bid is None:
+            return False, "Kein aktueller Preis von der Börse (Anfragelimit?) - gleich nochmal versuchen."
+        mid = (best_bid + best_ask) / 2.0
+    else:
+        mid = st.get("last_price")
+        if not mid:
+            return False, "Kein aktueller Preis bekannt."
+    st["last_price"] = mid
+    pos_signed = 0.0
+    if not dry:
+        pos = await get_account_position_from_exchange(client, market_index, retries=3, delay=0.8)
+        if pos is None:
+            return False, "Positionsabfrage fehlgeschlagen (Anfragelimit?) - nichts geschlossen, gleich nochmal versuchen."
+        try:
+            sg = int(getattr(pos, "sign", 1) or 1) or 1
+            pos_signed = abs(float(pos.position)) * sg
+        except (TypeError, ValueError, AttributeError):
+            return False, "Positionsdaten nicht lesbar - nichts geschlossen."
+        if pos_signed != 0:
+            ok = await _flatten_market(client, symbol, market_index, pos_signed, "MANUAL", cooldown_s=0)
+            if not ok:
+                return False, "Schließen fehlgeschlagen - Fehlertext im Log (FLATTEN FEHLGESCHLAGEN)."
+            await asyncio.sleep(2.0)
+            pos2 = await get_account_position_from_exchange(client, market_index, retries=3, delay=0.8)
+            try:
+                left = abs(float(pos2.position)) if pos2 is not None else None
+            except (TypeError, ValueError, AttributeError):
+                left = None
+            if left is not None and left > 0:
+                debug_log(f"⚠️ [{symbol}] Grid-Bot: nach dem Schließen bleibt Rest {left:.6g} - bitte erneut schließen")
+        else:
+            try:
+                for o in await read_open_orders(client, market_index):
+                    await cancel_order(client, market_index, o["coi"])
+            except Exception as e:
+                debug_log(f"⚠️ [{symbol}] Grid-Bot: Orders nicht abräumbar", {"error": str(e)})
+    flat_pnl = sum((mid - float(l["px"])) * float(l["size"]) * d for l in lots)
+    if lots:
+        tot = sum(float(l["size"]) for l in lots)
+        avg_px = sum(float(l["px"]) * float(l["size"]) for l in lots) / tot if tot else mid
+        st["gc_realized"] = float(st.get("gc_realized") or 0.0) + flat_pnl
+        _dash_trade(st, rng.get("dir", "long"), avg_px, mid, flat_pnl, "MANUAL")
+    gc_reset_state(st)
+    st["position"] = None
+    st["avg_entry_price"] = None
+    st["total_coin_size"] = 0.0
+    cfg["bot_active"] = False
+    await save_bot_state()
+    debug_log(f"🚪 [{symbol}] Grid-Bot: Position manuell geschlossen @ {mid:.6g} ({flat_pnl:+.3f} $ aus den Lots), Bot gestoppt")
+    return True, f"Position geschlossen @ {mid:.6g}, Bot gestoppt"
 
 
 # ============================================================================

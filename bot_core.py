@@ -8489,6 +8489,17 @@ async def handle_close_position(request):
     if symbol not in BOTS:
         return web.json_response({"error": "unknown symbol"}, status=404)
     st = BOTS[symbol]["state"]
+    if BOTS[symbol]["config"].get("entry_mode") == "grid_classic":
+        # Grid Classic: Lots sind ein virtuelles Buch - echte Boersen-Position schliessen, Lots leeren, Bot stoppen
+        from grid_scalp import gc_manual_close
+        try:
+            ok, msg = await gc_manual_close(symbol)
+        except Exception as e:
+            debug_log(f"⚠️ [{symbol}] Grid-Bot: manuelles Schließen fehlgeschlagen", {"error": str(e)})
+            return web.json_response({"error": f"Fehler: {e}"}, status=500)
+        if not ok:
+            return web.json_response({"error": msg}, status=500)
+        return web.json_response({"success": True, "message": msg})
     if st["position"] is None:
         return web.json_response({"error": "keine offene Position"}, status=400)
     if st["last_price"] is None:
