@@ -4451,13 +4451,13 @@ async function gcRunBacktest(days) {
 document.getElementById('gc-bt').addEventListener('click', () => gcRunBacktest(14));
 document.getElementById('gc-bt28').addEventListener('click', () => gcRunBacktest(28));
 document.getElementById('gc-reset').addEventListener('click', async () => {
-  if (!confirm('Gitter und Lot-Buch zurücksetzen? (Bot muss gestoppt sein. Offene Börsen-Position bleibt bestehen und wird NICHT geschlossen.)')) return;
+  if (!(await uiConfirm('Gitter und Lot-Buch zurücksetzen? (Bot muss gestoppt sein. Offene Börsen-Position bleibt bestehen und wird NICHT geschlossen.)')))  return;
   const res = await fetch(`/api/gc/reset?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
   const d = await res.json(); showToast(d.error ? '❌ ' + d.error : '✅ Zurückgesetzt');
 });
 
 document.getElementById('gc-initbuy').addEventListener('click', async () => {
-  if (!confirm('Start-Kauf jetzt ausführen? Der Bot kauft sofort (Markt-Order) je ein Lot für die Stufen über dem Kurs (Long) bzw. verkauft für die Stufen darunter (Short). Nur wenn keine Position und keine Lots da sind. Bot muss laufen (Start), Modus Grid Classic, nicht Dry-Run für echte Orders.')) return;
+  if (!(await uiConfirm('Start-Kauf jetzt ausführen? Der Bot kauft sofort (Markt-Order) je ein Lot für die Stufen über dem Kurs (Long) bzw. verkauft für die Stufen darunter (Short). Nur wenn keine Position und keine Lots da sind. Bot muss laufen (Start), Modus Grid Classic, nicht Dry-Run für echte Orders.')))  return;
   const res = await fetch(`/api/gc/initbuy?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
   const d = await res.json(); showToast(d.error ? '❌ ' + d.error : '✅ Start-Kauf wird im nächsten Tick ausgeführt - siehe Log');
 });
@@ -4488,24 +4488,24 @@ document.getElementById('btn-stop').addEventListener('click', async () => {
   await fetch(`/api/control?symbol=${currentSymbol}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_active:false}) });
 });
 document.getElementById('btn-close').addEventListener('click', async () => {
-  if (!confirm(`Position für ${currentSymbol} jetzt zum aktuellen Preis schließen?`)) return;
+  if (!(await uiConfirm(`Position für ${currentSymbol} jetzt zum aktuellen Preis schließen?`)))  return;
   const res = await fetch(`/api/close?symbol=${currentSymbol}`, { method:'POST' });
   const data = await res.json();
-  if (data.error) alert(data.error);
+  if (data.error) uiAlert(data.error);
   refresh();
 });
 document.getElementById('btn-reverse').addEventListener('click', async () => {
-  if (!confirm(`Position für ${currentSymbol} jetzt in die Gegenrichtung drehen (gleiche Größe)?`)) return;
+  if (!(await uiConfirm(`Position für ${currentSymbol} jetzt in die Gegenrichtung drehen (gleiche Größe)?`)))  return;
   const res = await fetch(`/api/reverse?symbol=${currentSymbol}`, { method:'POST' });
   const data = await res.json();
-  if (data.error) alert(data.error);
+  if (data.error) uiAlert(data.error);
   refresh();
 });
 document.getElementById('btn-reset').addEventListener('click', async () => {
-  if (!confirm(`Statistik/Trade-Log für ${currentSymbol} zurücksetzen? (nur möglich wenn flach)`)) return;
+  if (!(await uiConfirm(`Statistik/Trade-Log für ${currentSymbol} zurücksetzen? (nur möglich wenn flach)`)))  return;
   const res = await fetch(`/api/reset?symbol=${currentSymbol}`, { method:'POST' });
   const data = await res.json();
-  if (data.error) alert(data.error);
+  if (data.error) uiAlert(data.error);
   refresh();
 });
 
@@ -4514,7 +4514,7 @@ async function manualTrade(direction) {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({direction})
   });
   const data = await res.json();
-  if (data.error) alert(data.error);
+  if (data.error) uiAlert(data.error);
   refresh();
 }
 // btn-manual-buy/sell/tp werden jetzt in initOmsGrid() verdrahtet, da diese Buttons dort
@@ -7458,6 +7458,22 @@ document.addEventListener('click', (ev) => {
   try { applySweepRow(JSON.parse(decodeURIComponent(btn.dataset.apply))); } catch (e) { showToast('⚠️ Übernehmen fehlgeschlagen: ' + e); }
 });
 
+// Eigene Dialoge statt confirm()/alert(): der Browser unterdrueckt native Dialoge ("Weitere Dialoge verhindern" oder
+// Hintergrund-Tab) - dann tut ein Klick auf "Position schliessen" scheinbar nichts und es erscheint auch keine Fehlermeldung.
+function uiConfirm(msg) {
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:10px;max-width:480px;width:100%;padding:18px;font:14px/1.45 system-ui,sans-serif;';
+    const p = document.createElement('div'); p.textContent = msg; p.style.cssText = 'white-space:pre-wrap;margin-bottom:14px;';
+    const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;';
+    const mk = (t, ok) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = t; b.onclick = () => { ov.remove(); resolve(ok); }; return b; };
+    row.appendChild(mk('Abbrechen', false)); row.appendChild(mk('OK', true));
+    box.appendChild(p); box.appendChild(row); ov.appendChild(box); document.body.appendChild(ov);
+  });
+}
+function uiAlert(msg) { return uiConfirm(String(msg)).then(() => {}); }
 function showToast(msg) {
   let el = document.getElementById('save-toast');
   if (!el) {
