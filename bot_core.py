@@ -216,7 +216,7 @@ def default_config():
         # ===== Klassischer Grid-Bot (entry_mode "grid_classic") =====
         "gc_direction": "long", "gc_lower": 0.0, "gc_upper": 0.0, "gc_auto_pct": 5.0, "gc_levels": 20,
         "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6, "gc_exit_orders": 15,
-        "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0,
+        "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0, "gc_initial_buy": False,
         "gc_trend_mode": "off", "gc_trend_tf": "1h", "gc_trend_ilen": 4, "gc_trend_slen": 50, "gc_trend_on_flip": "wait",
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
@@ -928,7 +928,7 @@ PERSISTED_STATE_KEYS = [
     # gs_tag_map MUSS persistiert werden: sonst weiss der Bot nach einem Redeploy nicht
     # mehr, welche offenen Orders im Buch seine eigenen sind, und cancelt sie als fremd.
     "gs_anchor", "gs_cooldown_until", "gs_tag_map",
-    "gc_lots", "gc_prev", "gc_range", "gc_sig", "gc_realized", "gc_cycles", "gc_stopped", "gc_sim", "grid_sl_cooldown_until",
+    "gc_lots", "gc_prev", "gc_range", "gc_sig", "gc_init_done", "gc_realized", "gc_cycles", "gc_stopped", "gc_sim", "grid_sl_cooldown_until",
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
     "er_sl_price", "er_tp1_price", "er_tp2_price", "er_tp3_price", "er_tp1_done", "er_tp2_done", "er_sl_cooldown_until",
     "pm_sl_price", "pm_tp_price", "pm_trail_extreme", "pm_sl_cooldown_until",
@@ -3053,6 +3053,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_classic"><label>Anzahl Stufen</label><input type="number" step="1" id="gc_levels"></div>
   <div data-mode="grid_classic"><label>Abstand</label><select class="cfg" id="gc_spacing"><option value="arith">gleiche Abstände ($)</option><option value="geo">gleiche Prozent</option></select></div>
   <div data-mode="grid_classic"><label>Notional je Stufe ($)</label><input type="number" step="any" id="gc_size_usd"></div>
+  <div data-mode="grid_classic"><label><input type="checkbox" id="gc_initial_buy" style="width:auto; vertical-align:middle;"> Original-Grid: beim Start sofort alle Lots für die Stufen über dem Kurs kaufen (Long; Short: unter dem Kurs verkaufen) und Ausstiege setzen. Begrenzt durch „Max. gleichzeitige Lots“ — für ein volles Gitter dort mindestens die Anzahl der Stufen über dem Kurs eintragen.</label></div>
   <div data-mode="grid_classic"><label>Max. gleichzeitige Lots</label><input type="number" step="1" id="gc_max_lots"></div>
   <div data-mode="grid_classic"><label>Einstiegs-Orders im Buch</label><input type="number" step="1" id="gc_open_each_side"></div>
   <div data-mode="grid_classic"><label>Gegen-Orders im Buch (nur die nächsten Lots, 0 = alle)</label><input type="number" step="1" min="0" id="gc_exit_orders"></div>
@@ -6716,6 +6717,7 @@ async function refresh() {
     { const e=document.getElementById('gc_trend_ilen'); if(e) e.value = data.config.gc_trend_ilen ?? 4; }
     { const e=document.getElementById('gc_trend_slen'); if(e) e.value = data.config.gc_trend_slen ?? 50; }
     { const e=document.getElementById('gc_trend_on_flip'); if(e) e.value = data.config.gc_trend_on_flip || 'wait'; }
+    { const e=document.getElementById('gc_initial_buy'); if(e) e.checked = !!data.config.gc_initial_buy; }
     { const e=document.getElementById('gc_direction'); if(e && data.config.gc_direction!==undefined) e.value = data.config.gc_direction; }
     { const e=document.getElementById('gc_spacing'); if(e && data.config.gc_spacing!==undefined) e.value = data.config.gc_spacing; }
 
@@ -7354,6 +7356,7 @@ function buildConfigPayload() {
     gc_trend_ilen: parseInt(document.getElementById('gc_trend_ilen').value) || 4,
     gc_trend_slen: parseInt(document.getElementById('gc_trend_slen').value) || 50,
     gc_trend_on_flip: document.getElementById('gc_trend_on_flip').value,
+    gc_initial_buy: document.getElementById('gc_initial_buy').checked,
     gc_direction: document.getElementById('gc_direction').value,
     gc_spacing: document.getElementById('gc_spacing').value,
     grid_anchor_follow_pct: parseFloat(document.getElementById('grid_anchor_follow_pct').value),
@@ -7617,7 +7620,7 @@ async def handle_config_update(request):
                 "gs_requote_ticks", "gs_max_open_orders", "gs_poll_seconds",
                 "gc_direction", "gc_lower", "gc_upper", "gc_auto_pct", "gc_levels", "gc_spacing", "gc_size_usd",
                 "gc_max_lots", "gc_open_each_side", "gc_exit_orders", "gc_stop_pct", "gc_poll_seconds",
-                "gc_trend_mode", "gc_trend_tf", "gc_trend_ilen", "gc_trend_slen", "gc_trend_on_flip",
+                "gc_trend_mode", "gc_trend_tf", "gc_trend_ilen", "gc_trend_slen", "gc_trend_on_flip", "gc_initial_buy",
                 "dry_run", "auto_reverse", "binance_market_type",
                 "g2_direction_mode", "g2_mode", "g2_step_pct", "g2_tp_step_pct", "g2_step_usd", "g2_tp_step_usd",
                 "g2_max_nachkauf", "g2_sl_enabled", "g2_sl_mode", "g2_sl_manual_usd", "g2_sl_pct",

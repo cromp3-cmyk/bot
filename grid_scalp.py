@@ -1087,6 +1087,7 @@ GC_DEFAULTS = {
     "gc_trend_tf": "1h",           # Zeitebene des Trends: 5m / 15m / 1h / 4h / 1d
     "gc_trend_ilen": 4,            # Pivot-Laenge intern
     "gc_trend_slen": 50,           # Pivot-Laenge swing
+    "gc_initial_buy": False,       # Original-Grid: beim Start sofort alle Lots fuer die Stufen ueber (Long) / unter (Short) dem Kurs kaufen, Ausstiege nach oben/unten
     "gc_trend_on_flip": "wait",    # wait = Lots auslaufen lassen (keine neuen Kaeufe), dann wechseln / close = sofort alles schliessen
 }
 GC_COI_BASE = 10 ** 11
@@ -1146,7 +1147,10 @@ def _gc_desired(symbol, cfg, st, rng, levels, best_bid, best_ask):
         return round(round(p / tick) * tick, dec)
 
     def qty(usd, px):
-        return int((usd / px) * precision) / precision
+        # AUFrunden auf den Mengen-Schritt: sonst landet ein 10-$-Lot bei 9,7 $ (z.B. NEAR 2,6 statt 2,7) und die Boerse
+        # lehnt es mit 21706 "invalid order base or quote amount" ab.
+        import math
+        return math.ceil(round((usd / px) * precision, 6)) / precision
 
     groups = {}
     for lot in lots:
@@ -1224,6 +1228,69 @@ def _gc_apply_fills(st, rng, levels, filled, prev):
         st["last_entry_price"] = lots[-1]["px"]
 
 
+def _gc_qty(symbol, usd, px):
+    import math
+    precision = get_precision(symbol)
+    return math.ceil(round((usd / px) * precision, 6)) / precision
+
+
+async def _gc_initial_buy(client, symbol, market_index, cfg, st, rng, levels, mid, pos_signed, dry):
+    """Original-Grid-Start: fuer jede Stufe ueber dem Kurs (Long) bzw. unter dem Kurs (Short) sofort EIN Lot kaufen
+    (Short: verkaufen), damit die Ausstiege nach oben/unten sofort im Buch liegen. Ein Markt-Kauf fuer alle Lots zusammen.
+    Die Lots werden dem Level direkt unter/ueber der Ziel-Stufe zugeordnet, Einstiegspreis = echter Kaufkurs."""
+    d = 1 if rng["dir"] == "long" else -1
+    n = len(levels) - 1
+    tick = _tick_size(symbol)
+    if d > 0:
+        targets = [t for t in range(1, n + 1) if levels[t] > mid + tick]
+    else:
+        targets = [t for t in range(0, n) if levels[t] < mid - tick]
+    targets.sort(key=lambda t: abs(levels[t] - mid))
+    targets = targets[:max(0, int(_gcv(cfg, "gc_max_lots")))]
+    if not targets:
+        debug_log(f"ℹ️ [{symbol}] Grid-Bot Start-Kauf: keine Stufe {'über' if d > 0 else 'unter'} dem Kurs - nichts zu kaufen")
+        return 0
+    usd = float(_gcv(cfg, "gc_size_usd"))
+    lot = _gc_qty(symbol, usd, mid)
+    precision = get_precision(symbol)
+    cnt = len(targets)
+    entry_px = mid
+    if not dry:
+        from bot_core import place_market_order
+        if abs(pos_signed) > 0.5 * lot:
+            debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf übersprungen: es besteht schon eine Position ({pos_signed:.6g}) - Lots werden aus der Position abgeleitet")
+            return 0
+        base_amount = int(round(lot * cnt * precision))
+        tx, tx_hash, err = await place_market_order(client, market_index, symbol, d < 0, base_amount, mid, reduce_only=False)
+        if err:
+            debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf FEHLGESCHLAGEN", {"error": str(err), "menge": lot * cnt})
+            return 0
+        await asyncio.sleep(2.0)
+        pos = await get_account_position_from_exchange(client, market_index, retries=3, delay=0.6)
+        got = 0.0
+        try:
+            got = abs(float(pos.position)) if pos is not None else 0.0
+            if pos is not None and float(pos.avg_entry_price or 0) > 0:
+                entry_px = float(pos.avg_entry_price)
+        except (TypeError, ValueError, AttributeError):
+            got = 0.0
+        cnt = min(cnt, int(got / lot + 0.02)) if lot > 0 else 0
+        if cnt <= 0:
+            debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf: Position nach dem Markt-Kauf nicht bestätigt - Lots werden per Abgleich nachgezogen")
+            return 0
+    lots = st.setdefault("gc_lots", [])
+    for t in targets[:cnt]:
+        k = t - d
+        if any(int(l["k"]) == k for l in lots):
+            continue
+        lots.append({"k": k, "px": entry_px, "size": lot, "t": now_local().isoformat()})
+        _dash_entry(st, entry_px, lot, len(lots) > 1)
+    st["entry_count"] = len(lots)
+    st["last_entry_price"] = entry_px
+    debug_log(f"🟢 [{symbol}] Grid-Bot Start-Kauf: {len(lots)} Lots à {lot} @ ~{entry_px:.6g} - Ausstiege nach {'oben' if d > 0 else 'unten'} bis {levels[max(targets[:cnt])] if d > 0 else levels[min(targets[:cnt])]:.6g}")
+    return cnt
+
+
 def _gc_confirm_fills(pool, lots, pos_signed, d, lot_coin):
     """pool: tag -> Order-Info der verschwundenen Orders. Gibt (bestaetigt, unbestaetigt) zurueck.
     Vergleicht die Positionsaenderung der Boerse mit dem, was die Fills (Einstiege +, Ausstiege -) ausmachen wuerden."""
@@ -1271,7 +1338,7 @@ def _gc_rebuild_lots(st, rng, levels, pos_signed, mid, lot_size_coin):
 
 
 def gc_reset_state(st, keep_stats=True):
-    for k in ("gc_lots", "gc_prev", "gc_sim", "gc_range", "gc_sig", "gc_stopped", "gc_unconf"):
+    for k in ("gc_lots", "gc_prev", "gc_sim", "gc_range", "gc_sig", "gc_stopped", "gc_unconf", "gc_init_done"):
         st.pop(k, None)
     st["gc_lots"] = []
     st["entry_count"] = 0
@@ -1353,6 +1420,7 @@ async def grid_classic_tick(client, symbol):
                "spacing": _gcv(cfg, "gc_spacing"), "dir": cfg_dir}
         st["gc_range"], st["gc_sig"] = rng, sig
         st["gc_stopped"] = None
+        st["gc_init_done"] = False      # frisches Gitter: Start-Kauf (falls aktiviert) steht noch aus
         debug_log(f"🧱 [{symbol}] Grid-Bot: Gitter {rng['dir']} {lo:.6g} … {hi:.6g}, {rng['n']} Stufen ({rng['spacing']})")
     elif sig != st.get("gc_sig") or (cfg_dir != rng.get("dir") and not lots):
         # 2. Bedingung: Richtung im Formular != Richtung des laufenden Gitters, aber keine Lots offen -> umstellen.
@@ -1449,6 +1517,21 @@ async def grid_classic_tick(client, symbol):
         st["total_coin_size"] = 0.0
         await save_bot_state()
         return
+
+    # ---- Original-Grid: Start-Kauf (einmalig pro frischem Gitter) -----------------
+    if st.get("gc_init_done") is False:
+        if bool(_gcv(cfg, "gc_initial_buy")) and pos_known and not lots and not st.get("gc_pause_entries"):
+            await _gc_initial_buy(client, symbol, market_index, cfg, st, rng, levels, mid, pos_signed, dry)
+            if not dry:
+                try:
+                    pos2 = await get_account_position_from_exchange(client, market_index, retries=2, delay=0.4)
+                    if pos2 is not None:
+                        pos_signed = abs(float(pos2.position)) * (int(getattr(pos2, "sign", 1) or 1) or 1)
+                except (TypeError, ValueError, AttributeError):
+                    pass
+            await save_bot_state()
+        if pos_known or not bool(_gcv(cfg, "gc_initial_buy")):
+            st["gc_init_done"] = True
 
     # ---- Aktuelle Orders (Boerse bzw. Simulation) -------------------------
     prev = st.get("gc_prev") or {}
