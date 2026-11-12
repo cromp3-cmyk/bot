@@ -1335,8 +1335,8 @@ async def _gc_initial_buy(client, symbol, market_index, cfg, st, rng, levels, mi
             debug_log(f"ℹ️ [{symbol}] Grid-Bot Start-Kauf Versuch {attempt}: {got:.6g} von {want_total:.6g} gefüllt - Rest wird nachgekauft")
         cnt = min(cnt, int(got / lot + 0.02)) if lot > 0 else 0
         if cnt <= 0:
-            debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf: Position nach dem Markt-Kauf nicht bestätigt - Lots werden per Abgleich nachgezogen")
-            return 0
+            debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf: Position nach dem Markt-Kauf nicht bestätigt (Order abgelehnt oder Börse antwortet nicht) - neuer Versuch im nächsten Tick")
+            return -1
     lots = st.setdefault("gc_lots", [])
     for t in targets[:cnt]:
         k = t - d
@@ -1397,7 +1397,7 @@ def _gc_rebuild_lots(st, rng, levels, pos_signed, mid, lot_size_coin):
 
 
 def gc_reset_state(st, keep_stats=True):
-    for k in ("gc_lots", "gc_prev", "gc_sim", "gc_range", "gc_sig", "gc_stopped", "gc_unconf", "gc_init_done"):
+    for k in ("gc_lots", "gc_prev", "gc_sim", "gc_range", "gc_sig", "gc_stopped", "gc_unconf", "gc_init_done", "gc_init_try"):
         st.pop(k, None)
     st["gc_lots"] = []
     st["entry_count"] = 0
@@ -1578,18 +1578,40 @@ async def grid_classic_tick(client, symbol):
         return
 
     # ---- Original-Grid: Start-Kauf (einmalig pro frischem Gitter) -----------------
-    if st.get("gc_init_done") is False:
-        if bool(_gcv(cfg, "gc_initial_buy")) and pos_known and not lots and not st.get("gc_pause_entries"):
-            await _gc_initial_buy(client, symbol, market_index, cfg, st, rng, levels, mid, pos_signed, dry)
-            if not dry:
-                try:
-                    pos2 = await get_account_position_from_exchange(client, market_index, retries=2, delay=0.4)
-                    if pos2 is not None:
-                        pos_signed = abs(float(pos2.position)) * (int(getattr(pos2, "sign", 1) or 1) or 1)
-                except (TypeError, ValueError, AttributeError):
-                    pass
-            await save_bot_state()
-        if pos_known or not bool(_gcv(cfg, "gc_initial_buy")):
+    if st.get("gc_init_done") in (False, None):
+        want_init = bool(_gcv(cfg, "gc_initial_buy"))
+        if want_init:
+            why = None
+            if not pos_known:
+                why = "Position der Börse unbekannt (Abfrage fehlgeschlagen) - nächster Tick versucht es erneut"
+            elif lots:
+                why = f"{len(lots)} Lots sind schon im Buch"
+            elif st.get("gc_pause_entries"):
+                why = "Einstiege sind pausiert (Trendfilter)"
+            if why is None:
+                res = await _gc_initial_buy(client, symbol, market_index, cfg, st, rng, levels, mid, pos_signed, dry)
+                if res is not None and res < 0:
+                    # Fehlgeschlagen (Order abgelehnt, WAF-Sperre, keine Bestaetigung): bis zu 5 Ticks erneut versuchen
+                    st["gc_init_try"] = int(st.get("gc_init_try", 0)) + 1
+                    if st["gc_init_try"] >= 5:
+                        debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf nach 5 Versuchen aufgegeben - Gitter läuft ohne Start-Kauf (Kauf-Limits unter dem Kurs)")
+                        st["gc_init_done"] = True
+                    return
+                if not dry:
+                    try:
+                        pos2 = await get_account_position_from_exchange(client, market_index, retries=2, delay=0.4)
+                        if pos2 is not None:
+                            pos_signed = abs(float(pos2.position)) * (int(getattr(pos2, "sign", 1) or 1) or 1)
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+                await save_bot_state()
+                st["gc_init_done"] = True
+            elif not pos_known:
+                pass            # erneut versuchen
+            else:
+                debug_log(f"ℹ️ [{symbol}] Grid-Bot Start-Kauf übersprungen: {why}")
+                st["gc_init_done"] = True
+        else:
             st["gc_init_done"] = True
 
     # ---- Aktuelle Orders (Boerse bzw. Simulation) -------------------------
