@@ -88,8 +88,48 @@ def _ms(cfg, key):
 # Order-Schicht (neu - existierte im Bot bisher nicht)
 # ============================================================================
 
+# Alle Coins handeln ueber DASSELBE Konto/denselben API-Key. Mehrere SignerClients (einer pro Coin) zaehlen die Nonce
+# jeweils fuer sich -> "21104 invalid nonce". Darum: EIN gemeinsamer Client je Konto und alle Sende-Aufrufe nacheinander.
+_ORDER_LOCK = asyncio.Lock()
+_SHARED_CLIENTS = {}
+
+
+def get_shared_client(role):
+    c = _SHARED_CLIENTS.get(role)
+    if c is None:
+        c = get_lighter_client(role)
+        if c is not None:
+            _SHARED_CLIENTS[role] = c
+    return c
+
+
+async def drop_shared_client(role, client):
+    if _SHARED_CLIENTS.get(role) is client:
+        _SHARED_CLIENTS.pop(role, None)
+        try:
+            await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+        except Exception:
+            pass
+
+
+def _is_nonce_err(err):
+    return err is not None and ("21104" in str(err) or "invalid nonce" in str(err).lower())
+
+
 async def place_post_only_order(client, market_index, symbol, is_ask, base_amount,
                                 price, coi, reduce_only=False):
+    for attempt in range(3):
+        async with _ORDER_LOCK:
+            tx, tx_hash, err = await _place_post_only_order_raw(client, market_index, symbol, is_ask, base_amount,
+                                                               price, coi, reduce_only)
+        if not _is_nonce_err(err):
+            return tx, tx_hash, err
+        await asyncio.sleep(0.4 * (attempt + 1))
+    return tx, tx_hash, err
+
+
+async def _place_post_only_order_raw(client, market_index, symbol, is_ask, base_amount,
+                                     price, coi, reduce_only=False):
     """Post-Only-Limit. Wuerde die Order das Buch kreuzen, verwirft die Boerse sie -
     das ist KEIN Fehler, sondern der Sinn von Post-Only. Naechster Tick setzt neu."""
     price_decimals = get_price_decimals(symbol)
@@ -117,7 +157,8 @@ async def place_post_only_order(client, market_index, symbol, is_ask, base_amoun
 
 
 async def cancel_order(client, market_index, coi):
-    return await asyncio.wait_for(client.cancel_order(market_index=market_index, order_index=coi), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    async with _ORDER_LOCK:
+        return await asyncio.wait_for(client.cancel_order(market_index=market_index, order_index=coi), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
 
 
 _auth_cache = {}  # account_index -> (token, expires_ts)
@@ -766,8 +807,9 @@ async def _flatten_market(client, symbol, market_index, pos_size, reason, cooldo
         _sim_close_market(st, st.get("last_bid") or price, st.get("last_ask") or price, reason)
         st["gs_sim_orders"] = []
     else:
-        tx, tx_hash, err = await place_market_order(
-            client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
+        async with _ORDER_LOCK:
+            tx, tx_hash, err = await place_market_order(
+                client, market_index, symbol, is_ask, base_amount, price, reduce_only=True)
         if err:
             debug_log(f"⚠️ [{symbol}] Grid-Scalp FLATTEN FEHLGESCHLAGEN", {"error": str(err)})
             return
@@ -1005,12 +1047,7 @@ async def grid_scalp_poll_loop(symbol):
     while True:
         cfg = BOTS[symbol]["config"]
         if cfg.get("entry_mode") not in MODES:
-            if client is not None:
-                try:
-                    await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
-                except Exception:
-                    pass
-                client = None
+            client = None      # gemeinsamer Client bleibt fuer die anderen Coins offen
             # Alle 5 Minuten melden, WARUM nichts passiert. Sonst ist "Strategie nicht
             # aktiv" im Log nicht von "Loop laeuft gar nicht" zu unterscheiden.
             if time.time() - last_idle_log >= 300:
@@ -1026,15 +1063,11 @@ async def grid_scalp_poll_loop(symbol):
             want_role = account_role(cfg)
             if client is not None and client_role != want_role:
                 debug_log(f"🔁 [{symbol}] Grid-Bot: Konto gewechselt ({'Unterkonto' if want_role else 'Hauptkonto'}) - Verbindung wird neu aufgebaut")
-                try:
-                    await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
-                except Exception:
-                    pass
                 client = None
             if client is None:
                 # Persistenter Client - get_lighter_client() baut sonst pro Order einen
                 # neuen auf, was bei einem Maker-Loop mit ~30 Orders/Minute nicht geht
-                client = get_lighter_client(want_role)
+                client = get_shared_client(want_role)
                 if client is None:
                     await asyncio.sleep(10)
                     continue
@@ -1045,10 +1078,8 @@ async def grid_scalp_poll_loop(symbol):
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Grid-Scalp Tick-Fehler",
                       {"error": str(e), "traceback": traceback.format_exc()})
-            try:
-                await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
-            except Exception:
-                pass
+            if client is not None:
+                await drop_shared_client(client_role, client)
             client = None
             # Lighter-WAF ("Human Verification", HTTP 405) = zu viele Anfragen von dieser IP: laenger pausieren,
             # sonst bleibt die Sperre bestehen. Zufaellige Streuung, damit nicht alle Coins gleichzeitig wiederkommen.
@@ -1280,7 +1311,8 @@ async def _gc_initial_buy(client, symbol, market_index, cfg, st, rng, levels, mi
             if n_missing <= 0:
                 break
             base_amount = int(round(lot * n_missing * precision))
-            tx, tx_hash, err = await place_market_order(client, market_index, symbol, d < 0, base_amount, mid, reduce_only=False)
+            async with _ORDER_LOCK:
+                tx, tx_hash, err = await place_market_order(client, market_index, symbol, d < 0, base_amount, mid, reduce_only=False)
             if err:
                 debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf Versuch {attempt} FEHLGESCHLAGEN", {"error": str(err), "menge": lot * n_missing})
                 continue
