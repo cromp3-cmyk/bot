@@ -1272,20 +1272,35 @@ async def _gc_initial_buy(client, symbol, market_index, cfg, st, rng, levels, mi
         if abs(pos_signed) > 0.5 * lot:
             debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf übersprungen: es besteht schon eine Position ({pos_signed:.6g}) - Lots werden aus der Position abgeleitet")
             return 0
-        base_amount = int(round(lot * cnt * precision))
-        tx, tx_hash, err = await place_market_order(client, market_index, symbol, d < 0, base_amount, mid, reduce_only=False)
-        if err:
-            debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf FEHLGESCHLAGEN", {"error": str(err), "menge": lot * cnt})
-            return 0
-        await asyncio.sleep(2.0)
-        pos = await get_account_position_from_exchange(client, market_index, retries=3, delay=0.6)
+        want_total = lot * cnt
         got = 0.0
-        try:
-            got = abs(float(pos.position)) if pos is not None else 0.0
-            if pos is not None and float(pos.avg_entry_price or 0) > 0:
-                entry_px = float(pos.avg_entry_price)
-        except (TypeError, ValueError, AttributeError):
-            got = 0.0
+        for attempt in range(1, 4):
+            missing = want_total - got
+            n_missing = int(missing / lot + 0.02)
+            if n_missing <= 0:
+                break
+            base_amount = int(round(lot * n_missing * precision))
+            tx, tx_hash, err = await place_market_order(client, market_index, symbol, d < 0, base_amount, mid, reduce_only=False)
+            if err:
+                debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf Versuch {attempt} FEHLGESCHLAGEN", {"error": str(err), "menge": lot * n_missing})
+                continue
+            # Die on-chain Verbuchung kommt verzoegert: bis zu ~9 s warten, bis die Position die erwartete Menge zeigt
+            for _ in range(6):
+                await asyncio.sleep(1.5)
+                pos = await get_account_position_from_exchange(client, market_index, retries=2, delay=0.5)
+                try:
+                    if pos is not None:
+                        sg = int(getattr(pos, "sign", 1) or 1) or 1
+                        got = abs(float(pos.position)) if sg * d > 0 else 0.0
+                        if float(pos.avg_entry_price or 0) > 0 and got > 0:
+                            entry_px = float(pos.avg_entry_price)
+                except (TypeError, ValueError, AttributeError):
+                    pass
+                if got >= want_total * 0.98:
+                    break
+            if got >= want_total * 0.98:
+                break
+            debug_log(f"ℹ️ [{symbol}] Grid-Bot Start-Kauf Versuch {attempt}: {got:.6g} von {want_total:.6g} gefüllt - Rest wird nachgekauft")
         cnt = min(cnt, int(got / lot + 0.02)) if lot > 0 else 0
         if cnt <= 0:
             debug_log(f"⚠️ [{symbol}] Grid-Bot Start-Kauf: Position nach dem Markt-Kauf nicht bestätigt - Lots werden per Abgleich nachgezogen")
