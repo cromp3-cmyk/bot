@@ -26,7 +26,7 @@ import traceback
 from bot_core import (
     BOTS, SYMBOLS, MARKET_INDICES, debug_log, save_bot_state,
     get_lighter_client, get_precision, get_price_decimals, get_min_base_amount,
-    get_account_position_from_exchange, now_local, EXCHANGE_CALL_TIMEOUT_SECONDS,
+    get_account_position_from_exchange, now_local, EXCHANGE_CALL_TIMEOUT_SECONDS, account_role,
 )
 
 
@@ -998,6 +998,7 @@ async def grid_scalp_tick(client, symbol):
 async def grid_scalp_poll_loop(symbol):
     """In main.py's asyncio.gather einhaengen."""
     client = None
+    client_role = "unset"
     last_idle_log = 0.0
     debug_log(f"\U0001f680 [{symbol}] Grid-Scalp Loop gestartet "
               f"(aktueller entry_mode: {BOTS[symbol]['config'].get('entry_mode')})")
@@ -1020,15 +1021,26 @@ async def grid_scalp_poll_loop(symbol):
             continue
 
         try:
+            # Konto-Auswahl im Formular ("Hauptkonto" / "Unterkonto") gilt auch fuer den Grid-Bot. Frueher nahm der Grid
+            # IMMER das Unterkonto, sobald GRID_ACCOUNT_INDEX gesetzt war - egal was im Formular stand.
+            want_role = account_role(cfg)
+            if client is not None and client_role != want_role:
+                debug_log(f"🔁 [{symbol}] Grid-Bot: Konto gewechselt ({'Unterkonto' if want_role else 'Hauptkonto'}) - Verbindung wird neu aufgebaut")
+                try:
+                    await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
+                client = None
             if client is None:
                 # Persistenter Client - get_lighter_client() baut sonst pro Order einen
                 # neuen auf, was bei einem Maker-Loop mit ~30 Orders/Minute nicht geht
-                client = get_lighter_client("grid")
+                client = get_lighter_client(want_role)
                 if client is None:
                     await asyncio.sleep(10)
                     continue
-                BOTS[symbol]["state"]["gs_account"] = {"index": client.account_index, "sub": bool(os.getenv("GRID_ACCOUNT_INDEX") and os.getenv("GRID_PRIVATE_KEY"))}
-                debug_log(f"🔌 [{symbol}] Grid-Bot: Client verbunden (Konto {client.account_index}{' = Unterkonto' if os.getenv('GRID_ACCOUNT_INDEX') else ''})")
+                client_role = want_role
+                BOTS[symbol]["state"]["gs_account"] = {"index": client.account_index, "sub": want_role == "sub"}
+                debug_log(f"🔌 [{symbol}] Grid-Bot: Client verbunden (Konto {client.account_index}{' = Unterkonto' if want_role == 'sub' else ' = Hauptkonto'})")
             await grid_scalp_tick(client, symbol)
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Grid-Scalp Tick-Fehler",
