@@ -104,12 +104,14 @@ def get_shared_client(role):
 
 
 async def drop_shared_client(role, client):
+    """Gemeinsamen Client aus dem Cache nehmen, damit der naechste Tick einen frischen baut. NICHT schliessen: andere Coins
+    benutzen dieselbe Verbindung gerade (ein Schliessen hat sonst bei allen 'Session is closed' ausgeloest)."""
     if _SHARED_CLIENTS.get(role) is client:
         _SHARED_CLIENTS.pop(role, None)
-        try:
-            await asyncio.wait_for(client.close(), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
-        except Exception:
-            pass
+
+
+# Gemeinsame Pause bei Anfragelimit (429 / WAF): alle Coins warten zusammen, sonst bleibt die Sperre bestehen
+_RL_UNTIL = 0.0
 
 
 def _is_nonce_err(err):
@@ -1039,6 +1041,7 @@ async def grid_scalp_tick(client, symbol):
 
 async def grid_scalp_poll_loop(symbol):
     """In main.py's asyncio.gather einhaengen."""
+    global _RL_UNTIL
     client = None
     client_role = "unset"
     last_idle_log = 0.0
@@ -1055,6 +1058,12 @@ async def grid_scalp_poll_loop(symbol):
                 debug_log(f"\U0001f4a4 [{symbol}] Grid-Scalp inaktiv "
                           f"(entry_mode ist '{cfg.get('entry_mode')}', erwartet 'grid_scalp' oder 'maker_scalp')")
             await asyncio.sleep(5)
+            continue
+
+        _left = _RL_UNTIL - time.time()
+        if _left > 0:
+            import random
+            await asyncio.sleep(_left + random.random() * 8)     # Streuung: Coins kommen nicht alle im selben Moment zurueck
             continue
 
         try:
@@ -1078,17 +1087,21 @@ async def grid_scalp_poll_loop(symbol):
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] Grid-Scalp Tick-Fehler",
                       {"error": str(e), "traceback": traceback.format_exc()})
-            if client is not None:
-                await drop_shared_client(client_role, client)
-            client = None
-            # Lighter-WAF ("Human Verification", HTTP 405) = zu viele Anfragen von dieser IP: laenger pausieren,
-            # sonst bleibt die Sperre bestehen. Zufaellige Streuung, damit nicht alle Coins gleichzeitig wiederkommen.
             _err = str(e)
-            if "405" in _err or "Human Verification" in _err or "awswaf" in _err:
+            # Nur bei echten Verbindungsfehlern eine neue Verbindung bauen. Bei Anfragelimit/Order-Fehlern bleibt der
+            # gemeinsame Client erhalten (er wird von den anderen Coins mitbenutzt).
+            if client is not None and ("Session is closed" in _err or "Connector" in _err or "Cannot connect" in _err
+                                       or "Server disconnected" in _err):
+                await drop_shared_client(client_role, client)
+                client = None
+            # Lighter-WAF ("Human Verification", HTTP 405) bzw. 429 "Too Many Requests" (Code 23000) = zu viele Anfragen von
+            # dieser IP: ALLE Coins gemeinsam laenger pausieren, sonst bleibt die Sperre bestehen.
+            if ("405" in _err or "Human Verification" in _err or "awswaf" in _err or "429" in _err
+                    or "Too Many Requests" in _err or "23000" in _err):
                 import random
-                _w = 45 + random.random() * 30
-                debug_log(f"🚦 [{symbol}] Lighter-Anfragelimit (WAF) - pausiere {_w:.0f}s. Poll-Intervall im Grid-Bot auf 5+ Sekunden stellen!")
-                await asyncio.sleep(_w)
+                _w = 30 + random.random() * 30
+                _RL_UNTIL = max(_RL_UNTIL, time.time() + _w)
+                debug_log(f"🚦 [{symbol}] Lighter-Anfragelimit (429/WAF) - alle Grid-Coins pausieren {_w:.0f}s. Poll-Intervall im Grid-Bot auf 5+ Sekunden stellen!")
             else:
                 await asyncio.sleep(5)
 
