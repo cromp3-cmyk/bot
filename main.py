@@ -39,7 +39,7 @@ from copytrade import (
     handle_ct_set_coin_setting, handle_ct_remove_coin_setting, handle_ct_set_trader_defaults,
 )
 from binance_ws import binance_ws_cache_loop
-from grid_scalp import grid_scalp_poll_loop, handle_gc_backtest, handle_gc_reset
+from grid_scalp import grid_scalp_poll_loop, handle_gc_backtest, handle_gc_reset, handle_gc_initbuy
 from screener import screener_loop, handle_screener_index, handle_screener_api, handle_screener_cfg_get, handle_screener_cfg_set, load_screener_cfg
 from vwap_cross import vc_poll_loop
 from vwap_scanner import vwap_scanner_loop, load_vwap_scanner_cfg, handle_vwap_index, handle_vwap_api, handle_vwap_cfg_set, handle_vwap_lighter
@@ -69,6 +69,7 @@ async def start_web_server():
     app.router.add_get("/api/gc/trend", handle_gc_trend)
     app.router.add_post("/api/gc/backtest", handle_gc_backtest)
     app.router.add_post("/api/gc/reset", handle_gc_reset)
+    app.router.add_post("/api/gc/initbuy", handle_gc_initbuy)
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
     app.router.add_post("/api/dv_mc", handle_dv_montecarlo)
     app.router.add_post("/api/rlm_mc", handle_rlm_montecarlo)

@@ -3231,6 +3231,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <button type="button" id="gc-bt">📊 Backtest (14 Tage)</button>
     <button type="button" id="gc-bt28">📊 Backtest (4 Wochen)</button>
     <button type="button" id="gc-reset">♻️ Gitter &amp; Lots zurücksetzen</button>
+    <button type="button" id="gc-initbuy">🟢 Start-Kauf jetzt ausführen</button>
   </div>
   <div id="gc-bt-out" style="font-size:12px; white-space:pre-wrap;"></div>
 </div>
@@ -4453,6 +4454,12 @@ document.getElementById('gc-reset').addEventListener('click', async () => {
   if (!confirm('Gitter und Lot-Buch zurücksetzen? (Bot muss gestoppt sein. Offene Börsen-Position bleibt bestehen und wird NICHT geschlossen.)')) return;
   const res = await fetch(`/api/gc/reset?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
   const d = await res.json(); showToast(d.error ? '❌ ' + d.error : '✅ Zurückgesetzt');
+});
+
+document.getElementById('gc-initbuy').addEventListener('click', async () => {
+  if (!confirm('Start-Kauf jetzt ausführen? Der Bot kauft sofort (Markt-Order) je ein Lot für die Stufen über dem Kurs (Long) bzw. verkauft für die Stufen darunter (Short). Nur wenn keine Position und keine Lots da sind. Bot muss laufen (Start), Modus Grid Classic, nicht Dry-Run für echte Orders.')) return;
+  const res = await fetch(`/api/gc/initbuy?symbol=${currentSymbol}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  const d = await res.json(); showToast(d.error ? '❌ ' + d.error : '✅ Start-Kauf wird im nächsten Tick ausgeführt - siehe Log');
 });
 
 document.getElementById('btn-start').addEventListener('click', async () => {

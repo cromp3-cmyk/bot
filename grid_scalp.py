@@ -1973,6 +1973,28 @@ async def handle_gc_reset(request):
     return web.json_response({"success": True})
 
 
+async def handle_gc_initbuy(request):
+    """Button "Start-Kauf jetzt": schaltet die Option fuer diesen Coin ein und stoesst den Start-Kauf im naechsten Tick an."""
+    from aiohttp import web
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    st = BOTS[symbol]["state"]
+    cfg = BOTS[symbol]["config"]
+    if cfg.get("entry_mode") != "grid_classic":
+        return web.json_response({"error": "Nur im Modus Grid Classic."}, status=409)
+    if not cfg.get("bot_active"):
+        return web.json_response({"error": "Bot erst starten (Start-Knopf), dann Start-Kauf auslösen."}, status=409)
+    if st.get("gc_lots"):
+        return web.json_response({"error": f"Es liegen schon {len(st['gc_lots'])} Lots im Buch - erst Bot stoppen und 'Gitter & Lots zurücksetzen'."}, status=409)
+    cfg["gc_initial_buy"] = True
+    st["gc_init_done"] = False
+    st["gc_init_try"] = 0
+    await save_bot_state()
+    debug_log(f"🟢 [{symbol}] Grid-Bot: Start-Kauf manuell angefordert")
+    return web.json_response({"success": True})
+
+
 # ============================================================================
 # Probe-Helfer: einmal laufen lassen, BEVOR dry_run ausgeht
 # ============================================================================
