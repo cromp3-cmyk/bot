@@ -90,7 +90,8 @@ def _ms(cfg, key):
 
 # Alle Coins handeln ueber DASSELBE Konto/denselben API-Key. Mehrere SignerClients (einer pro Coin) zaehlen die Nonce
 # jeweils fuer sich -> "21104 invalid nonce". Darum: EIN gemeinsamer Client je Konto und alle Sende-Aufrufe nacheinander.
-_ORDER_LOCK = asyncio.Lock()
+import order_gate      # zentrale Sende-Schleuse (Lock, Mindestabstand, Backoff, Sicherung) - gilt fuer alle Strategien
+_ORDER_LOCK = order_gate.ORDER_LOCK
 _SHARED_CLIENTS = {}
 
 
@@ -110,24 +111,16 @@ async def drop_shared_client(role, client):
         _SHARED_CLIENTS.pop(role, None)
 
 
-# Gemeinsame Pause bei Anfragelimit (429 / WAF): alle Coins warten zusammen, sonst bleibt die Sperre bestehen
-_RL_UNTIL = 0.0
-
-
 def _is_nonce_err(err):
-    return err is not None and ("21104" in str(err) or "invalid nonce" in str(err).lower())
+    return order_gate.is_nonce_err(err)
 
 
 async def place_post_only_order(client, market_index, symbol, is_ask, base_amount,
                                 price, coi, reduce_only=False):
-    for attempt in range(3):
-        async with _ORDER_LOCK:
-            tx, tx_hash, err = await _place_post_only_order_raw(client, market_index, symbol, is_ask, base_amount,
-                                                               price, coi, reduce_only)
-        if not _is_nonce_err(err):
-            return tx, tx_hash, err
-        await asyncio.sleep(0.4 * (attempt + 1))
-    return tx, tx_hash, err
+    # Schleuse: Mindestabstand, gemeinsame Pause bei 429, Sicherung nach 5 Ablehnungen in Folge, Nonce-Neuversuch
+    return await order_gate.send(
+        lambda: _place_post_only_order_raw(client, market_index, symbol, is_ask, base_amount, price, coi, reduce_only),
+        kind="place", key=symbol, client=client)
 
 
 async def _place_post_only_order_raw(client, market_index, symbol, is_ask, base_amount,
@@ -159,8 +152,9 @@ async def _place_post_only_order_raw(client, market_index, symbol, is_ask, base_
 
 
 async def cancel_order(client, market_index, coi):
-    async with _ORDER_LOCK:
-        return await asyncio.wait_for(client.cancel_order(market_index=market_index, order_index=coi), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+    return await order_gate.send(
+        lambda: asyncio.wait_for(client.cancel_order(market_index=market_index, order_index=coi), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS),
+        kind="cancel", key=str(market_index), client=client)
 
 
 _auth_cache = {}  # account_index -> (token, expires_ts)
@@ -1116,7 +1110,6 @@ async def grid_scalp_tick(client, symbol):
 
 async def grid_scalp_poll_loop(symbol):
     """In main.py's asyncio.gather einhaengen."""
-    global _RL_UNTIL
     client = None
     client_role = "unset"
     last_idle_log = 0.0
@@ -1135,7 +1128,7 @@ async def grid_scalp_poll_loop(symbol):
             await asyncio.sleep(5)
             continue
 
-        _left = _RL_UNTIL - time.time()
+        _left = order_gate.rate_pause_remaining()
         if _left > 0:
             import random
             await asyncio.sleep(_left + random.random() * 8)     # Streuung: Coins kommen nicht alle im selben Moment zurueck
@@ -1173,9 +1166,7 @@ async def grid_scalp_poll_loop(symbol):
             # dieser IP: ALLE Coins gemeinsam laenger pausieren, sonst bleibt die Sperre bestehen.
             if ("405" in _err or "Human Verification" in _err or "awswaf" in _err or "429" in _err
                     or "Too Many Requests" in _err or "23000" in _err):
-                import random
-                _w = 30 + random.random() * 30
-                _RL_UNTIL = max(_RL_UNTIL, time.time() + _w)
+                _w = order_gate.on_rate_limit(symbol)      # 15 s, dann 30, 60, max. 120 s (nach 5 ruhigen Minuten wieder von vorn)
                 debug_log(f"🚦 [{symbol}] Lighter-Anfragelimit (429/WAF) - alle Grid-Coins pausieren {_w:.0f}s. Poll-Intervall im Grid-Bot auf 5+ Sekunden stellen!")
             else:
                 await asyncio.sleep(5)
@@ -1208,7 +1199,7 @@ GC_DEFAULTS = {
     "gc_levels": 20,               # Abschnitte (= Anzahl Stufen)
     "gc_spacing": "arith",         # arith (gleiche Abstaende) / geo (gleiche Prozent)
     "gc_size_usd": 200.0,          # Notional je Stufe (Lot)
-    "gc_max_lots": 10,             # maximal gleichzeitig gehaltene Lots (Inventar-Limit)
+    "gc_max_lots": 0,              # optionales Limit gleichzeitig offener Positionen (0 = unbegrenzt = Standard-Grid)
     "gc_open_each_side": 6,        # so viele Einstiegs-Orders liegen gleichzeitig im Buch
     "gc_exit_orders": 15,          # Gegen-Orders (Ausstieg) nur fuer die so vielen Lots, die dem Kurs am naechsten liegen (0 = fuer alle)
     "gc_order_cap": 30,            # Boersen-Limit aktiver Limit-Orders je Markt (Lighter: Fehler 21718) - Einstiege werden darauf gedeckelt
@@ -1218,7 +1209,7 @@ GC_DEFAULTS = {
     "gc_trend_tf": "1h",           # Zeitebene des Trends: 5m / 15m / 1h / 4h / 1d
     "gc_trend_ilen": 4,            # Pivot-Laenge intern
     "gc_trend_slen": 50,           # Pivot-Laenge swing
-    "gc_initial_buy": False,       # Original-Grid: beim Start sofort alle Lots fuer die Stufen ueber (Long) / unter (Short) dem Kurs kaufen, Ausstiege nach oben/unten
+    "gc_initial_buy": True,        # Original-Grid: beim Start sofort alle Lots fuer die Stufen ueber (Long) / unter (Short) dem Kurs kaufen, Ausstiege nach oben/unten
     "gc_trend_on_flip": "wait",    # wait = Lots auslaufen lassen (keine neuen Kaeufe), dann wechseln / close = sofort alles schliessen
 }
 GC_COI_BASE = 10 ** 11
@@ -1302,7 +1293,8 @@ def _gc_desired(symbol, cfg, st, rng, levels, best_bid, best_ask):
     n_exit_orders = len(exit_items)
 
     held = {int(l["k"]) for l in lots}
-    free = max(0, int(_gcv(cfg, "gc_max_lots")) - len(lots))
+    _ml = int(_gcv(cfg, "gc_max_lots"))
+    free = 10 ** 9 if _ml <= 0 else max(0, _ml - len(lots))      # 0 = unbegrenzt: wie beim Standard-Grid begrenzt nur die Stufenzahl
     each = min(int(_gcv(cfg, "gc_open_each_side")), free, max(0, int(_gcv(cfg, "gc_order_cap")) - n_exit_orders))
     if st.get("gc_pause_entries"):
         each = 0    # Trend steht gegen das laufende Gitter: nur noch Ausstiege, keine neuen Lots
@@ -1336,7 +1328,7 @@ def _gc_apply_fills(st, rng, levels, filled, prev):
                 continue
             lots.append({"k": idx, "px": levels[idx], "size": size, "t": now_local().isoformat()})
             _dash_entry(st, levels[idx], size, len(lots) > 1)
-            debug_log(f"🟢 Grid: Lot eröffnet @ {levels[idx]:.6g} (Level {idx}, {size}), Lots: {len(lots)}")
+            debug_log(f"🟢 Grid: Position eröffnet @ {levels[idx]:.6g} (Level {idx}, {size}), Positionen: {len(lots)}")
         else:
             hit = [l for l in lots if min(n, max(0, int(l["k"]) + d)) == idx]
             if not hit:
@@ -1377,7 +1369,16 @@ async def _gc_initial_buy(client, symbol, market_index, cfg, st, rng, levels, mi
     else:
         targets = [t for t in range(0, n) if levels[t] < mid - tick]
     targets.sort(key=lambda t: abs(levels[t] - mid))
-    targets = targets[:max(0, int(_gcv(cfg, "gc_max_lots")))]
+    # Standard-Grid: ein Kauf fuer JEDE Stufe ueber dem Kurs. Nur wenn der Nutzer ein Positions-Limit gesetzt hat (>0),
+    # bleibt daneben Platz fuer die Kauf-Orders unter dem Kurs.
+    max_lots = int(_gcv(cfg, "gc_max_lots"))
+    if max_lots > 0:
+        room = max(0, int(_gcv(cfg, "gc_open_each_side")))
+        cap = max(1, max_lots - room) if max_lots > room else max_lots
+        if len(targets) > cap:
+            debug_log(f"ℹ️ [{symbol}] Grid-Bot Start-Kauf: {len(targets)} Stufen über dem Kurs, aber Positions-Limit {max_lots} - es werden nur {cap} gekauft "
+                      f"({room} Plätze bleiben für Kauf-Orders frei). Limit auf 0 setzen = unbegrenzt.")
+        targets = targets[:max(0, cap)]
     if not targets:
         debug_log(f"ℹ️ [{symbol}] Grid-Bot Start-Kauf: keine Stufe {'über' if d > 0 else 'unter'} dem Kurs - nichts zu kaufen")
         return 0
@@ -1434,7 +1435,7 @@ async def _gc_initial_buy(client, symbol, market_index, cfg, st, rng, levels, mi
         _dash_entry(st, entry_px, lot, len(lots) > 1)
     st["entry_count"] = len(lots)
     st["last_entry_price"] = entry_px
-    debug_log(f"🟢 [{symbol}] Grid-Bot Start-Kauf: {len(lots)} Lots à {lot} @ ~{entry_px:.6g} - Ausstiege nach {'oben' if d > 0 else 'unten'} bis {levels[max(targets[:cnt])] if d > 0 else levels[min(targets[:cnt])]:.6g}")
+    debug_log(f"🟢 [{symbol}] Grid-Bot Start-Kauf: {len(lots)} Positionen à {lot} @ ~{entry_px:.6g} - Ausstiege nach {'oben' if d > 0 else 'unten'} bis {levels[max(targets[:cnt])] if d > 0 else levels[min(targets[:cnt])]:.6g}")
     return cnt
 
 
@@ -1851,7 +1852,9 @@ async def grid_classic_tick(client, symbol):
     now = time.time()
     if now - float(st.get("gs_last_heartbeat") or 0) >= 60:
         st["gs_last_heartbeat"] = now
-        debug_log(f"💓 [{symbol}] Grid-Bot {rng['dir']} {'(Dry-Run) ' if dry else ''}Kurs {mid:.6g}, Lots {len(lots)}/{int(_gcv(cfg, 'gc_max_lots'))}, "
+        _ml_ = int(_gcv(cfg, "gc_max_lots"))
+        _lim_txt = f" (Limit {_ml_})" if _ml_ > 0 else ""
+        debug_log(f"💓 [{symbol}] Grid-Bot {rng['dir']} {'(Dry-Run) ' if dry else ''}Kurs {mid:.6g}, Positionen {len(lots)}{_lim_txt}, "
                   f"Orders {len(new_prev)}, Gewinn {float(st.get('gc_realized') or 0):+.3f} $ in {int(st.get('gc_cycles') or 0)} Stufen, offen {upnl:+.3f} $")
 
 
@@ -1878,7 +1881,7 @@ def gc_backtest(candles, cfg, trend=None):
     spacing = _gcv(cfg, "gc_spacing")
     levels = _gc_levels({"lower": lo, "upper": hi, "n": n, "spacing": spacing})
     usd = float(_gcv(cfg, "gc_size_usd"))
-    cap = int(_gcv(cfg, "gc_max_lots"))
+    cap = int(_gcv(cfg, "gc_max_lots")) or 10 ** 9
     stop_pct = float(_gcv(cfg, "gc_stop_pct"))
     on_flip = str(_gcv(cfg, "gc_trend_on_flip"))
     lots = {}          # k -> (px, size)

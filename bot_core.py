@@ -10,6 +10,7 @@ zusammen und startet den Server + alle Hintergrund-Loops.
 """
 
 import asyncio
+import order_gate      # zentrale Sende-Schleuse fuer alle Lighter-Orders
 import websockets
 import aiohttp
 import json
@@ -215,8 +216,8 @@ def default_config():
         "gs_poll_seconds": float(os.getenv("GS_POLL_SECONDS", "2.0")),
         # ===== Klassischer Grid-Bot (entry_mode "grid_classic") =====
         "gc_direction": "long", "gc_lower": 0.0, "gc_upper": 0.0, "gc_auto_pct": 5.0, "gc_levels": 20,
-        "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 10, "gc_open_each_side": 6, "gc_exit_orders": 15,
-        "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0, "gc_initial_buy": False,
+        "gc_spacing": "arith", "gc_size_usd": 200.0, "gc_max_lots": 0, "gc_open_each_side": 6, "gc_exit_orders": 15,
+        "gc_stop_pct": 0.0, "gc_poll_seconds": 5.0, "gc_initial_buy": True,
         "gc_trend_mode": "off", "gc_trend_tf": "1h", "gc_trend_ilen": 4, "gc_trend_slen": 50, "gc_trend_on_flip": "wait",
         # ===== Scalp VWAP OBV RSI (Mean-Reversion Scalper, entry_mode "scalp_vwap_obv_rsi") =====
         # Positionsgroesse laeuft ueber die gemeinsamen margin/leverage-Felder oben (wie bei
@@ -1059,13 +1060,15 @@ async def place_market_order(client, market_index, symbol, is_ask, base_amount, 
     adjusted_price = reference_price * 0.98 if is_ask else reference_price * 1.02
     price_scaled = int(adjusted_price * (10 ** price_decimals))
     try:
-        tx, tx_hash, err = await asyncio.wait_for(client.create_order(
+        # Zentrale Sende-Schleuse (order_gate): gemeinsamer Lock + Mindestabstand + Nonce-Neuversuch. urgent=True: Markt-Orders
+        # (Ein-/Ausstiege) werden von Pause/Sicherung nie blockiert.
+        tx, tx_hash, err = await order_gate.send(lambda: asyncio.wait_for(client.create_order(
             market_index=market_index, client_order_index=int(time.time() * 1000),
             base_amount=base_amount, price=price_scaled, is_ask=is_ask,
             order_type=client.ORDER_TYPE_MARKET,
             time_in_force=client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL, reduce_only=reduce_only,
             order_expiry=client.DEFAULT_IOC_EXPIRY,
-        ), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+        ), timeout=EXCHANGE_CALL_TIMEOUT_SECONDS), kind="market", key=symbol, client=client, urgent=True)
     except asyncio.TimeoutError:
         debug_log(f"⚠️ [{symbol}] Order-Aufruf nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s abgebrochen (Timeout) - Boerse/Chain hat nicht rechtzeitig geantwortet")
         return None, None, f"Timeout nach {EXCHANGE_CALL_TIMEOUT_SECONDS}s"
@@ -1548,6 +1551,7 @@ async def _execute_exit_locked(symbol, price, reason):
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     market_index = MARKET_INDICES[symbol]
+    debug_log(f"🚪 [{symbol}] Exit ({reason}) startet @ {price} - Konto {account_role(cfg) or 'main'}, dry_run={cfg.get('dry_run')}")
 
     # Erneut pruefen, NACHDEM der Lock da ist: ein zweiter Klick auf "Schliessen" (oder ein Signal, das gleichzeitig
     # ausloest) kommt sonst an der Vorab-Pruefung vorbei, obwohl die erste Anfrage die Position inzwischen geschlossen hat.
@@ -1563,7 +1567,7 @@ async def _execute_exit_locked(symbol, price, reason):
         client = get_lighter_client(account_role(BOTS[symbol]["config"]))
         if client is None:
             debug_log(f"⚠️ [{symbol}] Kein Lighter-Client - Exit übersprungen (Position bleibt offen!)")
-            return
+            return False
         precision = get_precision(symbol)
         base_amount = int(round(st["total_coin_size"] * precision))
         is_ask = st["position"] == "long"
@@ -1577,7 +1581,7 @@ async def _execute_exit_locked(symbol, price, reason):
         if err:
             await _safe_close_client(client)
             debug_log(f"⚠️ [{symbol}] Exit-Order fehlgeschlagen - Position bleibt offen!", {"error": str(err)})
-            return
+            return False
 
         # Der tatsaechliche Fuellpreis einer Market-Order (und damit der echte PnL) kann vom
         # theoretischen Zielpreis abweichen (Slippage, Latenz, schnelle Kursbewegung) - deshalb
@@ -1772,6 +1776,97 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .coin-pill:hover { border-color: rgba(96,165,250,0.4); }
   .coin-pill.selected { border-color: var(--green); background: rgba(31,207,110,0.1); }
   @media (max-width:760px){ .container{padding:0 12px;} .topbar{padding:10px 12px;} .panel-card{padding:12px;border-radius:14px;} #wac-price{height:320px !important;} form{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));} }
+
+  /* ===== Glassmorphism, warm & hell (Beige / Sand / Koralle) - nur Optik, keine Funktionsaenderung ===== */
+  :root {
+    --bg: #cdbba6;
+    --panel: rgba(255,255,255,0.34);
+    --panel-border: rgba(255,255,255,0.58);
+    --text: #1e1913;
+    --text-dim: #6d5f50;
+    --accent: #e0663f;
+    --accent2: #e0663f;
+    --green: #17915a;
+    --red: #d2354b;
+    --yellow: #b9770e;
+    --ink: #17130f;
+    --glass-blur: blur(22px) saturate(140%);
+    --glass-shadow: 0 10px 34px rgba(70,45,20,0.18), inset 0 1px 0 rgba(255,255,255,0.75);
+  }
+  html { background: var(--bg); }
+  body {
+    color: var(--text);
+    background:
+      radial-gradient(1200px 520px at 50% -14%, rgba(86,58,36,0.62), transparent 66%),
+      radial-gradient(900px 640px at 22% 38%, rgba(255,246,232,0.75), transparent 64%),
+      radial-gradient(800px 620px at 96% 22%, rgba(226,122,84,0.38), transparent 64%),
+      radial-gradient(900px 640px at 6% 104%, rgba(238,208,160,0.70), transparent 64%),
+      linear-gradient(180deg, #d9ccbb, #b9a48d);
+    background-attachment: fixed;
+  }
+  .topbar {
+    background: rgba(255,255,255,0.34); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+    border-bottom: 1px solid rgba(255,255,255,0.6); box-shadow: 0 6px 24px rgba(70,45,20,0.14);
+    position: sticky; top: 0; z-index: 50;
+  }
+  .brand { color: var(--text); }
+  .card, .panel-card, .grid-stack-item-content, canvas {
+    background: linear-gradient(145deg, rgba(255,255,255,0.52), rgba(255,255,255,0.26));
+    -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--panel-border); box-shadow: var(--glass-shadow);
+  }
+  .card, .panel-card { border-radius: 22px; }
+  .grid-stack-item-content { border-radius: 20px; }
+  .card .value { color: var(--text); }
+  .widget-body .panel-card { background: transparent; border: none; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .widget-drag-handle { background: rgba(255,255,255,0.30); border-bottom: 1px solid rgba(255,255,255,0.55); color: var(--text-dim); }
+  #wac-price canvas, #wac-wt canvas { background: transparent; border: 0; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .card:hover { border-color: rgba(255,255,255,0.9); }
+  input, select.cfg, select#symbol-select, select.pill-select, button.pill {
+    background: rgba(255,255,255,0.50); border: 1px solid rgba(90,65,40,0.20); color: var(--text); color-scheme: light;
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  }
+  input:focus, select.cfg:focus, select#symbol-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(224,102,63,0.22); }
+  button, button.neutral, #btn-reset-layout {
+    background: rgba(255,255,255,0.58); border: 1px solid rgba(255,255,255,0.80); color: var(--text);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    box-shadow: 0 2px 8px rgba(70,45,20,0.12), inset 0 1px 0 rgba(255,255,255,0.8);
+    transition: transform .12s, background .15s, border-color .15s;
+  }
+  button:hover { background: rgba(255,255,255,0.85); filter: none; }
+  button.start { background: linear-gradient(180deg, #2bb673, #17915a); color: #fff; border: 1px solid rgba(255,255,255,0.45); }
+  button.stop  { background: linear-gradient(180deg, #ea6a55, #c93a3a); color: #fff; border: 1px solid rgba(255,255,255,0.40); }
+  button.danger { background: rgba(210,53,75,0.10); color: #b4213a; border: 1px solid rgba(210,53,75,0.55); }
+  #btn-reverse { color: #2d4f9c !important; border-color: rgba(59,100,200,0.55) !important; }
+  button.pill { background: rgba(255,255,255,0.50); color: var(--text-dim); }
+  button.pill.on, .coin-pill.selected { background: var(--ink); border-color: var(--ink); color: #fff; box-shadow: 0 4px 14px rgba(23,19,15,0.30); }
+  .coin-pill { background: rgba(255,255,255,0.45); border: 1px solid rgba(255,255,255,0.75); color: var(--text);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+  .coin-pill:hover { border-color: var(--accent); background: rgba(255,255,255,0.75); }
+  th, td { border-bottom: 1px solid rgba(90,65,40,0.13); }
+  tr:hover td { background: rgba(255,255,255,0.40); }
+  .badge { -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+  .badge.dry { color: #4540b0; }
+  .badge.live { color: #b4213a; }
+  .badge.active { color: #0f7440; }
+  .badge.paused { color: #8a5a06; }
+  .badge.pending { color: #a81f38; }
+  .warn, .start-banner { color: #a81f38; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+  a[style*="93c5fd"] { color: #9a4a28 !important; }
+  .brand .dot { box-shadow: 0 0 12px rgba(23,145,90,.55); }
+  /* eigene Dialoge + Hinweis-Meldung (uiConfirm / showToast) */
+  .ui-ov { position:fixed; inset:0; background:rgba(50,34,20,.32); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); z-index:99999; display:flex; align-items:center; justify-content:center; padding:16px; }
+  .ui-box { background: linear-gradient(145deg, rgba(255,255,255,0.80), rgba(255,255,255,0.55)); -webkit-backdrop-filter: blur(26px) saturate(150%); backdrop-filter: blur(26px) saturate(150%);
+    color: var(--text); border:1px solid rgba(255,255,255,0.85); border-radius:22px; max-width:480px; width:100%; padding:22px; font:14px/1.5 'Inter',system-ui,sans-serif; box-shadow:0 24px 64px rgba(60,38,18,.35), inset 0 1px 0 rgba(255,255,255,.9); }
+  .ui-toast { position:fixed; bottom:20px; right:20px; background: rgba(23,19,15,0.86); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    color:#fff; padding:10px 18px; border-radius:999px; box-shadow:0 8px 28px rgba(40,25,10,.35); z-index:9999; font-size:14px; transition:opacity .3s; }
+  /* Geraete ohne Weichzeichner: deckende helle Flaechen als Ersatz */
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .card, .panel-card, .grid-stack-item-content, .topbar, .ui-box, canvas { background: #efe6da; }
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    .card, .panel-card, .grid-stack-item-content, .topbar, .ui-box, canvas, button, input, select { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; background-color: #efe6da; }
+  }
 </style>
 </head>
 <body>
@@ -3053,10 +3148,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="grid_classic"><label>Anzahl Stufen</label><input type="number" step="1" id="gc_levels"></div>
   <div data-mode="grid_classic"><label>Abstand</label><select class="cfg" id="gc_spacing"><option value="arith">gleiche Abstände ($)</option><option value="geo">gleiche Prozent</option></select></div>
   <div data-mode="grid_classic"><label>Notional je Stufe ($)</label><input type="number" step="any" id="gc_size_usd"></div>
-  <div data-mode="grid_classic"><label><input type="checkbox" id="gc_initial_buy" style="width:auto; vertical-align:middle;"> Original-Grid: beim Start sofort alle Lots für die Stufen über dem Kurs kaufen (Long; Short: unter dem Kurs verkaufen) und Ausstiege setzen. Begrenzt durch „Max. gleichzeitige Lots“ — für ein volles Gitter dort mindestens die Anzahl der Stufen über dem Kurs eintragen.</label></div>
-  <div data-mode="grid_classic"><label>Max. gleichzeitige Lots</label><input type="number" step="1" id="gc_max_lots"></div>
+  <div data-mode="grid_classic"><label><input type="checkbox" id="gc_initial_buy" style="width:auto; vertical-align:middle;"> Standard-Grid: beim Start per Markt-Order für jede Stufe über dem Kurs eine Position kaufen (Short: unter dem Kurs verkaufen) und die Verkaufs-Orders setzen. Unter dem Kurs liegen Kauf-Orders.</label></div>
+  <div data-mode="grid_classic"><label>Max. gleichzeitige Positionen (0 = unbegrenzt = Standard-Grid)</label><input type="number" step="1" id="gc_max_lots"></div>
   <div data-mode="grid_classic"><label>Einstiegs-Orders im Buch</label><input type="number" step="1" id="gc_open_each_side"></div>
-  <div data-mode="grid_classic"><label>Gegen-Orders im Buch (nur die nächsten Lots, 0 = alle)</label><input type="number" step="1" min="0" id="gc_exit_orders"></div>
+  <div data-mode="grid_classic"><label>Verkaufs-Orders im Buch (nur für die nächsten Positionen, 0 = alle)</label><input type="number" step="1" min="0" id="gc_exit_orders"></div>
   <div data-mode="grid_classic"><label>Notbremse: % außerhalb (0 = aus)</label><input type="number" step="any" id="gc_stop_pct"></div>
   <div data-mode="grid_classic"><label>Poll (Sek.)</label><input type="number" step="any" id="gc_poll_seconds"></div>
   <div data-mode="grid_classic"><label>🧭 Richtung automatisch: Marktstruktur-Trend (BOS/CHoCH) oder Wellenanker-Signal – Aufwärts/Long = Long-Gitter, Abwärts/Short = Short-Gitter</label>
@@ -3230,7 +3325,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
     <button type="button" id="gc-bt">📊 Backtest (14 Tage)</button>
     <button type="button" id="gc-bt28">📊 Backtest (4 Wochen)</button>
-    <button type="button" id="gc-reset">♻️ Gitter &amp; Lots zurücksetzen</button>
+    <button type="button" id="gc-reset">♻️ Gitter &amp; Positionen zurücksetzen</button>
     <button type="button" id="gc-initbuy">🟢 Start-Kauf jetzt ausführen</button>
   </div>
   <div id="gc-bt-out" style="font-size:12px; white-space:pre-wrap;"></div>
@@ -4396,7 +4491,7 @@ async function gcPoll() {
     const c = (x) => x >= 0 ? 'var(--green,#1fcf6e)' : 'var(--red,#f0354b)';
     const box = (t, val, col) => `<div style="background:rgba(255,255,255,.04);border-radius:12px;padding:8px 10px;"><div style="font-size:11px;opacity:.6">${t}</div><div style="font-size:16px;font-weight:700;${col?'color:'+col:''}">${val}</div></div>`;
     k.innerHTML = box('Stufengewinn (realisiert)', '$'+v.realized.toFixed(2), c(v.realized)) + box('Stufen', v.cycles) +
-      box('Offene Position (unreal.)', '$'+v.upnl.toFixed(2), c(v.upnl)) + box('Lots', v.lots.length+' / '+v.max_lots) +
+      box('Offene Position (unreal.)', '$'+v.upnl.toFixed(2), c(v.upnl)) + box('Positionen', v.lots.length + (v.max_lots > 0 ? ' / '+v.max_lots : '')) +
       box('Gewinn je Stufe', '≈ $'+v.step_profit.toFixed(3));
     const ga = d.grid_account; const acc = ga ? (ga.sub ? ` · 🟢 Unterkonto ${ga.index}` : ` · Hauptkonto ${ga.index}`) : '';
     inf.textContent = `${v.dir.toUpperCase()}-Gitter ${v.lower.toPrecision(6)} … ${v.upper.toPrecision(6)}, ${v.n} Stufen, ${v.orders.length} Orders im Buch` + acc + (v.stopped ? ' · ⛔ ' + v.stopped : '');
@@ -4589,7 +4684,7 @@ const WAC = {mode: 'live', price: null, wt: null, cs: null, l1: null, l2: null, 
 function wacInit() {
   if (WAC.inited || !window.LightweightCharts) return;
   const LW = window.LightweightCharts;
-  const opt = {layout: {background: {color: 'transparent'}, textColor: '#9aa4bf'}, grid: {vertLines: {color: '#171b22'}, horzLines: {color: '#171b22'}},
+  const opt = {layout: {background: {color: 'transparent'}, textColor: '#6d5f50'}, grid: {vertLines: {color: 'rgba(90,65,40,0.10)'}, horzLines: {color: 'rgba(90,65,40,0.10)'}},
                rightPriceScale: {borderColor: '#242932'},
                localization: {timeFormatter: t => new Date(t * 1000).toLocaleString('de-DE', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: (WAC.tf && /s$/.test(WAC.tf)) ? '2-digit' : undefined, hour12: false})},
                timeScale: {borderColor: '#242932', timeVisible: true, secondsVisible: true, rightOffset: 25,
@@ -6837,7 +6932,7 @@ async function refresh() {
             data: { labels: qLabels, datasets: qDatasets },
             options: {
               responsive:true, maintainAspectRatio:false, animation:false,
-              scales: { x:{ display:false }, y:{ min:0, max:100, ticks:{color:'#9ca3af'} } },
+              scales: { x:{ display:false }, y:{ min:0, max:100, ticks:{color:'#6d5f50'} } },
               plugins:{legend:{labels:{color:'#e5e7eb', boxWidth:10, font:{size:10}}}}
             }
           });
@@ -7463,9 +7558,9 @@ document.addEventListener('click', (ev) => {
 function uiConfirm(msg) {
   return new Promise((resolve) => {
     const ov = document.createElement('div');
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px;';
+    ov.className = 'ui-ov';
     const box = document.createElement('div');
-    box.style.cssText = 'background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:10px;max-width:480px;width:100%;padding:18px;font:14px/1.45 system-ui,sans-serif;';
+    box.className = 'ui-box';
     const p = document.createElement('div'); p.textContent = msg; p.style.cssText = 'white-space:pre-wrap;margin-bottom:14px;';
     const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;';
     const mk = (t, ok) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = t; b.onclick = () => { ov.remove(); resolve(ok); }; return b; };
@@ -7479,7 +7574,7 @@ function showToast(msg) {
   if (!el) {
     el = document.createElement('div');
     el.id = 'save-toast';
-    el.style.cssText = 'position:fixed;bottom:20px;right:20px;background:#1e293b;color:#fff;padding:10px 16px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:9999;font-size:14px;transition:opacity .3s;';
+    el.className = 'ui-toast';
     document.body.appendChild(el);
   }
   el.textContent = msg;
@@ -8505,6 +8600,8 @@ async def handle_close_position(request):
     if symbol not in BOTS:
         return web.json_response({"error": "unknown symbol"}, status=404)
     st = BOTS[symbol]["state"]
+    debug_log(f"🖱️ [{symbol}] Dashboard: 'Position schließen' angefordert (Modus {BOTS[symbol]['config'].get('entry_mode')}, Position {st.get('position')}, "
+              f"Größe {st.get('total_coin_size')}, Preis {st.get('last_price')})")
     if BOTS[symbol]["config"].get("entry_mode") == "grid_classic":
         # Grid Classic: Lots sind ein virtuelles Buch - echte Boersen-Position schliessen, Lots leeren, Bot stoppen
         from grid_scalp import gc_manual_close
@@ -8517,10 +8614,14 @@ async def handle_close_position(request):
             return web.json_response({"error": msg}, status=500)
         return web.json_response({"success": True, "message": msg})
     if st["position"] is None:
+        debug_log(f"ℹ️ [{symbol}] Schließen abgelehnt: der Bot kennt keine offene Position (st.position ist leer)")
         return web.json_response({"error": "keine offene Position"}, status=400)
     if st["last_price"] is None:
+        debug_log(f"ℹ️ [{symbol}] Schließen abgelehnt: kein aktueller Preis bekannt")
         return web.json_response({"error": "kein aktueller Preis bekannt"}, status=400)
-    await execute_exit(symbol, st["last_price"], "MANUAL")
+    res = await execute_exit(symbol, st["last_price"], "MANUAL")
+    if res is False:
+        return web.json_response({"error": "Schließen nicht ausgeführt - Grund steht im Log (Zeile mit dem Coin)"}, status=500)
     return web.json_response({"success": True})
 
 
