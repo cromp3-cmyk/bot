@@ -4847,7 +4847,8 @@ function wacSetLbTrades(list) {
         priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
       bs.setData([{time: t.t1, value: val}, {time: t.t2 > t.t1 ? t.t2 : t.t1 + 1, value: val}]); wacTradeSeries.push(bs);
     };
-    zone(t.tp, '34,197,94'); zone(t.sl, '239,68,68');
+    if (t.tp !== null && t.tp !== undefined) zone(t.tp, '34,197,94');
+    if (t.sl !== null && t.sl !== undefined) zone(t.sl, '239,68,68');
     if (t.box_t) {   // die Box dieses Trades: von der Sweep-Kerze bis zum Einstieg, gelb umrandet
       const cb = t.kind === 'long' ? '34,197,94' : '239,68,68';
       const bb = WAC.price.addBaselineSeries({baseValue: {type: 'price', price: t.box_bottom}, topFillColor1: 'rgba(250,204,21,0.18)', topFillColor2: 'rgba(250,204,21,0.18)',
@@ -4859,6 +4860,13 @@ function wacSetLbTrades(list) {
     }
     const ls = WAC.price.addLineSeries({color: 'rgba(230,230,230,0.9)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, title: t.result});
     ls.setData([{time: t.t1, value: t.entry}, {time: t.t2 > t.t1 ? t.t2 : t.t1 + 1, value: t.entry}]); wacTradeSeries.push(ls);
+    if (t.trail && t.trail.length) {   // mitlaufendes Band (Stufenlinie, orange) ab TP1; Ende = Ausstieg
+      const pts = []; let lastT = 0;
+      t.trail.forEach(q => { const tm = q[0] > lastT ? q[0] : lastT + 1; pts.push({time: tm, value: q[1]}); lastT = tm; });
+      const endT = t.t2 > lastT ? t.t2 : lastT + 1; pts.push({time: endT, value: pts[pts.length - 1].value});
+      const ts2 = WAC.price.addLineSeries({color: 'rgba(249,115,22,0.95)', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, lineType: 1});
+      ts2.setData(pts); wacTradeSeries.push(ts2);
+    }
   });
 }
 let wacPathSeries = null;
@@ -4984,7 +4992,7 @@ async function wacPollLive() {
   const isMf = document.getElementById('entry_mode').value === 'mom_field';
   const isAr = document.getElementById('entry_mode').value === 'auction_trend';
   document.getElementById('wac-wtbox').style.display = (isWa || isMt || isWd || isMf || isAr) ? '' : 'none';
-  document.getElementById('wac-tab-bt').style.display = isWa ? '' : 'none';
+  document.getElementById('wac-tab-bt').style.display = (isWa || document.getElementById('entry_mode').value === 'gold_scalper') ? '' : 'none';
   const wtLab = document.querySelector('#wac-wtbox > div');
   if (wtLab) wtLab.textContent = isAr ? 'TREND-SCORE (blau) und Wechsel-Schwelle (gelb, positiv/negativ spiegelt sich) – Zustand wechselt, wenn der Score die Schwelle der Gegenrichtung überschreitet · Hintergrund grün = LONG, rot = SHORT · Pfad: grün/lila' : isMf ? 'MOMENTUM (blau, Nulllinie) – grüner Hintergrund = Wert über 0 (BUY), roter Hintergrund = Wert unter 0 (SELL)' : isPm ? 'MOMENTUM (Pure Momentum Oscillator) – gestrichelt: Short-/Long-Schwelle, Pfeil bei jedem Farbwechsel' : isMt ? 'TREND % (Ø der Blöcke, MTF Spread) – gestrichelt: Schwellen Rot/Grün bzw. Buy-/Sell-Level' : (isWd ? 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Divergenz-Schwellen · Divergenz-Linien: grün = bullisch, rot = bärisch, gestrichelt = hidden' : 'WaveTrend (Welle blau, Signallinie gelb) – gestrichelt: Levels');
   wacInit(); if (!WAC.inited) return;
@@ -5036,6 +5044,7 @@ function wacShowBacktest() {
   const b = WAC.bt, info = document.getElementById('wac-info');
   if (!b) { info.innerText = 'Noch kein Backtest – unten „Backtest starten“ klicken.'; return; }
   wacRender(b.chart, wacBtMarkers(b.trades));
+  wacSetLbTrades((b.chart && b.chart.lb_trades) || []);
   WAC.price.timeScale().fitContent();
   const n = (b.trades || []).filter(t => t.pnl !== null && t.pnl !== undefined).length;
   info.innerText = `Backtest ${b.symbol} ${b.resolution}: ${n} Trades im Chart (letzte ${b.chart.candles.length} Kerzen)`;
