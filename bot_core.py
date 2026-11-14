@@ -4837,7 +4837,10 @@ function wacSetBoxes(list) {
   });
 }
 let wacTradeSeries = [];
-function wacSetLbTrades(list) {
+function wacSetLbTrades(list, t0) {
+  // t0 = Zeit der ersten Kerze im Chart. Trades, die davor eingestiegen sind, bleiben weg: ihre Linien
+  // wuerden sonst quer ueber den ganzen Chart laufen und die Zeitachse nach links aufreissen.
+  if (t0) list = (list || []).filter(t => t.t1 >= t0);
   const sig = JSON.stringify(list || []); if (sig === WAC.tradeSig) return; WAC.tradeSig = sig;
   wacTradeSeries.forEach(s => { try { WAC.price.removeSeries(s); } catch (e) {} }); wacTradeSeries = [];
   const few = (list || []).length <= 5;    // bei wenigen Trades darf das Ergebnis an der Achse stehen, sonst wird die Preisachse mit SL/TRAIL-Schildern zugepflastert
@@ -5016,7 +5019,7 @@ async function wacPollLive() {
     wacSetBgFields(d.bg_fields, d.candles);
     wacSetBoxes(d.boxes);
     wacSetPath(d.ar_path);
-    wacSetLbTrades(d.lb_trades);
+    wacSetLbTrades(d.lb_trades, (d.candles && d.candles.length) ? d.candles[0].time : 0);
     if (first) { WAC.price.timeScale().setVisibleLogicalRange({from: d.candles.length - 110, to: d.candles.length + 40}); WAC.fitted = true; WAC.sym = sym; }
     const wtTxt = isAr ? ` · Trend-Score ${d.wt1v} (Schwelle ${d.wt2v})` : isMf ? ` · Momentum ${d.wt1v} (vorher ${d.wt2v})` : (isWa || isWd) ? ` · WT1 ${d.wt1v} / WT2 ${d.wt2v}` : (isMt ? (isPm ? ` · Momentum ${d.wt1v}` : ` · Trend % ${d.wt1v}`) : '');
     const p = d.position;
@@ -5045,10 +5048,13 @@ function wacShowBacktest() {
   wacSetPosition(null); wacSetOverlays([]); wacSetGrid(null);
   const b = WAC.bt, info = document.getElementById('wac-info');
   if (!b) { info.innerText = 'Noch kein Backtest – unten „Backtest starten“ klicken.'; return; }
-  wacRender(b.chart, wacBtMarkers(b.trades));
-  try { wacSetLbTrades((b.chart && b.chart.lb_trades) || []); } catch (e) { console.error(e); }
+  const t0 = (b.chart.candles && b.chart.candles.length) ? b.chart.candles[0].time : 0;
+  // nur Trades aus dem gezeigten Ausschnitt - sonst stapeln sich alle aelteren Ausstiegs-Punkte auf der ersten Kerze
+  const inView = (b.trades || []).filter(t => { const x = t.exit_ts || t.row_ts || t.entry_ts; return !x || Math.floor(x / 1000) >= t0; });
+  wacRender(b.chart, wacBtMarkers(inView));
+  try { wacSetLbTrades((b.chart && b.chart.lb_trades) || [], t0); } catch (e) { console.error(e); }
   WAC.price.timeScale().fitContent();
-  const n = (b.trades || []).filter(t => t.pnl !== null && t.pnl !== undefined).length;
+  const n = inView.filter(t => t.pnl !== null && t.pnl !== undefined).length;
   info.innerText = `Backtest ${b.symbol} ${b.resolution}: ${n} Trades im Chart (letzte ${b.chart.candles.length} Kerzen)`;
 }
 function wacShowLive() {

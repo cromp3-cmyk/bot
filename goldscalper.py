@@ -466,12 +466,12 @@ async def run_gq_backtest(symbol, cfg, days, exclude_top_n=1):
     trades = _gq_simulate(candles, cfg, buy, sell, atr, _gq_warmup(p), p, rec=rec)
     stats = summarize_backtest_trades(trades, exclude_top_n)
     nn = len(base_ts)
-    off = max(0, nn - 1000)      # immer die letzten 1000 Kerzen - so bleiben SL-/TP1-Flaechen und das mitlaufende Band gut lesbar
+    off = max(0, nn - 20000)     # moeglichst der ganze Backtest-Zeitraum, damit JEDER Trade mit Einstieg/SL/TP1 im Chart steht
     chart = {"candles": [{"time": base_ts[i] // 1000, "open": candles[1][i], "high": candles[2][i], "low": candles[3][i], "close": candles[4][i]} for i in range(off, nn)],
              "wt1": [], "wt2": [], "levels": [], "entry_mode": "gq", "wt1v": 0, "wt2v": 0, "bars": nn,
              "markers": [{"time": base_ts[i] // 1000, "kind": "long" if buy[i] else "short", "price": candles[4][i]} for i in range(off, nn) if buy[i] or sell[i]],
              "lb_trades": [{"t1": r["t1"], "t2": r["t2"], "kind": r["dir"], "entry": r["entry"], "tp": r["tp1"], "sl": r["sl"], "tp1_t": r["tp1_t"],
-                            "trail": r["trail"], "result": r["result"] or ""} for r in rec if r["t2"] is not None and r["t2"] >= base_ts[off] // 1000][-80:]}
+                            "trail": r["trail"], "result": r["result"] or ""} for r in rec if r["t2"] is not None and r["t2"] >= base_ts[off] // 1000][-500:]}
     actual_days = (base_ts[-1] - base_ts[0]) / 86_400_000
     return {
         "symbol": symbol, "entry_mode": "gold_scalper", "resolution": resolution,
