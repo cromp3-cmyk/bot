@@ -5048,6 +5048,11 @@ function wacShowBacktest() {
   wacRender(b.chart, wacBtMarkers(inView));
   try { wacSetLbTrades((b.chart && b.chart.lb_trades) || []); } catch (e) { console.error(e); }
   WAC.price.timeScale().fitContent();
+  const lbt = (b.chart && b.chart.lb_trades) || [];
+  if (b.entry_mode === 'gold_scalper' && lbt.length && b.chart.candles.length > 300) {   // viele Kerzen geladen: auf die letzten Trades zoomen, damit SL/TP-Flaechen lesbar sind (Rest per Scrollen/"Alles")
+    const bar = b.chart.candles[1].time - b.chart.candles[0].time, last = lbt[lbt.length - 1], first = lbt[Math.max(0, lbt.length - 3)];
+    try { WAC.price.timeScale().setVisibleRange({from: Math.max(t0, first.t1 - bar * 40), to: (last.t2 || last.t1) + bar * 40}); } catch (e) {}
+  }
   const n = inView.filter(t => t.pnl !== null && t.pnl !== undefined).length;
   info.innerText = `Backtest ${b.symbol} ${b.resolution}: ${n} Trades im Chart (letzte ${b.chart.candles.length} Kerzen)`;
 }
