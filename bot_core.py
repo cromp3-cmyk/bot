@@ -1887,7 +1887,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v14.11-a</span></div>
   <div class="topbar-right">
     <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
       <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
