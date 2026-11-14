@@ -4840,15 +4840,17 @@ let wacTradeSeries = [];
 function wacSetLbTrades(list) {
   const sig = JSON.stringify(list || []); if (sig === WAC.tradeSig) return; WAC.tradeSig = sig;
   wacTradeSeries.forEach(s => { try { WAC.price.removeSeries(s); } catch (e) {} }); wacTradeSeries = [];
-  (list || []).forEach(t => {
-    const zone = (val, col) => {
+  const few = (list || []).length <= 5;    // bei wenigen Trades darf das Ergebnis an der Achse stehen, sonst wird die Preisachse mit SL/TRAIL-Schildern zugepflastert
+  (list || []).forEach((t, ti) => {
+    const lab = ti === (list.length - 1);   // nur beim letzten Trade die Achsen-Beschriftung (sonst klebt sie bei jedem Trade an der Preisachse)
+    const zone = (val, col, title) => {
       const bs = WAC.price.addBaselineSeries({baseValue: {type: 'price', price: t.entry}, topFillColor1: `rgba(${col},0.18)`, topFillColor2: `rgba(${col},0.18)`,
         bottomFillColor1: `rgba(${col},0.18)`, bottomFillColor2: `rgba(${col},0.18)`, topLineColor: `rgba(${col},0.9)`, bottomLineColor: `rgba(${col},0.9)`, lineWidth: 1,
-        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, title: title || ''});
       bs.setData([{time: t.t1, value: val}, {time: t.t2 > t.t1 ? t.t2 : t.t1 + 1, value: val}]); wacTradeSeries.push(bs);
     };
-    if (t.tp !== null && t.tp !== undefined) zone(t.tp, '34,197,94');
-    if (t.sl !== null && t.sl !== undefined) zone(t.sl, '239,68,68');
+    if (t.tp !== null && t.tp !== undefined) zone(t.tp, '34,197,94', lab ? 'TP1' : '');
+    if (t.sl !== null && t.sl !== undefined) zone(t.sl, '239,68,68', lab ? 'SL' : '');
     if (t.box_t) {   // die Box dieses Trades: von der Sweep-Kerze bis zum Einstieg, gelb umrandet
       const cb = t.kind === 'long' ? '34,197,94' : '239,68,68';
       const bb = WAC.price.addBaselineSeries({baseValue: {type: 'price', price: t.box_bottom}, topFillColor1: 'rgba(250,204,21,0.18)', topFillColor2: 'rgba(250,204,21,0.18)',
@@ -4858,13 +4860,13 @@ function wacSetLbTrades(list) {
       const bl = WAC.price.addLineSeries({color: 'rgba(250,204,21,0.95)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
       bl.setData([{time: t.box_t, value: t.box_bottom}, {time: t.t1, value: t.box_bottom}]); wacTradeSeries.push(bl);
     }
-    const ls = WAC.price.addLineSeries({color: 'rgba(230,230,230,0.9)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, title: t.result});
+    const ls = WAC.price.addLineSeries({color: 'rgba(230,230,230,0.9)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, title: lab ? 'Einstieg' : (few ? t.result : '')});
     ls.setData([{time: t.t1, value: t.entry}, {time: t.t2 > t.t1 ? t.t2 : t.t1 + 1, value: t.entry}]); wacTradeSeries.push(ls);
     if (t.trail && t.trail.length) {   // mitlaufendes Band (Stufenlinie, orange) ab TP1; Ende = Ausstieg
       const pts = []; let lastT = 0;
       t.trail.forEach(q => { const tm = q[0] > lastT ? q[0] : lastT + 1; pts.push({time: tm, value: q[1]}); lastT = tm; });
       const endT = t.t2 > lastT ? t.t2 : lastT + 1; pts.push({time: endT, value: pts[pts.length - 1].value});
-      const ts2 = WAC.price.addLineSeries({color: 'rgba(249,115,22,0.95)', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, lineType: 1});
+      const ts2 = WAC.price.addLineSeries({color: 'rgba(249,115,22,0.95)', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, lineType: 1, title: lab ? 'Band' : ''});
       ts2.setData(pts); wacTradeSeries.push(ts2);
     }
   });
@@ -5043,12 +5045,10 @@ function wacShowBacktest() {
   wacSetPosition(null); wacSetOverlays([]); wacSetGrid(null);
   const b = WAC.bt, info = document.getElementById('wac-info');
   if (!b) { info.innerText = 'Noch kein Backtest – unten „Backtest starten“ klicken.'; return; }
-  const t0 = (b.chart.candles && b.chart.candles.length) ? b.chart.candles[0].time : 0;
-  const inView = (b.trades || []).filter(t => { const x = t.exit_ts || t.row_ts || t.entry_ts; return !x || Math.floor(x / 1000) >= t0; });   // nur Trades im sichtbaren Ausschnitt (sonst stapeln sich alte Punkte am linken Rand)
-  wacRender(b.chart, wacBtMarkers(inView));
+  wacRender(b.chart, wacBtMarkers(b.trades));
   try { wacSetLbTrades((b.chart && b.chart.lb_trades) || []); } catch (e) { console.error(e); }
   WAC.price.timeScale().fitContent();
-  const n = inView.filter(t => t.pnl !== null && t.pnl !== undefined).length;
+  const n = (b.trades || []).filter(t => t.pnl !== null && t.pnl !== undefined).length;
   info.innerText = `Backtest ${b.symbol} ${b.resolution}: ${n} Trades im Chart (letzte ${b.chart.candles.length} Kerzen)`;
 }
 function wacShowLive() {
