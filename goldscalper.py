@@ -53,6 +53,7 @@ def _gq_params(cfg):
         "buy_level": _f(cfg, "gq_buy_level", 1.0),
         "sell_level": _f(cfg, "gq_sell_level", 1.0),
         "atr_len": max(1, int(cfg.get("gq_atr_len", 14) or 14)),
+        "entry_cond": "line" if cfg.get("gq_entry_cond", "banker") == "line" else "banker",   # banker = Kreuzung der Banker-Linie + Referenzlinie | line = nur die Referenzlinie
         "exit_mode": "signal" if cfg.get("gq_exit_mode", "bands") == "signal" else "bands",
         "sl_mult": max(0.1, _f(cfg, "gq_sl_mult", 1.0)),          # SL-Band = ATR * Faktor (= Risiko R)
         "tp1_rr": max(0.1, _f(cfg, "gq_tp1_rr", 1.0)),            # TP1 = R * Faktor (1 = 1:1)
@@ -103,6 +104,15 @@ def gq_signals(base_ts, h, l, c, htf, p, atr=None):
     if atr is None:
         atr = compute_atr(h, l, c, p["atr_len"]) or [0.0] * n
     buy, sell = [False] * n, [False] * n
+    if p.get("entry_cond") == "line":
+        # Nur die Referenzlinie: Kauf, wenn der Schlusskurs das Hoch der Referenzkerze von unten durchkreuzt,
+        # Verkauf, wenn er das Tief von oben durchkreuzt. Die Banker-Linie wird nicht geprueft.
+        for i in range(1, n):
+            if ref_hi[i] is not None and ref_hi[i - 1] is not None and c[i] >= ref_hi[i] and c[i - 1] < ref_hi[i - 1]:
+                buy[i] = True
+            if ref_lo[i] is not None and ref_lo[i - 1] is not None and c[i] <= ref_lo[i] and c[i - 1] > ref_lo[i - 1]:
+                sell[i] = True
+        return buy, sell, atr
     for i in range(1, n):
         a, b = ma[i], ma[i - 1]
         if a is None or b is None:
