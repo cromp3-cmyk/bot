@@ -435,6 +435,21 @@ def default_config():
         "dv_tp_usd": float(os.getenv("DV_TP_USD", "5.0")),
         "dv_trail_usd": float(os.getenv("DV_TRAIL_USD", "0")),   # Trailing-Stop-Abstand in $ (0 = aus)
         "dv_sl_cooldown_seconds": float(os.getenv("DV_SL_COOLDOWN_SECONDS", "30.0")),
+        # ===== Gold Scalper (entry_mode gold_scalper): RSI-Banker-Kreuzung + Ausbruch ueber/unter Hoch/Tief der letzten 4h-Kerze, Ausstieg ueber ATR-Baender =====
+        "gq_resolution": os.getenv("GQ_RESOLUTION", "1m"),
+        "gq_htf_resolution": os.getenv("GQ_HTF_RESOLUTION", "4h"),   # Referenz-Zeitrahmen (Pine: Resolution 240)
+        "gq_rsi_len": int(os.getenv("GQ_RSI_LEN", "50")),
+        "gq_ma_len": int(os.getenv("GQ_MA_LEN", "8")),
+        "gq_buy_level": float(os.getenv("GQ_BUY_LEVEL", "1.0")),
+        "gq_sell_level": float(os.getenv("GQ_SELL_LEVEL", "1.0")),
+        "gq_direction_mode": os.getenv("GQ_DIRECTION_MODE", "both"),
+        "gq_atr_len": int(os.getenv("GQ_ATR_LEN", "14")),
+        "gq_exit_mode": os.getenv("GQ_EXIT_MODE", "bands"),   # bands = SL am ATR-Band + TP1 + mitlaufendes Band | signal = von Signal zu Signal
+        "gq_sl_mult": float(os.getenv("GQ_SL_MULT", "1.0")),   # SL-Band: Einstieg -/+ ATR * Faktor (= Risiko R)
+        "gq_tp1_rr": float(os.getenv("GQ_TP1_RR", "1.0")),     # TP1 = R * Faktor (1 = 1:1)
+        "gq_tp1_pct": float(os.getenv("GQ_TP1_PCT", "50")),    # Anteil der Position, der bei TP1 verkauft wird (danach SL auf Einstieg)
+        "gq_trail_mult": float(os.getenv("GQ_TRAIL_MULT", "1.0")),   # mitlaufendes ATR-Band fuer den Rest nach TP1
+        "gq_sl_cooldown_seconds": float(os.getenv("GQ_SL_COOLDOWN_SECONDS", "30.0")),
         # ===== Punk Algo (entry_mode punk_algo): Range-Filter-Dreiecke als Einstieg, Gegen-Dreieck = Flip, WaveTrend-X = Ausstieg =====
         "pa_resolution": os.getenv("PA_RESOLUTION", "5m"),
         "pa_period1": int(os.getenv("PA_PERIOD1", "27")), "pa_mult1": float(os.getenv("PA_MULT1", "9.1")),
@@ -934,6 +949,7 @@ PERSISTED_STATE_KEYS = [
     "er_sl_price", "er_tp1_price", "er_tp2_price", "er_tp3_price", "er_tp1_done", "er_tp2_done", "er_sl_cooldown_until",
     "pm_sl_price", "pm_tp_price", "pm_trail_extreme", "pm_sl_cooldown_until",
     "dv_sl_price", "dv_tp_price", "dv_trail_extreme", "dv_sl_cooldown_until",
+    "gq_sl_price", "gq_tp1_price", "gq_tp1_done", "gq_tp1_ms", "gq_sl_cooldown_until",
     "pa_sl_price", "pa_tp_price", "pa_sl_cooldown_until",
     "we_sl_price", "we_tp_price", "we_sl_cooldown_until",
     "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until", "wd_tps", "wd_tp_pcts", "wd_tp_done", "wd_be", "wd_entries", "wd_last_entry",
@@ -1944,6 +1960,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + fester $-SL/TP)</option>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
+      <option value="gold_scalper">Gold Scalper (RSI-Banker-Kreuzung + Ausbruch über Hoch/Tief der letzten 4h-Kerze, Ausstieg über ATR-Bänder)</option>
       <option value="wt_div">WT-Divergenz (WaveTrend-Divergenzen als Einstieg, Welle wie im Wellenanker, wählbarer Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="pivot_reversal">Pivot Reversal (BUY/SELL-Wechsel bei Ausbruch über das letzte Pivot-Hoch/-Tief, Heikin-Ashi/Renko wählbar, SL/TP, Teil-TPs, Break-Even)</option>
       <option value="auction_trend">Auction Range Migration Trend (schneller LONG/SHORT-Wechsel bei Trendwechsel, Flip in einer Order, SL/TP, Teil-TPs)</option>
@@ -2307,6 +2324,45 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="dollar701"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="dv_tp_usd"></div>
   <div data-mode="dollar701"><label>Trailing-Stop (Abstand in $ hinter dem besten Kurs, laeuft mit; 0 = aus)</label><input type="number" step="0.1" min="0" id="dv_trail_usd"></div>
   <div data-mode="dollar701"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="dv_sl_cooldown_seconds"></div>
+
+  <div data-mode="gold_scalper" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🥇 <b>Gold Scalper</b> (Indikator „Gold scalper 1 min or 30 sec“): <b>Kauf</b>, wenn der Banker (SMA aus 1,5×(RSI−50), begrenzt auf 0–20) nach oben über die Kauf-Schwelle kreuzt UND der Schlusskurs auf/über dem Hoch der letzten abgeschlossenen Referenz-Kerze (Standard 4h) liegt. <b>Verkauf</b> spiegelbildlich (Banker kreuzt nach unten, Kurs auf/unter dem Tief der Referenz-Kerze). Signal auf der geschlossenen Kerze. <b>Ausstieg wählbar:</b> (1) <b>ATR-Bänder</b> (Indikator „ATR Bands“): Stop-Loss am Band (Einstieg ∓ ATR × Faktor = Risiko R), <b>TP1</b> bei R × Faktor (Standard 1:1) – dort wird der eingestellte Anteil (Standard 50 %) verkauft und der SL auf den Einstieg gesetzt; der Rest (<b>TP2</b>) läuft mit einem <b>mitlaufenden ATR-Band</b> (nach jedem Kerzenschluss Schluss ∓ ATR × Faktor, wird nur nachgezogen). Weitere Signale bei offener Position werden ignoriert. (2) <b>Von Signal zu Signal</b>: kein SL/TP, das Gegen-Signal schließt und dreht die Position.
+  </div>
+  <div data-mode="gold_scalper"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="gq_resolution">
+      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="45s">45 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="gq_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="gold_scalper"><label>Referenz-Zeitrahmen (Hoch/Tief der letzten abgeschlossenen Kerze)</label>
+    <select class="cfg" id="gq_htf_resolution"><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="2h">2 Stunden</option><option value="4h">4 Stunden (Original)</option><option value="1d">1 Tag</option></select>
+  </div>
+  <div data-mode="gold_scalper"><label>RSI-Länge (Original: 50)</label><input type="number" step="1" min="2" id="gq_rsi_len"></div>
+  <div data-mode="gold_scalper"><label>Banker-Glättung (SMA, Original: 8)</label><input type="number" step="1" min="1" id="gq_ma_len"></div>
+  <div data-mode="gold_scalper"><label>Kauf-Schwelle (Banker kreuzt nach oben, Original: 1)</label><input type="number" step="0.1" id="gq_buy_level"></div>
+  <div data-mode="gold_scalper"><label>Verkaufs-Schwelle (Banker kreuzt nach unten, Original: 1)</label><input type="number" step="0.1" id="gq_sell_level"></div>
+  <div data-mode="gold_scalper"><label>Richtung</label>
+    <select class="cfg" id="gq_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
+  </div>
+  <div data-mode="gold_scalper"><label>Ausstieg</label>
+    <select class="cfg" id="gq_exit_mode"><option value="bands">ATR-Bänder (SL am Band, TP1, mitlaufendes Band)</option><option value="signal">Von Signal zu Signal (Gegen-Signal dreht die Position)</option></select>
+  </div>
+  <div data-mode="gold_scalper"><label>ATR-Länge (Original ATR Bands: 14)</label><input type="number" step="1" min="1" id="gq_atr_len"></div>
+  <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>Stop-Loss: ATR-Band-Faktor (Abstand = ATR × Faktor = Risiko R)</label><input type="number" step="0.1" min="0.1" id="gq_sl_mult"></div>
+  <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>TP1: Vielfaches von R (1 = 1:1)</label><input type="number" step="0.1" min="0.1" id="gq_tp1_rr"></div>
+  <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>TP1: Anteil der Position, der verkauft wird (%, 0 = kein Teilverkauf, 100 = alles); danach SL auf Einstieg</label><input type="number" step="5" min="0" max="100" id="gq_tp1_pct"></div>
+  <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>TP2: mitlaufendes ATR-Band für den Rest (ATR × Faktor hinter dem Schlusskurs, wird nur nachgezogen)</label><input type="number" step="0.1" min="0.1" id="gq_trail_mult"></div>
+  <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="gq_sl_cooldown_seconds"></div>
 
   <div data-mode="punk_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     ▲▼ <b>Punk Algo</b>: Range-Filter des Punk-Algo-Indikators. <b>Einstieg</b> bei jedem Dreieck (▲ = Long, ▼ = Short) auf der geschlossenen Kerze. <b>Ausstieg</b>: Gegen-Dreieck dreht die Position (hat Vorrang), oder das WaveTrend-X (cyan X beendet Shorts, pinkes X beendet Longs), dazu optional fester $-SL/-TP. Nicht portiert, weil ohne Einfluss auf die Einstiege: EMA144, Dashboard, RSI, Intelligent Trend, Momentum-Kerzen. Unten im Backtest-Bereich: Monte-Carlo-Test über die vier Range-Filter-Werte mit Training/Test-Trennung.
@@ -3785,6 +3841,65 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="gold_scalper" style="display:none;">
+<h2 class="section-title">🎲 Gold Scalper Monte-Carlo (Zeitrahmen × ATR-Bänder)</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet Kombinationen aus <b>Zeitrahmen</b>, <b>Stop-Loss-Band</b> (= Risiko R, TP1 liegt bei R × Faktor) und <b>mitlaufendem Band</b> für den Rest nach TP1
+    (Standard 1 bis 3 in 0,2er-Schritten) auf denselben Kerzen. Sind es mehr Kombinationen als „Durchläufe“, werden zufällige gezogen.
+    Richtung, RSI/Banker, ATR-Länge, TP1-Anteil, Cooldown, Margin und Hebel kommen aus den Einstellungen oben. Im Test „Von Signal zu Signal“ wird nur der Zeitrahmen variiert.
+    Einen sehr guten Einzelwert nicht blind übernehmen – die Spalte „PnL ohne beste N“ und die Trade-Zahl zeigen, ob er stabil ist.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="gq-mc-days" value="30" style="width:90px;"></div>
+    <div><label>Zeitrahmen (kommagetrennt, max. 8)</label><input type="text" id="gq-mc-res" value="30s, 1m, 5m, 15m" style="width:200px;"></div>
+    <div><label>Durchläufe (max. 2000)</label><input type="number" step="50" min="1" max="2000" id="gq-mc-runs" value="500" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="gq-mc-seed" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="gq-mc-exclude-top-n" value="1" style="width:90px;"></div>
+    <div><label>Ausstieg im Test</label><select id="gq-mc-exit-mode"><option value="">wie in den Einstellungen</option><option value="bands">ATR-Bänder</option><option value="signal">Von Signal zu Signal (nur Zeitrahmen)</option></select></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>ATR-Bänder von</label><input type="number" step="0.1" min="0.1" id="gq-mc-mult-min" value="1" style="width:80px;"></div>
+    <div><label>bis</label><input type="number" step="0.1" min="0.1" id="gq-mc-mult-max" value="3" style="width:80px;"></div>
+    <div><label>Schritt</label><input type="number" step="0.05" min="0.05" id="gq-mc-mult-step" value="0.2" style="width:80px;"></div>
+    <button id="btn-gq-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="gq-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="gq-mc-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="gq-mc-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="gq_resolution">Zeitrahmen ⇅</th>
+      <th class="sortable" data-key="gq_sl_mult">SL-Band ⇅</th>
+      <th class="sortable" data-key="gq_trail_mult">Mitlaufendes Band ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="gq-mc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="gq-mc-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="gq_resolution">Zeitrahmen ⇅</th>
+      <th class="sortable" data-key="gq_sl_mult">SL-Band ⇅</th>
+      <th class="sortable" data-key="gq_trail_mult">Mitlaufendes Band ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="wt_div" style="display:none;">
 <h2 class="section-title">🎲 WT-Divergenz Monte-Carlo (frei wählbare Werte)</h2>
 <div class="panel-card">
@@ -4959,7 +5074,7 @@ function tvRender() {
   const box = document.getElementById('wac-tv'); if (!box) return;
   const tfSel = document.getElementById('wac-tf').value;
   const mode = document.getElementById('entry_mode').value;
-  const fallback = {lsob: 'lb_resolution', mom_field: 'mf_resolution', auction_trend: 'ar_resolution', pivot_reversal: 'pv_resolution', wt_div: 'wd_resolution', wellenanker: 'wa_timeframe'}[mode];
+  const fallback = {lsob: 'lb_resolution', mom_field: 'mf_resolution', auction_trend: 'ar_resolution', pivot_reversal: 'pv_resolution', wt_div: 'wd_resolution', wellenanker: 'wa_timeframe', gold_scalper: 'gq_resolution'}[mode];
   const tf = tfSel || (fallback && document.getElementById(fallback) ? document.getElementById(fallback).value : '15m');
   const key = currentSymbol + '|' + tvInterval(tf);
   if (TVW.key === key && box.firstChild) return;
@@ -5138,7 +5253,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #mf_resolution, #ar_resolution, #pv_resolution, #lb_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
+document.querySelectorAll('#gq_resolution, #da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #mf_resolution, #ar_resolution, #pv_resolution, #lb_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -5449,6 +5564,69 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
       window.dvMcWorstData = data.worst_results || [];
       renderDvMcResults();
       renderDvMcWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.gqMcResultsData = [];
+window.gqMcWorstData = [];
+const gqMcRowHtml = (r) => `
+  <tr>
+    <td>${r.gq_resolution}</td>
+    <td>${r.gq_sl_mult > 0 ? r.gq_sl_mult : '–'}</td>
+    <td>${r.gq_trail_mult > 0 ? r.gq_trail_mult : '–'}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+    ${applyBtn(r.gq_sl_mult > 0 ? {gq_resolution: r.gq_resolution, gq_exit_mode: 'bands', gq_sl_mult: r.gq_sl_mult, gq_trail_mult: r.gq_trail_mult} : {gq_resolution: r.gq_resolution, gq_exit_mode: 'signal'})}
+  </tr>`;
+const renderGqMcResults = makeSortableTable('gq-mc-results-table', () => window.gqMcResultsData, gqMcRowHtml);
+const renderGqMcWorst = makeSortableTable('gq-mc-worst-table', () => window.gqMcWorstData, gqMcRowHtml);
+
+document.getElementById('btn-gq-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-gq-mc');
+  const statusEl = document.getElementById('gq-mc-status');
+  const tables = {top: document.getElementById('gq-mc-results-table'), worst: document.getElementById('gq-mc-worst-table')};
+  const titles = {top: document.getElementById('gq-mc-top-title'), worst: document.getElementById('gq-mc-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const num = (id) => parseFloat(document.getElementById(id).value);
+  const payload = {
+    days: parseInt(document.getElementById('gq-mc-days').value) || 30,
+    resolutions: document.getElementById('gq-mc-res').value,
+    runs: parseInt(document.getElementById('gq-mc-runs').value) || 500,
+    seed: document.getElementById('gq-mc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('gq-mc-exclude-top-n').value) || 0,
+    mult_min: num('gq-mc-mult-min'), mult_max: num('gq-mc-mult-max'), mult_step: num('gq-mc-mult-step'),
+    config: Object.assign(buildConfigPayload(), document.getElementById('gq-mc-exit-mode').value ? {gq_exit_mode: document.getElementById('gq-mc-exit-mode').value} : {}),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = `⏳ Lade Kerzen und teste die Kombinationen...`;
+  try {
+    const res = await fetch(`/api/gq_mc?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      const skip = (data.skipped_resolutions || []).length ? ` (zu wenig Kerzen, übersprungen: ${data.skipped_resolutions.join(', ')})` : '';
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet (Zeitrahmen ${data.resolutions.join(', ')}${skip}, Ausstieg: ${data.exit_mode === 'signal' ? 'Signal zu Signal' : 'ATR-Bänder'}) - ${data.profitable_pct}% im Plus, Median ${data.median_pnl_usd} $, bester ${data.best_pnl_usd} $, schlechtester ${data.worst_pnl_usd} $. Mindestens ${data.min_reliable_trades} Trades gelten als aussagekräftig.`;
+      window.gqMcResultsData = data.results || [];
+      window.gqMcWorstData = data.worst_results || [];
+      renderGqMcResults();
+      renderGqMcWorst();
       Object.values(tables).forEach(t => t.style.display = '');
       Object.values(titles).forEach(t => t.style.display = '');
     }
@@ -6491,6 +6669,20 @@ async function refresh() {
     document.getElementById('dv_tp_usd').value = data.config.dv_tp_usd;
     document.getElementById('dv_trail_usd').value = data.config.dv_trail_usd || 0;
     document.getElementById('dv_sl_cooldown_seconds').value = data.config.dv_sl_cooldown_seconds;
+    setResolutionField('gq_resolution', data.config.gq_resolution);
+    document.getElementById('gq_htf_resolution').value = data.config.gq_htf_resolution || '4h';
+    document.getElementById('gq_rsi_len').value = data.config.gq_rsi_len;
+    document.getElementById('gq_ma_len').value = data.config.gq_ma_len;
+    document.getElementById('gq_buy_level').value = data.config.gq_buy_level;
+    document.getElementById('gq_sell_level').value = data.config.gq_sell_level;
+    document.getElementById('gq_direction_mode').value = data.config.gq_direction_mode || 'both';
+    document.getElementById('gq_atr_len').value = data.config.gq_atr_len;
+    document.getElementById('gq_exit_mode').value = data.config.gq_exit_mode || 'bands';
+    document.getElementById('gq_sl_mult').value = data.config.gq_sl_mult;
+    document.getElementById('gq_tp1_rr').value = data.config.gq_tp1_rr;
+    document.getElementById('gq_tp1_pct').value = data.config.gq_tp1_pct;
+    document.getElementById('gq_trail_mult').value = data.config.gq_trail_mult;
+    document.getElementById('gq_sl_cooldown_seconds').value = data.config.gq_sl_cooldown_seconds;
     setResolutionField('pa_resolution', data.config.pa_resolution);
     document.getElementById('pa_period1').value = data.config.pa_period1;
     document.getElementById('pa_mult1').value = data.config.pa_mult1;
@@ -7076,6 +7268,20 @@ function buildConfigPayload() {
     dv_tp_usd: parseFloat(document.getElementById('dv_tp_usd').value) || 0,
     dv_trail_usd: parseFloat(document.getElementById('dv_trail_usd').value) || 0,
     dv_sl_cooldown_seconds: parseFloat(document.getElementById('dv_sl_cooldown_seconds').value),
+    gq_resolution: getResolutionField('gq_resolution'),
+    gq_htf_resolution: document.getElementById('gq_htf_resolution').value,
+    gq_rsi_len: parseInt(document.getElementById('gq_rsi_len').value) || 50,
+    gq_ma_len: parseInt(document.getElementById('gq_ma_len').value) || 8,
+    gq_buy_level: parseFloat(document.getElementById('gq_buy_level').value),
+    gq_sell_level: parseFloat(document.getElementById('gq_sell_level').value),
+    gq_direction_mode: document.getElementById('gq_direction_mode').value,
+    gq_atr_len: parseInt(document.getElementById('gq_atr_len').value) || 14,
+    gq_exit_mode: document.getElementById('gq_exit_mode').value,
+    gq_sl_mult: parseFloat(document.getElementById('gq_sl_mult').value) || 1,
+    gq_tp1_rr: parseFloat(document.getElementById('gq_tp1_rr').value) || 1,
+    gq_tp1_pct: Number.isFinite(parseFloat(document.getElementById('gq_tp1_pct').value)) ? parseFloat(document.getElementById('gq_tp1_pct').value) : 50,
+    gq_trail_mult: parseFloat(document.getElementById('gq_trail_mult').value) || 1,
+    gq_sl_cooldown_seconds: parseFloat(document.getElementById('gq_sl_cooldown_seconds').value),
     pa_resolution: getResolutionField('pa_resolution'),
     pa_period1: parseInt(document.getElementById('pa_period1').value) || 27,
     pa_mult1: parseFloat(document.getElementById('pa_mult1').value) || 9.1,
@@ -7752,7 +7958,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "pv_resolution", "pv_left", "pv_right", "pv_buffer_pct", "pv_candle_type", "pv_renko_mode", "pv_renko_atr_len", "pv_renko_mult", "pv_renko_pct", "pv_exit_mode", "pv_direction_mode", "pv_sl_usd", "pv_tp_usd", "pv_profit_only_close", "pv_tp_mode", "pv_be_trigger_usd", "pv_tp1_usd", "pv_tp2_usd", "pv_tp3_usd", "pv_tp1_pct", "pv_tp2_pct", "pv_be_after_tp1", "pv_sl_to_tp1_on_tp2", "pv_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_be_trigger_usd", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "gq_resolution", "gq_htf_resolution", "gq_rsi_len", "gq_ma_len", "gq_buy_level", "gq_sell_level", "gq_direction_mode", "gq_atr_len", "gq_exit_mode", "gq_sl_mult", "gq_tp1_rr", "gq_tp1_pct", "gq_trail_mult", "gq_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "pv_resolution", "pv_left", "pv_right", "pv_buffer_pct", "pv_candle_type", "pv_renko_mode", "pv_renko_atr_len", "pv_renko_mult", "pv_renko_pct", "pv_exit_mode", "pv_direction_mode", "pv_sl_usd", "pv_tp_usd", "pv_profit_only_close", "pv_tp_mode", "pv_be_trigger_usd", "pv_tp1_usd", "pv_tp2_usd", "pv_tp3_usd", "pv_tp1_pct", "pv_tp2_pct", "pv_be_after_tp1", "pv_sl_to_tp1_on_tp2", "pv_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_be_trigger_usd", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
@@ -7890,6 +8096,7 @@ async def handle_wa_live_chart(request):
     is_mt = cfg.get("entry_mode") == "mtf_spread"
     is_pm = cfg.get("entry_mode") == "pure_momentum"
     is_dv = cfg.get("entry_mode") == "dollar701"
+    is_gq = cfg.get("entry_mode") == "gold_scalper"
     is_pa = cfg.get("entry_mode") == "punk_algo"
     is_we = cfg.get("entry_mode") == "wae_ema"
     is_wd = cfg.get("entry_mode") == "wt_div"
@@ -7903,7 +8110,7 @@ async def handle_wa_live_chart(request):
     tf = request.query.get("tf", "")
     SUBMIN = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
-        tf = cfg.get("pv_resolution", "15m") if is_pv else cfg.get("ar_resolution", "15m") if is_ar else cfg.get("lb_resolution", "15m") if is_lb else cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else "5m")
+        tf = cfg.get("pv_resolution", "15m") if is_pv else cfg.get("ar_resolution", "15m") if is_ar else cfg.get("lb_resolution", "15m") if is_lb else cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else cfg.get("gq_resolution", "1m") if is_gq else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
             tf = "5m"
     if tf in SUBMIN:
@@ -7951,6 +8158,9 @@ async def handle_wa_live_chart(request):
     elif is_pa:
         from punk_algo import pa_chart_payload
         payload = await asyncio.to_thread(pa_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_gq:
+        from goldscalper import gq_chart_payload
+        payload = await gq_chart_payload(symbol, cfg, ts, o, h, l, c, 1000)
     elif is_dv:
         from dollar701 import dv_chart_payload
         payload = await asyncio.to_thread(dv_chart_payload, ts, o, h, l, c, cfg, 1000)
@@ -8338,6 +8548,39 @@ async def handle_dv_montecarlo(request):
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] Dollar701-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_gq_montecarlo(request):
+    """Monte-Carlo-Backtest fuer den Gold Scalper: Zeitrahmen x ATR-Baender, siehe run_gq_montecarlo."""
+    from goldscalper import run_gq_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        runs = max(1, min(2000, int(body.get("runs", 500))))
+        mult_min = float(body.get("mult_min", 1.0)); mult_max = float(body.get("mult_max", 3.0))
+        mult_step = float(body.get("mult_step", 0.2))
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(
+            run_gq_montecarlo(symbol, cfg, days, body.get("resolutions", ""), mult_min, mult_max, mult_step, runs, exclude_top_n, seed),
+            timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe, weniger Zeitrahmen oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Gold-Scalper-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 
