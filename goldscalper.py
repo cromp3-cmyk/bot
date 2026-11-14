@@ -25,7 +25,7 @@ import random
 import re
 import time
 import traceback
-from bisect import bisect_left, bisect_right
+from bisect import bisect_right
 
 from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_partial_exit, execute_reverse
 from dollar701 import _res_seconds, _poll_delay
@@ -349,7 +349,7 @@ async def gq_poll_loop(symbol):
         await asyncio.sleep(_poll_delay(cfg.get("gq_resolution", "1m"), b["state"]))
 
 
-def _gq_simulate(candles, cfg, buy_sig, sell_sig, atr, warmup, p, rec=None):
+def _gq_simulate(candles, cfg, buy_sig, sell_sig, atr, warmup, p):
     """Backtest-Gegenstueck zu check_gq_entry / check_gq_sl_tp / update_gq_trail: Einstieg zum Schlusskurs der Signal-Kerze.
     bands : Pro Kerze zuerst SL (gewinnt bei Gleichzeitigkeit mit TP1), dann TP1 (Teilverkauf, SL -> Einstieg; in derselben Kerze
             wird der neue SL nicht mehr geprueft), danach Band nachziehen (Schluss -/+ ATR*Faktor). Offene Position: Signale ignoriert.
@@ -361,25 +361,12 @@ def _gq_simulate(candles, cfg, buy_sig, sell_sig, atr, warmup, p, rec=None):
     mode = cfg.get("gq_direction_mode", "both")
     signal_mode = p["exit_mode"] == "signal"
     position, trades, cool_until = None, [], None
-
-    def _ropen(pos, i):      # fuer die Chart-Anzeige: Einstieg, SL, TP1, Verlauf des mitlaufenden Bandes
-        if rec is not None:
-            pos["rec"] = {"t1": ts[i] // 1000, "t2": None, "dir": pos["dir"], "entry": pos["entry"], "sl": pos["sl"], "tp1": pos["tp1"],
-                          "tp1_t": None, "trail": [], "result": None}
-            rec.append(pos["rec"])
-
-    def _rclose(pos, i, result):
-        if rec is not None and pos.get("rec") is not None:
-            pos["rec"]["t2"] = ts[i] // 1000
-            pos["rec"]["result"] = result
-
     for i in range(max(warmup, 1), n):
         if position is not None and not signal_mode:
             d, e, sl = position["dir"], position["entry"], position["sl"]
             if (d == "long" and l[i] <= sl) or (d == "short" and h[i] >= sl):
                 reason = _gq_sl_reason(d, e, sl, position["tp1_done"])
                 _bt_close_trade(trades, d, e, sl, position["size"], i, position["entry_i"], reason, ts=ts)
-                _rclose(position, i, reason)
                 position = None
                 if reason == "SL":
                     cool_until = ts[i] + cooldown_ms
@@ -387,9 +374,6 @@ def _gq_simulate(candles, cfg, buy_sig, sell_sig, atr, warmup, p, rec=None):
                 pct = p["tp1_pct"]
                 if pct >= 100:
                     _bt_close_trade(trades, d, e, position["tp1"], position["size"], i, position["entry_i"], "TP1", ts=ts)
-                    if rec is not None and position.get("rec") is not None:
-                        position["rec"]["tp1_t"] = ts[i] // 1000
-                    _rclose(position, i, "TP1")
                     position = None
                 else:
                     if pct > 0:
@@ -398,27 +382,19 @@ def _gq_simulate(candles, cfg, buy_sig, sell_sig, atr, warmup, p, rec=None):
                         position["size"] -= part
                     position["tp1_done"] = True
                     position["sl"] = e
-                    if rec is not None and position.get("rec") is not None:
-                        position["rec"]["tp1_t"] = ts[i] // 1000
-                        position["rec"]["trail"].append([ts[i] // 1000, e])
             if position is not None and position["tp1_done"] and atr[i] > 0:
-                old_sl = position["sl"]
                 position["sl"] = _gq_ratchet(d, position["sl"], _gq_trail_candidate(d, c[i], atr[i], p))
-                if rec is not None and position.get("rec") is not None and position["sl"] != old_sl:
-                    position["rec"]["trail"].append([ts[i] // 1000, position["sl"]])
         buy, sell = buy_sig[i], sell_sig[i]
         if signal_mode and position is not None and buy != sell:
             want = "long" if buy else "short"
             if want == position["dir"]:
                 continue
             _bt_close_trade(trades, position["dir"], position["entry"], c[i], position["size"], i, position["entry_i"], "GQ-FLIP", ts=ts)
-            _rclose(position, i, "GQ-FLIP")
             position = None
             if (mode == "long_only" and want == "short") or (mode == "short_only" and want == "long"):
                 continue
             size = (margin * leverage) / c[i]
             position = {"dir": want, "entry": c[i], "size": size, "entry_i": i, "sl": None, "tp1": None, "tp1_done": False}
-            _ropen(position, i)
             continue
         if position is not None:
             continue
@@ -435,9 +411,7 @@ def _gq_simulate(candles, cfg, buy_sig, sell_sig, atr, warmup, p, rec=None):
         size = (margin * leverage) / price
         sl, tp1 = (None, None) if signal_mode else _gq_levels(target, price, atr[i], p)
         position = {"dir": target, "entry": price, "size": size, "entry_i": i, "sl": sl, "tp1": tp1, "tp1_done": False}
-        _ropen(position, i)
     if position is not None:
-        _rclose(position, n - 1, "offen")
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1, position["entry_i"], "END-OF-BACKTEST", ts=ts)
     return trades
 
@@ -462,16 +436,8 @@ async def run_gq_backtest(symbol, cfg, days, exclude_top_n=1):
     base_ts = candles[0]
     buy, sell, atr = await asyncio.to_thread(gq_signals, base_ts, candles[2], candles[3], candles[4],
                                              (htf_candles[0], htf_candles[2], htf_candles[3]), p)
-    rec = []
-    trades = _gq_simulate(candles, cfg, buy, sell, atr, _gq_warmup(p), p, rec=rec)
+    trades = _gq_simulate(candles, cfg, buy, sell, atr, _gq_warmup(p), p)
     stats = summarize_backtest_trades(trades, exclude_top_n)
-    nn = len(base_ts)
-    off = max(0, nn - 20000)     # moeglichst der ganze Backtest-Zeitraum, damit JEDER Trade mit Einstieg/SL/TP1 im Chart steht
-    chart = {"candles": [{"time": base_ts[i] // 1000, "open": candles[1][i], "high": candles[2][i], "low": candles[3][i], "close": candles[4][i]} for i in range(off, nn)],
-             "wt1": [], "wt2": [], "levels": [], "entry_mode": "gq", "wt1v": 0, "wt2v": 0, "bars": nn,
-             "markers": [{"time": base_ts[i] // 1000, "kind": "long" if buy[i] else "short", "price": candles[4][i]} for i in range(off, nn) if buy[i] or sell[i]],
-             "lb_trades": [{"t1": r["t1"], "t2": r["t2"], "kind": r["dir"], "entry": r["entry"], "tp": r["tp1"], "sl": r["sl"], "tp1_t": r["tp1_t"],
-                            "trail": r["trail"], "result": r["result"] or ""} for r in rec if r["t2"] is not None and r["t2"] >= base_ts[off] // 1000][-500:]}
     actual_days = (base_ts[-1] - base_ts[0]) / 86_400_000
     return {
         "symbol": symbol, "entry_mode": "gold_scalper", "resolution": resolution,
@@ -481,25 +447,8 @@ async def run_gq_backtest(symbol, cfg, days, exclude_top_n=1):
         "stats": stats,
         "stats_long": summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n),
         "stats_short": summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n),
-        "trades": trades, "chart": chart,
+        "trades": trades,
     }
-
-
-def _gq_chart_trades(ts, o, h, l, c, buy, sell, atr, cfg, p, first_t):
-    """Je Trade fuer den Chart: Einstieg, Stop-Loss (rot), TP1 (gruen), Verlauf des mitlaufenden Bandes (orange), Ausstieg/Ergebnis."""
-    rec = []
-    try:
-        _gq_simulate((ts, o, h, l, c), cfg, buy, sell, atr, _gq_warmup(p), p, rec=rec)
-    except Exception:
-        return []
-    out = []
-    for r in rec:
-        if r["t2"] is None or r["t2"] < first_t:
-            continue
-        item = {"t1": r["t1"], "t2": r["t2"], "kind": r["dir"], "entry": r["entry"], "tp": r["tp1"], "sl": r["sl"],
-                "tp1_t": r["tp1_t"], "trail": r["trail"], "result": r["result"] or ""}
-        out.append(item)
-    return out[-60:]
 
 
 async def gq_chart_payload(symbol, cfg, ts, o, h, l, c, max_bars=1000):
@@ -510,7 +459,7 @@ async def gq_chart_payload(symbol, cfg, ts, o, h, l, c, max_bars=1000):
     span_ms = max(1, ts[-1] - ts[0])
     bars = min(1000, int(span_ms / (_res_seconds(p["htf"]) * 1000)) + 6)
     htf = await _fetch_htf(symbol, p["htf"], cfg, bars=bars) or ([], [], [])
-    buy, sell, atr = await asyncio.to_thread(gq_signals, ts, h, l, c, htf, p)
+    buy, sell, _ = await asyncio.to_thread(gq_signals, ts, h, l, c, htf, p)
     n = len(c)
     off = max(0, n - max_bars)
     candles, markers = [], []
@@ -522,8 +471,7 @@ async def gq_chart_payload(symbol, cfg, ts, o, h, l, c, max_bars=1000):
         if sell[i]:
             markers.append({"time": t, "kind": "short", "price": c[i]})
     return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [],
-            "entry_mode": "gq", "wt1v": 0, "wt2v": 0, "bars": n,
-            "lb_trades": _gq_chart_trades(ts, o, h, l, c, buy, sell, atr, cfg, p, ts[off] // 1000)}
+            "entry_mode": "gq", "wt1v": 0, "wt2v": 0, "bars": n}
 
 
 # ============================================================
