@@ -5043,10 +5043,12 @@ function wacShowBacktest() {
   wacSetPosition(null); wacSetOverlays([]); wacSetGrid(null);
   const b = WAC.bt, info = document.getElementById('wac-info');
   if (!b) { info.innerText = 'Noch kein Backtest – unten „Backtest starten“ klicken.'; return; }
-  wacRender(b.chart, wacBtMarkers(b.trades));
+  const t0 = (b.chart.candles && b.chart.candles.length) ? b.chart.candles[0].time : 0;
+  const inView = (b.trades || []).filter(t => Math.floor((t.exit_ts || t.row_ts || t.entry_ts || 0) / 1000) >= t0);   // nur Trades im sichtbaren Ausschnitt (sonst stapeln sich alte Punkte am linken Rand)
+  wacRender(b.chart, wacBtMarkers(inView));
   wacSetLbTrades((b.chart && b.chart.lb_trades) || []);
   WAC.price.timeScale().fitContent();
-  const n = (b.trades || []).filter(t => t.pnl !== null && t.pnl !== undefined).length;
+  const n = inView.filter(t => t.pnl !== null && t.pnl !== undefined).length;
   info.innerText = `Backtest ${b.symbol} ${b.resolution}: ${n} Trades im Chart (letzte ${b.chart.candles.length} Kerzen)`;
 }
 function wacShowLive() {
