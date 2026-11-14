@@ -475,7 +475,7 @@ async def gq_chart_payload(symbol, cfg, ts, o, h, l, c, max_bars=1000):
 
 
 # ============================================================
-# Monte-Carlo-Backtest: Zeitrahmen x ATR-Baender (SL-Band und mitlaufendes Band, z. B. 1 bis 3 in 0,2-Schritten)
+# Monte-Carlo-Backtest: Referenz-Zeitrahmen (+ optional Basis-Zeitrahmen) x ATR-Baender (SL-Band und mitlaufendes Band, z. B. 1 bis 3 in 0,2-Schritten)
 # ============================================================
 GQ_MC_MAX_RUNS = 2000
 GQ_MC_MAX_RESOLUTIONS = 8
@@ -493,6 +493,14 @@ def gq_parse_resolutions(text):
     return out[:GQ_MC_MAX_RESOLUTIONS]
 
 
+GQ_HTF_ALLOWED = ("15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")   # Auswahl des Referenz-Zeitrahmens im Formular
+
+
+def gq_parse_htf(text):
+    """Referenz-Zeitrahmen fuer den Monte-Carlo-Test: nur die im Formular waehlbaren Werte (sonst koennte "Uebernehmen" sie nicht eintragen)."""
+    return [r for r in gq_parse_resolutions(text) if r in GQ_HTF_ALLOWED]
+
+
 def gq_mult_values(vmin, vmax, step):
     """z. B. 1, 3, 0.2 -> [1.0, 1.2, ..., 3.0]"""
     vmin, vmax = sorted((max(0.1, float(vmin)), max(0.1, float(vmax))))
@@ -508,44 +516,53 @@ def gq_mult_values(vmin, vmax, step):
 
 
 def _gq_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
-    """prepared: {Zeitrahmen: (candles, buy, sell, atr)}. combos: (Zeitrahmen, SL-Band, mitlaufendes Band)."""
+    """prepared: {(Basis-Zeitrahmen, Referenz-Zeitrahmen): (candles, buy, sell, atr)}.
+    combos: (Basis-Zeitrahmen, Referenz-Zeitrahmen, SL-Band, mitlaufendes Band)."""
     base_p = _gq_params(base_cfg)
     out = []
-    for res, slm, trm in combos:
+    for res, htf, slm, trm in combos:
         if time.time() > deadline:
             break
-        candles, buy, sell, atr = prepared[res]
+        candles, buy, sell, atr = prepared[(res, htf)]
         p = dict(base_p, sl_mult=max(0.1, slm) if slm else base_p["sl_mult"], trail_mult=max(0.1, trm) if trm else base_p["trail_mult"])
         trades = _gq_simulate(candles, base_cfg, buy, sell, atr, _gq_warmup(p), p)
         st = summarize_backtest_trades(trades, exclude_top_n)
-        out.append({"gq_resolution": res, "gq_sl_mult": slm, "gq_trail_mult": trm, "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
+        out.append({"gq_resolution": res, "gq_htf_resolution": htf, "gq_sl_mult": slm, "gq_trail_mult": trm, "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
                     "total_pnl_usd": st["total_pnl_usd"], "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"],
                     "max_drawdown_usd": st["max_drawdown_usd"], "avg_bars_held": st["avg_bars_held"]})
     return out
 
 
 async def run_gq_montecarlo(symbol, cfg, days, resolutions, mult_min=1.0, mult_max=3.0, mult_step=0.2, runs=500,
-                            exclude_top_n=1, seed=None, exit_mode=None):
-    """Testet alle (bzw. `runs` zufaellig gezogene) Kombinationen aus Zeitrahmen x SL-Band x mitlaufendes Band auf denselben
-    Kerzen. Alles andere (Richtung, RSI/Banker, ATR-Laenge, TP1 1:1 + Anteil, Cooldown, Margin, Hebel) kommt aus den
-    Einstellungen. Im Modus "signal" (von Signal zu Signal) gibt es keine Baender: dann wird nur der Zeitrahmen variiert."""
+                            exclude_top_n=1, seed=None, exit_mode=None, htf_resolutions=""):
+    """Testet alle (bzw. `runs` zufaellig gezogene) Kombinationen aus Referenz-Zeitrahmen (Pine: "Resolution") x [Basis-Zeitrahmen]
+    x SL-Band x mitlaufendes Band auf denselben Kerzen. `htf_resolutions` leer = Referenz aus den Einstellungen; `resolutions`
+    (Basis-Zeitrahmen) leer = Basis aus den Einstellungen. Alles andere (Richtung, RSI/Banker, ATR-Laenge, TP1 + Anteil, Cooldown,
+    Margin, Hebel) kommt aus den Einstellungen. Im Modus "signal" (von Signal zu Signal) gibt es keine Baender: dann variieren
+    nur die Zeitrahmen."""
     cfg = dict(cfg)
     if exit_mode in ("bands", "signal"):
         cfg["gq_exit_mode"] = exit_mode
     p = _gq_params(cfg)
-    resolutions = gq_parse_resolutions(",".join(resolutions) if isinstance(resolutions, (list, tuple)) else resolutions)
-    if not resolutions:
-        return {"error": "Keine gültigen Zeitrahmen angegeben (z. B. 30s, 1m, 5m, 15m)."}
+    bases = gq_parse_resolutions(",".join(resolutions) if isinstance(resolutions, (list, tuple)) else resolutions) or [cfg.get("gq_resolution", "1m")]
+    htfs = gq_parse_htf(",".join(htf_resolutions) if isinstance(htf_resolutions, (list, tuple)) else htf_resolutions) or [p["htf"]]
+    if (str(htf_resolutions or "").strip() and not gq_parse_htf(htf_resolutions)):
+        return {"error": f"Keine gültigen Referenz-Zeitrahmen angegeben (erlaubt: {', '.join(GQ_HTF_ALLOWED)})."}
     values = gq_mult_values(mult_min, mult_max, mult_step)
     runs = max(1, min(GQ_MC_MAX_RUNS, int(runs)))
     mt = cfg.get("binance_market_type", "spot")
-    htf_days = int(days) + max(2, int(_res_seconds(p["htf"]) // 86400) + 2)
-    htf_candles, err = await _fetch_cached_mo7_backtest_candles(symbol, p["htf"], htf_days, 20_000, market_type=mt)
-    if err or not htf_candles:
-        return {"error": err or f"Keine Referenz-Kerzen ({p['htf']}) erhalten."}
-    htf = (htf_candles[0], htf_candles[2], htf_candles[3])
-    prepared, skipped, n_max, days_cov = {}, [], 0, 0.0
-    for res in resolutions:
+    htf_data, htf_skipped = {}, []
+    for htf in htfs:
+        htf_days = int(days) + max(2, int(_res_seconds(htf) // 86400) + 2)     # Vorlauf: Referenz-Kerze VOR der ersten Basis-Kerze
+        hc, err = await _fetch_cached_mo7_backtest_candles(symbol, htf, htf_days, 20_000, market_type=mt)
+        if err or not hc:
+            htf_skipped.append(htf)
+            continue
+        htf_data[htf] = (hc[0], hc[2], hc[3])
+    if not htf_data:
+        return {"error": f"Keine Referenz-Kerzen erhalten (versucht: {', '.join(htfs)})."}
+    base_data, skipped = {}, []
+    for res in bases:
         cap = BACKTEST_MAX_CANDLES.get("gold_scalper", 100_000)
         if res in SUB_MINUTE_RESOLUTIONS:
             cap = min(cap, 5000)
@@ -553,17 +570,21 @@ async def run_gq_montecarlo(symbol, cfg, days, resolutions, mult_min=1.0, mult_m
         if err or not candles or len(candles[4]) < _gq_warmup(p) + 10:
             skipped.append(res)
             continue
-        buy, sell, atr = await asyncio.to_thread(gq_signals, candles[0], candles[2], candles[3], candles[4], htf, p)
-        prepared[res] = (candles, buy, sell, atr)
+        base_data[res] = candles
+    if not base_data:
+        return {"error": "Für keinen der gewählten Zeitrahmen gab es genug Kerzen" + (f" (übersprungen: {', '.join(skipped)})." if skipped else ".")}
+    prepared, n_max, days_cov = {}, 0, 0.0
+    for res, candles in base_data.items():
         n_max = max(n_max, len(candles[4]))
         days_cov = max(days_cov, (candles[0][-1] - candles[0][0]) / 86_400_000)
-    if not prepared:
-        return {"error": "Für keinen der gewählten Zeitrahmen gab es genug Kerzen" + (f" (übersprungen: {', '.join(skipped)})." if skipped else ".")}
+        for htf, hd in htf_data.items():
+            buy, sell, atr = await asyncio.to_thread(gq_signals, candles[0], candles[2], candles[3], candles[4], hd, p)
+            prepared[(res, htf)] = (candles, buy, sell, atr)
     signal_mode = p["exit_mode"] == "signal"
     if signal_mode:
-        combos = [(r, 0.0, 0.0) for r in prepared]
+        combos = [(r, h, 0.0, 0.0) for (r, h) in prepared]
     else:
-        combos = list(itertools.product(list(prepared), values, values))
+        combos = [(r, h, a, b) for (r, h) in prepared for a, b in itertools.product(values, values)]
     requested = len(combos)
     rng = random.Random(seed)
     if len(combos) > runs:
@@ -577,7 +598,8 @@ async def run_gq_montecarlo(symbol, cfg, days, resolutions, mult_min=1.0, mult_m
     pos = sum(1 for x in pnls if x > 0)
     median = pnls[len(pnls) // 2] if pnls else 0
     return {
-        "exit_mode": p["exit_mode"], "symbol": symbol, "resolutions": list(prepared), "skipped_resolutions": skipped,
+        "exit_mode": p["exit_mode"], "symbol": symbol, "resolutions": list(base_data), "htf_resolutions": list(htf_data),
+        "skipped_resolutions": skipped, "skipped_htf": htf_skipped,
         "band_values": [] if signal_mode else values, "requested_days": days, "actual_days_covered": round(days_cov, 1),
         "candles_processed": n_max, "min_reliable_trades": GQ_MC_MIN_RELIABLE_TRADES,
         "combos_tested": len(results), "combos_requested": requested, "combos_drawn": len(combos),

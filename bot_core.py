@@ -2345,7 +2345,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <input type="number" step="1" min="1" id="gq_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="gold_scalper"><label>Referenz-Zeitrahmen (Hoch/Tief der letzten abgeschlossenen Kerze)</label>
-    <select class="cfg" id="gq_htf_resolution"><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="2h">2 Stunden</option><option value="4h">4 Stunden (Original)</option><option value="1d">1 Tag</option></select>
+    <select class="cfg" id="gq_htf_resolution"><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="2h">2 Stunden</option><option value="4h">4 Stunden (Original)</option><option value="6h">6 Stunden</option><option value="12h">12 Stunden</option><option value="1d">1 Tag</option></select>
   </div>
   <div data-mode="gold_scalper"><label>RSI-Länge (Original: 50)</label><input type="number" step="1" min="2" id="gq_rsi_len"></div>
   <div data-mode="gold_scalper"><label>Banker-Glättung (SMA, Original: 8)</label><input type="number" step="1" min="1" id="gq_ma_len"></div>
@@ -3842,17 +3842,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 
 <div data-mode-section="gold_scalper" style="display:none;">
-<h2 class="section-title">🎲 Gold Scalper Monte-Carlo (Zeitrahmen × ATR-Bänder)</h2>
+<h2 class="section-title">🎲 Gold Scalper Monte-Carlo (Referenz-Zeitrahmen × ATR-Bänder)</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet Kombinationen aus <b>Zeitrahmen</b>, <b>Stop-Loss-Band</b> (= Risiko R, TP1 liegt bei R × Faktor) und <b>mitlaufendem Band</b> für den Rest nach TP1
+    Testet Kombinationen aus <b>Referenz-Zeitrahmen</b> (das „Resolution“ des Indikators: Hoch/Tief der letzten abgeschlossenen Kerze), <b>Stop-Loss-Band</b> (= Risiko R, TP1 liegt bei R × Faktor) und <b>mitlaufendem Band</b> für den Rest nach TP1
     (Standard 1 bis 3 in 0,2er-Schritten) auf denselben Kerzen. Sind es mehr Kombinationen als „Durchläufe“, werden zufällige gezogen.
-    Richtung, RSI/Banker, ATR-Länge, TP1-Anteil, Cooldown, Margin und Hebel kommen aus den Einstellungen oben. Im Test „Von Signal zu Signal“ wird nur der Zeitrahmen variiert.
+    Der <b>Basis-Zeitrahmen</b> (auf dem gehandelt wird) kommt aus den Einstellungen oben; optional kannst du unten mehrere angeben. Richtung, RSI/Banker, ATR-Länge, TP1-Anteil, Cooldown, Margin und Hebel kommen ebenfalls aus den Einstellungen. Im Test „Von Signal zu Signal“ variieren nur die Zeitrahmen.
     Einen sehr guten Einzelwert nicht blind übernehmen – die Spalte „PnL ohne beste N“ und die Trade-Zahl zeigen, ob er stabil ist.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="gq-mc-days" value="30" style="width:90px;"></div>
-    <div><label>Zeitrahmen (kommagetrennt, max. 8)</label><input type="text" id="gq-mc-res" value="30s, 1m, 5m, 15m" style="width:200px;"></div>
+    <div><label>Referenz-Zeitrahmen (kommagetrennt; erlaubt: 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d)</label><input type="text" id="gq-mc-htf" value="1h, 2h, 4h, 1d" style="width:240px;"></div>
+    <div><label>Basis-Zeitrahmen (leer = wie in den Einstellungen)</label><input type="text" id="gq-mc-res" value="" placeholder="z. B. 30s, 1m, 5m" style="width:200px;"></div>
     <div><label>Durchläufe (max. 2000)</label><input type="number" step="50" min="1" max="2000" id="gq-mc-runs" value="500" style="width:90px;"></div>
     <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="gq-mc-seed" style="width:110px;"></div>
     <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="gq-mc-exclude-top-n" value="1" style="width:90px;"></div>
@@ -3868,7 +3869,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="gq-mc-top-title">📈 Die 30 besten Kombinationen</h3>
   <table id="gq-mc-results-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="gq_resolution">Zeitrahmen ⇅</th>
+      <th class="sortable" data-key="gq_htf_resolution">Referenz ⇅</th>
+      <th class="sortable" data-key="gq_resolution">Basis ⇅</th>
       <th class="sortable" data-key="gq_sl_mult">SL-Band ⇅</th>
       <th class="sortable" data-key="gq_trail_mult">Mitlaufendes Band ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
@@ -3884,7 +3886,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="gq-mc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
   <table id="gq-mc-worst-table" style="display:none; margin-top:8px;">
     <thead><tr>
-      <th class="sortable" data-key="gq_resolution">Zeitrahmen ⇅</th>
+      <th class="sortable" data-key="gq_htf_resolution">Referenz ⇅</th>
+      <th class="sortable" data-key="gq_resolution">Basis ⇅</th>
       <th class="sortable" data-key="gq_sl_mult">SL-Band ⇅</th>
       <th class="sortable" data-key="gq_trail_mult">Mitlaufendes Band ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
@@ -5578,6 +5581,7 @@ window.gqMcResultsData = [];
 window.gqMcWorstData = [];
 const gqMcRowHtml = (r) => `
   <tr>
+    <td>${r.gq_htf_resolution}</td>
     <td>${r.gq_resolution}</td>
     <td>${r.gq_sl_mult > 0 ? r.gq_sl_mult : '–'}</td>
     <td>${r.gq_trail_mult > 0 ? r.gq_trail_mult : '–'}</td>
@@ -5587,7 +5591,7 @@ const gqMcRowHtml = (r) => `
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
-    ${applyBtn(r.gq_sl_mult > 0 ? {gq_resolution: r.gq_resolution, gq_exit_mode: 'bands', gq_sl_mult: r.gq_sl_mult, gq_trail_mult: r.gq_trail_mult} : {gq_resolution: r.gq_resolution, gq_exit_mode: 'signal'})}
+    ${applyBtn(r.gq_sl_mult > 0 ? {gq_htf_resolution: r.gq_htf_resolution, gq_resolution: r.gq_resolution, gq_exit_mode: 'bands', gq_sl_mult: r.gq_sl_mult, gq_trail_mult: r.gq_trail_mult} : {gq_htf_resolution: r.gq_htf_resolution, gq_resolution: r.gq_resolution, gq_exit_mode: 'signal'})}
   </tr>`;
 const renderGqMcResults = makeSortableTable('gq-mc-results-table', () => window.gqMcResultsData, gqMcRowHtml);
 const renderGqMcWorst = makeSortableTable('gq-mc-worst-table', () => window.gqMcWorstData, gqMcRowHtml);
@@ -5602,6 +5606,7 @@ document.getElementById('btn-gq-mc').addEventListener('click', async () => {
   const payload = {
     days: parseInt(document.getElementById('gq-mc-days').value) || 30,
     resolutions: document.getElementById('gq-mc-res').value,
+    htf_resolutions: document.getElementById('gq-mc-htf').value,
     runs: parseInt(document.getElementById('gq-mc-runs').value) || 500,
     seed: document.getElementById('gq-mc-seed').value,
     exclude_top_n: parseInt(document.getElementById('gq-mc-exclude-top-n').value) || 0,
@@ -5621,8 +5626,9 @@ document.getElementById('btn-gq-mc').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      const skip = (data.skipped_resolutions || []).length ? ` (zu wenig Kerzen, übersprungen: ${data.skipped_resolutions.join(', ')})` : '';
-      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet (Zeitrahmen ${data.resolutions.join(', ')}${skip}, Ausstieg: ${data.exit_mode === 'signal' ? 'Signal zu Signal' : 'ATR-Bänder'}) - ${data.profitable_pct}% im Plus, Median ${data.median_pnl_usd} $, bester ${data.best_pnl_usd} $, schlechtester ${data.worst_pnl_usd} $. Mindestens ${data.min_reliable_trades} Trades gelten als aussagekräftig.`;
+      const skip = ((data.skipped_resolutions || []).length ? ` (Basis ohne genug Kerzen, übersprungen: ${data.skipped_resolutions.join(', ')})` : '')
+        + ((data.skipped_htf || []).length ? ` (Referenz ohne Kerzen, übersprungen: ${data.skipped_htf.join(', ')})` : '');
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet (Referenz ${data.htf_resolutions.join(', ')}, Basis ${data.resolutions.join(', ')}${skip}, Ausstieg: ${data.exit_mode === 'signal' ? 'Signal zu Signal' : 'ATR-Bänder'}) - ${data.profitable_pct}% im Plus, Median ${data.median_pnl_usd} $, bester ${data.best_pnl_usd} $, schlechtester ${data.worst_pnl_usd} $. Mindestens ${data.min_reliable_trades} Trades gelten als aussagekräftig.`;
       window.gqMcResultsData = data.results || [];
       window.gqMcWorstData = data.worst_results || [];
       renderGqMcResults();
@@ -8575,7 +8581,8 @@ async def handle_gq_montecarlo(request):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
     try:
         result = await asyncio.wait_for(
-            run_gq_montecarlo(symbol, cfg, days, body.get("resolutions", ""), mult_min, mult_max, mult_step, runs, exclude_top_n, seed),
+            run_gq_montecarlo(symbol, cfg, days, body.get("resolutions", ""), mult_min, mult_max, mult_step, runs, exclude_top_n, seed,
+                               htf_resolutions=body.get("htf_resolutions", "")),
             timeout=BACKTEST_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe, weniger Zeitrahmen oder kürzeren Zeitraum wählen."}, status=504)
