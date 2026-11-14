@@ -11,7 +11,7 @@ Das Pine-Skript hat keinen Ausstieg. Zwei waehlbare Ausstiege (gq_exit_mode):
              SL  = Einstieg -/+ ATR * gq_sl_mult                    (Abstand = Risiko R)
              TP1 = Einstieg +/- R * gq_tp1_rr (Standard 1:1)        -> gq_tp1_pct % der Position werden verkauft,
                    danach SL auf den Einstieg (Break-Even)
-             TP2 = Rest laeuft mit einem MITLAUFENDEN ATR-Band: nach jedem Kerzenschluss  Schluss -/+ ATR * gq_sl_mult (dasselbe Band wie der Stop-Loss),
+             TP2 = Rest laeuft mit einem MITLAUFENDEN ATR-Band: nach jedem Kerzenschluss  Schluss -/+ ATR * gq_trail_mult,
                    der Stop wird nur nachgezogen, nie gelockert; Ausstieg, wenn der Kurs ihn beruehrt.
   "signal" (von Signal zu Signal): kein SL/TP, das Gegen-Signal schliesst und dreht die Position.
 Signal auf der geschlossenen Kerze. Im Modus "bands" werden weitere Signale bei offener Position ignoriert.
@@ -57,7 +57,7 @@ def _gq_params(cfg):
         "sl_mult": max(0.1, _f(cfg, "gq_sl_mult", 1.0)),          # SL-Band = ATR * Faktor (= Risiko R)
         "tp1_rr": max(0.1, _f(cfg, "gq_tp1_rr", 1.0)),            # TP1 = R * Faktor (1 = 1:1)
         "tp1_pct": min(100.0, max(0.0, _f(cfg, "gq_tp1_pct", 50.0))),   # Anteil der Position, der bei TP1 verkauft wird
-        "trail_mult": max(0.1, _f(cfg, "gq_sl_mult", 1.0)),    # mitlaufendes ATR-Band nach TP1 = dasselbe Band wie der Stop-Loss
+        "trail_mult": max(0.1, _f(cfg, "gq_trail_mult", 1.0)),    # mitlaufendes ATR-Band nach TP1
         "htf": cfg.get("gq_htf_resolution", "4h"),
     }
 
@@ -524,11 +524,10 @@ def _gq_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
         if time.time() > deadline:
             break
         candles, buy, sell, atr = prepared[(res, htf)]
-        sm = max(0.1, slm) if slm else base_p["sl_mult"]
-        p = dict(base_p, sl_mult=sm, trail_mult=sm)     # mitlaufendes Band = SL-Band
+        p = dict(base_p, sl_mult=max(0.1, slm) if slm else base_p["sl_mult"], trail_mult=max(0.1, trm) if trm else base_p["trail_mult"])
         trades = _gq_simulate(candles, base_cfg, buy, sell, atr, _gq_warmup(p), p)
         st = summarize_backtest_trades(trades, exclude_top_n)
-        out.append({"gq_resolution": res, "gq_htf_resolution": htf, "gq_sl_mult": slm, "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
+        out.append({"gq_resolution": res, "gq_htf_resolution": htf, "gq_sl_mult": slm, "gq_trail_mult": trm, "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
                     "total_pnl_usd": st["total_pnl_usd"], "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"],
                     "max_drawdown_usd": st["max_drawdown_usd"], "avg_bars_held": st["avg_bars_held"]})
     return out
@@ -585,7 +584,7 @@ async def run_gq_montecarlo(symbol, cfg, days, resolutions, mult_min=1.0, mult_m
     if signal_mode:
         combos = [(r, h, 0.0, 0.0) for (r, h) in prepared]
     else:
-        combos = [(r, h, a, a) for (r, h) in prepared for a in values]
+        combos = [(r, h, a, b) for (r, h) in prepared for a, b in itertools.product(values, values)]
     requested = len(combos)
     rng = random.Random(seed)
     if len(combos) > runs:

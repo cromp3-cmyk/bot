@@ -2361,6 +2361,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>Stop-Loss: ATR-Band-Faktor (Abstand = ATR × Faktor = Risiko R)</label><input type="number" step="0.1" min="0.1" id="gq_sl_mult"></div>
   <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>TP1: Vielfaches von R (1 = 1:1)</label><input type="number" step="0.1" min="0.1" id="gq_tp1_rr"></div>
   <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>TP1: Anteil der Position, der verkauft wird (%, 0 = kein Teilverkauf, 100 = alles); danach SL auf Einstieg</label><input type="number" step="5" min="0" max="100" id="gq_tp1_pct"></div>
+  <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>TP2: mitlaufendes ATR-Band für den Rest (ATR × Faktor hinter dem Schlusskurs, wird nur nachgezogen)</label><input type="number" step="0.1" min="0.1" id="gq_trail_mult"></div>
   <div data-mode="gold_scalper" data-requires="gq_exit_mode" data-requires-value="bands"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="gq_sl_cooldown_seconds"></div>
 
   <div data-mode="punk_algo" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -3855,7 +3856,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div><label>Basis-Zeitrahmen (leer = wie in den Einstellungen)</label><input type="text" id="gq-mc-res" value="" placeholder="z. B. 30s, 1m, 5m" style="width:200px;"></div>
     <div><label>Durchläufe (max. 2000)</label><input type="number" step="50" min="1" max="2000" id="gq-mc-runs" value="500" style="width:90px;"></div>
     <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="gq-mc-seed" style="width:110px;"></div>
-    <div><label>bis Seed (leer = nur einer, max. 20 Seeds)</label><input type="number" step="1" id="gq-mc-seed-to" style="width:110px;"></div>
     <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="gq-mc-exclude-top-n" value="1" style="width:90px;"></div>
     <div><label>Ausstieg im Test</label><select id="gq-mc-exit-mode"><option value="">wie in den Einstellungen</option><option value="bands">ATR-Bänder</option><option value="signal">Von Signal zu Signal (nur Zeitrahmen)</option></select></div>
   </div>
@@ -3872,6 +3872,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="gq_htf_resolution">Referenz ⇅</th>
       <th class="sortable" data-key="gq_resolution">Basis ⇅</th>
       <th class="sortable" data-key="gq_sl_mult">SL-Band ⇅</th>
+      <th class="sortable" data-key="gq_trail_mult">Mitlaufendes Band ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -3888,6 +3889,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="gq_htf_resolution">Referenz ⇅</th>
       <th class="sortable" data-key="gq_resolution">Basis ⇅</th>
       <th class="sortable" data-key="gq_sl_mult">SL-Band ⇅</th>
+      <th class="sortable" data-key="gq_trail_mult">Mitlaufendes Band ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -5582,32 +5584,18 @@ const gqMcRowHtml = (r) => `
     <td>${r.gq_htf_resolution}</td>
     <td>${r.gq_resolution}</td>
     <td>${r.gq_sl_mult > 0 ? r.gq_sl_mult : '–'}</td>
+    <td>${r.gq_trail_mult > 0 ? r.gq_trail_mult : '–'}</td>
     <td>${r.trades}</td>
     <td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td>
     <td>${r.avg_bars_held}</td>
-    ${applyBtn(r.gq_sl_mult > 0 ? {gq_htf_resolution: r.gq_htf_resolution, gq_resolution: r.gq_resolution, gq_exit_mode: 'bands', gq_sl_mult: r.gq_sl_mult} : {gq_htf_resolution: r.gq_htf_resolution, gq_resolution: r.gq_resolution, gq_exit_mode: 'signal'})}
+    ${applyBtn(r.gq_sl_mult > 0 ? {gq_htf_resolution: r.gq_htf_resolution, gq_resolution: r.gq_resolution, gq_exit_mode: 'bands', gq_sl_mult: r.gq_sl_mult, gq_trail_mult: r.gq_trail_mult} : {gq_htf_resolution: r.gq_htf_resolution, gq_resolution: r.gq_resolution, gq_exit_mode: 'signal'})}
   </tr>`;
 const renderGqMcResults = makeSortableTable('gq-mc-results-table', () => window.gqMcResultsData, gqMcRowHtml);
 const renderGqMcWorst = makeSortableTable('gq-mc-worst-table', () => window.gqMcWorstData, gqMcRowHtml);
 
-function gqMergeMc(a, b) {
-  const key = r => [r.gq_htf_resolution, r.gq_resolution, r.gq_sl_mult].join('|');
-  const merge = (x, y, cmp, lim) => {
-    const seen = new Set(), out = [];
-    [...(x || []), ...(y || [])].forEach(r => { const k = key(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
-    return out.sort(cmp).slice(0, lim);
-  };
-  const ok = r => r.trades >= (a.min_reliable_trades || 5) ? 1 : 0;
-  a.results = merge(a.results, b.results, (p, q) => (ok(q) - ok(p)) || (q.total_pnl_usd - p.total_pnl_usd), 30);
-  a.worst_results = merge(a.worst_results, b.worst_results, (p, q) => p.total_pnl_usd - q.total_pnl_usd, 20);
-  a.combos_tested += b.combos_tested; a.combos_requested += b.combos_requested;
-  a.profitable_pct = Math.round((a.profitable_pct + b.profitable_pct) * 5) / 10;
-  a.best_pnl_usd = Math.max(a.best_pnl_usd, b.best_pnl_usd); a.worst_pnl_usd = Math.min(a.worst_pnl_usd, b.worst_pnl_usd);
-  return a;
-}
 document.getElementById('btn-gq-mc').addEventListener('click', async () => {
   const btn = document.getElementById('btn-gq-mc');
   const statusEl = document.getElementById('gq-mc-status');
@@ -5630,17 +5618,11 @@ document.getElementById('btn-gq-mc').addEventListener('click', async () => {
   Object.values(titles).forEach(t => t.style.display = 'none');
   statusEl.innerText = `⏳ Lade Kerzen und teste die Kombinationen...`;
   try {
-    const s1 = parseInt(payload.seed), s2 = parseInt(document.getElementById('gq-mc-seed-to').value);
-    const seeds = (!isNaN(s1) && !isNaN(s2) && s2 > s1) ? Array.from({length: Math.min(s2 - s1 + 1, 20)}, (_, i) => s1 + i) : [payload.seed];
-    let data = null;
-    for (let si = 0; si < seeds.length; si++) {
-      if (seeds.length > 1) statusEl.innerText = `⏳ Seed ${seeds[si]} (${si + 1} von ${seeds.length})...`;
-      const res = await fetch(`/api/gq_mc?symbol=${sweepSymbol}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...payload, seed: seeds[si]})});
-      const d = await res.json();
-      if (sweepSymbol !== currentSymbol) return;
-      if (d.error) { data = d; break; }
-      data = si === 0 ? d : gqMergeMc(data, d);
-    }
+    const res = await fetch(`/api/gq_mc?symbol=${sweepSymbol}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (sweepSymbol !== currentSymbol) return;
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
@@ -6705,6 +6687,7 @@ async function refresh() {
     document.getElementById('gq_sl_mult').value = data.config.gq_sl_mult;
     document.getElementById('gq_tp1_rr').value = data.config.gq_tp1_rr;
     document.getElementById('gq_tp1_pct').value = data.config.gq_tp1_pct;
+    document.getElementById('gq_trail_mult').value = data.config.gq_trail_mult;
     document.getElementById('gq_sl_cooldown_seconds').value = data.config.gq_sl_cooldown_seconds;
     setResolutionField('pa_resolution', data.config.pa_resolution);
     document.getElementById('pa_period1').value = data.config.pa_period1;
@@ -7303,6 +7286,7 @@ function buildConfigPayload() {
     gq_sl_mult: parseFloat(document.getElementById('gq_sl_mult').value) || 1,
     gq_tp1_rr: parseFloat(document.getElementById('gq_tp1_rr').value) || 1,
     gq_tp1_pct: Number.isFinite(parseFloat(document.getElementById('gq_tp1_pct').value)) ? parseFloat(document.getElementById('gq_tp1_pct').value) : 50,
+    gq_trail_mult: parseFloat(document.getElementById('gq_trail_mult').value) || 1,
     gq_sl_cooldown_seconds: parseFloat(document.getElementById('gq_sl_cooldown_seconds').value),
     pa_resolution: getResolutionField('pa_resolution'),
     pa_period1: parseInt(document.getElementById('pa_period1').value) || 27,
@@ -7980,7 +7964,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "gq_resolution", "gq_htf_resolution", "gq_rsi_len", "gq_ma_len", "gq_buy_level", "gq_sell_level", "gq_direction_mode", "gq_atr_len", "gq_exit_mode", "gq_sl_mult", "gq_tp1_rr", "gq_tp1_pct", "gq_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "pv_resolution", "pv_left", "pv_right", "pv_buffer_pct", "pv_candle_type", "pv_renko_mode", "pv_renko_atr_len", "pv_renko_mult", "pv_renko_pct", "pv_exit_mode", "pv_direction_mode", "pv_sl_usd", "pv_tp_usd", "pv_profit_only_close", "pv_tp_mode", "pv_be_trigger_usd", "pv_tp1_usd", "pv_tp2_usd", "pv_tp3_usd", "pv_tp1_pct", "pv_tp2_pct", "pv_be_after_tp1", "pv_sl_to_tp1_on_tp2", "pv_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_be_trigger_usd", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "gq_resolution", "gq_htf_resolution", "gq_rsi_len", "gq_ma_len", "gq_buy_level", "gq_sell_level", "gq_direction_mode", "gq_atr_len", "gq_exit_mode", "gq_sl_mult", "gq_tp1_rr", "gq_tp1_pct", "gq_trail_mult", "gq_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "pv_resolution", "pv_left", "pv_right", "pv_buffer_pct", "pv_candle_type", "pv_renko_mode", "pv_renko_atr_len", "pv_renko_mult", "pv_renko_pct", "pv_exit_mode", "pv_direction_mode", "pv_sl_usd", "pv_tp_usd", "pv_profit_only_close", "pv_tp_mode", "pv_be_trigger_usd", "pv_tp1_usd", "pv_tp2_usd", "pv_tp3_usd", "pv_tp1_pct", "pv_tp2_pct", "pv_be_after_tp1", "pv_sl_to_tp1_on_tp2", "pv_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_be_trigger_usd", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
