@@ -5044,8 +5044,7 @@ function wacShowBacktest() {
   const b = WAC.bt, info = document.getElementById('wac-info');
   if (!b) { info.innerText = 'Noch kein Backtest – unten „Backtest starten“ klicken.'; return; }
   const t0 = (b.chart.candles && b.chart.candles.length) ? b.chart.candles[0].time : 0;
-  let inView = (b.trades || []).filter(t => { const x = t.exit_ts || t.row_ts || t.entry_ts; return !x || Math.floor(x / 1000) >= t0; });   // nur Trades im sichtbaren Ausschnitt (sonst stapeln sich alte Punkte am linken Rand)
-  if (!inView.length) inView = b.trades || [];
+  const inView = (b.trades || []).filter(t => { const x = t.exit_ts || t.row_ts || t.entry_ts; return !x || Math.floor(x / 1000) >= t0; });   // nur Trades im sichtbaren Ausschnitt (sonst stapeln sich alte Punkte am linken Rand)
   wacRender(b.chart, wacBtMarkers(inView));
   try { wacSetLbTrades((b.chart && b.chart.lb_trades) || []); } catch (e) { console.error(e); }
   WAC.price.timeScale().fitContent();

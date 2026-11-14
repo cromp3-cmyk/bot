@@ -25,7 +25,7 @@ import random
 import re
 import time
 import traceback
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 
 from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_partial_exit, execute_reverse
 from dollar701 import _res_seconds, _poll_delay
@@ -467,6 +467,10 @@ async def run_gq_backtest(symbol, cfg, days, exclude_top_n=1):
     stats = summarize_backtest_trades(trades, exclude_top_n)
     nn = len(base_ts)
     off = max(0, nn - 1000)
+    if rec:      # Fenster so waehlen, dass die letzten ~15 Trades sichtbar sind (max. 8000 Kerzen)
+        k = rec[-min(15, len(rec))]
+        idx = bisect_left(base_ts, k["t1"] * 1000)
+        off = max(0, nn - 8000, min(off, idx - 100))
     chart = {"candles": [{"time": base_ts[i] // 1000, "open": candles[1][i], "high": candles[2][i], "low": candles[3][i], "close": candles[4][i]} for i in range(off, nn)],
              "wt1": [], "wt2": [], "levels": [], "entry_mode": "gq", "wt1v": 0, "wt2v": 0, "bars": nn,
              "markers": [{"time": base_ts[i] // 1000, "kind": "long" if buy[i] else "short", "price": candles[4][i]} for i in range(off, nn) if buy[i] or sell[i]],
