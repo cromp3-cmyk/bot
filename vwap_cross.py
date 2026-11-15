@@ -2,13 +2,12 @@
 vwap_cross.py - eigene Strategie "EMA 9 + VWAP" (entry_mode "vwap_cross", Config-Praefix vc_*).
 
 Prinzip:
-  * EMA 9 (Laenge einstellbar) gegen den VWAP (hlc3 x Volumen, Reset je Tag / Woche / Monat in UTC, Woche beginnt Montag).
-    Day-, Week- und Month-VWAP sind einzeln waehlbar.
-  * LONG  = EMA 9 kreuzt einen gewaehlten VWAP nach oben, SHORT = nach unten. Signal bei Kerzenschluss.
-  * Der Sprung des VWAP beim Start einer neuen Periode zaehlt nie als Kreuzung. Optional ("Erster Cross nach Perioden-Start
-    ueberspringen") wird ausserdem der erste echte Cross nach jedem Perioden-Start nicht gehandelt.
-  * Stop-Loss: "Kerze" = unter dem Tief der letzten GANZEN Kerze unterhalb des VWAP (Long) bzw. ueber dem Hoch der letzten Kerze
-    oberhalb des VWAP (Short), oder fester $-Betrag. Der $-Wert dient bei "Kerze" als Notfall-Limit/Fallback.
+  * EIN VWAP (Pine "Volume Weighted Average Price" von AustrianTradingMachine): waehlbare Quelle (hlc3 / Schluss / hl2 / ohlc4)
+    mal Volumen, Reset je Tag / Woche / Monat in UTC (Woche ab Montag). Dazu Standardabweichungs-Baender um den VWAP.
+  * LONG  = EMA 9 kreuzt den VWAP nach oben, SHORT = nach unten. JEDE Kreuzung bei Kerzenschluss ist ein Signal.
+  * Der Sprung des VWAP beim Start einer neuen Periode zaehlt nie als Kreuzung.
+  * Stop-Loss: hinter der VORLETZTEN Kerze - Long unter ihrem Tief, Short ueber ihrem Hoch (plus Puffer). Liegt dieses Extrem
+    auf der falschen Seite des Einstiegs, zaehlt ersatzweise das Extrem der Signalkerze.
   * Take-Profit: Kreuzung eines waehlbaren VWAP in Gegenrichtung (Standard Day), fester $-Gewinn, Gegen-Signal (Gegentrade) oder keiner.
   * Live: Kerzen und Volumen per Binance-REST nur bei neu geschlossener Kerze; VWAP = 15m-Basiskerzen seit Perioden-Beginn
     (zwischengespeichert, siehe vwap_scanner) + Kerzen der gewaehlten Zeitebene. Backtest: Kerzen der Zeitebene inkl. Vorlauf.
@@ -28,147 +27,131 @@ from vwap_scanner import _period_start, _ema, _fetch_base, BASE_MS
 
 VC_TFS = ["1m", "3m", "5m", "15m", "30m", "1h", "4h"]
 KINDS = ("d", "w", "m")
-KIND_NAMES = {"d": "Day", "w": "Week", "m": "Month"}
+KIND_NAMES = {"d": "Tag", "w": "Woche", "m": "Monat"}
 WARM_DAYS = {"d": 1.0, "w": 7.0, "m": 31.0}
+SRC_NAMES = {"hlc3": "hlc3", "close": "Schluss", "hl2": "hl2", "ohlc4": "ohlc4"}
 LIVE_CANDLES = 600
 SL_LOOKBACK = 200
 
 
 def _vc_params(cfg):
     res = cfg.get("vc_resolution", "15m")
-    use = [k for k, key in (("d", "vc_use_day"), ("w", "vc_use_week"), ("m", "vc_use_month")) if cfg.get(key)]
-    sl_mode = cfg.get("vc_sl_mode", "kerze")
     tp_mode = cfg.get("vc_tp_mode", "kreuzung")
-    rule = cfg.get("vc_sl_candle_rule", "whole")
     direction = cfg.get("vc_direction_mode", "both")
-    tpv = cfg.get("vc_tp_vwap", "d")
+    anchor = cfg.get("vc_anchor", "d")
+    src = cfg.get("vc_source", "hlc3")
     return {
         "res": res if res in VC_TFS else "15m",
         "ema": max(2, min(200, int(cfg.get("vc_ema_len", 9) or 9))),
-        "use": use or ["d"],
-        "skip_first": bool(cfg.get("vc_skip_first", True)),
+        "anchor": anchor if anchor in KINDS else "d",       # Reset des VWAP: Tag / Woche / Monat
+        "src": src if src in SRC_NAMES else "hlc3",         # Quelle des VWAP (Pine-Eingabe "Source")
+        "band_mult": max(0.1, float(cfg.get("vc_band_mult", 1.0) or 1.0)),
+        "band_vol": bool(cfg.get("vc_band_volume", True)),  # Baender zusaetzlich volumengewichtet (Pine "Volume weighted")
         "direction": direction if direction in ("both", "long_only", "short_only") else "both",
-        "sl_mode": sl_mode if sl_mode in ("kerze", "usd") else "kerze",
-        "rule": rule if rule in ("whole", "close") else "whole",
         "sl_buf": max(0.0, float(cfg.get("vc_sl_buffer_pct", 0.0) or 0.0)),
-        "sl_usd": max(0.0, float(cfg.get("vc_sl_usd", 5.0) or 0.0)),
         "tp_mode": tp_mode if tp_mode in ("kreuzung", "fester_betrag", "gegentrade", "aus") else "kreuzung",
         "tp_usd": max(0.0, float(cfg.get("vc_tp_usd", 5.0) or 0.0)),
-        "tp_vwap": tpv if tpv in KINDS else "d",
     }
+
+
+def _src_price(src, o, h, l, c):
+    """Quelle einer Kerze. o kann None sein (15m-Basiskerzen des Vorlaufs haben keine Eroeffnung) -> dann hlc3."""
+    if src == "close":
+        return c
+    if src == "hl2":
+        return (h + l) / 2.0
+    if src == "ohlc4" and o is not None:
+        return (o + h + l + c) / 4.0
+    return (h + l + c) / 3.0
 
 
 # ============================================================================
 # RECHNUNG (rein, ohne Netzwerk)
 # ============================================================================
-def vc_build(ts, h, l, c, v, bars, ema_len):
-    """EMA + VWAP je Kerze. bars = abgeschlossene 15m-Kerzen (live) fuer den Vorlauf vor dem Kerzenfenster, im Backtest None
-    (dort laeuft der VWAP direkt ueber alle Kerzen des Zeitrahmens)."""
+def vc_build(ts, o, h, l, c, v, bars, p):
+    """EMA, VWAP und Standardabweichungs-Baender je Kerze. bars = abgeschlossene 15m-Kerzen (live) fuer den Vorlauf vor dem
+    Kerzenfenster, im Backtest None (dort laeuft der VWAP direkt ueber alle Kerzen des Zeitrahmens)."""
     n = len(c)
-    ema = _ema(c, ema_len)
+    ema = _ema(c, p["ema"])
+    src, k = p["src"], p["anchor"]
     items = []
     j0 = 0
     if bars:
         t_w = -(-ts[0] // BASE_MS) * BASE_MS
         for b in bars:
             if b["ts"] < t_w:
-                items.append((b["ts"], (b["h"] + b["l"] + b["c"]) / 3.0 * b["v"], b["v"], None))
+                items.append((b["ts"], _src_price(src, b.get("o"), b["h"], b["l"], b["c"]), b["v"], None))
         j0 = None
         for j in range(n):
             if ts[j] >= t_w:
                 if j0 is None:
                     j0 = j
-                items.append((ts[j], (h[j] + l[j] + c[j]) / 3.0 * v[j], v[j], j))
+                items.append((ts[j], _src_price(src, o[j] if o else None, h[j], l[j], c[j]), v[j], j))
         if j0 is None:
             j0 = n
     else:
         for j in range(n):
-            items.append((ts[j], (h[j] + l[j] + c[j]) / 3.0 * v[j], v[j], j))
-    vw, resets = {}, {}
-    for k in KINDS:
-        arr = [None] * n
-        rs = set()
-        cur, spv, sv = None, 0.0, 0.0
-        for t, pv, vol, j in items:
-            ps = _period_start(t, k)
-            if ps != cur:
-                if cur is not None and j is not None:
-                    rs.add(j)                       # Periodenwechsel auf dieser Kerze (VWAP springt)
-                cur, spv, sv = ps, 0.0, 0.0
-            spv += pv
-            sv += vol
-            if j is not None and sv > 0:
-                arr[j] = spv / sv
-        vw[k], resets[k] = arr, rs
-    return {"ema": ema, "vw": vw, "resets": resets, "j0": j0, "n": n}
+            items.append((ts[j], _src_price(src, o[j] if o else None, h[j], l[j], c[j]), v[j], j))
+    vw = [None] * n
+    sd = [None] * n
+    rs = set()
+    cur = None
+    spv = sv = 0.0            # fuer den VWAP: immer mit Volumen gewichtet
+    sw = swx = swx2 = 0.0     # fuer die Baender: Gewicht nach Einstellung
+    cnt = 0
+    for t, px, vol, j in items:
+        ps = _period_start(t, k)
+        if ps != cur:
+            if cur is not None and j is not None:
+                rs.add(j)                       # Periodenwechsel auf dieser Kerze (VWAP springt)
+            cur, spv, sv, sw, swx, swx2, cnt = ps, 0.0, 0.0, 0.0, 0.0, 0.0, 0
+        w = vol if p["band_vol"] else 1.0
+        spv += px * vol
+        sv += vol
+        sw += w
+        swx += w * px
+        swx2 += w * px * px
+        cnt += 1
+        if j is not None and sv > 0:
+            vw[j] = spv / sv
+            if cnt > 1 and sw > 0:
+                mu = swx / sw
+                var = max(0.0, swx2 / sw - mu * mu)
+                sd[j] = var ** 0.5
+            else:
+                sd[j] = 0.0
+    return {"ema": ema, "vw": vw, "sd": sd, "resets": rs, "j0": j0, "n": n}
 
 
 def vc_signals(arr, p):
-    """Kreuzungen je VWAP + Einstiegssignale. -> dict(buy, sell, trig, tp_up, tp_dn, up, dn)."""
+    """Jede Kreuzung EMA x VWAP bei Kerzenschluss ist ein Signal. -> dict(buy, sell, trig, tp_up, tp_dn)."""
     n, ema, j0 = arr["n"], arr["ema"], arr["j0"]
-    up = {k: [False] * n for k in KINDS}
-    dn = {k: [False] * n for k in KINDS}
-    first = {k: [False] * n for k in KINDS}
-    for k in KINDS:
-        vw, rs = arr["vw"][k], arr["resets"][k]
-        seen, crossed = False, False
-        for j in range(j0, n):
-            if j in rs:
-                seen, crossed = True, False
-            if j == j0:
-                continue
-            a, b = vw[j], vw[j - 1]
-            if a is None or b is None or j in rs:   # Perioden-Start-Sprung ist keine Kreuzung
-                continue
-            p0, q = ema[j - 1] - b, ema[j] - a
-            if p0 <= 0 < q:
-                up[k][j] = True
-            elif p0 >= 0 > q:
-                dn[k][j] = True
-            else:
-                continue
-            if seen and not crossed:
-                first[k][j] = True                  # erster Cross seit dem Perioden-Start
-            crossed = True
-    buy, sell, trig = [False] * n, [False] * n, [None] * n
+    vw, rs = arr["vw"], arr["resets"]
+    buy, sell = [False] * n, [False] * n
     for j in range(j0 + 1, n):
-        bk = [k for k in p["use"] if up[k][j] and not (p["skip_first"] and first[k][j])]
-        sk = [k for k in p["use"] if dn[k][j] and not (p["skip_first"] and first[k][j])]
-        if bk and not sk:
-            buy[j], trig[j] = True, bk[0]
-        elif sk and not bk:
-            sell[j], trig[j] = True, sk[0]
-    return {"buy": buy, "sell": sell, "trig": trig, "tp_up": up[p["tp_vwap"]], "tp_dn": dn[p["tp_vwap"]], "up": up, "dn": dn}
+        a, b = vw[j], vw[j - 1]
+        if a is None or b is None or j in rs:       # Perioden-Start-Sprung ist keine Kreuzung
+            continue
+        p0, q = ema[j - 1] - b, ema[j] - a
+        if p0 <= 0 < q:
+            buy[j] = True
+        elif p0 >= 0 > q:
+            sell[j] = True
+    return {"buy": buy, "sell": sell, "trig": [None] * n, "tp_up": buy, "tp_dn": sell}
 
 
-def vc_sl_price(direction, j, k, arr, h, l, c, entry, size, p):
-    """Stop-Loss-Preis oder None. 'kerze': Extrem der letzten GANZEN Kerze auf der falschen VWAP-Seite (+ Puffer), mit $-Limit/Fallback."""
-    sl = None
+def vc_sl_price(direction, j, h, l, entry, p):
+    """Stop-Loss hinter der VORLETZTEN Kerze: Long unter ihrem Tief, Short ueber ihrem Hoch (plus Puffer).
+    Liegt dieses Extrem auf der falschen Seite des Einstiegs, zaehlt ersatzweise das Extrem der Signalkerze j."""
     long = direction == "long"
-    if p["sl_mode"] == "kerze" and k:
-        vw = arr["vw"][k]
-        buf = p["sl_buf"] / 100.0
-        for m in range(j, max(0, j - SL_LOOKBACK) - 1, -1):
-            vv = vw[m]
-            if vv is None:
-                continue
-            if long:
-                if (h[m] < vv) if p["rule"] == "whole" else (c[m] < vv):
-                    sl = l[m] * (1 - buf)
-                    break
-            else:
-                if (l[m] > vv) if p["rule"] == "whole" else (c[m] > vv):
-                    sl = h[m] * (1 + buf)
-                    break
-        if sl is not None and ((long and sl >= entry) or (not long and sl <= entry)):
-            sl = None
-    if p["sl_usd"] > 0 and size > 0:
-        cap = entry - p["sl_usd"] / size if long else entry + p["sl_usd"] / size
-        if sl is None:
-            sl = cap
-        else:
-            sl = max(sl, cap) if long else min(sl, cap)     # $-Limit begrenzt den Verlust
-    return sl
+    buf = p["sl_buf"] / 100.0
+    for m in (j - 1, j):
+        if m < 0:
+            continue
+        sl = l[m] * (1 - buf) if long else h[m] * (1 + buf)
+        if (long and sl < entry) or (not long and sl > entry):
+            return sl
+    return None
 
 
 def vc_tp_price(direction, entry, size, p):
@@ -233,10 +216,10 @@ async def _vc_fetch(symbol, cfg, p):
     return tfc, bars
 
 
-def _set_levels(st, cfg, target, price, j, k, arr, h, l, c, p):
+def _set_levels(st, cfg, target, price, j, h, l, p):
     entry = st.get("avg_entry_price") or price
     size = st.get("total_coin_size") or 0
-    st["vc_sl"] = vc_sl_price(target, j, k, arr, h, l, c, entry, size, p)
+    st["vc_sl"] = vc_sl_price(target, j, h, l, entry, p)
     st["vc_tp"] = vc_tp_price(target, entry, size, p)
 
 
@@ -251,8 +234,7 @@ async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
     j = len(closed) - 1
     pos = st["position"]
     target = "long" if sig["buy"][j] else "short" if sig["sell"][j] else None
-    trig = sig["trig"][j]
-    info = f"{KIND_NAMES.get(trig, '')}-VWAP" if trig else ""
+    info = f"{KIND_NAMES[p['anchor']]}-VWAP ({SRC_NAMES[p['src']]})"
     if pos is not None:
         is_long = pos == "long"
         tp_cross = p["tp_mode"] == "kreuzung" and (sig["tp_dn"][j] if is_long else sig["tp_up"][j])
@@ -265,7 +247,7 @@ async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
                 if await execute_reverse(symbol, price, reason, size_multiplier=1.0):
                     _vc_reset_state(st)
                     if st["position"] is not None:
-                        _set_levels(st, cfg, flip_to, price, j, trig, arr, h, l, c, p)
+                        _set_levels(st, cfg, flip_to, price, j, h, l, p)
             else:
                 debug_log(f"🎯 [{symbol}] EMA9+VWAP {reason}: {pos.upper()} schließen @ {price}")
                 await execute_exit(symbol, price, reason)
@@ -277,7 +259,7 @@ async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
     debug_log(f"📡 [{symbol}] EMA9+VWAP Signal: {target.upper()} @ {price} ({info})")
     await execute_entry(symbol, target, price, is_add_on=False)
     if st["position"] is not None:
-        _set_levels(st, cfg, target, price, j, trig, arr, h, l, c, p)
+        _set_levels(st, cfg, target, price, j, h, l, p)
 
 
 async def vc_poll_loop(symbol):
@@ -319,8 +301,8 @@ async def vc_poll_loop(symbol):
                                     if not first_run:         # erste Kerze nach dem Start nur merken, nicht handeln
                                         ts = [x["ts"] for x in closed]
                                         arr = await asyncio.to_thread(
-                                            vc_build, ts, [x["h"] for x in closed], [x["l"] for x in closed],
-                                            [x["c"] for x in closed], [x["v"] for x in closed], bars, p["ema"])
+                                            vc_build, ts, [x.get("o") for x in closed], [x["h"] for x in closed], [x["l"] for x in closed],
+                                            [x["c"] for x in closed], [x["v"] for x in closed], bars, p)
                                         sig = vc_signals(arr, p)
                                         await vc_check_candle(symbol, cfg, p, closed, arr, sig, price if price is not None else closed[-1]["c"])
                             else:
@@ -329,7 +311,7 @@ async def vc_poll_loop(symbol):
                             wait = 5.0
                 if now - last_heartbeat > 300:
                     last_heartbeat = now
-                    debug_log(f"💓 [{symbol}] EMA9+VWAP aktiv: {p['res']}, VWAP {'/'.join(KIND_NAMES[k] for k in p['use'])}, SL={p['sl_mode']}, TP={p['tp_mode']}, Preis={price}")
+                    debug_log(f"💓 [{symbol}] EMA9+VWAP aktiv: {p['res']}, VWAP {KIND_NAMES[p['anchor']]}/{SRC_NAMES[p['src']]}, SL=vorletzte Kerze, TP={p['tp_mode']}, Preis={price}")
         except Exception as e:
             debug_log(f"⚠️ [{symbol}] EMA9+VWAP-Abfrage fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         await asyncio.sleep(wait if b["state"].get("position") is None else min(wait, 1.0))
@@ -347,7 +329,7 @@ def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start):
 
     def open_pos(target, i):
         size = (margin * leverage) / c[i]
-        sl = vc_sl_price(target, i, sig["trig"][i], arr, h, l, c, c[i], size, p)
+        sl = vc_sl_price(target, i, h, l, c[i], p)
         tp = vc_tp_price(target, c[i], size, p)
         return {"dir": target, "entry": c[i], "size": size, "entry_i": i, "sl": sl, "tp": tp}
 
@@ -379,10 +361,8 @@ def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start):
 
 async def run_vc_backtest(symbol, cfg, days, exclude_top_n=1):
     p = _vc_params(cfg)
-    need = set(p["use"])
-    if p["tp_mode"] == "kreuzung":
-        need.add(p["tp_vwap"])
-    warm_days = max(WARM_DAYS[k] for k in need) + 1.0      # Vorlauf: Beginn der laengsten Periode + EMA-Einschwingen
+    need = {p["anchor"]}
+    warm_days = WARM_DAYS[p["anchor"]] + 1.0               # Vorlauf: Beginn der VWAP-Periode + EMA-Einschwingen
     max_candles = BACKTEST_MAX_CANDLES.get("vwap_cross", 100_000)
     candles, err = await _fetch_cached_mo7_backtest_candles(symbol, p["res"], days + warm_days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
     if err:
@@ -394,7 +374,7 @@ async def run_vc_backtest(symbol, cfg, days, exclude_top_n=1):
         return {"error": "Keine Volumendaten erhalten - der VWAP braucht Volumen."}
     start_ts = ts[-1] - int(days * 86_400_000)
     i_start = next((i for i, t in enumerate(ts) if t >= start_ts), 1)
-    arr = await asyncio.to_thread(vc_build, ts, h, l, c, v, None, p["ema"])
+    arr = await asyncio.to_thread(vc_build, ts, o, h, l, c, v, None, p)
     sig = vc_signals(arr, p)
     trades = vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start)
     stats = summarize_backtest_trades(trades, exclude_top_n)
@@ -424,7 +404,7 @@ async def vc_chart_payload(symbol, cfg, ts, o, h, l, c, tf):
     n = len(c)
     off = max(0, n - 1000)
     candles = [{"time": ts[i] // 1000, "open": o[i], "high": h[i], "low": l[i], "close": c[i]} for i in range(off, n)]
-    markers = []
+    markers, lines = [], []
     if tf == p["res"]:
         try:
             data = await _vc_fetch(symbol, cfg, p)
@@ -434,14 +414,28 @@ async def vc_chart_payload(symbol, cfg, ts, o, h, l, c, tf):
                 now_ms = int(time.time() * 1000)
                 closed = [x for x in tfc if x["ts"] + tf_ms <= now_ms]
                 if len(closed) > 30:
-                    arr = await asyncio.to_thread(vc_build, [x["ts"] for x in closed], [x["h"] for x in closed], [x["l"] for x in closed],
-                                                  [x["c"] for x in closed], [x["v"] for x in closed], bars, p["ema"])
+                    arr = await asyncio.to_thread(vc_build, [x["ts"] for x in closed], [x.get("o") for x in closed], [x["h"] for x in closed],
+                                                  [x["l"] for x in closed], [x["c"] for x in closed], [x["v"] for x in closed], bars, p)
                     sig = vc_signals(arr, p)
                     first_t = candles[0]["time"] if candles else 0
                     for j, x in enumerate(closed):
                         kind = "long" if sig["buy"][j] else "short" if sig["sell"][j] else None
                         if kind and x["ts"] // 1000 >= first_t:
                             markers.append({"time": x["ts"] // 1000, "kind": kind, "price": x["c"]})
+                    vw, sd, mult = arr["vw"], arr["sd"], p["band_mult"]
+                    line, bup, blo = [], [], []
+                    for j, x in enumerate(closed):
+                        t = x["ts"] // 1000
+                        if t < first_t or vw[j] is None:
+                            continue
+                        line.append({"time": t, "value": vw[j]})
+                        if sd[j] is not None:
+                            bup.append({"time": t, "value": vw[j] + mult * sd[j]})
+                            blo.append({"time": t, "value": vw[j] - mult * sd[j]})
+                    lines = [{"key": "vc_vwap", "label": f"VWAP {KIND_NAMES[p['anchor']]}", "data": line},
+                             {"key": "vc_bup", "label": "VWAP Band oben", "data": bup},
+                             {"key": "vc_blo", "label": "VWAP Band unten", "data": blo}]
         except Exception as e:
             debug_log(f"⚠️ EMA9+VWAP Chart-Markierungen fehlgeschlagen: {e}")
-    return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "entry_mode": "vwap_cross", "wt1v": 0, "wt2v": 0, "bars": n}
+    return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "entry_mode": "vwap_cross", "wt1v": 0, "wt2v": 0, "bars": n,
+            "vc_lines": lines}

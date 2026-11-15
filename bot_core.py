@@ -573,18 +573,14 @@ def default_config():
         # ===== Reaction Level Matrix (entry_mode rlm): Swing-Level + Ablehnung (Rejection) an Unterstuetzung/Widerstand =====
         "vc_resolution": os.getenv("VC_RESOLUTION", "15m"),
         "vc_ema_len": int(os.getenv("VC_EMA_LEN", "9")),
-        "vc_use_day": os.getenv("VC_USE_DAY", "true").lower() == "true",
-        "vc_use_week": os.getenv("VC_USE_WEEK", "false").lower() == "true",
-        "vc_use_month": os.getenv("VC_USE_MONTH", "false").lower() == "true",
-        "vc_skip_first": os.getenv("VC_SKIP_FIRST", "true").lower() == "true",   # ersten echten Cross nach Tag-/Wochen-/Monatsstart nicht handeln
+        "vc_anchor": os.getenv("VC_ANCHOR", "d"),                      # Reset des VWAP: d = Tag | w = Woche | m = Monat
+        "vc_source": os.getenv("VC_SOURCE", "hlc3"),                   # Quelle des VWAP: hlc3 | close | hl2 | ohlc4
+        "vc_band_mult": float(os.getenv("VC_BAND_MULT", "1.0")),       # Breite der Standardabweichungs-Baender
+        "vc_band_volume": os.getenv("VC_BAND_VOLUME", "true").lower() == "true",
         "vc_direction_mode": os.getenv("VC_DIRECTION_MODE", "both"),
-        "vc_sl_mode": os.getenv("VC_SL_MODE", "kerze"),                # kerze = hinter der letzten ganzen Kerze auf der falschen VWAP-Seite | usd = fester $-Betrag
-        "vc_sl_candle_rule": os.getenv("VC_SL_CANDLE_RULE", "whole"),  # whole = ganze Kerze (Hoch<VWAP bzw. Tief>VWAP) | close = Schluss auf der falschen Seite
-        "vc_sl_buffer_pct": float(os.getenv("VC_SL_BUFFER_PCT", "0.0")),
-        "vc_sl_usd": float(os.getenv("VC_SL_USD", "5.0")),             # fester SL bzw. $-Limit bei Kerzen-SL (0 = kein Limit)
+        "vc_sl_buffer_pct": float(os.getenv("VC_SL_BUFFER_PCT", "0.0")),   # Puffer hinter der vorletzten Kerze
         "vc_tp_mode": os.getenv("VC_TP_MODE", "kreuzung"),             # kreuzung | fester_betrag | gegentrade | aus
         "vc_tp_usd": float(os.getenv("VC_TP_USD", "5.0")),
-        "vc_tp_vwap": os.getenv("VC_TP_VWAP", "d"),                    # welcher VWAP bei TP "kreuzung" zaehlt
         "rlm_resolution": os.getenv("RLM_RESOLUTION", "5m"),
         "rlm_swing_len": int(os.getenv("RLM_SWING_LEN", "6")),         # Balken links/rechts, die einen Swing bestaetigen
         "rlm_level_tol": float(os.getenv("RLM_LEVEL_TOL", "0.6")),     # Level-Toleranz in x ATR(34)
@@ -1888,7 +1884,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v14.11-b</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v15.11-a</span></div>
   <div class="topbar-right">
     <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
       <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
@@ -1969,7 +1965,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="lsob">LSOB (Sweep → Box → Ausbruch → Retest → Ablehnungskerze, TP 1:2, Break-Even bei halbem Ziel)</option>
       <option value="wae_ema">WAE-Zonen + EMA9 (WAE-Zone aus höherem Zeitrahmen, CALL/PUT bei Zone + EMA, wählbarer Ausstieg, optional $-SL/-TP)</option>
       <option value="punk_algo">Punk Algo (Range-Filter-Dreiecke ▲/▼ als Einstieg, Gegen-Dreieck = Flip, WaveTrend-X = Ausstieg, optional $-SL/-TP, Monte-Carlo-Test)</option>
-      <option value="vwap_cross">EMA 9 + VWAP (Einstieg bei Kreuzung EMA9 / Day-Week-Month-VWAP, SL hinter letzter Kerze, TP Kreuzung/Fest/Gegentrade, Backtest)</option>
+      <option value="vwap_cross">EMA 9 + VWAP (Einstieg bei jeder Kreuzung EMA9 / VWAP, Quelle wählbar, SL hinter der vorletzten Kerze, TP Kreuzung/Fest/Gegentrade, Backtest)</option>
       <option value="rlm">Reaction Level Matrix (Swing-Level mit Score, Einstieg bei Ablehnung an Unterstützung/Widerstand, SL/TP1-TP3 mit Teilverkäufen, Gegen-Signal dreht)</option>
       <option value="trendfolge">Trendfolge (Marktstruktur-Trend: im Aufwärtstrend bei jeder roten Kerze kaufen, im Abwärtstrend bei jeder grünen shorten, fester $-TP, Trendwechsel = schließen)</option>
       <option value="ema_rsi">EMA + RSI (Smart Money Zone Tracker: Schluss über/unter EMA + RSI über/unter Mittellinie, Swing-SL, TP1/TP2/TP3 mit Teilverkäufen)</option>
@@ -2590,21 +2586,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="trendfolge"><label>Max. Käufe pro Position (0 = unbegrenzt)</label><input type="number" step="1" min="0" id="tfl_max_entries"></div>
 
   <div data-mode="vwap_cross" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    📈 <b>EMA 9 + VWAP</b>: <b>Long</b>, wenn die EMA den gewählten VWAP (Day / Week / Month, UTC, Woche ab Montag) nach oben kreuzt, <b>Short</b> bei Kreuzung nach unten – Signal bei Kerzenschluss. Der Sprung des VWAP beim Start einer neuen Periode zählt nie als Kreuzung. Mit „Ersten Cross überspringen“ wird zusätzlich der erste echte Cross nach jedem Tag-/Wochen-/Monatsstart nicht gehandelt. Daten: Binance (Spot/Futures laut Einstellung), nur Coins mit Binance-Paar.
+    📈 <b>EMA 9 + VWAP</b>: <b>Long</b>, wenn die EMA den VWAP nach oben kreuzt, <b>Short</b> bei Kreuzung nach unten – <b>jede</b> Kreuzung bei Kerzenschluss ist ein Signal. Der VWAP läuft über die gewählte Quelle (hlc3, Schluss, hl2, ohlc4) mal Volumen und beginnt je Tag, Woche oder Monat neu (UTC, Woche ab Montag); sein Sprung beim Periodenstart zählt nie als Kreuzung. Dazu zeichnet der Chart die Standardabweichungs-Bänder um den VWAP. <b>Stop-Loss</b>: hinter der vorletzten Kerze – Long unter ihrem Tief, Short über ihrem Hoch (plus Puffer); liegt dieses Extrem auf der falschen Seite des Einstiegs, zählt ersatzweise die Signalkerze. Daten: Binance (Spot/Futures laut Einstellung), nur Coins mit Binance-Paar.
   </div>
   <div data-mode="vwap_cross"><label>Zeitebene (Signal bei Kerzenschluss)</label><select class="cfg" id="vc_resolution"><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option></select></div>
   <div data-mode="vwap_cross"><label>EMA-Länge</label><input type="number" step="1" min="2" max="200" id="vc_ema_len"></div>
-  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_use_day" style="width:auto; vertical-align:middle;"> Day-VWAP verwenden</label></div>
-  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_use_week" style="width:auto; vertical-align:middle;"> Week-VWAP verwenden</label></div>
-  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_use_month" style="width:auto; vertical-align:middle;"> Month-VWAP verwenden</label></div>
-  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_skip_first" style="width:auto; vertical-align:middle;"> Ersten Cross nach Tag-/Wochen-/Monatsstart überspringen (je VWAP)</label></div>
+  <div data-mode="vwap_cross"><label>VWAP-Quelle (Pine-Eingabe „Source“)</label><select class="cfg" id="vc_source"><option value="hlc3">hlc3 (Hoch+Tief+Schluss)/3</option><option value="close">Schlusskurs</option><option value="hl2">hl2 (Hoch+Tief)/2</option><option value="ohlc4">ohlc4 (alle vier)</option></select></div>
+  <div data-mode="vwap_cross"><label>VWAP-Periode (Reset)</label><select class="cfg" id="vc_anchor"><option value="d">Tag</option><option value="w">Woche</option><option value="m">Monat</option></select></div>
+  <div data-mode="vwap_cross"><label>Bänder: Standardabweichungen (nur Anzeige im Chart)</label><input type="number" step="0.1" min="0.1" id="vc_band_mult"></div>
+  <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_band_volume" style="width:auto; vertical-align:middle;"> Bänder zusätzlich volumengewichtet</label></div>
   <div data-mode="vwap_cross"><label>Richtung</label><select class="cfg" id="vc_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
-  <div data-mode="vwap_cross"><label>Stop-Loss</label><select class="cfg" id="vc_sl_mode"><option value="kerze">Hinter der letzten Kerze auf der falschen VWAP-Seite (Long: unter ihrem Tief, Short: über ihrem Hoch)</option><option value="usd">Fester $-Betrag (Verlust der Position)</option></select></div>
-  <div data-mode="vwap_cross" data-requires="vc_sl_mode" data-requires-value="kerze"><label>Welche Kerze zählt</label><select class="cfg" id="vc_sl_candle_rule"><option value="whole">Ganze Kerze unter dem VWAP (Long) / über dem VWAP (Short)</option><option value="close">Kerze mit Schluss auf der falschen Seite</option></select></div>
-  <div data-mode="vwap_cross" data-requires="vc_sl_mode" data-requires-value="kerze"><label>Puffer hinter der Kerze (%)</label><input type="number" step="0.01" min="0" id="vc_sl_buffer_pct"></div>
-  <div data-mode="vwap_cross"><label>SL in $ Verlust der Position (bei „Kerze“ als Begrenzung/Ersatz, 0 = keine)</label><input type="number" step="any" min="0" id="vc_sl_usd"></div>
-  <div data-mode="vwap_cross"><label>Take-Profit</label><select class="cfg" id="vc_tp_mode"><option value="kreuzung">Kreuzung der EMA mit einem VWAP in Gegenrichtung (Long: nach unten, Short: nach oben)</option><option value="fester_betrag">Fester $-Gewinn</option><option value="gegentrade">Gegentrade (Gegen-Signal dreht die Position)</option><option value="aus">Kein TP (nur SL)</option></select></div>
-  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="kreuzung"><label>Welcher VWAP für die TP-Kreuzung</label><select class="cfg" id="vc_tp_vwap"><option value="d">Day-VWAP</option><option value="w">Week-VWAP</option><option value="m">Month-VWAP</option></select></div>
+  <div data-mode="vwap_cross"><label>Puffer hinter der vorletzten Kerze (%) – der Stop-Loss liegt Long unter ihrem Tief, Short über ihrem Hoch</label><input type="number" step="0.01" min="0" id="vc_sl_buffer_pct"></div>
+  <div data-mode="vwap_cross"><label>Take-Profit</label><select class="cfg" id="vc_tp_mode"><option value="kreuzung">Kreuzung der EMA mit dem VWAP in Gegenrichtung (Long: nach unten, Short: nach oben)</option><option value="fester_betrag">Fester $-Gewinn</option><option value="gegentrade">Gegentrade (Gegen-Signal dreht die Position)</option><option value="aus">Kein TP (nur SL)</option></select></div>
   <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="fester_betrag"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="any" min="0" id="vc_tp_usd"></div>
 
   <div data-mode="rlm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -4906,6 +4898,7 @@ function wacSetLevels(levels) {
 // ===== Chart-Linien (VWAP / EMA / Swing) - Farben + Sichtbarkeit pro Browser gespeichert =====
 const OV_DEF = [
   ['vwap_d','VWAP Day','#f5b83d',true], ['vwap_w','VWAP Week','#3b82f6',true], ['vwap_m','VWAP Month','#a855f7',true],
+  ['vc_vwap','VWAP der Strategie','#c67600',true], ['vc_bup','VWAP Band oben','#a69b33',true], ['vc_blo','VWAP Band unten','#a69b33',true],
   ['ema9','9 EMA','#e5e7eb',false], ['ema21','21 EMA','#22d3ee',true], ['ema50','50 EMA','#f97316',true],
   ['swing_h','Swing High','#f0354b',true], ['swing_l','Swing Low','#1fcf6e',true]];
 let OV = {};
@@ -6856,17 +6849,13 @@ async function refresh() {
     document.getElementById('rlm_resolution').value = data.config.rlm_resolution || '';
     document.getElementById('vc_resolution').value = data.config.vc_resolution || '15m';
     document.getElementById('vc_ema_len').value = data.config.vc_ema_len ?? 9;
-    document.getElementById('vc_use_day').checked = !!data.config.vc_use_day;
-    document.getElementById('vc_use_week').checked = !!data.config.vc_use_week;
-    document.getElementById('vc_use_month').checked = !!data.config.vc_use_month;
-    document.getElementById('vc_skip_first').checked = !!data.config.vc_skip_first;
+    document.getElementById('vc_source').value = data.config.vc_source || 'hlc3';
+    document.getElementById('vc_anchor').value = data.config.vc_anchor || 'd';
+    document.getElementById('vc_band_mult').value = data.config.vc_band_mult ?? 1;
+    document.getElementById('vc_band_volume').checked = data.config.vc_band_volume !== false;
     document.getElementById('vc_direction_mode').value = data.config.vc_direction_mode || 'both';
-    document.getElementById('vc_sl_mode').value = data.config.vc_sl_mode || 'kerze';
-    document.getElementById('vc_sl_candle_rule').value = data.config.vc_sl_candle_rule || 'whole';
     document.getElementById('vc_sl_buffer_pct').value = data.config.vc_sl_buffer_pct ?? 0;
-    document.getElementById('vc_sl_usd').value = data.config.vc_sl_usd ?? '';
     document.getElementById('vc_tp_mode').value = data.config.vc_tp_mode || 'kreuzung';
-    document.getElementById('vc_tp_vwap').value = data.config.vc_tp_vwap || 'd';
     document.getElementById('vc_tp_usd').value = data.config.vc_tp_usd ?? '';
     document.getElementById('rlm_direction_mode').value = data.config.rlm_direction_mode || 'both';
     document.getElementById('rlm_candle_type').value = data.config.rlm_candle_type || 'normal';
@@ -7510,17 +7499,13 @@ function buildConfigPayload() {
     rlm_resolution: document.getElementById('rlm_resolution').value,
     vc_resolution: document.getElementById('vc_resolution').value,
     vc_ema_len: parseInt(document.getElementById('vc_ema_len').value) || 9,
-    vc_use_day: document.getElementById('vc_use_day').checked,
-    vc_use_week: document.getElementById('vc_use_week').checked,
-    vc_use_month: document.getElementById('vc_use_month').checked,
-    vc_skip_first: document.getElementById('vc_skip_first').checked,
+    vc_source: document.getElementById('vc_source').value,
+    vc_anchor: document.getElementById('vc_anchor').value,
+    vc_band_mult: parseFloat(document.getElementById('vc_band_mult').value) || 1,
+    vc_band_volume: document.getElementById('vc_band_volume').checked,
     vc_direction_mode: document.getElementById('vc_direction_mode').value,
-    vc_sl_mode: document.getElementById('vc_sl_mode').value,
-    vc_sl_candle_rule: document.getElementById('vc_sl_candle_rule').value,
     vc_sl_buffer_pct: parseFloat(document.getElementById('vc_sl_buffer_pct').value) || 0,
-    vc_sl_usd: parseFloat(document.getElementById('vc_sl_usd').value) || 0,
     vc_tp_mode: document.getElementById('vc_tp_mode').value,
-    vc_tp_vwap: document.getElementById('vc_tp_vwap').value,
     vc_tp_usd: parseFloat(document.getElementById('vc_tp_usd').value) || 0,
     rlm_direction_mode: document.getElementById('rlm_direction_mode').value,
     rlm_candle_type: document.getElementById('rlm_candle_type').value,
@@ -8004,7 +7989,7 @@ async def handle_config_update(request):
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
                 "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "gq_resolution", "gq_htf_resolution", "gq_rsi_len", "gq_ma_len", "gq_buy_level", "gq_sell_level", "gq_direction_mode", "gq_atr_len", "gq_entry_cond", "gq_exit_mode", "gq_sl_mult", "gq_tp1_rr", "gq_tp1_pct", "gq_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "pv_resolution", "pv_left", "pv_right", "pv_buffer_pct", "pv_candle_type", "pv_renko_mode", "pv_renko_atr_len", "pv_renko_mult", "pv_renko_pct", "pv_exit_mode", "pv_direction_mode", "pv_sl_usd", "pv_tp_usd", "pv_profit_only_close", "pv_tp_mode", "pv_be_trigger_usd", "pv_tp1_usd", "pv_tp2_usd", "pv_tp3_usd", "pv_tp1_pct", "pv_tp2_pct", "pv_be_after_tp1", "pv_sl_to_tp1_on_tp2", "pv_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_be_trigger_usd", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
-                "vc_resolution","vc_ema_len","vc_use_day","vc_use_week","vc_use_month","vc_skip_first","vc_direction_mode","vc_sl_mode","vc_sl_candle_rule","vc_sl_buffer_pct","vc_sl_usd","vc_tp_mode","vc_tp_vwap","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
+                "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_tp_mode","vc_tp_usd","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
@@ -8287,6 +8272,9 @@ async def handle_wa_live_chart(request):
                 trade_marks.append({"time": t_in, "kind": "entry", "dir": st["position"], "price": en.get("price")})
     except Exception as e:
         debug_log(f"⚠️ Chart-Trade-Markierungen fehlgeschlagen: {e}")
+    for ln in (payload.pop("vc_lines", None) or []):      # VWAP + Baender der Strategie als Chart-Linien
+        if ln.get("data"):
+            overlays.append(ln)
     payload.update({"trade_marks": trade_marks, "ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid, "overlays": overlays, "structure": structure,
                     "active": bool(cfg.get("bot_active"))})
     return web.json_response(payload)
