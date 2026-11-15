@@ -49,6 +49,7 @@ def _vc_params(cfg):
         "band_vol": bool(cfg.get("vc_band_volume", True)),  # Baender zusaetzlich volumengewichtet (Pine "Volume weighted")
         "direction": direction if direction in ("both", "long_only", "short_only") else "both",
         "sl_buf": max(0.0, float(cfg.get("vc_sl_buffer_pct", 0.0) or 0.0)),
+        "be_pct": max(0.0, float(cfg.get("vc_be_pct", 0.0) or 0.0)),       # ab dieser Kursbewegung wandert der SL auf den Einstieg (0 = aus)
         "tp_mode": tp_mode if tp_mode in ("kreuzung", "fester_betrag", "gegentrade", "aus") else "kreuzung",
         "tp_usd": max(0.0, float(cfg.get("vc_tp_usd", 5.0) or 0.0)),
     }
@@ -170,6 +171,14 @@ def _allowed(target, p):
 def _vc_reset_state(st):
     st["vc_sl"] = None
     st["vc_tp"] = None
+    st["vc_be_done"] = False
+
+
+def _vc_be_trigger(direction, entry, be_pct):
+    """Kurs, ab dem der Stop-Loss auf den Einstieg wandert. None, wenn Breakeven aus ist."""
+    if not be_pct or not entry:
+        return None
+    return entry * (1 + be_pct / 100.0) if direction == "long" else entry * (1 - be_pct / 100.0)
 
 
 async def check_vc_sl_tp(symbol, price):
@@ -178,10 +187,22 @@ async def check_vc_sl_tp(symbol, price):
     pos = st["position"]
     if pos is None or price is None:
         return
+    cfg = BOTS[symbol]["config"]
+    entry = st.get("avg_entry_price")
+    be_pct = max(0.0, float(cfg.get("vc_be_pct", 0.0) or 0.0))
+    trig = _vc_be_trigger(pos, entry, be_pct)
+    if trig is not None and not st.get("vc_be_done") and ((pos == "long" and price >= trig) or (pos == "short" and price <= trig)):
+        old = st.get("vc_sl")
+        # nur nachziehen, nie lockern
+        if old is None or (pos == "long" and entry > old) or (pos == "short" and entry < old):
+            st["vc_sl"] = entry
+            debug_log(f"🛡️ [{symbol}] EMA9+VWAP Breakeven: {pos.upper()} {be_pct}% im Plus @ {price} - SL auf den Einstieg {round(entry, 6)}")
+        st["vc_be_done"] = True
     sl, tp = st.get("vc_sl"), st.get("vc_tp")
     if sl is not None and ((pos == "long" and price <= sl) or (pos == "short" and price >= sl)):
-        debug_log(f"🚪 [{symbol}] EMA9+VWAP SL: {pos.upper()} @ {price} (Ziel war {round(sl, 6)})")
-        await execute_exit(symbol, price, "SL")
+        reason = "BREAKEVEN" if st.get("vc_be_done") and entry and abs(sl - entry) < 1e-12 else "SL"
+        debug_log(f"🚪 [{symbol}] EMA9+VWAP {reason}: {pos.upper()} @ {price} (Ziel war {round(sl, 6)})")
+        await execute_exit(symbol, price, reason)
         if st["position"] is None:
             _vc_reset_state(st)
         return
@@ -331,18 +352,25 @@ def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start):
         size = (margin * leverage) / c[i]
         sl = vc_sl_price(target, i, h, l, c[i], p)
         tp = vc_tp_price(target, c[i], size, p)
-        return {"dir": target, "entry": c[i], "size": size, "entry_i": i, "sl": sl, "tp": tp}
+        return {"dir": target, "entry": c[i], "size": size, "entry_i": i, "sl": sl, "tp": tp, "be": False}
 
     for i in range(max(1, i_start), n):
         if position is not None and position["entry_i"] < i:
             d, e, sgn = position["dir"], position["entry"], (1 if position["dir"] == "long" else -1)
             sl, tp = position["sl"], position["tp"]
             if sl is not None and ((sgn > 0 and l[i] <= sl) or (sgn < 0 and h[i] >= sl)):
-                _bt_close_trade(trades, d, e, sl, position["size"], i, position["entry_i"], "SL", ts=ts)
+                reason = "BREAKEVEN" if position["be"] and abs(sl - e) < 1e-12 else "SL"
+                _bt_close_trade(trades, d, e, sl, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
             elif tp is not None and ((sgn > 0 and h[i] >= tp) or (sgn < 0 and l[i] <= tp)):
                 _bt_close_trade(trades, d, e, tp, position["size"], i, position["entry_i"], "TP-FESTER-BETRAG", ts=ts)
                 position = None
+            else:
+                trig = _vc_be_trigger(d, e, p["be_pct"])     # Breakeven erst nach der SL-Pruefung dieser Kerze
+                if trig is not None and not position["be"] and ((sgn > 0 and h[i] >= trig) or (sgn < 0 and l[i] <= trig)):
+                    if position["sl"] is None or (sgn > 0 and e > position["sl"]) or (sgn < 0 and e < position["sl"]):
+                        position["sl"] = e
+                    position["be"] = True
         target = "long" if sig["buy"][i] else "short" if sig["sell"][i] else None
         if position is not None and position["entry_i"] < i:
             d = position["dir"]
