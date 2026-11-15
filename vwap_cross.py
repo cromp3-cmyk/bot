@@ -14,18 +14,31 @@ Prinzip:
 """
 
 import asyncio
+import re
 import time
 import traceback
 
 import binance_ws
-from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_reverse
+from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_partial_exit, execute_reverse
 from strategies import (
     BINANCE_SYMBOL_MAP, BINANCE_FUTURES_ONLY_SYMBOLS, _tf_ms, summarize_backtest_trades,
     _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
 )
 from vwap_scanner import _period_start, _ema, _fetch_base, BASE_MS
 
-VC_TFS = ["1m", "3m", "5m", "15m", "30m", "1h", "4h"]
+VC_TFS = ["10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
+BINANCE_NATIVE_TFS = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d")   # alles andere wird aus kleineren Kerzen zusammengesetzt
+
+
+def _vc_res(res):
+    """Erlaubt die Liste oben und eigene Minuten/Sekunden (z. B. "8m"), wie bei den anderen Strategien."""
+    res = str(res or "15m")
+    if res in VC_TFS:
+        return res
+    m = re.match(r"^(\d+)([sm])$", res)
+    if m and 1 <= int(m.group(1)) <= 1440:
+        return res
+    return "15m"
 KINDS = ("d", "w", "m")
 KIND_NAMES = {"d": "Tag", "w": "Woche", "m": "Monat"}
 WARM_DAYS = {"d": 1.0, "w": 7.0, "m": 31.0}
@@ -41,7 +54,7 @@ def _vc_params(cfg):
     anchor = cfg.get("vc_anchor", "d")
     src = cfg.get("vc_source", "hlc3")
     return {
-        "res": res if res in VC_TFS else "15m",
+        "res": _vc_res(res),
         "ema": max(2, min(200, int(cfg.get("vc_ema_len", 9) or 9))),
         "anchor": anchor if anchor in KINDS else "d",       # Reset des VWAP: Tag / Woche / Monat
         "src": src if src in SRC_NAMES else "hlc3",         # Quelle des VWAP (Pine-Eingabe "Source")
@@ -52,6 +65,9 @@ def _vc_params(cfg):
         "be_pct": max(0.0, float(cfg.get("vc_be_pct", 0.0) or 0.0)),       # ab dieser Kursbewegung wandert der SL auf den Einstieg (0 = aus)
         "tp_mode": tp_mode if tp_mode in ("kreuzung", "fester_betrag", "gegentrade", "aus") else "kreuzung",
         "tp_usd": max(0.0, float(cfg.get("vc_tp_usd", 5.0) or 0.0)),
+        "tp1_on": bool(cfg.get("vc_tp1_on", False)),                       # Teilgewinn bei TP1, danach SL auf den Einstieg
+        "tp1_rr": max(0.1, float(cfg.get("vc_tp1_rr", 1.0) or 1.0)),       # Vielfaches des Risikos (Abstand Einstieg -> SL)
+        "tp1_pct": min(100.0, max(0.0, float(cfg.get("vc_tp1_pct", 50.0) or 0.0))),
     }
 
 
@@ -171,7 +187,19 @@ def _allowed(target, p):
 def _vc_reset_state(st):
     st["vc_sl"] = None
     st["vc_tp"] = None
+    st["vc_tp1"] = None
+    st["vc_tp1_done"] = False
     st["vc_be_done"] = False
+
+
+def _vc_tp1_price(direction, entry, sl, p):
+    """TP1 = Einstieg + Vielfaches des Risikos. Ohne Stop-Loss gibt es kein Risiko und damit kein TP1."""
+    if not p["tp1_on"] or sl is None or not entry:
+        return None
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None
+    return entry + risk * p["tp1_rr"] if direction == "long" else entry - risk * p["tp1_rr"]
 
 
 def _vc_be_trigger(direction, entry, be_pct):
@@ -188,7 +216,25 @@ async def check_vc_sl_tp(symbol, price):
     if pos is None or price is None:
         return
     cfg = BOTS[symbol]["config"]
+    p = _vc_params(cfg)
     entry = st.get("avg_entry_price")
+    tp1 = st.get("vc_tp1")
+    if tp1 is not None and not st.get("vc_tp1_done") and ((pos == "long" and price >= tp1) or (pos == "short" and price <= tp1)):
+        pct = p["tp1_pct"]
+        st["vc_tp1_done"] = True
+        if pct >= 100:
+            debug_log(f"🎯 [{symbol}] EMA9+VWAP TP1: {pos.upper()} @ {price} - ganze Position")
+            await execute_exit(symbol, price, "TP1")
+            if st["position"] is None:
+                _vc_reset_state(st)
+            return
+        if pct > 0:
+            await execute_partial_exit(symbol, price, pct / 100.0, "TP1")
+        if st["position"] is not None and entry:
+            st["vc_sl"] = entry          # bei TP1 wandert der Stop-Loss auf den Einstieg
+            st["vc_be_done"] = True
+            debug_log(f"🎯 [{symbol}] EMA9+VWAP TP1: {pos.upper()} @ {price}, {pct:.0f}% verkauft - SL auf den Einstieg {round(entry, 6)}")
+        return
     be_pct = max(0.0, float(cfg.get("vc_be_pct", 0.0) or 0.0))
     trig = _vc_be_trigger(pos, entry, be_pct)
     if trig is not None and not st.get("vc_be_done") and ((pos == "long" and price >= trig) or (pos == "short" and price <= trig)):
@@ -228,7 +274,12 @@ async def _vc_fetch(symbol, cfg, p):
     mt = _vc_market(symbol, cfg)
     tf_ms = _tf_ms(p["res"])
     now_ms = int(time.time() * 1000)
-    tfc = await binance_ws._rest_klines_range(mt, pair, p["res"], now_ms - LIVE_CANDLES * tf_ms, now_ms, LIVE_CANDLES)
+    if p["res"] in BINANCE_NATIVE_TFS:
+        tfc = await binance_ws._rest_klines_range(mt, pair, p["res"], now_ms - LIVE_CANDLES * tf_ms, now_ms, LIVE_CANDLES)
+    else:
+        from strategies import fetch_candles_binance_multi      # Sekunden-Kerzen und eigene Minuten werden dort zusammengesetzt
+        d = await fetch_candles_binance_multi(symbol, p["res"], count_back=LIVE_CANDLES, market_type=mt)
+        tfc = [{"ts": d[0][i], "o": d[1][i], "h": d[2][i], "l": d[3][i], "c": d[4][i], "v": d[5][i]} for i in range(len(d[0]))] if d else None
     if not tfc or len(tfc) < max(60, p["ema"] * 3):
         return None
     bars = await _fetch_base(mt, pair, now_ms)
@@ -242,6 +293,9 @@ def _set_levels(st, cfg, target, price, j, h, l, p):
     size = st.get("total_coin_size") or 0
     st["vc_sl"] = vc_sl_price(target, j, h, l, entry, p)
     st["vc_tp"] = vc_tp_price(target, entry, size, p)
+    st["vc_tp1"] = _vc_tp1_price(target, entry, st["vc_sl"], p)
+    st["vc_tp1_done"] = False
+    st["vc_be_done"] = False
 
 
 async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
@@ -352,7 +406,8 @@ def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start):
         size = (margin * leverage) / c[i]
         sl = vc_sl_price(target, i, h, l, c[i], p)
         tp = vc_tp_price(target, c[i], size, p)
-        return {"dir": target, "entry": c[i], "size": size, "entry_i": i, "sl": sl, "tp": tp, "be": False}
+        return {"dir": target, "entry": c[i], "size": size, "entry_i": i, "sl": sl, "tp": tp, "be": False,
+                "tp1": _vc_tp1_price(target, c[i], sl, p), "tp1_done": False}
 
     for i in range(max(1, i_start), n):
         if position is not None and position["entry_i"] < i:
@@ -366,6 +421,21 @@ def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start):
                 _bt_close_trade(trades, d, e, tp, position["size"], i, position["entry_i"], "TP-FESTER-BETRAG", ts=ts)
                 position = None
             else:
+                t1 = position["tp1"]
+                if t1 is not None and not position["tp1_done"] and ((sgn > 0 and h[i] >= t1) or (sgn < 0 and l[i] <= t1)):
+                    pct = p["tp1_pct"]
+                    position["tp1_done"] = True
+                    if pct >= 100:
+                        _bt_close_trade(trades, d, e, t1, position["size"], i, position["entry_i"], "TP1", ts=ts)
+                        position = None
+                    else:
+                        if pct > 0:
+                            _bt_close_trade(trades, d, e, t1, position["size"] * pct / 100.0, i, position["entry_i"], "TP1", ts=ts)
+                            position["size"] -= position["size"] * pct / 100.0
+                        position["sl"] = e          # bei TP1 wandert der Stop-Loss auf den Einstieg
+                        position["be"] = True
+                if position is None:
+                    continue
                 trig = _vc_be_trigger(d, e, p["be_pct"])     # Breakeven erst nach der SL-Pruefung dieser Kerze
                 if trig is not None and not position["be"] and ((sgn > 0 and h[i] >= trig) or (sgn < 0 and l[i] <= trig)):
                     if position["sl"] is None or (sgn > 0 and e > position["sl"]) or (sgn < 0 and e < position["sl"]):
