@@ -49,7 +49,6 @@ SL_LOOKBACK = 200
 
 def _vc_params(cfg):
     res = cfg.get("vc_resolution", "15m")
-    tmode = cfg.get("vc_trail_mode", "off")
     tp_mode = cfg.get("vc_tp_mode", "kreuzung")
     direction = cfg.get("vc_direction_mode", "both")
     anchor = cfg.get("vc_anchor", "d")
@@ -73,34 +72,10 @@ def _vc_params(cfg):
         "adx_min": max(0.0, float(cfg.get("vc_adx_min", 0.0) or 0.0)),
         "adx_len": max(2, int(cfg.get("vc_adx_len", 14) or 14)),
         "adx_dir": bool(cfg.get("vc_adx_directional", False)),
-        # mitlaufender Stop: haelt den Buchgewinn fest, bevor die Gegenkreuzung ihn zurueckgibt
-        "trail_mode": tmode if tmode in ("off", "atr", "pct") else "off",
-        "trail_atr_len": max(2, int(cfg.get("vc_trail_atr_len", 14) or 14)),
-        "trail_mult": max(0.1, float(cfg.get("vc_trail_mult", 2.0) or 2.0)),
-        "trail_pct": max(0.01, float(cfg.get("vc_trail_pct", 0.5) or 0.5)),
+        # gegen Saegezahn-Kreuzungen: Mindestabstand und Bestaetigung ueber mehrere Kerzen
+        "cross_min_pct": max(0.0, float(cfg.get("vc_cross_min_pct", 0.0) or 0.0)),
+        "confirm": max(1, min(20, int(cfg.get("vc_cross_confirm", 1) or 1))),
     }
-
-
-def _vc_trail_candidate(direction, close, atr_val, peak, p):
-    """Vorschlag fuer den mitlaufenden Stop auf dieser Kerze. None = kein Vorschlag."""
-    if p["trail_mode"] == "atr":
-        if not atr_val:
-            return None
-        return close - atr_val * p["trail_mult"] if direction == "long" else close + atr_val * p["trail_mult"]
-    if p["trail_mode"] == "pct":
-        if not peak:
-            return None
-        return peak * (1 - p["trail_pct"] / 100.0) if direction == "long" else peak * (1 + p["trail_pct"] / 100.0)
-    return None
-
-
-def _vc_ratchet(direction, sl, cand):
-    """Der Stop zieht nur nach, nie zurueck."""
-    if cand is None:
-        return sl
-    if sl is None:
-        return cand
-    return max(sl, cand) if direction == "long" else min(sl, cand)
 
 
 def vc_adx_ok(ts, o, h, l, c, p):
@@ -187,19 +162,47 @@ def vc_build(ts, o, h, l, c, v, bars, p):
 
 
 def vc_signals(arr, p):
-    """Jede Kreuzung EMA x VWAP bei Kerzenschluss ist ein Signal. -> dict(buy, sell, trig, tp_up, tp_dn)."""
+    """Kreuzung EMA x VWAP bei Kerzenschluss. Zwei Filter gegen Saegezahn-Kreuzungen:
+      * Bestaetigung: die EMA muss N Kerzen lang auf der neuen Seite bleiben; das Signal faellt auf die N-te Kerze.
+      * Mindestabstand: auf der Signalkerze muss die EMA um mindestens X % vom VWAP entfernt sein.
+    Beide wirken auf Einstieg UND Kreuzungs-Ausstieg. N = 1 und X = 0 ist die ungefilterte Kreuzung.
+    -> dict(buy, sell, trig, tp_up, tp_dn)."""
     n, ema, j0 = arr["n"], arr["ema"], arr["j0"]
     vw, rs = arr["vw"], arr["resets"]
     buy, sell = [False] * n, [False] * n
+    need, minp = p["confirm"], p["cross_min_pct"] / 100.0
     for j in range(j0 + 1, n):
         a, b = vw[j], vw[j - 1]
         if a is None or b is None or j in rs:       # Perioden-Start-Sprung ist keine Kreuzung
             continue
         p0, q = ema[j - 1] - b, ema[j] - a
-        if p0 <= 0 < q:
-            buy[j] = True
-        elif p0 >= 0 > q:
-            sell[j] = True
+        up = p0 <= 0 < q
+        dn = p0 >= 0 > q
+        if not (up or dn):
+            continue
+        k = j + need - 1                            # Kerze, auf der das bestaetigte Signal faellt
+        if k >= n:
+            continue
+        ok = True
+        for m in range(j, k + 1):
+            if vw[m] is None or (m > j and m in rs):    # Perioden-Sprung mittendrin -> nicht vergleichbar
+                ok = False
+                break
+            d = ema[m] - vw[m]
+            if (up and d <= 0) or (dn and d >= 0):      # EMA faellt zurueck -> keine Bestaetigung
+                ok = False
+                break
+        if not ok:
+            continue
+        if minp > 0 and (not vw[k] or abs(ema[k] - vw[k]) / vw[k] < minp):
+            continue
+        if up:
+            buy[k] = True
+        else:
+            sell[k] = True
+    for j in range(n):
+        if buy[j] and sell[j]:                      # beide Richtungen auf derselben Kerze -> nichts tun
+            buy[j] = sell[j] = False
     return {"buy": buy, "sell": sell, "trig": [None] * n, "tp_up": buy, "tp_dn": sell}
 
 
@@ -236,8 +239,6 @@ def _vc_reset_state(st):
     st["vc_tp1"] = None
     st["vc_tp1_done"] = False
     st["vc_be_done"] = False
-    st["vc_peak"] = None
-    st["vc_trail_on"] = False
 
 
 def _vc_tp1_price(direction, entry, sl, p):
@@ -294,8 +295,7 @@ async def check_vc_sl_tp(symbol, price):
         st["vc_be_done"] = True
     sl, tp = st.get("vc_sl"), st.get("vc_tp")
     if sl is not None and ((pos == "long" and price <= sl) or (pos == "short" and price >= sl)):
-        reason = ("BREAKEVEN" if st.get("vc_be_done") and entry and abs(sl - entry) < 1e-12
-                  else "TRAIL" if st.get("vc_trail_on") else "SL")
+        reason = "BREAKEVEN" if st.get("vc_be_done") and entry and abs(sl - entry) < 1e-12 else "SL"
         debug_log(f"🚪 [{symbol}] EMA9+VWAP {reason}: {pos.upper()} @ {price} (Ziel war {round(sl, 6)})")
         await execute_exit(symbol, price, reason)
         if st["position"] is None:
@@ -345,8 +345,6 @@ def _set_levels(st, cfg, target, price, j, h, l, p):
     st["vc_tp1"] = _vc_tp1_price(target, entry, st["vc_sl"], p)
     st["vc_tp1_done"] = False
     st["vc_be_done"] = False
-    st["vc_peak"] = entry
-    st["vc_trail_on"] = False
 
 
 async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
@@ -361,20 +359,6 @@ async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
     pos = st["position"]
     target = "long" if sig["buy"][j] else "short" if sig["sell"][j] else None
     info = f"{KIND_NAMES[p['anchor']]}-VWAP ({SRC_NAMES[p['src']]})"
-    if pos is not None and p["trail_mode"] != "off":
-        peak = st.get("vc_peak") or c[j]
-        peak = max(peak, c[j]) if pos == "long" else min(peak, c[j])
-        st["vc_peak"] = peak
-        atr_val = None
-        if p["trail_mode"] == "atr":
-            from strategies import compute_atr
-            atr_val = (await asyncio.to_thread(compute_atr, h, l, c, p["trail_atr_len"]))[j]
-        cand = _vc_trail_candidate(pos, c[j], atr_val, peak, p)
-        new_sl = _vc_ratchet(pos, st.get("vc_sl"), cand)
-        if new_sl is not None and new_sl != st.get("vc_sl"):
-            st["vc_sl"] = new_sl
-            st["vc_trail_on"] = True
-            debug_log(f"📈 [{symbol}] EMA9+VWAP Stop nachgezogen auf {round(new_sl, 6)} ({pos.upper()}, Kurs {c[j]})")
     adx_ok = True
     if target is not None and p["adx_min"] > 0:
         lo, so = vc_adx_ok([x["ts"] for x in closed], [x.get("o") or x["c"] for x in closed], h, l, c, p)
@@ -467,7 +451,7 @@ async def vc_poll_loop(symbol):
 # ============================================================================
 # BACKTEST
 # ============================================================================
-def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, adx=None, atr=None):
+def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, adx=None):
     """Kerze i: zuerst SL / fester TP einer schon offenen Position ueber Hoch/Tief (SL gewinnt bei Gleichzeitigkeit), dann bei
     Kerzenschluss Kreuzungs-TP / Gegentrade, dann das Einstiegssignal zum Schlusskurs."""
     n = len(c)
@@ -479,15 +463,14 @@ def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, adx=None, atr=None):
         sl = vc_sl_price(target, i, h, l, c[i], p)
         tp = vc_tp_price(target, c[i], size, p)
         return {"dir": target, "entry": c[i], "size": size, "entry_i": i, "sl": sl, "tp": tp, "be": False,
-                "tp1": _vc_tp1_price(target, c[i], sl, p), "tp1_done": False, "peak": c[i], "trail": False}
+                "tp1": _vc_tp1_price(target, c[i], sl, p), "tp1_done": False}
 
     for i in range(max(1, i_start), n):
         if position is not None and position["entry_i"] < i:
             d, e, sgn = position["dir"], position["entry"], (1 if position["dir"] == "long" else -1)
             sl, tp = position["sl"], position["tp"]
             if sl is not None and ((sgn > 0 and l[i] <= sl) or (sgn < 0 and h[i] >= sl)):
-                reason = ("BREAKEVEN" if position["be"] and abs(sl - e) < 1e-12
-                          else "TRAIL" if position["trail"] else "SL")
+                reason = "BREAKEVEN" if position["be"] and abs(sl - e) < 1e-12 else "SL"
                 _bt_close_trade(trades, d, e, sl, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
             elif tp is not None and ((sgn > 0 and h[i] >= tp) or (sgn < 0 and l[i] <= tp)):
@@ -514,13 +497,6 @@ def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, adx=None, atr=None):
                     if position["sl"] is None or (sgn > 0 and e > position["sl"]) or (sgn < 0 and e < position["sl"]):
                         position["sl"] = e
                     position["be"] = True
-                if p["trail_mode"] != "off":                 # mitlaufender Stop erst nach den Pruefungen dieser Kerze
-                    position["peak"] = max(position["peak"], c[i]) if sgn > 0 else min(position["peak"], c[i])
-                    cand = _vc_trail_candidate(d, c[i], (atr[i] if atr else None), position["peak"], p)
-                    new_sl = _vc_ratchet(d, position["sl"], cand)
-                    if new_sl is not None and new_sl != position["sl"]:
-                        position["sl"] = new_sl
-                        position["trail"] = True
         target = "long" if sig["buy"][i] else "short" if sig["sell"][i] else None
         if target is not None and adx is not None and not (adx[0] if target == "long" else adx[1])[i]:
             target = None                                   # ADX zu schwach (oder falsche Richtung)
@@ -557,11 +533,7 @@ async def run_vc_backtest(symbol, cfg, days, exclude_top_n=1):
     arr = await asyncio.to_thread(vc_build, ts, o, h, l, c, v, None, p)
     sig = vc_signals(arr, p)
     lo, so = vc_adx_ok(ts, o, h, l, c, p)
-    atr = None
-    if p["trail_mode"] == "atr":
-        from strategies import compute_atr
-        atr = await asyncio.to_thread(compute_atr, h, l, c, p["trail_atr_len"])
-    trades = vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, (lo, so) if lo is not None else None, atr)
+    trades = vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, (lo, so) if lo is not None else None)
     stats = summarize_backtest_trades(trades, exclude_top_n)
     warm_ok = ts[0] <= start_ts - int((max(WARM_DAYS[k] for k in need)) * 86_400_000)
     note = None if warm_ok else (f"Hinweis: Für den Vorlauf der VWAP-Periode ({', '.join(KIND_NAMES[k] for k in sorted(need))}) gab es nicht genug Kerzen "
