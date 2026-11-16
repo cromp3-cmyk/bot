@@ -1893,7 +1893,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v16.11-d</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v16.11-g</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
@@ -3872,6 +3872,70 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="vwap_cross" style="display:none;">
+<h2 class="section-title">🎲 EMA 9 + VWAP Monte-Carlo</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet Kombinationen der Werte, die das <b>Signal</b> verändern. Jede Achse ist einzeln zuschaltbar: Haken weg heißt „Wert aus den Einstellungen“, also nur ein Wert auf dieser Achse.
+    Alles andere (VWAP-Quelle und -Periode, Stop-Loss, TP, TP1, Breakeven, Richtung, Margin, Hebel) kommt aus den Einstellungen oben.
+    Sind es mehr Kombinationen als „Durchläufe“, werden zufällige gezogen – dann lohnen mehrere Seeds.
+    Nicht den besten Einzelwert blind übernehmen: Die Spalte „PnL ohne beste N“ und die Trade-Zahl zeigen, ob er stabil ist.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="vc-mc-days" value="30" style="width:90px;"></div>
+    <div><label>Durchläufe (max. 2000)</label><input type="number" step="50" min="1" max="2000" id="vc-mc-runs" value="500" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="vc-mc-seed" style="width:110px;"></div>
+    <div><label>bis Seed (leer = nur einer, max. 20 Seeds)</label><input type="number" step="1" id="vc-mc-seed-to" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="vc-mc-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label><input type="checkbox" id="vc-mc-use-res" checked style="width:auto; vertical-align:middle;"> Zeitebene</label><input type="text" id="vc-mc-res" value="1m, 3m, 5m, 15m" style="width:190px;"></div>
+    <div><label><input type="checkbox" id="vc-mc-use-ema" checked style="width:auto; vertical-align:middle;"> EMA-Länge</label><input type="text" id="vc-mc-ema" value="5, 9, 14, 21" style="width:160px;"></div>
+    <div><label><input type="checkbox" id="vc-mc-use-minpct" checked style="width:auto; vertical-align:middle;"> Mindestabstand %</label><input type="text" id="vc-mc-minpct" value="0, 0.02, 0.05, 0.1" style="width:170px;"></div>
+    <div><label><input type="checkbox" id="vc-mc-use-confirm" checked style="width:auto; vertical-align:middle;"> Bestätigung (Kerzen)</label><input type="text" id="vc-mc-confirm" value="1, 2, 3" style="width:130px;"></div>
+    <div><label><input type="checkbox" id="vc-mc-use-adx" style="width:auto; vertical-align:middle;"> ADX-Schwelle</label><input type="text" id="vc-mc-adx" value="0, 20, 25" style="width:130px;"></div>
+    <button id="btn-vc-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="vc-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="vc-mc-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="vc-mc-results-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="vc_resolution">Zeitebene ⇅</th>
+      <th class="sortable" data-key="vc_ema_len">EMA ⇅</th>
+      <th class="sortable" data-key="vc_cross_min_pct">Mindestabstand % ⇅</th>
+      <th class="sortable" data-key="vc_cross_confirm">Bestätigung ⇅</th>
+      <th class="sortable" data-key="vc_adx_min">ADX ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="vc-mc-worst-title">📉 Die 20 schlechtesten Werte (nach PnL, unabhängig von der Trade-Anzahl)</h3>
+  <table id="vc-mc-worst-table" style="display:none; margin-top:8px;">
+    <thead><tr>
+      <th class="sortable" data-key="vc_resolution">Zeitebene ⇅</th>
+      <th class="sortable" data-key="vc_ema_len">EMA ⇅</th>
+      <th class="sortable" data-key="vc_cross_min_pct">Mindestabstand % ⇅</th>
+      <th class="sortable" data-key="vc_cross_confirm">Bestätigung ⇅</th>
+      <th class="sortable" data-key="vc_adx_min">ADX ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen gehalten ⇅</th>
+      <th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+</div>
+
 <div data-mode-section="gold_scalper" style="display:none;">
 <h2 class="section-title">🎲 Gold Scalper Monte-Carlo (Referenz-Zeitrahmen × ATR-Bänder)</h2>
 <div class="panel-card">
@@ -5615,6 +5679,96 @@ document.getElementById('btn-dv-mc').addEventListener('click', async () => {
       window.dvMcWorstData = data.worst_results || [];
       renderDvMcResults();
       renderDvMcWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.vcMcResultsData = [];
+window.vcMcWorstData = [];
+const vcMcRowHtml = (r) => `
+  <tr>
+    <td>${r.vc_resolution}</td>
+    <td>${r.vc_ema_len}</td>
+    <td>${r.vc_cross_min_pct}</td>
+    <td>${r.vc_cross_confirm}</td>
+    <td>${r.vc_adx_min > 0 ? r.vc_adx_min : '–'}</td>
+    <td>${r.trades}</td>
+    <td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td>
+    <td>${r.avg_bars_held}</td>
+    ${applyBtn({vc_resolution: r.vc_resolution, vc_ema_len: r.vc_ema_len, vc_cross_min_pct: r.vc_cross_min_pct, vc_cross_confirm: r.vc_cross_confirm, vc_adx_min: r.vc_adx_min})}
+  </tr>`;
+const renderVcMcResults = makeSortableTable('vc-mc-results-table', () => window.vcMcResultsData, vcMcRowHtml);
+const renderVcMcWorst = makeSortableTable('vc-mc-worst-table', () => window.vcMcWorstData, vcMcRowHtml);
+
+function vcMergeMc(a, b) {
+  const key = r => [r.vc_resolution, r.vc_ema_len, r.vc_cross_min_pct, r.vc_cross_confirm, r.vc_adx_min].join('|');
+  const merge = (x, y, cmp, lim) => {
+    const seen = new Set(), out = [];
+    [...(x || []), ...(y || [])].forEach(r => { const k = key(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
+    return out.sort(cmp).slice(0, lim);
+  };
+  const ok = r => r.trades >= (a.min_reliable_trades || 5) ? 1 : 0;
+  a.results = merge(a.results, b.results, (p, q) => (ok(q) - ok(p)) || (q.total_pnl_usd - p.total_pnl_usd), 30);
+  a.worst_results = merge(a.worst_results, b.worst_results, (p, q) => p.total_pnl_usd - q.total_pnl_usd, 20);
+  a.combos_tested += b.combos_tested; a.combos_requested += b.combos_requested;
+  a.profitable_pct = Math.round((a.profitable_pct + b.profitable_pct) * 5) / 10;
+  a.best_pnl_usd = Math.max(a.best_pnl_usd, b.best_pnl_usd); a.worst_pnl_usd = Math.min(a.worst_pnl_usd, b.worst_pnl_usd);
+  return a;
+}
+
+document.getElementById('btn-vc-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-vc-mc');
+  const statusEl = document.getElementById('vc-mc-status');
+  const tables = {top: document.getElementById('vc-mc-results-table'), worst: document.getElementById('vc-mc-worst-table')};
+  const titles = {top: document.getElementById('vc-mc-top-title'), worst: document.getElementById('vc-mc-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const axis = (use, id) => document.getElementById(use).checked ? document.getElementById(id).value : '';
+  const payload = {
+    days: parseInt(document.getElementById('vc-mc-days').value) || 30,
+    runs: parseInt(document.getElementById('vc-mc-runs').value) || 500,
+    seed: document.getElementById('vc-mc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('vc-mc-exclude-top-n').value) || 0,
+    resolutions: axis('vc-mc-use-res', 'vc-mc-res'),
+    ema_lens: axis('vc-mc-use-ema', 'vc-mc-ema'),
+    min_pcts: axis('vc-mc-use-minpct', 'vc-mc-minpct'),
+    confirms: axis('vc-mc-use-confirm', 'vc-mc-confirm'),
+    adx_mins: axis('vc-mc-use-adx', 'vc-mc-adx'),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = '⏳ Lade Kerzen und teste die Kombinationen...';
+  try {
+    const s1 = parseInt(payload.seed), s2 = parseInt(document.getElementById('vc-mc-seed-to').value);
+    const seeds = (!isNaN(s1) && !isNaN(s2) && s2 > s1) ? Array.from({length: Math.min(s2 - s1 + 1, 20)}, (_, i) => s1 + i) : [payload.seed];
+    let data = null;
+    for (let si = 0; si < seeds.length; si++) {
+      if (seeds.length > 1) statusEl.innerText = `⏳ Seed ${seeds[si]} (${si + 1} von ${seeds.length})...`;
+      const res = await fetch(`/api/vc_mc?symbol=${sweepSymbol}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...payload, seed: seeds[si]})});
+      const d = await res.json();
+      if (sweepSymbol !== currentSymbol) return;
+      if (d.error) { data = d; break; }
+      data = si === 0 ? d : vcMergeMc(data, d);
+    }
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      const skip = (data.skipped_resolutions || []).length ? ` (ohne genug Kerzen, übersprungen: ${data.skipped_resolutions.join(', ')})` : '';
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet (Zeitebenen ${data.resolutions.join(', ')}${skip}, EMA ${data.ema_lens.join(', ')}, Abstand ${data.min_pcts.join(', ')} %, Bestätigung ${data.confirms.join(', ')}, ADX ${data.adx_mins.join(', ')}) - ${data.profitable_pct}% im Plus, Median ${data.median_pnl_usd} $, bester ${data.best_pnl_usd} $, schlechtester ${data.worst_pnl_usd} $. Mindestens ${data.min_reliable_trades} Trades gelten als aussagekräftig.`;
+      window.vcMcResultsData = data.results || [];
+      window.vcMcWorstData = data.worst_results || [];
+      renderVcMcResults();
+      renderVcMcWorst();
       Object.values(tables).forEach(t => t.style.display = '');
       Object.values(titles).forEach(t => t.style.display = '');
     }
@@ -8630,6 +8784,39 @@ async def handle_dv_montecarlo(request):
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe oder kürzeren Zeitraum wählen."}, status=504)
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] Dollar701-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_vc_montecarlo(request):
+    """Monte-Carlo fuer EMA 9 + VWAP: Zeitebene x EMA x Mindestabstand x Bestaetigung x ADX, siehe run_vc_montecarlo."""
+    from vwap_cross import run_vc_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        runs = max(1, min(2000, int(body.get("runs", 500))))
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(
+            run_vc_montecarlo(symbol, cfg, days, body.get("resolutions", ""), body.get("ema_lens", ""),
+                              body.get("min_pcts", ""), body.get("confirms", ""), body.get("adx_mins", ""),
+                              runs, exclude_top_n, seed),
+            timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe, weniger Werte je Achse oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] EMA9+VWAP-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 

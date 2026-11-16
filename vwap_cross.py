@@ -14,6 +14,7 @@ Prinzip:
 """
 
 import asyncio
+import random
 import re
 import time
 import traceback
@@ -596,3 +597,124 @@ async def vc_chart_payload(symbol, cfg, ts, o, h, l, c, tf):
             debug_log(f"⚠️ EMA9+VWAP Chart-Markierungen fehlgeschlagen: {e}")
     return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "entry_mode": "vwap_cross", "wt1v": 0, "wt2v": 0, "bars": n,
             "vc_lines": lines}
+
+
+# ============================================================================
+# MONTE-CARLO (Raster ueber die Werte, die das Signal veraendern)
+# ============================================================================
+VC_MC_MAX_RUNS = 2000
+VC_MC_MAX_VALUES = 12          # je Achse hoechstens so viele Werte
+
+
+def vc_mc_values(text, cast, lo, hi):
+    """"1, 2,3" -> [1, 2, 3]. Ungueltiges und Doppeltes faellt weg, Reihenfolge bleibt."""
+    out = []
+    for part in str(text or "").replace(";", ",").replace(" ", ",").split(","):
+        s = part.strip()
+        if not s:
+            continue
+        try:
+            val = cast(s)
+        except (TypeError, ValueError):
+            continue
+        if lo <= val <= hi and val not in out:
+            out.append(val)
+    return out[:VC_MC_MAX_VALUES]
+
+
+def vc_mc_resolutions(text):
+    out = []
+    for part in str(text or "").replace(";", ",").replace(" ", ",").split(","):
+        r = part.strip().lower()
+        if r and _vc_res(r) == r and r not in out:
+            out.append(r)
+    return out[:VC_MC_MAX_VALUES]
+
+
+def _vc_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
+    """prepared: {Zeitebene: (candles, i_start)}. combos: (Zeitebene, EMA, Mindestabstand, Bestaetigung, ADX-Schwelle)."""
+    base_p = _vc_params(base_cfg)
+    arr_cache, adx_cache = {}, {}
+    out = []
+    for res, ema, minp, conf, adxm in combos:
+        if time.time() > deadline:
+            break
+        candles, i_start = prepared[res]
+        ts, o, h, l, c, v = candles
+        p = dict(base_p, res=res, ema=ema, cross_min_pct=minp, confirm=conf, adx_min=adxm)
+        if (res, ema) not in arr_cache:
+            arr_cache[(res, ema)] = vc_build(ts, o, h, l, c, v, None, p)
+        arr = arr_cache[(res, ema)]
+        sig = vc_signals(arr, p)
+        adx = None
+        if adxm > 0:
+            if (res, adxm) not in adx_cache:
+                adx_cache[(res, adxm)] = vc_adx_ok(ts, o, h, l, c, p)
+            lo, so = adx_cache[(res, adxm)]
+            adx = (lo, so) if lo is not None else None
+        trades = vc_simulate(ts, o, h, l, c, arr, sig, base_cfg, p, i_start, adx)
+        st = summarize_backtest_trades(trades, exclude_top_n)
+        out.append({"vc_resolution": res, "vc_ema_len": ema, "vc_cross_min_pct": minp, "vc_cross_confirm": conf,
+                    "vc_adx_min": adxm, "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
+                    "total_pnl_usd": st["total_pnl_usd"], "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"],
+                    "max_drawdown_usd": st["max_drawdown_usd"], "avg_bars_held": st["avg_bars_held"]})
+    return out
+
+
+async def run_vc_montecarlo(symbol, cfg, days, resolutions="", ema_lens="", min_pcts="", confirms="", adx_mins="",
+                            runs=500, exclude_top_n=1, seed=None):
+    """Testet Kombinationen aus Zeitebene x EMA-Laenge x Mindestabstand x Bestaetigung x ADX-Schwelle auf denselben Kerzen.
+    Jede Achse ist einzeln zuschaltbar: leer heisst "Wert aus den Einstellungen", also nur ein Wert auf dieser Achse.
+    Alles andere (VWAP-Quelle und -Periode, Stop-Loss, TP, TP1, Breakeven, Richtung, Margin, Hebel) kommt aus den Einstellungen."""
+    cfg = dict(cfg)
+    base_p = _vc_params(cfg)
+    res_list = vc_mc_resolutions(resolutions) or [base_p["res"]]
+    ema_list = vc_mc_values(ema_lens, int, 2, 200) or [base_p["ema"]]
+    minp_list = vc_mc_values(min_pcts, float, 0.0, 10.0) or [base_p["cross_min_pct"]]
+    conf_list = vc_mc_values(confirms, int, 1, 20) or [base_p["confirm"]]
+    adx_list = vc_mc_values(adx_mins, float, 0.0, 100.0) or [base_p["adx_min"]]
+    runs = max(1, min(VC_MC_MAX_RUNS, int(runs)))
+    mt = cfg.get("binance_market_type", "spot")
+    warm_days = WARM_DAYS[base_p["anchor"]] + 1.0
+    max_candles = BACKTEST_MAX_CANDLES.get("vwap_cross", 100_000)
+    prepared, skipped, days_cov, n_max = {}, [], 0.0, 0
+    for res in res_list:
+        cap = min(max_candles, 5000) if res in ("10s", "15s", "30s", "45s") else max_candles
+        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, res, days + warm_days, cap, market_type=mt)
+        if err or not candles or len(candles[4]) < 100 or not any(candles[5]):
+            skipped.append(res)
+            continue
+        ts = candles[0]
+        start_ts = ts[-1] - int(days * 86_400_000)
+        i_start = next((i for i, t in enumerate(ts) if t >= start_ts), 1)
+        prepared[res] = (candles, i_start)
+        days_cov = max(days_cov, (ts[-1] - ts[i_start]) / 86_400_000)
+        n_max = max(n_max, len(ts))
+    if not prepared:
+        return {"error": "Für keine der gewählten Zeitebenen gab es genug Kerzen mit Volumen"
+                         + (f" (übersprungen: {', '.join(skipped)})." if skipped else ".")}
+    combos = [(r, e, m, cf, a) for r in prepared for e in ema_list for m in minp_list for cf in conf_list for a in adx_list]
+    requested = len(combos)
+    rng = random.Random(seed)
+    if len(combos) > runs:
+        combos = rng.sample(combos, runs)
+    deadline = time.time() + 240
+    results = await asyncio.to_thread(_vc_mc_compute, prepared, cfg, combos, exclude_top_n, deadline)
+    if not results:
+        return {"error": "Keine Kombination konnte in der verfügbaren Zeit gerechnet werden - weniger Durchläufe oder kürzeren Zeitraum wählen."}
+    pnls = sorted(r["total_pnl_usd"] for r in results)
+    median = pnls[len(pnls) // 2] if len(pnls) % 2 else (pnls[len(pnls) // 2 - 1] + pnls[len(pnls) // 2]) / 2
+    pos = sum(1 for r in results if r["total_pnl_usd"] > 0)
+    min_trades = 5
+    best = sorted(results, key=lambda r: (r["trades"] >= min_trades, r["total_pnl_usd"]), reverse=True)
+    worst = sorted(results, key=lambda r: r["total_pnl_usd"])
+    return {
+        "symbol": symbol, "entry_mode": "vwap_cross", "days": days, "actual_days_covered": round(days_cov, 1),
+        "candles_processed": n_max, "resolutions": list(prepared.keys()), "skipped_resolutions": skipped,
+        "ema_lens": ema_list, "min_pcts": minp_list, "confirms": conf_list, "adx_mins": adx_list,
+        "min_reliable_trades": min_trades, "seed": seed,
+        "combos_tested": len(results), "combos_requested": requested, "combos_drawn": len(combos),
+        "profitable_pct": round(pos / len(results) * 100, 1) if results else 0,
+        "median_pnl_usd": round(median, 2), "best_pnl_usd": pnls[-1] if pnls else 0, "worst_pnl_usd": pnls[0] if pnls else 0,
+        "results": best[:30], "worst_results": worst[:20],
+    }
