@@ -72,6 +72,9 @@ def _vc_params(cfg):
         "adx_min": max(0.0, float(cfg.get("vc_adx_min", 0.0) or 0.0)),
         "adx_len": max(2, int(cfg.get("vc_adx_len", 14) or 14)),
         "adx_dir": bool(cfg.get("vc_adx_directional", False)),
+        # gegen Saegezahn-Kreuzungen: Mindestabstand und Bestaetigung ueber mehrere Kerzen
+        "cross_min_pct": max(0.0, float(cfg.get("vc_cross_min_pct", 0.0) or 0.0)),
+        "confirm": max(1, min(20, int(cfg.get("vc_cross_confirm", 1) or 1))),
     }
 
 
@@ -159,19 +162,47 @@ def vc_build(ts, o, h, l, c, v, bars, p):
 
 
 def vc_signals(arr, p):
-    """Jede Kreuzung EMA x VWAP bei Kerzenschluss ist ein Signal. -> dict(buy, sell, trig, tp_up, tp_dn)."""
+    """Kreuzung EMA x VWAP bei Kerzenschluss. Zwei Filter gegen Saegezahn-Kreuzungen:
+      * Bestaetigung: die EMA muss N Kerzen lang auf der neuen Seite bleiben; das Signal faellt auf die N-te Kerze.
+      * Mindestabstand: auf der Signalkerze muss die EMA um mindestens X % vom VWAP entfernt sein.
+    Beide wirken auf Einstieg UND Kreuzungs-Ausstieg. N = 1 und X = 0 ist die ungefilterte Kreuzung.
+    -> dict(buy, sell, trig, tp_up, tp_dn)."""
     n, ema, j0 = arr["n"], arr["ema"], arr["j0"]
     vw, rs = arr["vw"], arr["resets"]
     buy, sell = [False] * n, [False] * n
+    need, minp = p["confirm"], p["cross_min_pct"] / 100.0
     for j in range(j0 + 1, n):
         a, b = vw[j], vw[j - 1]
         if a is None or b is None or j in rs:       # Perioden-Start-Sprung ist keine Kreuzung
             continue
         p0, q = ema[j - 1] - b, ema[j] - a
-        if p0 <= 0 < q:
-            buy[j] = True
-        elif p0 >= 0 > q:
-            sell[j] = True
+        up = p0 <= 0 < q
+        dn = p0 >= 0 > q
+        if not (up or dn):
+            continue
+        k = j + need - 1                            # Kerze, auf der das bestaetigte Signal faellt
+        if k >= n:
+            continue
+        ok = True
+        for m in range(j, k + 1):
+            if vw[m] is None or (m > j and m in rs):    # Perioden-Sprung mittendrin -> nicht vergleichbar
+                ok = False
+                break
+            d = ema[m] - vw[m]
+            if (up and d <= 0) or (dn and d >= 0):      # EMA faellt zurueck -> keine Bestaetigung
+                ok = False
+                break
+        if not ok:
+            continue
+        if minp > 0 and (not vw[k] or abs(ema[k] - vw[k]) / vw[k] < minp):
+            continue
+        if up:
+            buy[k] = True
+        else:
+            sell[k] = True
+    for j in range(n):
+        if buy[j] and sell[j]:                      # beide Richtungen auf derselben Kerze -> nichts tun
+            buy[j] = sell[j] = False
     return {"buy": buy, "sell": sell, "trig": [None] * n, "tp_up": buy, "tp_dn": sell}
 
 
