@@ -47,15 +47,8 @@ LIVE_CANDLES = 600
 SL_LOOKBACK = 200
 
 
-VC_TREND_TFS = ["10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"]
-_vc_trend_cache = {}
-
-
 def _vc_params(cfg):
     res = cfg.get("vc_resolution", "15m")
-    tf_mode = cfg.get("vc_trend_filter", "off")
-    ttf = cfg.get("vc_trend_tf", "1h")
-    tmode = cfg.get("vc_trend_mode", "swing")
     tp_mode = cfg.get("vc_tp_mode", "kreuzung")
     direction = cfg.get("vc_direction_mode", "both")
     anchor = cfg.get("vc_anchor", "d")
@@ -75,13 +68,25 @@ def _vc_params(cfg):
         "tp1_on": bool(cfg.get("vc_tp1_on", False)),                       # Teilgewinn bei TP1, danach SL auf den Einstieg
         "tp1_rr": max(0.1, float(cfg.get("vc_tp1_rr", 1.0) or 1.0)),       # Vielfaches des Risikos (Abstand Einstieg -> SL)
         "tp1_pct": min(100.0, max(0.0, float(cfg.get("vc_tp1_pct", 50.0) or 0.0))),
-        # Marktstruktur-Trend (BOS/CHoCH) als Filter - dieselbe Rechnung wie bei Grid Classic, Wellenanker und RLM
-        "trend_filter": tf_mode if tf_mode in ("off", "entry", "entry_close") else "off",
-        "trend_tf": ttf if ttf in VC_TREND_TFS else "1h",
-        "trend_mode": tmode if tmode in ("intern", "swing") else "swing",
-        "ilen": max(2, int(cfg.get("vc_trend_ilen", 4) or 4)),
-        "slen": max(2, int(cfg.get("vc_trend_slen", 50) or 50)),
+        # ADX-Filter: nur handeln, wenn der Trend stark genug ist (0 = aus)
+        "adx_min": max(0.0, float(cfg.get("vc_adx_min", 0.0) or 0.0)),
+        "adx_len": max(2, int(cfg.get("vc_adx_len", 14) or 14)),
+        "adx_dir": bool(cfg.get("vc_adx_directional", False)),
     }
+
+
+def vc_adx_ok(ts, o, h, l, c, p):
+    """(long_ok, short_ok) je Kerze oder (None, None), wenn der ADX-Filter aus ist.
+    ADX laeuft auf den EIGENEN Kerzen der Strategie, eine zweite Zeitebene braucht er nicht."""
+    if p["adx_min"] <= 0:
+        return None, None
+    from strategies import compute_adx_filter_series
+    return compute_adx_filter_series((ts, o or [0.0] * len(c), h, l, c), p["adx_len"], p["adx_min"],
+                                     directional=p["adx_dir"], mode="require_trend")
+
+
+def _vc_adx_text(p):
+    return f"ADX({p['adx_len']}) unter {p['adx_min']:g}" + (" oder falsche Richtung (+DI/-DI)" if p["adx_dir"] else "")
 
 
 def _src_price(src, o, h, l, c):
@@ -301,62 +306,6 @@ async def _vc_fetch(symbol, cfg, p):
     return tfc, bars
 
 
-async def vc_trend_now(symbol, cfg, p):
-    """Aktueller Marktstruktur-Trend 1 / -1 / 0 (unbekannt) aus geschlossenen Kerzen der Trend-Zeitebene."""
-    from strategies import ms_trend_series, SUB_MINUTE_RESOLUTIONS, fetch_candles_binance_multi
-    L = p["ilen"] if p["trend_mode"] == "intern" else p["slen"]
-    key = (symbol, p["trend_tf"], p["trend_mode"], p["ilen"], p["slen"])
-    cached = _vc_trend_cache.get(key)
-    if cached and time.time() - cached["at"] < (2.0 if p["trend_tf"] in SUB_MINUTE_RESOLUTIONS else 10.0):
-        return cached["val"]
-    d = await fetch_candles_binance_multi(symbol, p["trend_tf"], count_back=2 * L + 150, market_type=_vc_market(symbol, cfg))
-    if not d or len(d[4]) < 2 * L + 6:
-        return cached["val"] if cached else 0
-    tts, _o, th, tl, tc = d[0], d[1], d[2], d[3], d[4]
-    if cached and cached["last"] == tts[-1]:
-        cached["at"] = time.time()
-        return cached["val"]
-    itr, swt, _ev = await asyncio.to_thread(ms_trend_series, th, tl, tc, p["ilen"], p["slen"])
-    val = (itr if p["trend_mode"] == "intern" else swt)[-1]
-    _vc_trend_cache[key] = {"at": time.time(), "last": tts[-1], "val": val}
-    return val
-
-
-def _vc_trend_ok(target, trend, p):
-    """Passt das Signal zum Trend? Ohne Filter immer ja; Trend 0 (noch unbekannt) sperrt den Einstieg."""
-    if p["trend_filter"] == "off":
-        return True
-    return (trend > 0) if target == "long" else (trend < 0)
-
-
-def _vc_trend_text(trend):
-    return "aufwärts" if trend and trend > 0 else "abwärts" if trend and trend < 0 else "unbekannt"
-
-
-async def _vc_trend_for_backtest(symbol, cfg, candles, days, p):
-    """Trend-Array passend zu den Basis-Kerzen (nur geschlossene Trend-Kerzen, kein Blick in die Zukunft) oder (None, Fehlertext)."""
-    from strategies import ms_trend_series, SUB_MINUTE_RESOLUTIONS, _trend_align
-    ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
-    L = p["ilen"] if p["trend_mode"] == "intern" else p["slen"]
-    pick = (lambda itr, swt: itr if p["trend_mode"] == "intern" else swt)
-    if p["trend_tf"] == p["res"]:
-        itr, swt, _ev = await asyncio.to_thread(ms_trend_series, h, l, c, p["ilen"], p["slen"])
-        return pick(itr, swt), None
-    if p["trend_tf"] in SUB_MINUTE_RESOLUTIONS:
-        return None, "Backtest: Trend-Zeitebene unter 1 Minute geht nur, wenn sie gleich der Kerzen-Zeitebene ist (keine Sekunden-Historie)."
-    if p["res"] not in SUB_MINUTE_RESOLUTIONS and _tf_ms(p["trend_tf"]) < _tf_ms(p["res"]):
-        return None, "Backtest: Trend-Zeitebene muss gleich oder größer als die Kerzen-Zeitebene sein."
-    htf_ms = _tf_ms(p["trend_tf"])
-    warm_days = (2 * L + 30) * htf_ms / 86_400_000
-    data, err = await _fetch_cached_mo7_backtest_candles(symbol, p["trend_tf"], days + warm_days + 1, 5000, market_type=cfg.get("binance_market_type", "spot"))
-    if err or not data or len(data[4]) < 2 * L + 5:
-        return None, err or "Zu wenig Kerzen der Trend-Zeitebene für den Backtest."
-    hts, _o, hh, hl, hc, _v = data
-    itr, swt, _ev = await asyncio.to_thread(ms_trend_series, hh, hl, hc, p["ilen"], p["slen"])
-    base_ms = ts[1] - ts[0] if len(ts) > 1 else _tf_ms(p["res"])
-    return _trend_align(ts, base_ms, hts, htf_ms, pick(itr, swt)), None
-
-
 def _set_levels(st, cfg, target, price, j, h, l, p):
     entry = st.get("avg_entry_price") or price
     size = st.get("total_coin_size") or 0
@@ -379,21 +328,17 @@ async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
     pos = st["position"]
     target = "long" if sig["buy"][j] else "short" if sig["sell"][j] else None
     info = f"{KIND_NAMES[p['anchor']]}-VWAP ({SRC_NAMES[p['src']]})"
-    trend = await vc_trend_now(symbol, cfg, p) if p["trend_filter"] != "off" else 0
-    st["vc_trend"] = trend if p["trend_filter"] != "off" else None
-    if pos is not None and p["trend_filter"] == "entry_close" and not _vc_trend_ok(pos, trend, p):
-        debug_log(f"🚪 [{symbol}] EMA9+VWAP Trendwechsel: Marktstruktur {p['trend_tf']} ({p['trend_mode']}) ist {_vc_trend_text(trend)} - {pos.upper()} schließen @ {price}")
-        await execute_exit(symbol, price, "TREND-AUS")
-        if st["position"] is None:
-            _vc_reset_state(st)
-        return
+    adx_ok = True
+    if target is not None and p["adx_min"] > 0:
+        lo, so = vc_adx_ok([x["ts"] for x in closed], [x.get("o") or x["c"] for x in closed], h, l, c, p)
+        adx_ok = (lo if target == "long" else so)[j]
     if pos is not None:
         is_long = pos == "long"
         tp_cross = p["tp_mode"] == "kreuzung" and (sig["tp_dn"][j] if is_long else sig["tp_up"][j])
         opposite = target is not None and target != pos
         if tp_cross or (p["tp_mode"] == "gegentrade" and opposite):
             reason = "TP-KREUZUNG" if tp_cross else "VC-FLIP"
-            flip_to = target if opposite and _allowed(target, p) and _vc_trend_ok(target, trend, p) else None
+            flip_to = target if opposite and _allowed(target, p) and adx_ok else None
             if flip_to:
                 debug_log(f"🔄 [{symbol}] EMA9+VWAP {reason}: {pos.upper()} -> {flip_to.upper()} @ {price} ({info})")
                 if await execute_reverse(symbol, price, reason, size_multiplier=1.0):
@@ -408,8 +353,8 @@ async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
         return
     if target is None or not _allowed(target, p):
         return
-    if not _vc_trend_ok(target, trend, p):
-        debug_log(f"⛔ [{symbol}] EMA9+VWAP Signal {target.upper()} verworfen - Marktstruktur {p['trend_tf']} ({p['trend_mode']}) ist {_vc_trend_text(trend)}")
+    if not adx_ok:
+        debug_log(f"⛔ [{symbol}] EMA9+VWAP Signal {target.upper()} verworfen - {_vc_adx_text(p)}")
         return
     debug_log(f"📡 [{symbol}] EMA9+VWAP Signal: {target.upper()} @ {price} ({info})")
     await execute_entry(symbol, target, price, is_add_on=False)
@@ -475,7 +420,7 @@ async def vc_poll_loop(symbol):
 # ============================================================================
 # BACKTEST
 # ============================================================================
-def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, trend=None):
+def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, adx=None):
     """Kerze i: zuerst SL / fester TP einer schon offenen Position ueber Hoch/Tief (SL gewinnt bei Gleichzeitigkeit), dann bei
     Kerzenschluss Kreuzungs-TP / Gegentrade, dann das Einstiegssignal zum Schlusskurs."""
     n = len(c)
@@ -522,13 +467,8 @@ def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, trend=None):
                         position["sl"] = e
                     position["be"] = True
         target = "long" if sig["buy"][i] else "short" if sig["sell"][i] else None
-        tr = trend[i] if trend is not None else 0
-        if target is not None and trend is not None and not _vc_trend_ok(target, tr, p):
-            target = None                                  # Signal passt nicht zum Marktstruktur-Trend
-        if position is not None and position["entry_i"] < i and p["trend_filter"] == "entry_close" and trend is not None \
-                and not _vc_trend_ok(position["dir"], tr, p):
-            _bt_close_trade(trades, position["dir"], position["entry"], c[i], position["size"], i, position["entry_i"], "TREND-AUS", ts=ts)
-            position = None
+        if target is not None and adx is not None and not (adx[0] if target == "long" else adx[1])[i]:
+            target = None                                   # ADX zu schwach (oder falsche Richtung)
         if position is not None and position["entry_i"] < i:
             d = position["dir"]
             tp_cross = p["tp_mode"] == "kreuzung" and (sig["tp_dn"][i] if d == "long" else sig["tp_up"][i])
@@ -561,12 +501,8 @@ async def run_vc_backtest(symbol, cfg, days, exclude_top_n=1):
     i_start = next((i for i, t in enumerate(ts) if t >= start_ts), 1)
     arr = await asyncio.to_thread(vc_build, ts, o, h, l, c, v, None, p)
     sig = vc_signals(arr, p)
-    trend = None
-    if p["trend_filter"] != "off":
-        trend, terr = await _vc_trend_for_backtest(symbol, cfg, candles, days, p)
-        if terr:
-            return {"error": terr}
-    trades = vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, trend)
+    lo, so = vc_adx_ok(ts, o, h, l, c, p)
+    trades = vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, (lo, so) if lo is not None else None)
     stats = summarize_backtest_trades(trades, exclude_top_n)
     warm_ok = ts[0] <= start_ts - int((max(WARM_DAYS[k] for k in need)) * 86_400_000)
     note = None if warm_ok else (f"Hinweis: Für den Vorlauf der VWAP-Periode ({', '.join(KIND_NAMES[k] for k in sorted(need))}) gab es nicht genug Kerzen "
