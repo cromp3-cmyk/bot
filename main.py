@@ -1,5 +1,5 @@
 """
-main.py - Startpunkt. Bindet bot_core.py, strategies.py und copytrade.py
+main.py - Startpunkt. Bindet bot_core.py und strategies.py
 zusammen, registriert alle Web-Routen und startet alle Hintergrund-Loops.
 
 RENDER START COMMAND: python -u main.py
@@ -32,13 +32,6 @@ from pivot import pv_poll_loop
 from lsob import lb_poll_loop
 from trendfolge import tfl_poll_loop
 from rlm import rlm_poll_loop
-from copytrade import (
-    load_ct_watched, ct_leaderboard_refresh_loop, ct_watch_loop,
-    handle_ct_index, handle_ct_status, handle_ct_watch, handle_ct_copy_toggle,
-    handle_ct_monitor_toggle, handle_ct_skip_nachkauf_toggle, handle_ct_dry_run_toggle,
-    handle_ct_copy_all_coins_toggle,
-    handle_ct_set_coin_setting, handle_ct_remove_coin_setting, handle_ct_set_trader_defaults,
-)
 from binance_ws import binance_ws_cache_loop
 from grid_scalp import grid_scalp_poll_loop, handle_gc_backtest, handle_gc_reset, handle_gc_initbuy
 from screener import screener_loop, handle_screener_index, handle_screener_api, handle_screener_cfg_get, handle_screener_cfg_set, load_screener_cfg
@@ -105,17 +98,6 @@ async def start_web_server():
     app.router.add_post("/api/scalp/auto", handle_scalp_auto)
     app.router.add_post("/api/scalp/wa", handle_scalp_wa)
     app.router.add_post("/api/scalp/mtf", handle_scalp_mtf)
-    app.router.add_get("/copytrading", handle_ct_index)
-    app.router.add_get("/api/ct/status", handle_ct_status)
-    app.router.add_post("/api/ct/watch", handle_ct_watch)
-    app.router.add_post("/api/ct/copy", handle_ct_copy_toggle)
-    app.router.add_post("/api/ct/monitor", handle_ct_monitor_toggle)
-    app.router.add_post("/api/ct/skip_nachkauf", handle_ct_skip_nachkauf_toggle)
-    app.router.add_post("/api/ct/dry_run", handle_ct_dry_run_toggle)
-    app.router.add_post("/api/ct/copy_all_coins", handle_ct_copy_all_coins_toggle)
-    app.router.add_post("/api/ct/coin_setting", handle_ct_set_coin_setting)
-    app.router.add_post("/api/ct/remove_coin_setting", handle_ct_remove_coin_setting)
-    app.router.add_post("/api/ct/trader_defaults", handle_ct_set_trader_defaults)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
@@ -157,7 +139,6 @@ async def main():
     await load_bot_configs()
     await load_bot_state()
     await load_global_settings()
-    await load_ct_watched()
     await load_screener_cfg()
     await load_vwap_scanner_cfg()
     # MUSS vor allen Poll-Loops geladen werden: sonst "vergisst" der Bot bei jedem Neustart einen
@@ -201,8 +182,6 @@ async def main():
         *[liq_poll_loop(s) for s in SYMBOLS],
         *[wa_poll_loop(s) for s in SYMBOLS],
         *[vc_poll_loop(s) for s in SYMBOLS],
-        ct_leaderboard_refresh_loop(),
-        ct_watch_loop(),
         state_persist_loop(),
         binance_ws_cache_loop(),
         screener_loop(),

@@ -5,7 +5,7 @@ Enthaelt: Lighter-Client, Coin-Konfiguration, Config/State-Struktur, Redis-
 Persistenz, Positions-Ein-/Ausstieg (execute_entry/execute_exit), und das
 Haupt-Dashboard (Grid/HA-Supertrend/Kerzenfarbe/OBI-Scalp Uebersicht).
 
-Wird von strategies.py UND copytrade.py importiert - main.py bindet alles
+Wird von strategies.py importiert - main.py bindet alles
 zusammen und startet den Server + alle Hintergrund-Loops.
 """
 
@@ -865,7 +865,6 @@ async def save_bot_configs():
 # Globale Schalter, unabhaengig von einzelnen Coins - z.B. um bei knappen Server-Ressourcen
 # (siehe Render Memory/CPU-Limit) Last komplett abzuschalten, ohne jeden Coin einzeln umzustellen.
 GLOBAL_SETTINGS = {
-    "copytrading_enabled": True,   # Copytrading vom Hyperliquid-Leaderboard komplett an/aus
 }
 
 
@@ -899,7 +898,7 @@ async def handle_global_settings_get(request):
 async def handle_global_settings_update(request):
     body = await request.json()
     changed = False
-    for key in ("copytrading_enabled",):
+    for key in ():
         if key in body:
             GLOBAL_SETTINGS[key] = bool(body[key])
             changed = True
@@ -1889,12 +1888,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v15.11-c</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v16.11-a</span></div>
   <div class="topbar-right">
-    <label style="font-size:12px; color:var(--text-dim); margin-right:14px; display:inline-flex; align-items:center; gap:5px; cursor:pointer;" title="Copytrading komplett an/aus - pausiert Leaderboard-Abruf und alle Trader-Beobachtung/Kopie">
-      <input type="checkbox" id="toggle-copytrading-global" style="cursor:pointer;"> 📡 Copytrading
-    </label>
-    <a href="/copytrading" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📡 Copy-Trading →</a><a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
+    <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
 </div>
 <div class="container">
@@ -7879,15 +7875,10 @@ async function loadGlobalSettings() {
   try {
     const res = await fetch('/api/global_settings');
     const data = await res.json();
-    document.getElementById('toggle-copytrading-global').checked = !!data.copytrading_enabled;
   } catch (e) {
     console.error('Globale Einstellungen konnten nicht geladen werden:', e);
   }
 }
-document.getElementById('toggle-copytrading-global').addEventListener('change', async (e) => {
-  await fetch('/api/global_settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({copytrading_enabled: e.target.checked}) });
-  showToast(e.target.checked ? '✅ Copytrading global AN' : '⏸️ Copytrading global AUS');
-});
 
 (async () => {
   await loadSymbols();

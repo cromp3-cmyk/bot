@@ -1,5 +1,5 @@
 """
-Zentrale Sende-Schleuse fuer ALLE Lighter-Orders (Grid Classic, Grid-Scalp, Trendfolge, Pivot, Copytrading, ...).
+Zentrale Sende-Schleuse fuer ALLE Lighter-Orders (Grid Classic, Grid-Scalp, Trendfolge, Pivot, ...).
 
 Was sie macht:
   1. EIN Sende-Lock fuer alle Coins/Strategien (wiedereintrittsfaehig, damit verschachtelte Aufrufe nicht blockieren).
