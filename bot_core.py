@@ -580,7 +580,14 @@ def default_config():
         "vc_direction_mode": os.getenv("VC_DIRECTION_MODE", "both"),
         "vc_sl_buffer_pct": float(os.getenv("VC_SL_BUFFER_PCT", "0.0")),   # Puffer hinter der vorletzten Kerze
         "vc_be_pct": float(os.getenv("VC_BE_PCT", "0.0")),                 # ab dieser Kursbewegung SL auf den Einstieg (0 = aus)
-        "vc_tp_mode": os.getenv("VC_TP_MODE", "kreuzung"),             # kreuzung | fester_betrag | gegentrade | aus
+        "vc_tp_mode": os.getenv("VC_TP_MODE", "kreuzung"),             # kreuzung | wellenanker | fester_betrag | gegentrade | aus
+        "vc_wa_src": os.getenv("VC_WA_SRC", "close"),                  # Wellenanker als Ausstieg: Quelle der Welle
+        "vc_wa_n1": int(os.getenv("VC_WA_N1", "10")),
+        "vc_wa_n2": int(os.getenv("VC_WA_N2", "21")),
+        "vc_wa_sig_len": int(os.getenv("VC_WA_SIG_LEN", "4")),
+        "vc_wa_wave_scale": float(os.getenv("VC_WA_WAVE_SCALE", "1.35")),
+        "vc_wa_zone": float(os.getenv("VC_WA_ZONE", "0")),             # 0 = jede Kreuzung zaehlt
+        "vc_wa_tf": os.getenv("VC_WA_TF", ""),                         # eigene Zeiteinheit des Wellenankers ("" = wie die Strategie)
         "vc_tp_usd": float(os.getenv("VC_TP_USD", "5.0")),
         "vc_tp1_on": os.getenv("VC_TP1_ON", "false").lower() == "true",    # Teilgewinn bei TP1, danach SL auf den Einstieg
         "vc_tp1_rr": float(os.getenv("VC_TP1_RR", "1.0")),                 # TP1 = Vielfaches des Risikos (Einstieg -> SL)
@@ -1893,7 +1900,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v16.11-g</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v16.11-i</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
@@ -2632,7 +2639,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="vwap_cross"><label>ADX-Filter: nur handeln ab ADX über (0 = aus, üblich 20–25)</label><input type="number" step="1" min="0" id="vc_adx_min"></div>
   <div data-mode="vwap_cross"><label>ADX-Periode</label><input type="number" step="1" min="2" id="vc_adx_len"></div>
   <div data-mode="vwap_cross"><label><input type="checkbox" id="vc_adx_directional" style="width:auto; vertical-align:middle;"> Zusätzlich die Richtung prüfen (Long nur bei +DI über −DI, Short umgekehrt)</label></div>
-  <div data-mode="vwap_cross"><label>Take-Profit</label><select class="cfg" id="vc_tp_mode"><option value="kreuzung">Kreuzung der EMA mit dem VWAP in Gegenrichtung (Long: nach unten, Short: nach oben)</option><option value="fester_betrag">Fester $-Gewinn</option><option value="gegentrade">Gegentrade (Gegen-Signal dreht die Position)</option><option value="aus">Kein TP (nur SL)</option></select></div>
+  <div data-mode="vwap_cross"><label>Take-Profit</label><select class="cfg" id="vc_tp_mode"><option value="kreuzung">Kreuzung der EMA mit dem VWAP in Gegenrichtung (Long: nach unten, Short: nach oben)</option><option value="wellenanker">Wellenanker-Kreuzung (wt1 × wt2 gegen die Position)</option><option value="fester_betrag">Fester $-Gewinn</option><option value="gegentrade">Gegentrade (Gegen-Signal dreht die Position)</option><option value="aus">Kein TP (nur SL)</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    Der Wellenanker läuft auf seiner eigenen Zeiteinheit (leer = wie die Strategie), der Einstieg bleibt auf der Zeitebene oben. <b>Long</b> wird geschlossen, wenn wt1 die Signallinie wt2 nach unten kreuzt, <b>Short</b> bei Kreuzung nach oben. Die Werte entsprechen denen der Wellenanker-Strategie.</div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Zeiteinheit des Wellenankers</label>
+    <select class="cfg" id="vc_wa_tf"><option value="">wie die Strategie</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="2m">2 Minuten</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="2h">2 Stunden</option><option value="4h">4 Stunden</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Quelle der Welle</label>
+    <select class="cfg" id="vc_wa_src"><option value="close">Schlusskurs</option><option value="hlc3">hlc3</option><option value="ohlc4">ohlc4</option><option value="hl2">hl2</option></select></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Kanal-Länge</label><input type="number" step="1" min="1" id="vc_wa_n1"></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Durchschnitt-Länge</label><input type="number" step="1" min="1" id="vc_wa_n2"></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Signallinien-Glättung</label><input type="number" step="1" min="1" id="vc_wa_sig_len"></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Wellen-Skalierung</label><input type="number" step="0.05" min="0.5" max="3.0" id="vc_wa_wave_scale"></div>
+  <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Zonen-Filter: nur kreuzen lassen, wenn wt2 weiter als ± dieser Wert von der Null weg ist (0 = jede Kreuzung)</label><input type="number" step="1" min="0" id="vc_wa_zone"></div>
   <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="fester_betrag"><label>TP-Betrag ($ Gewinn der Position)</label><input type="number" step="any" min="0" id="vc_tp_usd"></div>
 
   <div data-mode="rlm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
@@ -7055,6 +7073,13 @@ async function refresh() {
     document.getElementById('vc_adx_len').value = data.config.vc_adx_len ?? 14;
     document.getElementById('vc_adx_directional').checked = !!data.config.vc_adx_directional;
     document.getElementById('vc_tp_mode').value = data.config.vc_tp_mode || 'kreuzung';
+    document.getElementById('vc_wa_tf').value = data.config.vc_wa_tf || '';
+    document.getElementById('vc_wa_src').value = data.config.vc_wa_src || 'close';
+    document.getElementById('vc_wa_n1').value = data.config.vc_wa_n1 ?? 10;
+    document.getElementById('vc_wa_n2').value = data.config.vc_wa_n2 ?? 21;
+    document.getElementById('vc_wa_sig_len').value = data.config.vc_wa_sig_len ?? 4;
+    document.getElementById('vc_wa_wave_scale').value = data.config.vc_wa_wave_scale ?? 1.35;
+    document.getElementById('vc_wa_zone').value = data.config.vc_wa_zone ?? 0;
     document.getElementById('vc_tp_usd').value = data.config.vc_tp_usd ?? '';
     document.getElementById('rlm_direction_mode').value = data.config.rlm_direction_mode || 'both';
     document.getElementById('rlm_candle_type').value = data.config.rlm_candle_type || 'normal';
@@ -7714,6 +7739,13 @@ function buildConfigPayload() {
     vc_adx_len: parseInt(document.getElementById('vc_adx_len').value) || 14,
     vc_adx_directional: document.getElementById('vc_adx_directional').checked,
     vc_tp_mode: document.getElementById('vc_tp_mode').value,
+    vc_wa_tf: document.getElementById('vc_wa_tf').value,
+    vc_wa_src: document.getElementById('vc_wa_src').value,
+    vc_wa_n1: parseInt(document.getElementById('vc_wa_n1').value) || 10,
+    vc_wa_n2: parseInt(document.getElementById('vc_wa_n2').value) || 21,
+    vc_wa_sig_len: parseInt(document.getElementById('vc_wa_sig_len').value) || 4,
+    vc_wa_wave_scale: parseFloat(document.getElementById('vc_wa_wave_scale').value) || 1.35,
+    vc_wa_zone: parseFloat(document.getElementById('vc_wa_zone').value) || 0,
     vc_tp_usd: parseFloat(document.getElementById('vc_tp_usd').value) || 0,
     rlm_direction_mode: document.getElementById('rlm_direction_mode').value,
     rlm_candle_type: document.getElementById('rlm_candle_type').value,
@@ -8192,7 +8224,7 @@ async def handle_config_update(request):
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
                 "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "dv_sl_cooldown_seconds", "gq_resolution", "gq_htf_resolution", "gq_rsi_len", "gq_ma_len", "gq_buy_level", "gq_sell_level", "gq_direction_mode", "gq_atr_len", "gq_entry_cond", "gq_exit_mode", "gq_sl_mult", "gq_tp1_rr", "gq_tp1_pct", "gq_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "pv_resolution", "pv_left", "pv_right", "pv_buffer_pct", "pv_candle_type", "pv_renko_mode", "pv_renko_atr_len", "pv_renko_mult", "pv_renko_pct", "pv_exit_mode", "pv_direction_mode", "pv_sl_usd", "pv_tp_usd", "pv_profit_only_close", "pv_tp_mode", "pv_be_trigger_usd", "pv_tp1_usd", "pv_tp2_usd", "pv_tp3_usd", "pv_tp1_pct", "pv_tp2_pct", "pv_be_after_tp1", "pv_sl_to_tp1_on_tp2", "pv_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_be_trigger_usd", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
-                "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_be_pct","vc_tp_mode","vc_tp_usd","vc_tp1_on","vc_tp1_rr","vc_tp1_pct","vc_adx_min","vc_adx_len","vc_adx_directional","vc_cross_min_pct","vc_cross_confirm","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
+                "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_be_pct","vc_tp_mode","vc_tp_usd","vc_wa_tf","vc_wa_src","vc_wa_n1","vc_wa_n2","vc_wa_sig_len","vc_wa_wave_scale","vc_wa_zone","vc_tp1_on","vc_tp1_rr","vc_tp1_pct","vc_adx_min","vc_adx_len","vc_adx_directional","vc_cross_min_pct","vc_cross_confirm","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",

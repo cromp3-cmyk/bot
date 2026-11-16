@@ -8,7 +8,8 @@ Prinzip:
   * Der Sprung des VWAP beim Start einer neuen Periode zaehlt nie als Kreuzung.
   * Stop-Loss: hinter der VORLETZTEN Kerze - Long unter ihrem Tief, Short ueber ihrem Hoch (plus Puffer). Liegt dieses Extrem
     auf der falschen Seite des Einstiegs, zaehlt ersatzweise das Extrem der Signalkerze.
-  * Take-Profit: Kreuzung eines waehlbaren VWAP in Gegenrichtung (Standard Day), fester $-Gewinn, Gegen-Signal (Gegentrade) oder keiner.
+  * Take-Profit: Kreuzung EMA x VWAP in Gegenrichtung, Wellenanker-Kreuzung (wt1 x wt2, eigene Zeiteinheit moeglich),
+    fester $-Gewinn, Gegen-Signal oder keiner.
   * Live: Kerzen und Volumen per Binance-REST nur bei neu geschlossener Kerze; VWAP = 15m-Basiskerzen seit Perioden-Beginn
     (zwischengespeichert, siehe vwap_scanner) + Kerzen der gewaehlten Zeitebene. Backtest: Kerzen der Zeitebene inkl. Vorlauf.
 """
@@ -25,6 +26,8 @@ from strategies import (
     BINANCE_SYMBOL_MAP, BINANCE_FUTURES_ONLY_SYMBOLS, _tf_ms, summarize_backtest_trades,
     _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
 )
+from bisect import bisect_left
+
 from vwap_scanner import _period_start, _ema, _fetch_base, BASE_MS
 
 VC_TFS = ["10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
@@ -50,6 +53,9 @@ SL_LOOKBACK = 200
 
 def _vc_params(cfg):
     res = cfg.get("vc_resolution", "15m")
+    wa_src = cfg.get("vc_wa_src", cfg.get("wa_src", "close"))
+    wa_tf = str(cfg.get("vc_wa_tf", "") or "").strip().lower()
+    wa_tf = wa_tf if (wa_tf and _vc_res(wa_tf) == wa_tf) else ""
     tp_mode = cfg.get("vc_tp_mode", "kreuzung")
     direction = cfg.get("vc_direction_mode", "both")
     anchor = cfg.get("vc_anchor", "d")
@@ -64,7 +70,15 @@ def _vc_params(cfg):
         "direction": direction if direction in ("both", "long_only", "short_only") else "both",
         "sl_buf": max(0.0, float(cfg.get("vc_sl_buffer_pct", 0.0) or 0.0)),
         "be_pct": max(0.0, float(cfg.get("vc_be_pct", 0.0) or 0.0)),       # ab dieser Kursbewegung wandert der SL auf den Einstieg (0 = aus)
-        "tp_mode": tp_mode if tp_mode in ("kreuzung", "fester_betrag", "gegentrade", "aus") else "kreuzung",
+        "tp_mode": tp_mode if tp_mode in ("kreuzung", "fester_betrag", "gegentrade", "wellenanker", "aus") else "kreuzung",
+        # Wellenanker (WaveTrend) als Ausstieg: wt1 kreuzt wt2 gegen die Position
+        "wa_n1": max(1, int(cfg.get("vc_wa_n1", cfg.get("wa_n1", 10)) or 10)),
+        "wa_n2": max(1, int(cfg.get("vc_wa_n2", cfg.get("wa_n2", 21)) or 21)),
+        "wa_sig": max(1, int(cfg.get("vc_wa_sig_len", cfg.get("wa_sig_len", 4)) or 4)),
+        "wa_scale": max(0.1, float(cfg.get("vc_wa_wave_scale", cfg.get("wa_wave_scale", 1.35)) or 1.35)),
+        "wa_src": wa_src if wa_src in ("close", "hlc3", "ohlc4", "hl2") else "close",
+        "wa_zone": max(0.0, float(cfg.get("vc_wa_zone", 0.0) or 0.0)),   # 0 = jede Kreuzung zaehlt
+        "wa_tf": wa_tf,                                 # eigene Zeiteinheit des Wellenankers ("" = wie die Strategie)
         "tp_usd": max(0.0, float(cfg.get("vc_tp_usd", 5.0) or 0.0)),
         "tp1_on": bool(cfg.get("vc_tp1_on", False)),                       # Teilgewinn bei TP1, danach SL auf den Einstieg
         "tp1_rr": max(0.1, float(cfg.get("vc_tp1_rr", 1.0) or 1.0)),       # Vielfaches des Risikos (Abstand Einstieg -> SL)
@@ -91,6 +105,61 @@ def vc_adx_ok(ts, o, h, l, c, p):
 
 def _vc_adx_text(p):
     return f"ADX({p['adx_len']}) unter {p['adx_min']:g}" + (" oder falsche Richtung (+DI/-DI)" if p["adx_dir"] else "")
+
+
+def vc_wa_cross(o, h, l, c, p):
+    """(up, dn) je Kerze: Kreuzung der Wellenanker-Linien wt1 x wt2, gerechnet wie in der Wellenanker-Strategie.
+    up = wt1 kreuzt wt2 nach oben (schliesst einen Short), dn = nach unten (schliesst einen Long).
+    Der Zonen-Filter verlangt, dass wt2 weit genug von der Nulllinie weg ist (0 = jede Kreuzung zaehlt)."""
+    from strategies import compute_wavetrend_series
+    n = len(c)
+    wt1, wt2 = compute_wavetrend_series(o or list(c), h, l, c, p["wa_n1"], p["wa_n2"], p["wa_sig"], p["wa_src"], p["wa_scale"])
+    z = p["wa_zone"]
+    up, dn = [False] * n, [False] * n
+    for i in range(1, n):
+        if wt1[i] > wt2[i] and wt1[i - 1] <= wt2[i - 1]:
+            up[i] = (wt2[i] < -z) if z > 0 else True
+        elif wt1[i] < wt2[i] and wt1[i - 1] >= wt2[i - 1]:
+            dn[i] = (wt2[i] > z) if z > 0 else True
+    return up, dn
+
+
+def _vc_wa_align(base_ts, base_ms, wts, wa_ms, up, dn):
+    """Kreuzungen einer anderen Zeiteinheit auf die Basis-Kerzen legen: eine Kreuzung wirkt ab der ersten Basis-Kerze,
+    die NACH dem Abschluss der Wellenanker-Kerze schliesst - so kann der Backtest nicht in die Zukunft schauen."""
+    n = len(base_ts)
+    bu, bd = [False] * n, [False] * n
+    for i in range(len(wts)):
+        if not (up[i] or dn[i]):
+            continue
+        k = bisect_left(base_ts, wts[i] + wa_ms - base_ms)
+        if 0 <= k < n:
+            if up[i]:
+                bu[k] = True
+            if dn[i]:
+                bd[k] = True
+    return bu, bd
+
+
+async def vc_wa_cross_tf(symbol, cfg, p, base_ts=None, days=None):
+    """Wellenanker-Kreuzungen auf seiner EIGENEN Zeiteinheit. Mit base_ts werden sie auf die Basis-Kerzen gelegt
+    (Backtest), ohne base_ts kommen die Rohreihen der letzten Kerzen zurueck (live). -> (up, dn) oder None."""
+    tf = p["wa_tf"] or p["res"]
+    mt = _vc_market(symbol, cfg)
+    need = max(200, p["wa_n2"] * 6 + p["wa_sig"] + 10)
+    if base_ts is None:
+        from strategies import fetch_candles_binance_multi
+        d = await fetch_candles_binance_multi(symbol, tf, count_back=need, market_type=mt)
+        if not d or len(d[4]) < need // 4:
+            return None
+        return await asyncio.to_thread(vc_wa_cross, d[1], d[2], d[3], d[4], p), d[0]
+    wa_ms, base_ms = _tf_ms(tf), (base_ts[1] - base_ts[0] if len(base_ts) > 1 else _tf_ms(p["res"]))
+    warm = need * wa_ms / 86_400_000
+    data, err = await _fetch_cached_mo7_backtest_candles(symbol, tf, days + warm + 1, 50_000, market_type=cfg.get("binance_market_type", "spot"))
+    if err or not data or len(data[4]) < 50:
+        return None
+    up, dn = await asyncio.to_thread(vc_wa_cross, data[1], data[2], data[3], data[4], p)
+    return _vc_wa_align(base_ts, base_ms, data[0], wa_ms, up, dn)
 
 
 def _src_price(src, o, h, l, c):
@@ -367,9 +436,12 @@ async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
     if pos is not None:
         is_long = pos == "long"
         tp_cross = p["tp_mode"] == "kreuzung" and (sig["tp_dn"][j] if is_long else sig["tp_up"][j])
+        if p["tp_mode"] == "wellenanker" and not p["wa_tf"]:     # eigene Zeiteinheit wird in der Schleife geprueft
+            wa_up, wa_dn = await asyncio.to_thread(vc_wa_cross, [x.get("o") or x["c"] for x in closed], h, l, c, p)
+            tp_cross = wa_dn[j] if is_long else wa_up[j]
         opposite = target is not None and target != pos
         if tp_cross or (p["tp_mode"] == "gegentrade" and opposite):
-            reason = "TP-KREUZUNG" if tp_cross else "VC-FLIP"
+            reason = ("TP-WELLENANKER" if p["tp_mode"] == "wellenanker" else "TP-KREUZUNG") if tp_cross else "VC-FLIP"
             flip_to = target if opposite and _allowed(target, p) and adx_ok else None
             if flip_to:
                 debug_log(f"🔄 [{symbol}] EMA9+VWAP {reason}: {pos.upper()} -> {flip_to.upper()} @ {price} ({info})")
@@ -394,8 +466,28 @@ async def vc_check_candle(symbol, cfg, p, closed, arr, sig, price):
         _set_levels(st, cfg, target, price, j, h, l, p)
 
 
+async def vc_check_wa_exit(symbol, cfg, p, price):
+    """Ausstieg nach der Wellenanker-Kreuzung auf DESSEN eigener Zeiteinheit. True = geprueft (Kerzen waren da)."""
+    st = BOTS[symbol]["state"]
+    if st["position"] is None or price is None:
+        return True
+    got = await vc_wa_cross_tf(symbol, cfg, p)
+    if not got:
+        return False
+    (up, dn), _wts = got
+    i = len(up) - 1
+    hit = dn[i] if st["position"] == "long" else up[i]
+    if hit:
+        debug_log(f"🎯 [{symbol}] EMA9+VWAP TP-WELLENANKER ({p['wa_tf']}): {st['position'].upper()} schließen @ {price}")
+        await execute_exit(symbol, price, "TP-WELLENANKER")
+        if st["position"] is None:
+            _vc_reset_state(st)
+    return True
+
+
 async def vc_poll_loop(symbol):
     b = BOTS[symbol]
+    last_wa = None
     last_processed = None
     last_heartbeat = 0.0
     warned = False
@@ -441,6 +533,15 @@ async def vc_poll_loop(symbol):
                                 wait = 3.0                    # neue Kerze noch nicht bei Binance verfuegbar -> gleich nochmal
                         else:
                             wait = 5.0
+                if (st["position"] is not None and p["tp_mode"] == "wellenanker" and p["wa_tf"] and p["wa_tf"] != p["res"]
+                        and BINANCE_SYMBOL_MAP.get(symbol)):
+                    wa_ms = _tf_ms(p["wa_tf"])
+                    expect_wa = int(now * 1000) // wa_ms * wa_ms - wa_ms
+                    if last_wa is None or expect_wa > last_wa:
+                        if await vc_check_wa_exit(symbol, cfg, p, price):
+                            last_wa = expect_wa
+                        else:
+                            wait = min(wait, 3.0)
                 if now - last_heartbeat > 300:
                     last_heartbeat = now
                     debug_log(f"💓 [{symbol}] EMA9+VWAP aktiv: {p['res']}, VWAP {KIND_NAMES[p['anchor']]}/{SRC_NAMES[p['src']]}, SL=vorletzte Kerze, TP={p['tp_mode']}, Preis={price}")
@@ -452,7 +553,7 @@ async def vc_poll_loop(symbol):
 # ============================================================================
 # BACKTEST
 # ============================================================================
-def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, adx=None):
+def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, adx=None, wa=None):
     """Kerze i: zuerst SL / fester TP einer schon offenen Position ueber Hoch/Tief (SL gewinnt bei Gleichzeitigkeit), dann bei
     Kerzenschluss Kreuzungs-TP / Gegentrade, dann das Einstiegssignal zum Schlusskurs."""
     n = len(c)
@@ -504,10 +605,12 @@ def vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, adx=None):
         if position is not None and position["entry_i"] < i:
             d = position["dir"]
             tp_cross = p["tp_mode"] == "kreuzung" and (sig["tp_dn"][i] if d == "long" else sig["tp_up"][i])
+            if p["tp_mode"] == "wellenanker" and wa is not None:
+                tp_cross = (wa[1][i] if d == "long" else wa[0][i])
             opposite = target is not None and target != d
             if tp_cross or (p["tp_mode"] == "gegentrade" and opposite):
                 _bt_close_trade(trades, d, position["entry"], c[i], position["size"], i, position["entry_i"],
-                                "TP-KREUZUNG" if tp_cross else "VC-FLIP", ts=ts)
+                                (("TP-WELLENANKER" if p["tp_mode"] == "wellenanker" else "TP-KREUZUNG") if tp_cross else "VC-FLIP"), ts=ts)
                 position = None
         if position is None and target is not None and _allowed(target, p):
             position = open_pos(target, i)
@@ -534,7 +637,15 @@ async def run_vc_backtest(symbol, cfg, days, exclude_top_n=1):
     arr = await asyncio.to_thread(vc_build, ts, o, h, l, c, v, None, p)
     sig = vc_signals(arr, p)
     lo, so = vc_adx_ok(ts, o, h, l, c, p)
-    trades = vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, (lo, so) if lo is not None else None)
+    wa = None
+    if p["tp_mode"] == "wellenanker":
+        if p["wa_tf"] and p["wa_tf"] != p["res"]:
+            wa = await vc_wa_cross_tf(symbol, cfg, p, ts, days + warm_days)
+            if wa is None:
+                return {"error": f"Keine Kerzen für die Wellenanker-Zeiteinheit {p['wa_tf']} erhalten."}
+        else:
+            wa = await asyncio.to_thread(vc_wa_cross, o, h, l, c, p)
+    trades = vc_simulate(ts, o, h, l, c, arr, sig, cfg, p, i_start, (lo, so) if lo is not None else None, wa)
     stats = summarize_backtest_trades(trades, exclude_top_n)
     warm_ok = ts[0] <= start_ts - int((max(WARM_DAYS[k] for k in need)) * 86_400_000)
     note = None if warm_ok else (f"Hinweis: Für den Vorlauf der VWAP-Periode ({', '.join(KIND_NAMES[k] for k in sorted(need))}) gab es nicht genug Kerzen "
@@ -634,7 +745,7 @@ def vc_mc_resolutions(text):
 def _vc_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
     """prepared: {Zeitebene: (candles, i_start)}. combos: (Zeitebene, EMA, Mindestabstand, Bestaetigung, ADX-Schwelle)."""
     base_p = _vc_params(base_cfg)
-    arr_cache, adx_cache = {}, {}
+    arr_cache, adx_cache, wa_cache = {}, {}, {}
     out = []
     for res, ema, minp, conf, adxm in combos:
         if time.time() > deadline:
@@ -652,7 +763,9 @@ def _vc_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
                 adx_cache[(res, adxm)] = vc_adx_ok(ts, o, h, l, c, p)
             lo, so = adx_cache[(res, adxm)]
             adx = (lo, so) if lo is not None else None
-        trades = vc_simulate(ts, o, h, l, c, arr, sig, base_cfg, p, i_start, adx)
+        if p["tp_mode"] == "wellenanker" and res not in wa_cache:
+            wa_cache[res] = vc_wa_cross(o, h, l, c, p)
+        trades = vc_simulate(ts, o, h, l, c, arr, sig, base_cfg, p, i_start, adx, wa_cache.get(res))
         st = summarize_backtest_trades(trades, exclude_top_n)
         out.append({"vc_resolution": res, "vc_ema_len": ema, "vc_cross_min_pct": minp, "vc_cross_confirm": conf,
                     "vc_adx_min": adxm, "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
