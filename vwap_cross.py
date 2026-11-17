@@ -686,11 +686,20 @@ async def vc_chart_payload(symbol, cfg, ts, o, h, l, c, tf):
                     arr = await asyncio.to_thread(vc_build, [x["ts"] for x in closed], [x.get("o") for x in closed], [x["h"] for x in closed],
                                                   [x["l"] for x in closed], [x["c"] for x in closed], [x["v"] for x in closed], bars, p)
                     sig = vc_signals(arr, p)
+                    # Pfeile nur dort, wo ALLE Einstellungen passen - sonst zeigt der Chart Signale,
+                    # die der Bot gar nicht nehmen wuerde (ADX-Filter, Richtungsbegrenzung).
+                    lo, so = vc_adx_ok([x["ts"] for x in closed], [x.get("o") or x["c"] for x in closed],
+                                       [x["h"] for x in closed], [x["l"] for x in closed], [x["c"] for x in closed], p)
                     first_t = candles[0]["time"] if candles else 0
                     for j, x in enumerate(closed):
                         kind = "long" if sig["buy"][j] else "short" if sig["sell"][j] else None
-                        if kind and x["ts"] // 1000 >= first_t:
-                            markers.append({"time": x["ts"] // 1000, "kind": kind, "price": x["c"]})
+                        if not kind or x["ts"] // 1000 < first_t:
+                            continue
+                        if not _allowed(kind, p):
+                            continue
+                        if lo is not None and not (lo[j] if kind == "long" else so[j]):
+                            continue
+                        markers.append({"time": x["ts"] // 1000, "kind": kind, "price": x["c"]})
                     vw, sd, mult = arr["vw"], arr["sd"], p["band_mult"]
                     line, bup, blo = [], [], []
                     for j, x in enumerate(closed):
