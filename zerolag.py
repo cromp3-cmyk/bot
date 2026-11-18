@@ -11,6 +11,8 @@ Nachbau von "Zero Lag Trend Signals (MTF)" von AlgoAlpha:
     schon in dieselbe Richtung zeigt und auch auf der Kerze davor zeigte.
   * Zusaetzlich waehlbar: Einstieg direkt beim Kippen des Trends (die grossen Pfeile des Originals).
   * MTF-Filter: der Trend einer zweiten Zeiteinheit muss zur Richtung passen (die Tabelle des Originals).
+  * Umkehr (waehlbar): aus einem Kaufsignal wird ein Short und umgekehrt - fuer Maerkte, in denen das
+    Original gegen den Kurs laeuft.
 
 Ausstieg (waehlbar): Trendwechsel, Gegensignal, oder nur SL/TP; das Gegensignal kann die Position auch drehen.
 Stop-Loss: am gegenueberliegenden Band (wahlweise nachziehend), fester $-Betrag oder keiner.
@@ -66,6 +68,7 @@ def _zl_params(cfg):
         "tp2_usd": max(0.0, float(cfg.get("zl_tp2_usd", 0.0) or 0.0)),       # 0 = TP2 aus
         "tp2_pct": min(100.0, max(0.0, float(cfg.get("zl_tp2_pct", 100.0) or 0.0))),
         "mtf_tf": mtf if (mtf and _zl_res(mtf, "") == mtf) else "",           # "" = kein MTF-Filter
+        "invert": bool(cfg.get("zl_invert", False)),                          # Signale umdrehen: Long-Signal -> Short
     }
 
 
@@ -139,6 +142,11 @@ def zl_build(h, l, c, p):
             buy[i] = True
         elif c[i] < zlema[i] and c[i - 1] >= zlema[i - 1] and trend[i] == -1 and trend[i - 1] == -1:
             sell[i] = True
+    if p["invert"]:
+        # Signale umdrehen. Das geschieht EINMAL hier, damit Einstieg, Ausstieg, Stop-Loss-Seite
+        # und die Pfeile im Chart alle dieselbe gedrehte Sicht benutzen.
+        buy, sell = sell, buy
+        flip_up, flip_dn = flip_dn, flip_up
     return {"zlema": zlema, "vol": vol, "trend": trend, "buy": buy, "sell": sell,
             "flip_up": flip_up, "flip_dn": flip_dn, "n": n}
 
