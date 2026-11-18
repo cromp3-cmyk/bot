@@ -25,7 +25,7 @@ from collections import deque
 
 from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_partial_exit, execute_reverse
 from strategies import (
-    BINANCE_SYMBOL_MAP, _tf_ms, summarize_backtest_trades, compute_atr,
+    BINANCE_SYMBOL_MAP, _tf_ms, summarize_backtest_trades, compute_atr, SUB_MINUTE_RESOLUTIONS,
     _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
 )
 
@@ -458,6 +458,8 @@ async def run_zl_backtest(symbol, cfg, days, exclude_top_n=1):
     warm_bars = p["length"] * 4 + 60
     warm_days = warm_bars * _tf_ms(p["res"]) / 86_400_000
     max_candles = BACKTEST_MAX_CANDLES.get("zero_lag", 100_000)
+    if p["res"] in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)       # Sekunden-Kerzen werden aus 1s-Daten gebaut - sonst laeuft der Abruf ins Zeitlimit
     candles, err = await _fetch_cached_mo7_backtest_candles(symbol, p["res"], days + warm_days + 1, max_candles,
                                                             market_type=cfg.get("binance_market_type", "spot"))
     if err:
@@ -472,7 +474,8 @@ async def run_zl_backtest(symbol, cfg, days, exclude_top_n=1):
     if p["mtf_tf"] and p["mtf_tf"] != p["res"]:
         htf_ms = _tf_ms(p["mtf_tf"])
         hwarm = warm_bars * htf_ms / 86_400_000
-        hd, herr = await _fetch_cached_mo7_backtest_candles(symbol, p["mtf_tf"], days + hwarm + 1, 50_000,
+        hcap = 5000 if p["mtf_tf"] in SUB_MINUTE_RESOLUTIONS else 50_000
+        hd, herr = await _fetch_cached_mo7_backtest_candles(symbol, p["mtf_tf"], days + hwarm + 1, hcap,
                                                             market_type=cfg.get("binance_market_type", "spot"))
         if herr or not hd or len(hd[4]) < p["length"] + 10:
             return {"error": f"Keine Kerzen für die MTF-Zeiteinheit {p['mtf_tf']} erhalten."}

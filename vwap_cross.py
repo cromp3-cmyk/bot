@@ -23,7 +23,7 @@ import traceback
 import binance_ws
 from bot_core import BOTS, debug_log, execute_entry, execute_exit, execute_partial_exit, execute_reverse
 from strategies import (
-    BINANCE_SYMBOL_MAP, BINANCE_FUTURES_ONLY_SYMBOLS, _tf_ms, summarize_backtest_trades,
+    BINANCE_SYMBOL_MAP, BINANCE_FUTURES_ONLY_SYMBOLS, _tf_ms, summarize_backtest_trades, SUB_MINUTE_RESOLUTIONS,
     _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
 )
 from bisect import bisect_left
@@ -624,6 +624,8 @@ async def run_vc_backtest(symbol, cfg, days, exclude_top_n=1):
     need = {p["anchor"]}
     warm_days = WARM_DAYS[p["anchor"]] + 1.0               # Vorlauf: Beginn der VWAP-Periode + EMA-Einschwingen
     max_candles = BACKTEST_MAX_CANDLES.get("vwap_cross", 100_000)
+    if p["res"] in SUB_MINUTE_RESOLUTIONS:
+        max_candles = min(max_candles, 5000)       # Sekunden-Kerzen werden aus 1s-Daten gebaut - sonst laeuft der Abruf ins Zeitlimit
     candles, err = await _fetch_cached_mo7_backtest_candles(symbol, p["res"], days + warm_days, max_candles, market_type=cfg.get("binance_market_type", "spot"))
     if err:
         return {"error": err}
