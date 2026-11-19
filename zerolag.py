@@ -600,7 +600,10 @@ def zl_mc_resolutions(text):
 def _zl_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
     """prepared: {Zeitebene: (candles, i_start)}. combos: (Zeitebene, Laenge, Faktor, SL $, TP1 $, TP2 $)."""
     base_p = _zl_params(base_cfg)
-    arr_cache = {}
+    # Nach (Zeitebene, Laenge, Faktor) sortieren: so wird je Gruppe nur EINE Rechnung im Speicher gehalten.
+    # Ein Woerterbuch ueber alle Kombinationen waere bei 100.000 Kerzen schnell dreistellig in MB.
+    combos = sorted(combos, key=lambda x: (x[0], x[1], x[2]))
+    cur_key, arr = None, None
     out = []
     for res, length, mult, sl_usd, tp1, tp2 in combos:
         if time.time() > deadline:
@@ -610,9 +613,10 @@ def _zl_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
         p = dict(base_p, res=res, length=length, mult=mult, sl_usd=sl_usd, tp1_usd=tp1, tp2_usd=tp2)
         if p["sl_mode"] == "usd" and sl_usd <= 0:
             p = dict(p, sl_mode="aus")
-        if (res, length, mult) not in arr_cache:
-            arr_cache[(res, length, mult)] = zl_build(h, l, c, p)
-        arr = arr_cache[(res, length, mult)]
+        if cur_key != (res, length, mult):
+            arr = None                                  # alte Rechnung zuerst freigeben
+            arr = zl_build(h, l, c, p)
+            cur_key = (res, length, mult)
         trades = zl_simulate(ts, h, l, c, arr, base_cfg, p, i_start)
         st = summarize_backtest_trades(trades, exclude_top_n)
         out.append({"zl_resolution": res, "zl_length": length, "zl_mult": mult, "zl_sl_usd": sl_usd,
@@ -644,8 +648,21 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
     runs = max(1, min(ZL_MC_MAX_RUNS, int(runs)))
     mt = cfg.get("binance_market_type", "spot")
     max_candles = BACKTEST_MAX_CANDLES.get("zero_lag", 100_000)
-    prepared, skipped, days_cov, n_max = {}, [], 0.0, 0
+    combos = [(r, ln, m, sl, t1, t2) for r in res_list for ln in len_list for m in mult_list
+              for sl in sl_list for t1 in tp1_list for t2 in tp2_list]
+    requested = len(combos)
+    rng = random.Random(seed)
+    if len(combos) > runs:
+        combos = rng.sample(combos, runs)
+    # Zeitebene fuer Zeitebene: die Kerzen der einen werden freigegeben, bevor die naechsten geladen werden.
+    # Alle gleichzeitig im Speicher zu halten war der Grund, warum dem Server bei mehreren Zeitebenen die Luft ausging.
+    skipped, days_cov, n_max, results = [], 0.0, 0, []
+    deadline = time.time() + 240
+    used_res = []
     for res in res_list:
+        grp = [x for x in combos if x[0] == res]
+        if not grp:
+            continue
         warm = (max(len_list) * 4 + 60) * _tf_ms(res) / 86_400_000
         cap = min(max_candles, 5000) if res in ("10s", "15s", "30s", "45s") else max_candles
         candles, err = await _fetch_cached_mo7_backtest_candles(symbol, res, days + warm + 1, cap, market_type=mt)
@@ -655,20 +672,16 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
         ts = candles[0]
         start_ts = ts[-1] - int(days * 86_400_000)
         i_start = next((i for i, t in enumerate(ts) if t >= start_ts), 1)
-        prepared[res] = (candles, i_start)
         days_cov = max(days_cov, (ts[-1] - ts[i_start]) / 86_400_000)
         n_max = max(n_max, len(ts))
-    if not prepared:
+        used_res.append(res)
+        results += await asyncio.to_thread(_zl_mc_compute, {res: (candles, i_start)}, cfg, grp, exclude_top_n, deadline)
+        candles = None
+        if time.time() > deadline:
+            break
+    if not results:
         return {"error": "Für keine der gewählten Zeitebenen gab es genug Kerzen"
                          + (f" (übersprungen: {', '.join(skipped)})." if skipped else ".")}
-    combos = [(r, ln, m, sl, t1, t2) for r in prepared for ln in len_list for m in mult_list
-              for sl in sl_list for t1 in tp1_list for t2 in tp2_list]
-    requested = len(combos)
-    rng = random.Random(seed)
-    if len(combos) > runs:
-        combos = rng.sample(combos, runs)
-    deadline = time.time() + 240
-    results = await asyncio.to_thread(_zl_mc_compute, prepared, cfg, combos, exclude_top_n, deadline)
     if not results:
         return {"error": "Keine Kombination konnte in der verfügbaren Zeit gerechnet werden - weniger Durchläufe oder kürzeren Zeitraum wählen."}
     pnls = sorted(r["total_pnl_usd"] for r in results)
@@ -679,7 +692,7 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
     worst = sorted(results, key=lambda r: r["total_pnl_usd"])
     return {
         "symbol": symbol, "entry_mode": "zero_lag", "days": days, "actual_days_covered": round(days_cov, 1),
-        "candles_processed": n_max, "resolutions": list(prepared.keys()), "skipped_resolutions": skipped,
+        "candles_processed": n_max, "resolutions": used_res, "skipped_resolutions": skipped,
         "lengths": len_list, "mults": mult_list, "sl_usds": sl_list, "tp1_usds": tp1_list, "tp2_usds": tp2_list,
         "min_reliable_trades": min_trades, "seed": seed,
         "combos_tested": len(results), "combos_requested": requested, "combos_drawn": len(combos),

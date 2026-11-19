@@ -756,7 +756,10 @@ def vc_mc_resolutions(text):
 def _vc_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
     """prepared: {Zeitebene: (candles, i_start)}. combos: (Zeitebene, EMA, Mindestabstand, Bestaetigung, ADX-Schwelle)."""
     base_p = _vc_params(base_cfg)
-    arr_cache, adx_cache, wa_cache = {}, {}, {}
+    # Nach (Zeitebene, EMA) sortieren: so liegt immer nur EINE Rechnung im Speicher statt einer je Kombination.
+    combos = sorted(combos, key=lambda x: (x[0], x[1]))
+    cur_key, arr = None, None
+    adx_cache, wa_cache = {}, {}
     out = []
     for res, ema, minp, conf, adxm in combos:
         if time.time() > deadline:
@@ -764,9 +767,10 @@ def _vc_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
         candles, i_start = prepared[res]
         ts, o, h, l, c, v = candles
         p = dict(base_p, res=res, ema=ema, cross_min_pct=minp, confirm=conf, adx_min=adxm)
-        if (res, ema) not in arr_cache:
-            arr_cache[(res, ema)] = vc_build(ts, o, h, l, c, v, None, p)
-        arr = arr_cache[(res, ema)]
+        if cur_key != (res, ema):
+            arr = None                                  # alte Rechnung zuerst freigeben
+            arr = vc_build(ts, o, h, l, c, v, None, p)
+            cur_key = (res, ema)
         sig = vc_signals(arr, p)
         adx = None
         if adxm > 0:
@@ -801,8 +805,18 @@ async def run_vc_montecarlo(symbol, cfg, days, resolutions="", ema_lens="", min_
     mt = cfg.get("binance_market_type", "spot")
     warm_days = WARM_DAYS[base_p["anchor"]] + 1.0
     max_candles = BACKTEST_MAX_CANDLES.get("vwap_cross", 100_000)
-    prepared, skipped, days_cov, n_max = {}, [], 0.0, 0
+    combos = [(r, e, m, cf, a) for r in res_list for e in ema_list for m in minp_list for cf in conf_list for a in adx_list]
+    requested = len(combos)
+    rng = random.Random(seed)
+    if len(combos) > runs:
+        combos = rng.sample(combos, runs)
+    # Zeitebene fuer Zeitebene, damit nie mehrere Kerzensaetze gleichzeitig im Speicher liegen.
+    skipped, days_cov, n_max, results, used_res = [], 0.0, 0, [], []
+    deadline = time.time() + 240
     for res in res_list:
+        grp = [x for x in combos if x[0] == res]
+        if not grp:
+            continue
         cap = min(max_candles, 5000) if res in ("10s", "15s", "30s", "45s") else max_candles
         candles, err = await _fetch_cached_mo7_backtest_candles(symbol, res, days + warm_days, cap, market_type=mt)
         if err or not candles or len(candles[4]) < 100 or not any(candles[5]):
@@ -811,19 +825,16 @@ async def run_vc_montecarlo(symbol, cfg, days, resolutions="", ema_lens="", min_
         ts = candles[0]
         start_ts = ts[-1] - int(days * 86_400_000)
         i_start = next((i for i, t in enumerate(ts) if t >= start_ts), 1)
-        prepared[res] = (candles, i_start)
         days_cov = max(days_cov, (ts[-1] - ts[i_start]) / 86_400_000)
         n_max = max(n_max, len(ts))
-    if not prepared:
+        used_res.append(res)
+        results += await asyncio.to_thread(_vc_mc_compute, {res: (candles, i_start)}, cfg, grp, exclude_top_n, deadline)
+        candles = None
+        if time.time() > deadline:
+            break
+    if not results:
         return {"error": "Für keine der gewählten Zeitebenen gab es genug Kerzen mit Volumen"
                          + (f" (übersprungen: {', '.join(skipped)})." if skipped else ".")}
-    combos = [(r, e, m, cf, a) for r in prepared for e in ema_list for m in minp_list for cf in conf_list for a in adx_list]
-    requested = len(combos)
-    rng = random.Random(seed)
-    if len(combos) > runs:
-        combos = rng.sample(combos, runs)
-    deadline = time.time() + 240
-    results = await asyncio.to_thread(_vc_mc_compute, prepared, cfg, combos, exclude_top_n, deadline)
     if not results:
         return {"error": "Keine Kombination konnte in der verfügbaren Zeit gerechnet werden - weniger Durchläufe oder kürzeren Zeitraum wählen."}
     pnls = sorted(r["total_pnl_usd"] for r in results)
@@ -834,7 +845,7 @@ async def run_vc_montecarlo(symbol, cfg, days, resolutions="", ema_lens="", min_
     worst = sorted(results, key=lambda r: r["total_pnl_usd"])
     return {
         "symbol": symbol, "entry_mode": "vwap_cross", "days": days, "actual_days_covered": round(days_cov, 1),
-        "candles_processed": n_max, "resolutions": list(prepared.keys()), "skipped_resolutions": skipped,
+        "candles_processed": n_max, "resolutions": used_res, "skipped_resolutions": skipped,
         "ema_lens": ema_list, "min_pcts": minp_list, "confirms": conf_list, "adx_mins": adx_list,
         "min_reliable_trades": min_trades, "seed": seed,
         "combos_tested": len(results), "combos_requested": requested, "combos_drawn": len(combos),

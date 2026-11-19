@@ -1918,7 +1918,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v18.11-d</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.11-a</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
