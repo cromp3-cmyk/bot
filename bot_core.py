@@ -1918,7 +1918,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v18.11-c</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v18.11-d</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
@@ -3951,6 +3951,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     Testet Kombinationen aus Zeitebene, Länge, Band-Faktor, Stop-Loss, TP1 und TP2. Jede Achse ist einzeln zuschaltbar: Haken weg heißt „Wert aus den Einstellungen“.
     Einstiegs-Art, Ausstieg, die Anteile von TP1/TP2, Richtung, MTF-Filter, Margin und Hebel kommen aus den Einstellungen oben.
     Sind es mehr Kombinationen als „Durchläufe“, werden zufällige gezogen – dann lohnen mehrere Seeds.
+    Je Zahlen-Achse werden höchstens 40 Werte gebildet; die tatsächlich getesteten Werte stehen nach dem Lauf in der Zeile unter dem Knopf.
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="zl-mc-days" value="30" style="width:90px;"></div>
@@ -3961,11 +3962,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
     <div><label><input type="checkbox" id="zl-mc-use-res" checked style="width:auto; vertical-align:middle;"> Zeitebene</label><input type="text" id="zl-mc-res" value="3m, 5m, 15m" style="width:160px;"></div>
-    <div><label><input type="checkbox" id="zl-mc-use-len" checked style="width:auto; vertical-align:middle;"> Länge</label><input type="text" id="zl-mc-len" value="30, 50, 70, 100" style="width:150px;"></div>
-    <div><label><input type="checkbox" id="zl-mc-use-mult" checked style="width:auto; vertical-align:middle;"> Band-Faktor</label><input type="text" id="zl-mc-mult" value="0.8, 1.2, 1.6, 2" style="width:150px;"></div>
-    <div><label><input type="checkbox" id="zl-mc-use-sl" style="width:auto; vertical-align:middle;"> Stop-Loss $</label><input type="text" id="zl-mc-sl" value="5, 10, 20" style="width:130px;"></div>
-    <div><label><input type="checkbox" id="zl-mc-use-tp1" style="width:auto; vertical-align:middle;"> TP1 $</label><input type="text" id="zl-mc-tp1" value="0, 10, 20" style="width:130px;"></div>
-    <div><label><input type="checkbox" id="zl-mc-use-tp2" style="width:auto; vertical-align:middle;"> TP2 $</label><input type="text" id="zl-mc-tp2" value="0, 30, 50" style="width:130px;"></div>
+    <div><label><input type="checkbox" id="zl-mc-use-len" checked style="width:auto; vertical-align:middle;"> Länge: von / bis / Schritt</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="1" min="2" id="zl-mc-len-min" value="30" style="width:70px;"><input type="number" step="1" min="2" id="zl-mc-len-max" value="100" style="width:70px;"><input type="number" step="1" min="1" id="zl-mc-len-step" value="10" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="zl-mc-use-mult" checked style="width:auto; vertical-align:middle;"> Band-Faktor: von / bis / Schritt</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="0.1" min="0.1" id="zl-mc-mult-min" value="0.8" style="width:70px;"><input type="number" step="0.1" min="0.1" id="zl-mc-mult-max" value="2" style="width:70px;"><input type="number" step="0.1" min="0.1" id="zl-mc-mult-step" value="0.2" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="zl-mc-use-sl" style="width:auto; vertical-align:middle;"> Stop-Loss $: von / bis / Schritt</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="1" min="0" id="zl-mc-sl-min" value="5" style="width:70px;"><input type="number" step="1" min="0" id="zl-mc-sl-max" value="25" style="width:70px;"><input type="number" step="1" min="0.5" id="zl-mc-sl-step" value="5" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="zl-mc-use-tp1" style="width:auto; vertical-align:middle;"> TP1 $: von / bis / Schritt</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="1" min="0" id="zl-mc-tp1-min" value="0" style="width:70px;"><input type="number" step="1" min="0" id="zl-mc-tp1-max" value="30" style="width:70px;"><input type="number" step="1" min="0.5" id="zl-mc-tp1-step" value="10" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="zl-mc-use-tp2" style="width:auto; vertical-align:middle;"> TP2 $: von / bis / Schritt</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="1" min="0" id="zl-mc-tp2-min" value="0" style="width:70px;"><input type="number" step="1" min="0" id="zl-mc-tp2-max" value="60" style="width:70px;"><input type="number" step="1" min="0.5" id="zl-mc-tp2-step" value="20" style="width:70px;"></span></div>
     <button id="btn-zl-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
   </div>
   <div id="zl-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
@@ -5860,17 +5866,23 @@ document.getElementById('btn-zl-mc').addEventListener('click', async () => {
   const titles = {top: document.getElementById('zl-mc-top-title'), worst: document.getElementById('zl-mc-worst-title')};
   const sweepSymbol = currentSymbol;
   const axis = (use, id) => document.getElementById(use).checked ? document.getElementById(id).value : '';
+  // Zahlen-Achse: von / bis / Schritt. Haken weg -> null, dann nimmt der Server den Wert aus den Einstellungen.
+  const rng = (use, id) => document.getElementById(use).checked ? {
+    min: parseFloat(document.getElementById(id + '-min').value),
+    max: parseFloat(document.getElementById(id + '-max').value),
+    step: parseFloat(document.getElementById(id + '-step').value),
+  } : null;
   const payload = {
     days: parseInt(document.getElementById('zl-mc-days').value) || 30,
     runs: parseInt(document.getElementById('zl-mc-runs').value) || 500,
     seed: document.getElementById('zl-mc-seed').value,
     exclude_top_n: parseInt(document.getElementById('zl-mc-exclude-top-n').value) || 0,
     resolutions: axis('zl-mc-use-res', 'zl-mc-res'),
-    lengths: axis('zl-mc-use-len', 'zl-mc-len'),
-    mults: axis('zl-mc-use-mult', 'zl-mc-mult'),
-    sl_usds: axis('zl-mc-use-sl', 'zl-mc-sl'),
-    tp1_usds: axis('zl-mc-use-tp1', 'zl-mc-tp1'),
-    tp2_usds: axis('zl-mc-use-tp2', 'zl-mc-tp2'),
+    lengths: rng('zl-mc-use-len', 'zl-mc-len'),
+    mults: rng('zl-mc-use-mult', 'zl-mc-mult'),
+    sl_usds: rng('zl-mc-use-sl', 'zl-mc-sl'),
+    tp1_usds: rng('zl-mc-use-tp1', 'zl-mc-tp1'),
+    tp2_usds: rng('zl-mc-use-tp2', 'zl-mc-tp2'),
     config: buildConfigPayload(),
   };
   btn.disabled = true;

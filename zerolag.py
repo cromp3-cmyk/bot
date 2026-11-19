@@ -566,6 +566,28 @@ def zl_mc_values(text, cast, lo, hi):
     return out[:ZL_MC_MAX_VALUES]
 
 
+def zl_mc_range(rng, cast, hard_lo, hard_hi, maxn=40):
+    """{"min": .., "max": .., "step": ..} -> Werteliste. Leer/ungueltig -> []. Hoechstens maxn Werte."""
+    if not isinstance(rng, dict):
+        return []
+    try:
+        lo, hi, step = float(rng.get("min")), float(rng.get("max")), float(rng.get("step"))
+    except (TypeError, ValueError):
+        return []
+    if step <= 0 or hi < lo:
+        return []
+    out, i = [], 0
+    while len(out) < maxn:
+        v = lo + i * step
+        if v > hi + 1e-9:
+            break
+        val = int(round(v)) if cast is int else round(v, 6)
+        if hard_lo <= val <= hard_hi and val not in out:
+            out.append(val)
+        i += 1
+    return out
+
+
 def zl_mc_resolutions(text):
     out = []
     for part in str(text or "").replace(";", ",").replace(" ", ",").split(","):
@@ -600,20 +622,25 @@ def _zl_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
     return out
 
 
-async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths="", mults="", sl_usds="", tp1_usds="", tp2_usds="",
-                            runs=500, exclude_top_n=1, seed=None):
-    """Raster ueber Zeitebene x Laenge x Band-Faktor x SL x TP1 x TP2. Jede Achse einzeln zuschaltbar:
-    leer heisst "Wert aus den Einstellungen". Alles andere (Einstiegs-Modus, Ausstieg, Anteile, Richtung,
-    MTF-Filter, Margin, Hebel) kommt aus den Einstellungen."""
+async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mults=None, sl_usds=None, tp1_usds=None,
+                            tp2_usds=None, runs=500, exclude_top_n=1, seed=None):
+    """Raster ueber Zeitebene x Laenge x Band-Faktor x SL x TP1 x TP2. Die Zahlen-Achsen kommen als
+    {"min": .., "max": .., "step": ..}; eine leere oder abgeschaltete Achse nimmt den Wert aus den Einstellungen.
+    Kommagetrennte Listen werden weiterhin akzeptiert. Alles andere (Einstiegs-Modus, Ausstieg, Anteile,
+    Richtung, MTF-Filter, Margin, Hebel) kommt aus den Einstellungen."""
     import random
     cfg = dict(cfg)
     base_p = _zl_params(cfg)
+
+    def axis(val, cast, lo, hi, fallback):
+        return (zl_mc_range(val, cast, lo, hi) if isinstance(val, dict) else zl_mc_values(val, cast, lo, hi)) or [fallback]
+
     res_list = zl_mc_resolutions(resolutions) or [base_p["res"]]
-    len_list = zl_mc_values(lengths, int, 2, 500) or [base_p["length"]]
-    mult_list = zl_mc_values(mults, float, 0.1, 10.0) or [base_p["mult"]]
-    sl_list = zl_mc_values(sl_usds, float, 0.0, 10_000.0) or [base_p["sl_usd"]]
-    tp1_list = zl_mc_values(tp1_usds, float, 0.0, 10_000.0) or [base_p["tp1_usd"]]
-    tp2_list = zl_mc_values(tp2_usds, float, 0.0, 10_000.0) or [base_p["tp2_usd"]]
+    len_list = axis(lengths, int, 2, 500, base_p["length"])
+    mult_list = axis(mults, float, 0.1, 10.0, base_p["mult"])
+    sl_list = axis(sl_usds, float, 0.0, 10_000.0, base_p["sl_usd"])
+    tp1_list = axis(tp1_usds, float, 0.0, 10_000.0, base_p["tp1_usd"])
+    tp2_list = axis(tp2_usds, float, 0.0, 10_000.0, base_p["tp2_usd"])
     runs = max(1, min(ZL_MC_MAX_RUNS, int(runs)))
     mt = cfg.get("binance_market_type", "spot")
     max_candles = BACKTEST_MAX_CANDLES.get("zero_lag", 100_000)
