@@ -10,7 +10,8 @@ Nachbau von "Zero Lag Trend Signals (MTF)" von AlgoAlpha:
   * Einstiegssignal (die kleinen Pfeile im Original): Schluss kreuzt die zlema-Linie, waehrend der Trend
     schon in dieselbe Richtung zeigt und auch auf der Kerze davor zeigte.
   * Zusaetzlich waehlbar: Einstieg direkt beim Kippen des Trends (die grossen Pfeile des Originals).
-  * MTF-Filter: der Trend einer zweiten Zeiteinheit muss zur Richtung passen (die Tabelle des Originals).
+  * ADX-Filter (eigener Zusatz, nicht im Original): nur handeln, wenn der ADX ueber der Schwelle liegt -
+    wahlweise zusaetzlich mit passender +DI/-DI-Ausrichtung. Laeuft auf den eigenen Kerzen, keine zweite Zeiteinheit.
   * Umkehr (waehlbar): aus einem Kaufsignal wird ein Short und umgekehrt - fuer Maerkte, in denen das
     Original gegen den Kurs laeuft.
 
@@ -31,7 +32,7 @@ from strategies import (
     _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
 )
 
-ZL_TFS = ["10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
+ZL_TFS = ["5s", "10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
 LIVE_CANDLES = 600
 
 
@@ -51,7 +52,6 @@ def _zl_params(cfg):
     entry = cfg.get("zl_entry_mode", "signal")
     exit_mode = cfg.get("zl_exit_mode", "trend_flip")
     sl_mode = cfg.get("zl_sl_mode", "band")
-    mtf = str(cfg.get("zl_mtf_tf", "") or "").strip().lower()
     return {
         "res": _zl_res(cfg.get("zl_resolution", "5m")),
         "length": max(2, min(500, int(cfg.get("zl_length", 70) or 70))),      # Original: 70
@@ -67,7 +67,10 @@ def _zl_params(cfg):
         "tp1_pct": min(100.0, max(0.0, float(cfg.get("zl_tp1_pct", 50.0) or 0.0))),
         "tp2_usd": max(0.0, float(cfg.get("zl_tp2_usd", 0.0) or 0.0)),       # 0 = TP2 aus
         "tp2_pct": min(100.0, max(0.0, float(cfg.get("zl_tp2_pct", 100.0) or 0.0))),
-        "mtf_tf": mtf if (mtf and _zl_res(mtf, "") == mtf) else "",           # "" = kein MTF-Filter
+        # ADX-Filter: nur handeln, wenn der Trend stark genug ist (0 = aus)
+        "adx_min": max(0.0, float(cfg.get("zl_adx_min", 0.0) or 0.0)),
+        "adx_len": max(2, int(cfg.get("zl_adx_len", 14) or 14)),
+        "adx_dir": bool(cfg.get("zl_adx_directional", False)),                # zusaetzlich +DI/-DI in Signalrichtung
         "invert": bool(cfg.get("zl_invert", False)),                          # Signale umdrehen: Long-Signal -> Short
     }
 
@@ -278,21 +281,26 @@ async def _zl_fetch(symbol, cfg, p, res=None, bars=None):
     return d
 
 
-async def zl_mtf_trend(symbol, cfg, p):
-    """Trendzustand der zweiten Zeiteinheit: 1, -1 oder 0 (unbekannt)."""
-    if not p["mtf_tf"]:
-        return 0
-    d = await _zl_fetch(symbol, cfg, p, res=p["mtf_tf"])
-    if not d:
-        return 0
-    arr = await asyncio.to_thread(zl_build, d[2], d[3], d[4], p)
-    return arr["trend"][-1]
+def zl_adx_ok(ts, o, h, l, c, p):
+    """(long_ok, short_ok) je Kerze oder (None, None), wenn der ADX-Filter aus ist.
+    Der ADX laeuft auf den EIGENEN Kerzen der Strategie - eine zweite Zeiteinheit braucht er nicht."""
+    if p["adx_min"] <= 0:
+        return None, None
+    from strategies import compute_adx_filter_series
+    return compute_adx_filter_series((ts, o or [0.0] * len(c), h, l, c), p["adx_len"], p["adx_min"],
+                                     directional=p["adx_dir"], mode="require_trend")
 
 
-def _zl_mtf_ok(target, mtf, p):
-    if not p["mtf_tf"]:
+def _zl_adx_text(p):
+    return f"ADX({p['adx_len']}) unter {p['adx_min']:g}" + (" oder falsche Richtung (+DI/-DI)" if p["adx_dir"] else "")
+
+
+def _zl_adx_ok_at(target, adx, i):
+    """True = Kerze i darf in diese Richtung handeln. adx = (long_ok, short_ok) oder None (Filter aus)."""
+    if adx is None or adx[0] is None:
         return True
-    return (mtf > 0) if target == "long" else (mtf < 0)
+    series = adx[0] if target == "long" else adx[1]
+    return bool(series[i]) if 0 <= i < len(series) else False
 
 
 def _set_levels(st, cfg, target, price, arr, i, p):
@@ -302,7 +310,7 @@ def _set_levels(st, cfg, target, price, arr, i, p):
     st["zl_tp1_done"] = False
 
 
-async def zl_check_candle(symbol, cfg, p, arr, i, price, mtf):
+async def zl_check_candle(symbol, cfg, p, arr, i, price, adx=None):
     """Auswertung der neu geschlossenen Kerze (Index i)."""
     st = BOTS[symbol]["state"]
     if not cfg["bot_active"] or price is None:
@@ -314,7 +322,7 @@ async def zl_check_candle(symbol, cfg, p, arr, i, price, mtf):
         if not zl_exit_signal(arr, i, pos, p):
             return
         opposite = target is not None and target != pos
-        flip_to = target if (p["flip"] and opposite and _allowed(target, p) and _zl_mtf_ok(target, mtf, p)) else None
+        flip_to = target if (p["flip"] and opposite and _allowed(target, p) and _zl_adx_ok_at(target, adx, i)) else None
         if flip_to:
             debug_log(f"🔄 [{symbol}] Zero Lag Flip: {pos.upper()} -> {flip_to.upper()} @ {price}")
             if await execute_reverse(symbol, price, "ZL-FLIP", size_multiplier=1.0):
@@ -330,8 +338,8 @@ async def zl_check_candle(symbol, cfg, p, arr, i, price, mtf):
         return
     if target is None or not _allowed(target, p):
         return
-    if not _zl_mtf_ok(target, mtf, p):
-        debug_log(f"⛔ [{symbol}] Zero Lag Signal {target.upper()} verworfen - Trend auf {p['mtf_tf']} passt nicht")
+    if not _zl_adx_ok_at(target, adx, i):
+        debug_log(f"⛔ [{symbol}] Zero Lag Signal {target.upper()} verworfen - {_zl_adx_text(p)}")
         return
     debug_log(f"📡 [{symbol}] Zero Lag Signal: {target.upper()} @ {price} (Trend {arr['trend'][i]})")
     await execute_entry(symbol, target, price, is_add_on=False)
@@ -373,9 +381,10 @@ async def zl_poll_loop(symbol):
                                 last_processed = expect_ts
                                 if not first_run:          # erste Kerze nach dem Start nur merken, nicht handeln
                                     arr = await asyncio.to_thread(zl_build, d[2], d[3], d[4], p)
-                                    mtf = await zl_mtf_trend(symbol, cfg, p)
+                                    lo, so = await asyncio.to_thread(zl_adx_ok, d[0], d[1], d[2], d[3], d[4], p)
                                     await zl_check_candle(symbol, cfg, p, arr, len(d[4]) - 1,
-                                                          price if price is not None else d[4][-1], mtf)
+                                                          price if price is not None else d[4][-1],
+                                                          (lo, so) if lo is not None else None)
                         elif d:
                             wait = 3.0                     # neue Kerze noch nicht bei Binance verfuegbar
                         else:
@@ -392,7 +401,7 @@ async def zl_poll_loop(symbol):
 # ============================================================================
 # BACKTEST
 # ============================================================================
-def zl_simulate(ts, h, l, c, arr, cfg, p, i_start, mtf=None):
+def zl_simulate(ts, h, l, c, arr, cfg, p, i_start, adx=None):
     """Kerze i: zuerst SL / TP einer offenen Position ueber Hoch/Tief (SL gewinnt bei Gleichstand),
     dann bei Kerzenschluss der Ausstieg, dann das Einstiegssignal zum Schlusskurs."""
     n = len(c)
@@ -431,7 +440,7 @@ def zl_simulate(ts, h, l, c, arr, cfg, p, i_start, mtf=None):
                         _bt_close_trade(trades, d, e, t2, part, i, position["entry_i"], "TP2", ts=ts)
                         position["size"] -= part
         target = zl_entry_signal(arr, i, p)
-        if target is not None and mtf is not None and not _zl_mtf_ok(target, mtf[i], p):
+        if target is not None and not _zl_adx_ok_at(target, adx, i):
             target = None
         if position is not None and position["entry_i"] < i and zl_exit_signal(arr, i, position["dir"], p):
             reason = "ZL-TRENDWECHSEL" if p["exit_mode"] == "trend_flip" else "ZL-GEGENSIGNAL"
@@ -451,16 +460,6 @@ def zl_simulate(ts, h, l, c, arr, cfg, p, i_start, mtf=None):
     return trades
 
 
-def _zl_mtf_align(base_ts, base_ms, hts, htf_ms, trend):
-    """Trend der zweiten Zeiteinheit auf die Basis-Kerzen legen - nur abgeschlossene Kerzen, kein Blick nach vorn."""
-    from bisect import bisect_right
-    out = [0] * len(base_ts)
-    for i, t in enumerate(base_ts):
-        k = bisect_right(hts, t + base_ms - htf_ms) - 1      # letzte HTF-Kerze, die vor dem Schluss dieser Kerze fertig war
-        out[i] = trend[k] if 0 <= k < len(trend) else 0
-    return out
-
-
 async def run_zl_backtest(symbol, cfg, days, exclude_top_n=1):
     p = _zl_params(cfg)
     warm_bars = p["length"] * 4 + 60
@@ -478,22 +477,15 @@ async def run_zl_backtest(symbol, cfg, days, exclude_top_n=1):
     start_ts = ts[-1] - int(days * 86_400_000)
     i_start = next((i for i, t in enumerate(ts) if t >= start_ts), 1)
     arr = await asyncio.to_thread(zl_build, h, l, c, p)
-    mtf = None
-    if p["mtf_tf"] and p["mtf_tf"] != p["res"]:
-        htf_ms = _tf_ms(p["mtf_tf"])
-        hwarm = warm_bars * htf_ms / 86_400_000
-        hcap = 5000 if p["mtf_tf"] in SUB_MINUTE_RESOLUTIONS else 50_000
-        hd, herr = await _fetch_cached_mo7_backtest_candles(symbol, p["mtf_tf"], days + hwarm + 1, hcap,
-                                                            market_type=cfg.get("binance_market_type", "spot"))
-        if herr or not hd or len(hd[4]) < p["length"] + 10:
-            return {"error": f"Keine Kerzen für die MTF-Zeiteinheit {p['mtf_tf']} erhalten."}
-        harr = await asyncio.to_thread(zl_build, hd[2], hd[3], hd[4], p)
-        base_ms = ts[1] - ts[0] if len(ts) > 1 else _tf_ms(p["res"])
-        mtf = _zl_mtf_align(ts, base_ms, hd[0], htf_ms, harr["trend"])
-    trades = zl_simulate(ts, h, l, c, arr, cfg, p, i_start, mtf)
+    lo, so = await asyncio.to_thread(zl_adx_ok, ts, o, h, l, c, p)
+    adx = (lo, so) if lo is not None else None
+    trades = zl_simulate(ts, h, l, c, arr, cfg, p, i_start, adx)
     stats = summarize_backtest_trades(trades, exclude_top_n)
-    sig_buy = sum(1 for i in range(i_start, len(ts)) if zl_entry_signal(arr, i, p) == "long")
-    sig_sell = sum(1 for i in range(i_start, len(ts)) if zl_entry_signal(arr, i, p) == "short")
+    # Nur Signale zaehlen, die auch durch den ADX-Filter kommen - sonst passt die Zahl nicht zu den Trades
+    sig_buy = sum(1 for i in range(i_start, len(ts))
+                  if zl_entry_signal(arr, i, p) == "long" and _zl_adx_ok_at("long", adx, i))
+    sig_sell = sum(1 for i in range(i_start, len(ts))
+                   if zl_entry_signal(arr, i, p) == "short" and _zl_adx_ok_at("short", adx, i))
     return {
         "symbol": symbol, "entry_mode": "zero_lag", "resolution": p["res"],
         "requested_days": days, "actual_days_covered": round((ts[-1] - ts[i_start]) / 86_400_000, 1),
@@ -521,6 +513,10 @@ async def zl_chart_payload(symbol, cfg, ts, o, h, l, c, tf):
             d = await _zl_fetch(symbol, cfg, p)
             if d:
                 arr = await asyncio.to_thread(zl_build, d[2], d[3], d[4], p)
+                # Pfeile nur dort, wo ALLE Einstellungen passen (Richtung, ADX-Filter) - sonst zeigt
+                # der Chart Signale, die der Bot gar nicht nehmen wuerde.
+                lo, so = await asyncio.to_thread(zl_adx_ok, d[0], d[1], d[2], d[3], d[4], p)
+                adx = (lo, so) if lo is not None else None
                 first_t = candles[0]["time"] if candles else 0
                 base, up, dn = [], [], []
                 for i in range(len(d[0])):
@@ -528,7 +524,7 @@ async def zl_chart_payload(symbol, cfg, ts, o, h, l, c, tf):
                     if t < first_t:
                         continue
                     kind = zl_entry_signal(arr, i, p)
-                    if kind and _allowed(kind, p):
+                    if kind and _allowed(kind, p) and _zl_adx_ok_at(kind, adx, i):
                         markers.append({"time": t, "kind": kind, "price": d[4][i]})
                     if arr["zlema"][i] is not None:
                         base.append({"time": t, "value": arr["zlema"][i]})
@@ -598,40 +594,45 @@ def zl_mc_resolutions(text):
 
 
 def _zl_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
-    """prepared: {Zeitebene: (candles, i_start)}. combos: (Zeitebene, Laenge, Faktor, SL $, TP1 $, TP2 $)."""
+    """prepared: {Zeitebene: (candles, i_start)}. combos: (Zeitebene, Laenge, Faktor, SL $, TP1 $, TP2 $, ADX)."""
     base_p = _zl_params(base_cfg)
     # Nach (Zeitebene, Laenge, Faktor) sortieren: so wird je Gruppe nur EINE Rechnung im Speicher gehalten.
     # Ein Woerterbuch ueber alle Kombinationen waere bei 100.000 Kerzen schnell dreistellig in MB.
     combos = sorted(combos, key=lambda x: (x[0], x[1], x[2]))
     cur_key, arr = None, None
+    adx_cache = {}                                      # ADX-Schwelle -> (long_ok, short_ok); je Zeitebene nur ein Aufruf pro Wert
     out = []
-    for res, length, mult, sl_usd, tp1, tp2 in combos:
+    for res, length, mult, sl_usd, tp1, tp2, adx_min in combos:
         if time.time() > deadline:
             break
         candles, i_start = prepared[res]
         ts, o, h, l, c, v = candles
-        p = dict(base_p, res=res, length=length, mult=mult, sl_usd=sl_usd, tp1_usd=tp1, tp2_usd=tp2)
+        p = dict(base_p, res=res, length=length, mult=mult, sl_usd=sl_usd, tp1_usd=tp1, tp2_usd=tp2, adx_min=adx_min)
         if p["sl_mode"] == "usd" and sl_usd <= 0:
             p = dict(p, sl_mode="aus")
         if cur_key != (res, length, mult):
             arr = None                                  # alte Rechnung zuerst freigeben
             arr = zl_build(h, l, c, p)
             cur_key = (res, length, mult)
-        trades = zl_simulate(ts, h, l, c, arr, base_cfg, p, i_start)
+        if adx_min not in adx_cache:
+            lo, so = zl_adx_ok(ts, o, h, l, c, p)
+            adx_cache[adx_min] = (lo, so) if lo is not None else None
+        trades = zl_simulate(ts, h, l, c, arr, base_cfg, p, i_start, adx_cache[adx_min])
         st = summarize_backtest_trades(trades, exclude_top_n)
         out.append({"zl_resolution": res, "zl_length": length, "zl_mult": mult, "zl_sl_usd": sl_usd,
-                    "zl_tp1_usd": tp1, "zl_tp2_usd": tp2, "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
+                    "zl_tp1_usd": tp1, "zl_tp2_usd": tp2, "zl_adx_min": adx_min,
+                    "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
                     "total_pnl_usd": st["total_pnl_usd"], "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"],
                     "max_drawdown_usd": st["max_drawdown_usd"], "avg_bars_held": st["avg_bars_held"]})
     return out
 
 
 async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mults=None, sl_usds=None, tp1_usds=None,
-                            tp2_usds=None, runs=500, exclude_top_n=1, seed=None):
-    """Raster ueber Zeitebene x Laenge x Band-Faktor x SL x TP1 x TP2. Die Zahlen-Achsen kommen als
+                            tp2_usds=None, adx_mins=None, runs=500, exclude_top_n=1, seed=None):
+    """Raster ueber Zeitebene x Laenge x Band-Faktor x SL x TP1 x TP2 x ADX-Schwelle. Die Zahlen-Achsen kommen als
     {"min": .., "max": .., "step": ..}; eine leere oder abgeschaltete Achse nimmt den Wert aus den Einstellungen.
     Kommagetrennte Listen werden weiterhin akzeptiert. Alles andere (Einstiegs-Modus, Ausstieg, Anteile,
-    Richtung, MTF-Filter, Margin, Hebel) kommt aus den Einstellungen."""
+    Richtung, ADX-Laenge/Richtungspruefung, Margin, Hebel) kommt aus den Einstellungen."""
     import random
     cfg = dict(cfg)
     base_p = _zl_params(cfg)
@@ -645,11 +646,12 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
     sl_list = axis(sl_usds, float, 0.0, 10_000.0, base_p["sl_usd"])
     tp1_list = axis(tp1_usds, float, 0.0, 10_000.0, base_p["tp1_usd"])
     tp2_list = axis(tp2_usds, float, 0.0, 10_000.0, base_p["tp2_usd"])
+    adx_list = axis(adx_mins, float, 0.0, 100.0, base_p["adx_min"])
     runs = max(1, min(ZL_MC_MAX_RUNS, int(runs)))
     mt = cfg.get("binance_market_type", "spot")
     max_candles = BACKTEST_MAX_CANDLES.get("zero_lag", 100_000)
-    combos = [(r, ln, m, sl, t1, t2) for r in res_list for ln in len_list for m in mult_list
-              for sl in sl_list for t1 in tp1_list for t2 in tp2_list]
+    combos = [(r, ln, m, sl, t1, t2, a) for r in res_list for ln in len_list for m in mult_list
+              for sl in sl_list for t1 in tp1_list for t2 in tp2_list for a in adx_list]
     requested = len(combos)
     rng = random.Random(seed)
     if len(combos) > runs:
@@ -664,7 +666,7 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
         if not grp:
             continue
         warm = (max(len_list) * 4 + 60) * _tf_ms(res) / 86_400_000
-        cap = min(max_candles, 5000) if res in ("10s", "15s", "30s", "45s") else max_candles
+        cap = min(max_candles, 5000) if res in SUB_MINUTE_RESOLUTIONS else max_candles
         candles, err = await _fetch_cached_mo7_backtest_candles(symbol, res, days + warm + 1, cap, market_type=mt)
         if err or not candles or len(candles[4]) < 100:
             skipped.append(res)
@@ -694,6 +696,7 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
         "symbol": symbol, "entry_mode": "zero_lag", "days": days, "actual_days_covered": round(days_cov, 1),
         "candles_processed": n_max, "resolutions": used_res, "skipped_resolutions": skipped,
         "lengths": len_list, "mults": mult_list, "sl_usds": sl_list, "tp1_usds": tp1_list, "tp2_usds": tp2_list,
+        "adx_mins": adx_list,
         "min_reliable_trades": min_trades, "seed": seed,
         "combos_tested": len(results), "combos_requested": requested, "combos_drawn": len(combos),
         "profitable_pct": round(pos / len(results) * 100, 1) if results else 0,

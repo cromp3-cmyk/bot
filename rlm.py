@@ -25,8 +25,8 @@ from strategies import (
     summarize_backtest_trades, _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
 )
 
-TREND_TFS = ["10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"]
-RLM_TFS = ["10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "4h"]
+TREND_TFS = ["5s", "10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"]
+RLM_TFS = ["5s", "10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "4h"]
 
 # feste Konstanten des Pine-Originals
 STRUCT_ATR_LEN = 34

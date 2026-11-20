@@ -238,7 +238,7 @@ async def fetch_candles_binance(symbol, resolution, count_back=150, market_type=
         return None
     try:
         # Binance Futures (fapi) bietet KEINE 1-Sekunden-Kerzen an (nur Spot) - die sind aber
-        # die Grundlage fuer alle Sekunden-Aufloesungen (10s/15s/30s/45s). Diese Regel hat
+        # die Grundlage fuer alle Sekunden-Aufloesungen (5s/10s/15s/30s/45s). Diese Regel hat
         # IMMER Vorrang vor der XAU/XAG-Futures-Regel (siehe Check oben), sonst wuerde "1s" an
         # den Futures-Endpunkt gehen, der Sekunden-Intervalle gar nicht kennt ("Invalid interval").
         if resolution == "1s":
@@ -356,14 +356,14 @@ BINANCE_INTERVAL_MS = {
 }
 
 
-SYNTHETIC_RESOLUTIONS = {"10s": ("1s", 10), "15s": ("1s", 15), "30s": ("1s", 30), "45s": ("1s", 45), "2m": ("1m", 2)}  # Zeitrahmen, die Binance nicht nativ anbietet
+SYNTHETIC_RESOLUTIONS = {"5s": ("1s", 5), "10s": ("1s", 10), "15s": ("1s", 15), "30s": ("1s", 30), "45s": ("1s", 45), "2m": ("1m", 2)}  # Zeitrahmen, die Binance nicht nativ anbietet
 NATIVE_BINANCE_MINUTE_INTERVALS = {1, 3, 5, 15, 30}  # von Binance nativ unterstuetzte Minuten-Intervalle
 
 
 def resolve_synthetic_resolution(resolution):
     """Gibt (Basis-Aufloesung, Faktor) zurueck, falls 'resolution' aus einer kleineren nativen
     Binance-Aufloesung zusammengesetzt werden muss - sonst None (native Aufloesung, direkt
-    abrufbar). Deckt sowohl die festen Sekunden-Faelle (10s/15s/30s/45s aus 1s) als auch JEDE
+    abrufbar). Deckt sowohl die festen Sekunden-Faelle (5s/10s/15s/30s/45s aus 1s) als auch JEDE
     beliebige, nicht-native Minutenzahl ab (z.B. '8m' oder '24m' aus 1m-Kerzen zusammengesetzt) -
     Binance selbst bietet nativ nur 1m/3m/5m/15m/30m an, alles andere muss client-seitig
     zusammengefasst werden."""
@@ -396,7 +396,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     # Hartes Limit an Basis-Kerzen (vor evtl. Zusammenfassung), damit die Anfrage nicht ausufert
     hard_candle_cap = max_candles * fetch_factor + 2000
     # Binance Futures (fapi) bietet KEINE 1-Sekunden-Kerzen an (nur Spot) - ohne diesen
-    # Fallback wuerde jede Sekunden-Aufloesung (10s/15s/30s/45s) mit "Keine Daten erhalten"
+    # Fallback wuerde jede Sekunden-Aufloesung (5s/10s/15s/30s/45s) mit "Keine Daten erhalten"
     # fehlschlagen, sobald "futures" als Datenquelle eingestellt ist.
     effective_market_type = "spot" if base_resolution == "1s" and market_type == "futures" else market_type
     if symbol in BINANCE_FUTURES_ONLY_SYMBOLS:
@@ -404,7 +404,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
         # Vorrang, ausser bei Sekunden-Aufloesungen (die gehen fuer XAU/XAG dann leider gar
         # nicht, da es weder ein Spot-Paar noch 1s-Futures-Kerzen gibt)
         if base_resolution == "1s":
-            return None, "Sekunden-Auflösungen (10s/15s/30s/45s) sind für XAU/XAG nicht möglich - Binance bietet dafür weder ein Spot-Paar noch 1-Sekunden-Futures-Kerzen an."
+            return None, "Sekunden-Auflösungen (5s/10s/15s/30s/45s) sind für XAU/XAG nicht möglich - Binance bietet dafür weder ein Spot-Paar noch 1-Sekunden-Futures-Kerzen an."
     base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
 
     all_rows = []
@@ -474,7 +474,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
     closes = [float(r[4]) for r in all_rows]
 
     if synth:
-        # Sekunden-Basis (10s/15s/30s/45s aus 1s-Kerzen) braucht die SEKUNDEN-Bucket-Funktion,
+        # Sekunden-Basis (5s/10s/15s/30s/45s aus 1s-Kerzen) braucht die SEKUNDEN-Bucket-Funktion,
         # nicht die Minuten-basierte resample_candles() - sonst entsteht derselbe Bug wie vorher
         # bei get_seconds_candles() (30-Minuten- statt 30-Sekunden-Buckets, praktisch nie genug
         # Kerzen pro Bucket). Minuten-Basis (z.B. 2m aus 1m-Kerzen) nutzt weiterhin die normale
@@ -497,7 +497,7 @@ async def fetch_historical_candles_binance(symbol, resolution, days, max_candles
 async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_candles, market_type="spot"):
     """Wie fetch_historical_candles_binance, liefert zusaetzlich das Handelsvolumen - fuer MO7
     (braucht MFI) und VWAP-Deviation (SuperTrend+RSI). Unterstuetzt wie die normale Variante
-    auch synthetische Aufloesungen (2m, eigene Minuten, 10s/15s/30s/45s - siehe
+    auch synthetische Aufloesungen (2m, eigene Minuten, 5s/10s/15s/30s/45s - siehe
     resolve_synthetic_resolution), das Volumen wird beim Zusammenfassen pro Bucket aufsummiert
     (siehe resample_candles_with_volume/_resample_seconds_candles_with_volume)."""
     pair = BINANCE_SYMBOL_MAP.get(symbol)
@@ -515,7 +515,7 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
     if symbol in BINANCE_FUTURES_ONLY_SYMBOLS:
         effective_market_type = "futures"
         if base_resolution == "1s":
-            return None, "Sekunden-Auflösungen (10s/15s/30s/45s) sind für XAU/XAG nicht möglich - Binance bietet dafür weder ein Spot-Paar noch 1-Sekunden-Futures-Kerzen an."
+            return None, "Sekunden-Auflösungen (5s/10s/15s/30s/45s) sind für XAU/XAG nicht möglich - Binance bietet dafür weder ein Spot-Paar noch 1-Sekunden-Futures-Kerzen an."
     base_url = BINANCE_BASE_URLS.get(effective_market_type, BINANCE_BASE_URLS["spot"])
 
     all_rows = []
@@ -523,7 +523,7 @@ async def fetch_historical_candles_binance_vol(symbol, resolution, days, max_can
     requests_made = 0
     # Seiten-Limit und Pause: Futures gewichtet Klines-Anfragen nach Limit-Bracket (Binance:
     # 1-100 -> Gewicht 1, 101-500 -> 2, 501-1000 -> 5) - Spot ist dagegen unabhaengig vom Limit
-    # immer guenstig. Bei Sekunden-Aufloesungen (10s/15s/30s/45s) braucht ein Backtest bis zu
+    # immer guenstig. Bei Sekunden-Aufloesungen (5s/10s/15s/30s/45s) braucht ein Backtest bis zu
     # ~30x so viele Roh-1s-Seiten wie fertige Kerzen (z.B. 5000 fertige 30s-Kerzen -> 152 Seiten) -
     # auf Futures mit limit=1000 (Gewicht 5) reisst das zusammen mit dem parallel laufenden
     # Live-Trading (das denselben Futures-Endpunkt fuer SuperTrend-HTF-Filter nutzt) leicht das
@@ -599,7 +599,7 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
     """Wie fetch_candles_binance, liefert zusaetzlich das Handelsvolumen pro Kerze -
     fuer Strategien wie BLSH-Composite, die Volumen brauchen (z.B. MFI), und fuer
     VWAP-Deviation (SuperTrend+RSI). Unterstuetzt wie die Backtest-Variante auch
-    synthetische Aufloesungen (2m, eigene Minuten, 10s/15s/30s/45s - siehe
+    synthetische Aufloesungen (2m, eigene Minuten, 5s/10s/15s/30s/45s - siehe
     resolve_synthetic_resolution): der WS-Cache deckt nur native Intervalle ab (siehe
     binance_ws.CACHEABLE_INTERVALS), fuer alles andere wird die Basis-Aufloesung per REST
     geholt und das Volumen beim Zusammenfassen pro Bucket aufsummiert.
@@ -642,7 +642,7 @@ async def fetch_candles_binance_vol(symbol, resolution, count_back=150):
     fetch_limit = min(1000, cache_fetch_limit)
 
     if synth:
-        # Zusammengesetzte Zeitrahmen (10s/15s/30s/45s aus 1s, 2m/eigene Minuten aus 1m) kamen bisher
+        # Zusammengesetzte Zeitrahmen (5s/10s/15s/30s/45s aus 1s, 2m/eigene Minuten aus 1m) kamen bisher
         # bei JEDEM Durchlauf (alle 5 s, je Coin) per REST - jetzt wie die nativen Intervalle aus dem
         # WebSocket-Cache der Basis-Aufloesung (1s/1m, beide gecacht) zusammengesetzt; REST nur noch,
         # wenn der Cache (noch) nicht warm oder eingefroren ist.
@@ -736,7 +736,7 @@ def resample_candles(data, factor):
     return out_ts, out_o, out_h, out_l, out_c
 
 
-SUB_MINUTE_RESOLUTIONS = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}  # Sekunden je Kerze, alle aus dem 1s-Puffer
+SUB_MINUTE_RESOLUTIONS = {"5s": 5, "10s": 10, "15s": 15, "30s": 30, "45s": 45}  # Sekunden je Kerze, alle aus dem 1s-Puffer
 
 
 def _resample_seconds_candles(data, seconds):
@@ -745,7 +745,7 @@ def _resample_seconds_candles(data, seconds):
     Quelldaten und z.B. seconds=30 einen 30-MINUTEN-Bucket ergeben wuerde (1800 statt 30
     Kerzen pro Bucket) und dadurch praktisch nie einen vollstaendigen Bucket liefert. Das war
     ein echter Bug: get_seconds_candles() rief bisher direkt resample_candles(..., seconds)
-    auf, wodurch alle Sekunden-Zeitrahmen (10s/15s/30s/45s) ueber den echten
+    auf, wodurch alle Sekunden-Zeitrahmen (5s/10s/15s/30s/45s) ueber den echten
     Binance-1s-Puffer faktisch nie genug Kerzen zurueckgaben.
 
     ZWEITER BUG (behoben): frueher wurde ein Bucket nur akzeptiert, wenn er EXAKT 'seconds'
@@ -873,7 +873,7 @@ async def binance_1s_poll_loop(symbol):
     b = BOTS[symbol]
     st = b["state"]
 
-    # Der 1s-Puffer wird NUR von Sekunden-Zeitrahmen (10s/15s/30s/45s) gebraucht (get_seconds_candles) -
+    # Der 1s-Puffer wird NUR von Sekunden-Zeitrahmen (5s/10s/15s/30s/45s) gebraucht (get_seconds_candles) -
     # egal ob als Handels-Zeitrahmen oder als Zeitrahmen eines Filters. Vorher lief Vorbefuellung
     # (~11 REST-Seiten je Coin) + 5-s-Abruf + 1s-WebSocket-Stream fuer JEDEN Coin in GRID_SYMBOLS, auch
     # wenn dort gar keine Sekunden-Strategie eingestellt ist. Jetzt nur noch fuer Coins, in deren
@@ -2359,7 +2359,7 @@ async def run_ab_sweep(symbol, cfg, days, timeframes, st_mult_min=0.1, st_mult_m
         if not tf or tf in tfs:
             continue
         if _resolution_ms(tf) is None:
-            skipped.append({"timeframe": tf, "reason": "unbekanntes Format (erlaubt: 10s/15s/30s/45s, 1m, 5m, 15m, 30m, 1h, 4h oder eigene Minuten wie 8m)"})
+            skipped.append({"timeframe": tf, "reason": "unbekanntes Format (erlaubt: 5s/10s/15s/30s/45s, 1m, 5m, 15m, 30m, 1h, 4h oder eigene Minuten wie 8m)"})
             continue
         tfs.append(tf)
     if not tfs:
@@ -2700,7 +2700,7 @@ def _min_ts_step(ts):
 
 
 def _resolution_ms(resolution):
-    """Kerzenlaenge einer Zeiteinheit in Millisekunden (10s/15s/30s/45s, native Binance-Intervalle
+    """Kerzenlaenge einer Zeiteinheit in Millisekunden (5s/10s/15s/30s/45s, native Binance-Intervalle
     und beliebige Minutenwerte wie '8m'/'24m') - None bei unbekanntem Format."""
     if resolution in SUB_MINUTE_RESOLUTIONS:
         return SUB_MINUTE_RESOLUTIONS[resolution] * 1000
@@ -2766,7 +2766,7 @@ async def _fetch_trend_filter_candles_live(symbol, st, cfg, tf_resolution, tf_at
     """Liefert (highs, lows, closes) der ABGESCHLOSSENEN Kerzen der SuperTrend-Trendfilter-Zeiteinheit
     (live, fuer ab_breakout und hvd_signal) - oder None, wenn (noch) nicht genug Daten da sind (der
     Aufrufer laesst den Filter dann wie bisher durch). Unterstuetzt ALLE Zeiteinheiten der Strategien:
-    Sekunden-Zeitrahmen (10s/15s/30s/45s) kommen aus dem 1s-Puffer (wie beim eigenen Handels-Zeitrahmen,
+    Sekunden-Zeitrahmen (5s/10s/15s/30s/45s) kommen aus dem 1s-Puffer (wie beim eigenen Handels-Zeitrahmen,
     kein REST-Traffic), native Minuten/Stunden aus dem Binance-Cache, eigene Minutenwerte (z.B. 8m, 24m)
     werden aus 1m-Kerzen zusammengesetzt."""
     tf_needed = min(500, tf_atr_period * 5 + 20)
@@ -6458,7 +6458,7 @@ async def gc_structure_events(symbol, cfg, chart_ts):
     return out
 
 
-SCALP_MS_TFS = ["10s", "30s", "1m", "5m", "15m", "30m", "1h", "4h"]
+SCALP_MS_TFS = ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "4h"]
 
 
 def _scalp_ms_cfg(cfg):

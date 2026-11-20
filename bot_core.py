@@ -443,7 +443,9 @@ def default_config():
         "zl_entry_mode": os.getenv("ZL_ENTRY_MODE", "signal"),         # signal = kleine Pfeile | trend = Trendwechsel
         "zl_exit_mode": os.getenv("ZL_EXIT_MODE", "trend_flip"),       # trend_flip | signal | sltp_only
         "zl_flip_on_exit": os.getenv("ZL_FLIP_ON_EXIT", "false").lower() == "true",
-        "zl_mtf_tf": os.getenv("ZL_MTF_TF", ""),                       # "" = kein MTF-Filter
+        "zl_adx_min": float(os.getenv("ZL_ADX_MIN", "0")),             # nur handeln, wenn ADX darueber liegt (0 = Filter aus)
+        "zl_adx_len": int(os.getenv("ZL_ADX_LEN", "14")),
+        "zl_adx_directional": os.getenv("ZL_ADX_DIRECTIONAL", "false").lower() == "true",
         "zl_invert": os.getenv("ZL_INVERT", "false").lower() == "true",   # Signale umdrehen
         "zl_sl_mode": os.getenv("ZL_SL_MODE", "band"),                 # band | usd | aus
         "zl_sl_trail": os.getenv("ZL_SL_TRAIL", "false").lower() == "true",
@@ -1918,7 +1920,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.11-a</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.12-a</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
@@ -1932,7 +1934,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <button type="button" id="wac-tab-live" class="pill on">🔴 Live</button>
     <button type="button" id="wac-tab-bt" class="pill">📊 Backtest-Trades</button>
     <select id="wac-tf" class="pill-select" title="Zeitrahmen">
-      <option value="">TF: Strategie</option><option value="10s">10s</option><option value="15s">15s</option><option value="30s">30s</option><option value="45s">45s</option><option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option>
+      <option value="">TF: Strategie</option><option value="5s">5s</option><option value="10s">10s</option><option value="15s">15s</option><option value="30s">30s</option><option value="45s">45s</option><option value="1m">1m</option><option value="3m">3m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option>
     </select>
     <button type="button" id="wac-center" class="pill" title="Aktuelle Kerze in die Mitte des Charts setzen">🎯 Mitte</button>
     <button type="button" id="wac-fit" class="pill" title="Gesamten Verlauf einpassen">⤢ Alles</button>
@@ -2027,7 +2029,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="ab_breakout"><label>Zeitrahmen</label>
     <select class="cfg" id="ab_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -2114,7 +2116,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="ab_breakout" data-requires="ab_trend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
     <select class="cfg" id="ab_trend_filter_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -2157,7 +2159,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="ema_rsi"><label>Zeitrahmen</label>
     <select class="cfg" id="er_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -2225,7 +2227,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="mtf_spread"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="mt_resolution">
-      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="5s">5 Sekunden (aus Binance-1s-Kerzen)</option><option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
       <option value="15s">15 Sekunden</option>
       <option value="30s">30 Sekunden</option>
       <option value="45s">45 Sekunden</option>
@@ -2298,7 +2300,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="pure_momentum"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="pm_resolution">
-      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="5s">5 Sekunden (aus Binance-1s-Kerzen)</option><option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
       <option value="15s">15 Sekunden</option>
       <option value="30s">30 Sekunden</option>
       <option value="45s">45 Sekunden</option>
@@ -2328,7 +2330,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="dollar701"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="dv_resolution">
-      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="5s">5 Sekunden (aus Binance-1s-Kerzen)</option><option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
       <option value="15s">15 Sekunden</option>
       <option value="30s">30 Sekunden</option>
       <option value="45s">45 Sekunden</option>
@@ -2358,10 +2360,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     0️⃣ <b>Zero Lag Trend</b> (Nachbau von AlgoAlpha): Die <b>Zero-Lag-Linie</b> ist eine EMA, der die halbe Länge an Verzögerung vorweggenommen wird. Darum liegt ein <b>Band</b> aus dem höchsten ATR der letzten drei Längen mal Faktor.
     Der <b>Trend</b> kippt auf <b>auf</b>, wenn ein Schlusskurs das obere Band durchbricht, und auf <b>ab</b> beim unteren Band – dazwischen bleibt er stehen.
     <b>Einstieg</b>: entweder beim Durchkreuzen der Linie, während der Trend schon passt (die kleinen Pfeile im Original), oder direkt beim Kippen des Trends.
+    <b>ADX-Filter</b> (optional): Einstiege und Wechsel nur, wenn der ADX auf der Signalkerze über der Schwelle liegt – auf Wunsch zusätzlich mit passender +DI/−DI-Richtung. Ausstiege, SL und TP laufen immer, egal was der ADX sagt.
     Daten: Binance (Spot/Futures laut Einstellung), nur Coins mit Binance-Paar.</div>
   <div data-mode="zero_lag"><label>Zeitebene (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="zl_resolution">
-      <option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option>
+      <option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option>
       <option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option>
       <option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="2h">2 Stunden</option><option value="4h">4 Stunden</option>
       <option value="6h">6 Stunden</option><option value="12h">12 Stunden</option><option value="1d">1 Tag</option>
@@ -2375,8 +2378,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="zl_entry_mode"><option value="signal">Kurs kreuzt die Linie, Trend passt bereits (kleine Pfeile)</option><option value="trend">Beim Kippen des Trends (große Pfeile)</option></select></div>
   <div data-mode="zero_lag"><label>Richtung</label>
     <select class="cfg" id="zl_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
-  <div data-mode="zero_lag"><label>MTF-Filter: Trend dieser Zeiteinheit muss passen (leer = aus)</label>
-    <select class="cfg" id="zl_mtf_tf"><option value="">Aus</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">1 Tag</option></select></div>
+  <div data-mode="zero_lag"><label>ADX-Filter: nur handeln ab ADX über (0 = aus, üblich 20–25)</label><input type="number" step="1" min="0" id="zl_adx_min"></div>
+  <div data-mode="zero_lag"><label>ADX-Periode</label><input type="number" step="1" min="2" id="zl_adx_len"></div>
+  <div data-mode="zero_lag"><label><input type="checkbox" id="zl_adx_directional" style="width:auto; vertical-align:middle;"> Zusätzlich die Richtung prüfen (Long nur bei +DI über −DI, Short umgekehrt)</label></div>
   <div data-mode="zero_lag"><label><input type="checkbox" id="zl_invert" style="width:auto; vertical-align:middle;"> Signale umdrehen: Kaufsignal → Short, Verkaufssignal → Long</label></div>
   <div data-mode="zero_lag"><label>Ausstieg</label>
     <select class="cfg" id="zl_exit_mode"><option value="trend_flip">Beim Kippen des Trends</option><option value="signal">Beim Gegensignal</option><option value="sltp_only">Nur SL und TP</option></select></div>
@@ -2394,7 +2398,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="gold_scalper"><label>Basis-Zeitrahmen (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="gq_resolution">
-      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="5s">5 Sekunden (aus Binance-1s-Kerzen)</option><option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
       <option value="15s">15 Sekunden</option>
       <option value="30s">30 Sekunden</option>
       <option value="45s">45 Sekunden</option>
@@ -2434,7 +2438,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     ▲▼ <b>Punk Algo</b>: Range-Filter des Punk-Algo-Indikators. <b>Einstieg</b> bei jedem Dreieck (▲ = Long, ▼ = Short) auf der geschlossenen Kerze. <b>Ausstieg</b>: Gegen-Dreieck dreht die Position (hat Vorrang), oder das WaveTrend-X (cyan X beendet Shorts, pinkes X beendet Longs), dazu optional fester $-SL/-TP. Nicht portiert, weil ohne Einfluss auf die Einstiege: EMA144, Dashboard, RSI, Intelligent Trend, Momentum-Kerzen. Unten im Backtest-Bereich: Monte-Carlo-Test über die vier Range-Filter-Werte mit Training/Test-Trennung.
   </div>
   <div data-mode="punk_algo"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
-    <select class="cfg" id="pa_resolution"><option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <select class="cfg" id="pa_resolution"><option value="5s">5 Sekunden (aus Binance-1s-Kerzen)</option><option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
     <input type="number" step="1" min="1" id="pa_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="punk_algo"><label>Periode 1 (Pine: 27)</label><input type="number" step="1" min="2" id="pa_period1"></div>
@@ -2456,7 +2460,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     🌊 <b>WAE-Zonen + EMA9</b>: Die Zone (grün/rot) ist der Waddah-Attar-Explosion-Zustand eines <b>größeren Zeitrahmens</b>. Auf dem <b>kleineren Signal-Zeitrahmen</b> gibt es bei Kerzenschluss <b>CALL (Long)</b>, wenn die Zone grün ist und der Kurs über der EMA schließt, bzw. <b>PUT (Short)</b> bei roter Zone und Kurs unter der EMA - einmalig beim ersten Erfüllen. Es werden <b>nie Zukunftsdaten</b> benutzt (kein Lookahead). Das Pine-Skript hat keinen Ausstieg - hier wählbar.
   </div>
   <div data-mode="wae_ema"><label>Signal-Zeitrahmen (muss kleiner als die Zone sein)</label>
-    <select class="cfg" id="we_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="custom">Eigene Minuten...</option></select>
+    <select class="cfg" id="we_resolution"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="custom">Eigene Minuten...</option></select>
     <input type="number" step="1" min="1" id="we_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="wae_ema"><label>Zonen-Zeitrahmen (Pine: 1h)</label><select class="cfg" id="we_zone_tf"><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="2h">2 Stunden</option><option value="4h">4 Stunden</option><option value="6h">6 Stunden</option><option value="12h">12 Stunden</option><option value="1d">1 Tag</option></select></div>
@@ -2479,7 +2483,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     〰️ <b>WT-Divergenz</b>: Die WaveTrend-Welle ist dieselbe wie im Wellenanker. Der Bot sucht <b>Pivots</b> (Hoch-/Tiefpunkte) auf der Welle und vergleicht sie mit dem Kurs: <b>Bullish</b> (Long) = Kurs macht ein tieferes Tief, die Welle ein höheres Tief; <b>Bearish</b> (Short) = Kurs höheres Hoch, Welle tieferes Hoch. <b>Hidden</b> ist das Gegenteil (Trendfortsetzung). Ein Pivot gilt erst nach „Pivot rechts“ weiteren geschlossenen Kerzen - das Signal kommt also bewusst etwas verzögert, dafür ohne Repaint.
   </div>
   <div data-mode="wt_div"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
-    <select class="cfg" id="wd_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <select class="cfg" id="wd_resolution"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
     <input type="number" step="1" min="1" id="wd_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="wt_div"><label>Welle: Quelle</label><select class="cfg" id="wd_src"><option value="close">Close</option><option value="hlc3">HLC3</option><option value="ohlc4">OHLC4</option><option value="hl2">HL2</option></select></div>
@@ -2522,7 +2526,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     🟩🟥 <b>Momentum-Feld</b>: Nachbau des Pine „Momentum: Kerzenfärbung + Punkte + Wert + MTF“ im Modus <b>Durchgehend (Feld)</b>. Das Momentum ist eine doppelt geglättete Kerzen-Änderung (Hoch+Tief)/2 in %. Kreuzt der Wert die <b>0</b> nach oben → grünes Feld + <b>BUY</b> (Long), nach unten → rotes Feld + <b>SELL</b> (Short). Im Chart beginnt das Feld wie im Pine rückwirkend bei der Kerze, an der die Kerzenfarbe zuletzt gewechselt hat; der Bot selbst steigt beim Schlusskurs der Kerze ein, auf der der Wert die 0 kreuzt (keine Rückwirkung, nur geschlossene Kerzen).
   </div>
   <div data-mode="mom_field"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
-    <select class="cfg" id="mf_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <select class="cfg" id="mf_resolution"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
     <input type="number" step="1" min="1" id="mf_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="mom_field"><label>Einstieg</label><select class="cfg" id="mf_entry_mode"><option value="candle">Kerzenfarbe: Hintergrund = Kerzenfarbe (grün steigt / rot fällt), Einstieg bei jedem Farbwechsel, kein Repaint</option><option value="color">Früh: Farbwechsel nah an der 0 (mit Rückkehr bei Fehlsignal)</option><option value="cross">Erst beim Nulldurchgang des Werts</option></select></div>
@@ -2545,7 +2549,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="mom_field"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="mf_sl_cooldown_seconds"></div>
   <div data-mode="auction_trend" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">📈 <b>Auction Range Migration Trend</b> (Pine „SchizoQuant“): Der Bot misst, wohin sich die Kerzen-Spannen verschieben (Mitte, Schluss, neues Terrain, Persistenz). Kippt der Trend-Score über die Schwelle, wechselt der Zustand LONG ↔ SHORT – das ist das Signal (nur auf geschlossenen Kerzen, kein Repaint). Der Bot dreht dann die Position in <b>einer</b> Order (Flip). Kleinere „Wechsel-Schwelle“ und kürzere Längen = schnellerer Wechsel, aber mehr Fehlsignale.</div>
   <div data-mode="auction_trend"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
-    <select class="cfg" id="ar_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <select class="cfg" id="ar_resolution"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
     <input type="number" step="1" min="1" id="ar_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="auction_trend"><label>ATR-Länge (Pine: 14)</label><input type="number" step="1" min="1" id="ar_atr_len"></div>
@@ -2576,7 +2580,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="auction_trend"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="ar_sl_cooldown_seconds"></div>
   <div data-mode="pivot_reversal" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">🔀 <b>Pivot Reversal</b> (Pine „ACW Pivot Reversal v3“): Der Bot merkt sich das letzte <b>Pivot-Hoch</b> und <b>Pivot-Tief</b>. Bricht eine Kerze über das Pivot-Hoch aus, ist das <b>BUY (LONG)</b>, bricht sie unter das Pivot-Tief, ist das <b>SELL (SHORT)</b> – Signale kommen nur abwechselnd. Der Bot wertet nur geschlossene Kerzen aus und dreht die Position in <b>einer</b> Order (Flip). Kerzenart wählbar: normal, <b>Heikin-Ashi</b> oder <b>Renko</b> (die Signale werden auf diesen Kerzen berechnet, SL/TP laufen auf den echten Preisen).</div>
   <div data-mode="pivot_reversal"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
-    <select class="cfg" id="pv_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <select class="cfg" id="pv_resolution"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
     <input type="number" step="1" min="1" id="pv_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="pivot_reversal"><label>Pivot links (Pine: 1)</label><input type="number" step="1" min="1" id="pv_left"></div>
@@ -2607,7 +2611,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     📦 <b>LSOB</b> (Regeln aus dem Bootcamp-Video): <b>Sweep</b> (neues Tief/Hoch) → 1–2 Reaktionskerzen → <b>Box</b> um die extreme Kerze → <b>Ausbruch</b> (Kerze schließt jenseits der Box) → <b>Retest</b> (Docht sticht hinein und/oder Körper schließt am Rand, höchstens 10 % der Boxhöhe tief, tiefer = ungültig) → <b>Ablehnungskerze</b> mit Docht (Long: unten) → Einstieg zum <b>Open der nächsten Kerze</b>. <b>SL</b> = Boxende oder Docht der Ablehnungskerze (wählbar), <b>TP</b> = Risiko × RR (1:2), bei halbem Weg SL auf Einstieg (+ Aufschlag für Gebühren). Mindest-TP-Abstand 0,5 %, optional Handelszeit. Nicht enthalten: Risiko-Positionsgröße, Limit-TP, Widerstands-Filter. Kein Signal-Ausstieg.
   </div>
   <div data-mode="lsob"><label>Zeitrahmen (Signal bei Kerzenschluss)</label>
-    <select class="cfg" id="lb_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
+    <select class="cfg" id="lb_resolution"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="custom">Eigene Minuten...</option></select>
     <input type="number" step="1" min="1" id="lb_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
   </div>
   <div data-mode="lsob"><label>Pivot links (Kerzen; die Kerze muss das tiefste/höchste dieser Kerzen davor sein)</label><input type="number" step="1" min="1" id="lb_pivot_left"></div>
@@ -2641,8 +2645,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="trendfolge" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     🧭 <b>Trendfolge</b>: Der Trend kommt aus der Marktstruktur (BOS/CHoCH). <b>Aufwärtstrend: bei jeder roten Kerze Kauf</b> (Nachkauf, solange die Position läuft), <b>Abwärtstrend: bei jeder grünen Kerze Short</b>. Ausstieg: fester $-TP auf die gesamte Position, optional fester $-SL. <b>Trendwechsel = Position drehen</b> (beenden und sofort im neuen Trend einsteigen, oder nur schließen). Kerzen- und Trend-Zeitebene sind getrennt wählbar (ab 10 Sekunden).
   </div>
-  <div data-mode="trendfolge"><label>Kerzen-Zeitebene (rot/grün wird hier gezählt)</label><select class="cfg" id="tfl_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
-  <div data-mode="trendfolge"><label>Trend-Zeitebene (Marktstruktur)</label><select class="cfg" id="tfl_trend_tf"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
+  <div data-mode="trendfolge"><label>Kerzen-Zeitebene (rot/grün wird hier gezählt)</label><select class="cfg" id="tfl_resolution"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
+  <div data-mode="trendfolge"><label>Trend-Zeitebene (Marktstruktur)</label><select class="cfg" id="tfl_trend_tf"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
   <div data-mode="trendfolge"><label>Trend-Art</label><select class="cfg" id="tfl_trend_mode"><option value="swing">Swing-Struktur (größere Wellen)</option><option value="intern">Interne Struktur (kleinere Wellen)</option></select></div>
   <div data-mode="trendfolge"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="tfl_trend_ilen"></div>
   <div data-mode="trendfolge"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="tfl_trend_slen"></div>
@@ -2657,7 +2661,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="vwap_cross"><label>Zeitebene (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="vc_resolution">
-      <option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="5s">5 Sekunden (aus Binance-1s-Kerzen)</option><option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
       <option value="15s">15 Sekunden</option>
       <option value="30s">30 Sekunden</option>
       <option value="45s">45 Sekunden</option>
@@ -2697,7 +2701,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     Der Wellenanker läuft auf seiner eigenen Zeiteinheit (leer = wie die Strategie), der Einstieg bleibt auf der Zeitebene oben. <b>Long</b> wird geschlossen, wenn wt1 die Signallinie wt2 nach unten kreuzt, <b>Short</b> bei Kreuzung nach oben. Die Werte entsprechen denen der Wellenanker-Strategie.</div>
   <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Zeiteinheit des Wellenankers</label>
-    <select class="cfg" id="vc_wa_tf"><option value="">wie die Strategie</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="2m">2 Minuten</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="2h">2 Stunden</option><option value="4h">4 Stunden</option></select></div>
+    <select class="cfg" id="vc_wa_tf"><option value="">wie die Strategie</option><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="2m">2 Minuten</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="2h">2 Stunden</option><option value="4h">4 Stunden</option></select></div>
   <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Quelle der Welle</label>
     <select class="cfg" id="vc_wa_src"><option value="close">Schlusskurs</option><option value="hlc3">hlc3</option><option value="ohlc4">ohlc4</option><option value="hl2">hl2</option></select></div>
   <div data-mode="vwap_cross" data-requires="vc_tp_mode" data-requires-value="wellenanker"><label>Kanal-Länge</label><input type="number" step="1" min="1" id="vc_wa_n1"></div>
@@ -2710,7 +2714,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="rlm" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📐 <b>Reaction Level Matrix</b>: Aus bestätigten Swing-Hochs/-Tiefs entstehen Preis-Level (Bänder) mit Score 0–100 (mehr Berührungen = stärker, alte Level verblassen). <b>Long</b>, wenn eine Kerze in eine Unterstützung eintaucht, wieder darüber schließt und im oberen Teil ihrer Spanne endet; <b>Short</b> spiegelbildlich am Widerstand. Signal erst bei Kerzenschluss. Ausstieg: SL, TP1/TP2/TP3 mit Teilverkäufen, Break-Even nach TP1; ein Gegen-Signal dreht die Position.
   </div>
-  <div data-mode="rlm"><label>Kerzen-Zeitebene (Signal bei Kerzenschluss)</label><select class="cfg" id="rlm_resolution"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option></select></div>
+  <div data-mode="rlm"><label>Kerzen-Zeitebene (Signal bei Kerzenschluss)</label><select class="cfg" id="rlm_resolution"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option></select></div>
   <div data-mode="rlm"><label>Kerzenart (Signale berechnen auf …)</label><select class="cfg" id="rlm_candle_type"><option value="normal">Normale Kerzen</option><option value="heikin">Heikin-Ashi-Kerzen (geglättet; Ein-/Ausstiege, SL und TP laufen auf echten Kursen)</option></select></div>
   <div data-mode="rlm"><label>Swing-Länge (Kerzen links/rechts, 2–30)</label><input type="number" step="1" min="2" max="30" id="rlm_swing_len"></div>
   <div data-mode="rlm"><label>Level-Toleranz (× ATR, 0.2–2)</label><input type="number" step="0.05" min="0.2" max="2" id="rlm_level_tol"></div>
@@ -2732,7 +2736,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="rlm"><label>TP2 Teilverkauf (% der verbleibenden Position, 100 = alles)</label><input type="number" step="1" min="1" max="100" id="rlm_tp2_close_pct"></div>
   <div data-mode="rlm"><label>SL auf Break-Even nach TP1</label><select class="cfg" id="rlm_be_after_tp1"><option value="true">An</option><option value="false">Aus</option></select></div>
   <div data-mode="rlm"><label>Trend-Filter (Marktstruktur BOS/CHoCH)</label><select class="cfg" id="rlm_trend_filter"><option value="off">Aus</option><option value="entry">Nur Signale in Trendrichtung (Long nur im Aufwärtstrend, Short nur im Abwärtstrend)</option><option value="entry_close">Wie oben + Position schließen, wenn die Struktur dagegen dreht</option></select></div>
-  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Trend-Zeitebene</label><select class="cfg" id="rlm_trend_tf"><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
+  <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Trend-Zeitebene</label><select class="cfg" id="rlm_trend_tf"><option value="5s">5 Sekunden</option><option value="10s">10 Sekunden</option><option value="15s">15 Sekunden</option><option value="30s">30 Sekunden</option><option value="45s">45 Sekunden</option><option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="4h">4 Stunden</option><option value="1d">Tageschart</option></select></div>
   <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Trend-Art</label><select class="cfg" id="rlm_trend_mode"><option value="swing">Swing-Struktur (größere Wellen)</option><option value="intern">Interne Struktur (kleinere Wellen)</option></select></div>
   <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Pivot-Länge intern</label><input type="number" step="1" min="2" id="rlm_trend_ilen"></div>
   <div data-mode="rlm" data-requires="rlm_trend_filter" data-requires-not="off"><label>Pivot-Länge swing</label><input type="number" step="1" min="2" id="rlm_trend_slen"></div>
@@ -2743,7 +2747,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="rsi_signal"><label>Zeitrahmen</label>
     <select class="cfg" id="rsi_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -2798,7 +2802,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="rsi_signal" data-requires="rsi_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
     <select class="cfg" id="rsi_supertrend_filter_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -2845,7 +2849,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="mvwap_mf_signal"><label>Zeitrahmen</label>
     <select class="cfg" id="mvwap_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -2932,7 +2936,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="mvwap_mf_signal" data-requires="mvwap_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
     <select class="cfg" id="mvwap_supertrend_filter_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -3018,7 +3022,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Zeitrahmen</label>
     <select class="cfg" id="scalp_timeframe">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -3073,7 +3077,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="scalp_vwap_obv_rsi" data-requires="scalp_supertrend_filter_enabled"><label>Trendfilter-Zeiteinheit</label>
     <select class="cfg" id="scalp_supertrend_filter_resolution">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -3097,7 +3101,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </select></div>
   <div data-mode="scalp_vwap_obv_rsi"><label>Trend-Zeitebene</label>
     <select class="cfg" id="scalp_ms_trend_tf">
-      <option value="10s">10s</option><option value="30s">30s</option><option value="1m">1m</option>
+      <option value="5s">5s</option><option value="10s">10s</option><option value="30s">30s</option><option value="1m">1m</option>
       <option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option>
       <option value="1h">1h</option><option value="4h">4h</option>
     </select></div>
@@ -3109,7 +3113,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="liquidity_waves"><label>Zeitrahmen</label>
     <select class="cfg" id="liq_timeframe">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -3158,7 +3162,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div data-mode="wellenanker"><label>Zeitrahmen</label>
     <select class="cfg" id="wa_timeframe">
-      <option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
+      <option value="5s">5 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option><option value="10s">10 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="15s">15 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="30s">30 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
       <option value="45s">45 Sekunden (aus echten Binance-1s-Kerzen zusammengesetzt)</option>
@@ -3948,8 +3952,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <h2 class="section-title">🎲 Zero Lag Monte-Carlo</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet Kombinationen aus Zeitebene, Länge, Band-Faktor, Stop-Loss, TP1 und TP2. Jede Achse ist einzeln zuschaltbar: Haken weg heißt „Wert aus den Einstellungen“.
-    Einstiegs-Art, Ausstieg, die Anteile von TP1/TP2, Richtung, MTF-Filter, Margin und Hebel kommen aus den Einstellungen oben.
+    Testet Kombinationen aus Zeitebene, Länge, Band-Faktor, Stop-Loss, TP1, TP2 und ADX-Schwelle. Jede Achse ist einzeln zuschaltbar: Haken weg heißt „Wert aus den Einstellungen“.
+    Einstiegs-Art, Ausstieg, die Anteile von TP1/TP2, Richtung, ADX-Periode/Richtungsprüfung, Margin und Hebel kommen aus den Einstellungen oben.
     Sind es mehr Kombinationen als „Durchläufe“, werden zufällige gezogen – dann lohnen mehrere Seeds.
     Je Zahlen-Achse werden höchstens 40 Werte gebildet; die tatsächlich getesteten Werte stehen nach dem Lauf in der Zeile unter dem Knopf.
   </div>
@@ -3972,6 +3976,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <span style="display:flex; gap:4px;"><input type="number" step="1" min="0" id="zl-mc-tp1-min" value="0" style="width:70px;"><input type="number" step="1" min="0" id="zl-mc-tp1-max" value="30" style="width:70px;"><input type="number" step="1" min="0.5" id="zl-mc-tp1-step" value="10" style="width:70px;"></span></div>
     <div><label><input type="checkbox" id="zl-mc-use-tp2" style="width:auto; vertical-align:middle;"> TP2 $: von / bis / Schritt</label>
       <span style="display:flex; gap:4px;"><input type="number" step="1" min="0" id="zl-mc-tp2-min" value="0" style="width:70px;"><input type="number" step="1" min="0" id="zl-mc-tp2-max" value="60" style="width:70px;"><input type="number" step="1" min="0.5" id="zl-mc-tp2-step" value="20" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="zl-mc-use-adx" style="width:auto; vertical-align:middle;"> ADX-Schwelle: von / bis / Schritt (0 = Filter aus)</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="1" min="0" id="zl-mc-adx-min" value="0" style="width:70px;"><input type="number" step="1" min="0" id="zl-mc-adx-max" value="30" style="width:70px;"><input type="number" step="1" min="1" id="zl-mc-adx-step" value="10" style="width:70px;"></span></div>
     <button id="btn-zl-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
   </div>
   <div id="zl-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
@@ -3983,6 +3989,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="zl_sl_usd">SL $ ⇅</th>
       <th class="sortable" data-key="zl_tp1_usd">TP1 $ ⇅</th>
       <th class="sortable" data-key="zl_tp2_usd">TP2 $ ⇅</th>
+      <th class="sortable" data-key="zl_adx_min">ADX ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -3998,6 +4005,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="zl_sl_usd">SL $ ⇅</th>
       <th class="sortable" data-key="zl_tp1_usd">TP1 $ ⇅</th>
       <th class="sortable" data-key="zl_tp2_usd">TP2 $ ⇅</th>
+      <th class="sortable" data-key="zl_adx_min">ADX ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -5834,17 +5842,18 @@ const zlMcRowHtml = (r) => `
     <td>${r.zl_sl_usd > 0 ? r.zl_sl_usd : '–'}</td>
     <td>${r.zl_tp1_usd > 0 ? r.zl_tp1_usd : '–'}</td>
     <td>${r.zl_tp2_usd > 0 ? r.zl_tp2_usd : '–'}</td>
+    <td>${r.zl_adx_min > 0 ? r.zl_adx_min : '–'}</td>
     <td>${r.trades}</td><td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td><td>${r.avg_bars_held}</td>
-    ${applyBtn({zl_resolution: r.zl_resolution, zl_length: r.zl_length, zl_mult: r.zl_mult, zl_sl_usd: r.zl_sl_usd, zl_tp1_usd: r.zl_tp1_usd, zl_tp2_usd: r.zl_tp2_usd})}
+    ${applyBtn({zl_resolution: r.zl_resolution, zl_length: r.zl_length, zl_mult: r.zl_mult, zl_sl_usd: r.zl_sl_usd, zl_tp1_usd: r.zl_tp1_usd, zl_tp2_usd: r.zl_tp2_usd, zl_adx_min: r.zl_adx_min})}
   </tr>`;
 const renderZlMcResults = makeSortableTable('zl-mc-results-table', () => window.zlMcResultsData, zlMcRowHtml);
 const renderZlMcWorst = makeSortableTable('zl-mc-worst-table', () => window.zlMcWorstData, zlMcRowHtml);
 
 function zlMergeMc(a, b) {
-  const key = r => [r.zl_resolution, r.zl_length, r.zl_mult, r.zl_sl_usd, r.zl_tp1_usd, r.zl_tp2_usd].join('|');
+  const key = r => [r.zl_resolution, r.zl_length, r.zl_mult, r.zl_sl_usd, r.zl_tp1_usd, r.zl_tp2_usd, r.zl_adx_min].join('|');
   const merge = (x, y, cmp, lim) => {
     const seen = new Set(), out = [];
     [...(x || []), ...(y || [])].forEach(r => { const k = key(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
@@ -5883,6 +5892,7 @@ document.getElementById('btn-zl-mc').addEventListener('click', async () => {
     sl_usds: rng('zl-mc-use-sl', 'zl-mc-sl'),
     tp1_usds: rng('zl-mc-use-tp1', 'zl-mc-tp1'),
     tp2_usds: rng('zl-mc-use-tp2', 'zl-mc-tp2'),
+    adx_mins: rng('zl-mc-use-adx', 'zl-mc-adx'),
     config: buildConfigPayload(),
   };
   btn.disabled = true;
@@ -7133,7 +7143,9 @@ async function refresh() {
     document.getElementById('zl_mult').value = data.config.zl_mult ?? 1.2;
     document.getElementById('zl_entry_mode').value = data.config.zl_entry_mode || 'signal';
     document.getElementById('zl_direction_mode').value = data.config.zl_direction_mode || 'both';
-    document.getElementById('zl_mtf_tf').value = data.config.zl_mtf_tf || '';
+    document.getElementById('zl_adx_min').value = data.config.zl_adx_min ?? 0;
+    document.getElementById('zl_adx_len').value = data.config.zl_adx_len ?? 14;
+    document.getElementById('zl_adx_directional').checked = !!data.config.zl_adx_directional;
     document.getElementById('zl_invert').checked = !!data.config.zl_invert;
     document.getElementById('zl_exit_mode').value = data.config.zl_exit_mode || 'trend_flip';
     document.getElementById('zl_flip_on_exit').checked = !!data.config.zl_flip_on_exit;
@@ -7760,7 +7772,9 @@ function buildConfigPayload() {
     zl_mult: parseFloat(document.getElementById('zl_mult').value) || 1.2,
     zl_entry_mode: document.getElementById('zl_entry_mode').value,
     zl_direction_mode: document.getElementById('zl_direction_mode').value,
-    zl_mtf_tf: document.getElementById('zl_mtf_tf').value,
+    zl_adx_min: parseFloat(document.getElementById('zl_adx_min').value) || 0,
+    zl_adx_len: parseInt(document.getElementById('zl_adx_len').value) || 14,
+    zl_adx_directional: document.getElementById('zl_adx_directional').checked,
     zl_invert: document.getElementById('zl_invert').checked,
     zl_exit_mode: document.getElementById('zl_exit_mode').value,
     zl_flip_on_exit: document.getElementById('zl_flip_on_exit').checked,
@@ -8468,7 +8482,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "zl_resolution", "zl_length", "zl_mult", "zl_entry_mode", "zl_direction_mode", "zl_mtf_tf", "zl_invert", "zl_exit_mode",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "zl_resolution", "zl_length", "zl_mult", "zl_entry_mode", "zl_direction_mode", "zl_adx_min", "zl_adx_len", "zl_adx_directional", "zl_invert", "zl_exit_mode",
                 "zl_flip_on_exit", "zl_sl_mode", "zl_sl_trail", "zl_sl_usd", "zl_tp1_usd", "zl_tp1_pct", "zl_tp2_usd", "zl_tp2_pct",
                 "dv_sl_cooldown_seconds", "gq_resolution", "gq_htf_resolution", "gq_rsi_len", "gq_ma_len", "gq_buy_level", "gq_sell_level", "gq_direction_mode", "gq_atr_len", "gq_entry_cond", "gq_exit_mode", "gq_sl_mult", "gq_tp1_rr", "gq_tp1_pct", "gq_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "pv_resolution", "pv_left", "pv_right", "pv_buffer_pct", "pv_candle_type", "pv_renko_mode", "pv_renko_atr_len", "pv_renko_mult", "pv_renko_pct", "pv_exit_mode", "pv_direction_mode", "pv_sl_usd", "pv_tp_usd", "pv_profit_only_close", "pv_tp_mode", "pv_be_trigger_usd", "pv_tp1_usd", "pv_tp2_usd", "pv_tp3_usd", "pv_tp1_pct", "pv_tp2_pct", "pv_be_after_tp1", "pv_sl_to_tp1_on_tp2", "pv_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_be_trigger_usd", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_be_pct","vc_tp_mode","vc_tp_usd","vc_wa_tf","vc_wa_src","vc_wa_n1","vc_wa_n2","vc_wa_sig_len","vc_wa_wave_scale","vc_wa_zone","vc_tp1_on","vc_tp1_rr","vc_tp1_pct","vc_adx_min","vc_adx_len","vc_adx_directional","vc_cross_min_pct","vc_cross_confirm","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
@@ -8621,7 +8635,7 @@ async def handle_wa_live_chart(request):
     is_vc = cfg.get("entry_mode") == "vwap_cross"
     is_zl = cfg.get("entry_mode") == "zero_lag"
     tf = request.query.get("tf", "")
-    SUBMIN = {"10s": 10, "15s": 15, "30s": 30, "45s": 45}
+    SUBMIN = {"5s": 5, "10s": 10, "15s": 15, "30s": 30, "45s": 45}
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
         tf = cfg.get("pv_resolution", "15m") if is_pv else cfg.get("ar_resolution", "15m") if is_ar else cfg.get("lb_resolution", "15m") if is_lb else cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("zl_resolution", "5m") if is_zl else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else cfg.get("gq_resolution", "1m") if is_gq else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
@@ -8844,7 +8858,7 @@ async def handle_backtest(request):
         cfg.update({k: v for k, v in overrides.items() if k in cfg})
     entry_mode = cfg["entry_mode"]
     # BACKTEST_TIMEOUT_SECONDS: ohne dieses Limit kann ein Backtest (v.a. bei Sekunden-
-    # Aufloesungen wie 10s/15s/30s/45s ueber mehrere Tage/Wochen) im schlimmsten Fall
+    # Aufloesungen wie 5s/10s/15s/30s/45s ueber mehrere Tage/Wochen) im schlimmsten Fall
     # unbegrenzt lange im Hintergrund weiterlaufen - selbst wenn der Browser-Tab laengst
     # geschlossen wurde, der aiohttp-Request also niemand mehr zuhoert. Beobachtet: ein
     # solcher haengender Task blockierte ueber eine Stunde denselben globalen Binance-
@@ -8863,7 +8877,7 @@ async def handle_backtest(request):
         return web.json_response({
             "error": f"Backtest nach {BACKTEST_TIMEOUT_SECONDS}s abgebrochen (Timeout) - "
                      f"wahrscheinlich zu viele Kerzen fuer den gewaehlten Zeitraum/Aufloesung. "
-                     f"Bei Sekunden-Aufloesungen (10s/15s/30s/45s) einen kuerzeren Zeitraum wählen."
+                     f"Bei Sekunden-Aufloesungen (5s/10s/15s/30s/45s) einen kuerzeren Zeitraum wählen."
         }, status=504)
     except Exception as e:
         # Ohne dieses try/except wuerde ein unerwarteter Fehler (z.B. bei sehr kurzen Zeitraeumen
@@ -9072,7 +9086,7 @@ async def handle_dv_montecarlo(request):
 
 
 async def handle_zl_montecarlo(request):
-    """Monte-Carlo fuer Zero Lag Trend: Zeitebene x Laenge x Band-Faktor x SL x TP1 x TP2."""
+    """Monte-Carlo fuer Zero Lag Trend: Zeitebene x Laenge x Band-Faktor x SL x TP1 x TP2 x ADX-Schwelle."""
     from zerolag import run_zl_montecarlo
     symbol = request.query.get("symbol", SYMBOLS[0]).upper()
     if symbol not in BOTS:
@@ -9094,7 +9108,7 @@ async def handle_zl_montecarlo(request):
         result = await asyncio.wait_for(
             run_zl_montecarlo(symbol, cfg, days, body.get("resolutions", ""), body.get("lengths", ""),
                               body.get("mults", ""), body.get("sl_usds", ""), body.get("tp1_usds", ""),
-                              body.get("tp2_usds", ""), runs, exclude_top_n, seed),
+                              body.get("tp2_usds", ""), body.get("adx_mins", ""), runs, exclude_top_n, seed),
             timeout=BACKTEST_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe, weniger Werte je Achse oder kürzeren Zeitraum wählen."}, status=504)

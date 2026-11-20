@@ -20,7 +20,7 @@ from strategies import (
     summarize_backtest_trades, _fetch_cached_mo7_backtest_candles, BACKTEST_MAX_CANDLES, _bt_close_trade,
 )
 
-TFL_TFS = ["10s", "15s", "30s", "45s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+TFL_TFS = ["5s", "10s", "15s", "30s", "45s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
 
 def _res_seconds(res):

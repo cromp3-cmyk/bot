@@ -30,7 +30,7 @@ from bisect import bisect_left
 
 from vwap_scanner import _period_start, _ema, _fetch_base, BASE_MS
 
-VC_TFS = ["10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
+VC_TFS = ["5s", "10s", "15s", "30s", "45s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
 BINANCE_NATIVE_TFS = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d")   # alles andere wird aus kleineren Kerzen zusammengesetzt
 
 
@@ -817,7 +817,7 @@ async def run_vc_montecarlo(symbol, cfg, days, resolutions="", ema_lens="", min_
         grp = [x for x in combos if x[0] == res]
         if not grp:
             continue
-        cap = min(max_candles, 5000) if res in ("10s", "15s", "30s", "45s") else max_candles
+        cap = min(max_candles, 5000) if res in SUB_MINUTE_RESOLUTIONS else max_candles
         candles, err = await _fetch_cached_mo7_backtest_candles(symbol, res, days + warm_days, cap, market_type=mt)
         if err or not candles or len(candles[4]) < 100 or not any(candles[5]):
             skipped.append(res)
