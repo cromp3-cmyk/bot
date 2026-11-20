@@ -443,6 +443,8 @@ def default_config():
         "zl_entry_mode": os.getenv("ZL_ENTRY_MODE", "signal"),         # signal = kleine Pfeile | trend = Trendwechsel
         "zl_exit_mode": os.getenv("ZL_EXIT_MODE", "trend_flip"),       # trend_flip | signal | sltp_only
         "zl_flip_on_exit": os.getenv("ZL_FLIP_ON_EXIT", "false").lower() == "true",
+        "zl_be_usd": float(os.getenv("ZL_BE_USD", "0")),                # SL auf Einstieg ab X $ Buchgewinn (0 = aus)
+        "zl_trail_usd": float(os.getenv("ZL_TRAIL_USD", "0")),          # $-Trailing-Stop, Abstand zum besten Kurs (0 = aus)
         "zl_adx_min": float(os.getenv("ZL_ADX_MIN", "0")),             # nur handeln, wenn ADX darueber liegt (0 = Filter aus)
         "zl_adx_len": int(os.getenv("ZL_ADX_LEN", "14")),
         "zl_adx_directional": os.getenv("ZL_ADX_DIRECTIONAL", "false").lower() == "true",
@@ -836,6 +838,11 @@ def default_state():
         "wa_sl_price": None,
         "wa_tp_price": None,
         "wa_wt2_last": None,  # zuletzt berechneter WaveTrend-Signalwert, nur fuers Dashboard
+        # ===== Zero Lag Trend State =====
+        "zl_be": None,         # Kurs, ab dem der Stop-Loss auf den Einstieg wandert
+        "zl_be_done": False,
+        "zl_best": None,       # bester Kurs seit dem Einstieg (fuer den $-Trailing-Stop)
+        "zl_size0": None,      # Groesse beim Einstieg - $-Abstaende rechnen immer damit
     }
 
 
@@ -986,7 +993,7 @@ PERSISTED_STATE_KEYS = [
     "dv_sl_price", "dv_tp_price", "dv_trail_extreme", "dv_sl_cooldown_until",
     "gq_sl_price", "gq_tp1_price", "gq_tp1_done", "gq_tp1_ms", "gq_sl_cooldown_until",
     "vc_sl", "vc_tp", "vc_tp1", "vc_tp1_done", "vc_be_done",
-    "zl_sl", "zl_tp1", "zl_tp2", "zl_tp1_done",
+    "zl_sl", "zl_tp1", "zl_tp2", "zl_tp1_done", "zl_be", "zl_be_done", "zl_best", "zl_size0",
     "pa_sl_price", "pa_tp_price", "pa_sl_cooldown_until",
     "we_sl_price", "we_tp_price", "we_sl_cooldown_until",
     "wd_sl_price", "wd_tp_price", "wd_sl_cooldown_until", "wd_tps", "wd_tp_pcts", "wd_tp_done", "wd_be", "wd_entries", "wd_last_entry",
@@ -2244,7 +2251,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.12-b</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.12-c</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
@@ -2685,6 +2692,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     Der <b>Trend</b> kippt auf <b>auf</b>, wenn ein Schlusskurs das obere Band durchbricht, und auf <b>ab</b> beim unteren Band – dazwischen bleibt er stehen.
     <b>Einstieg</b>: entweder beim Durchkreuzen der Linie, während der Trend schon passt (die kleinen Pfeile im Original), oder direkt beim Kippen des Trends.
     <b>ADX-Filter</b> (optional): Einstiege und Wechsel nur, wenn der ADX auf der Signalkerze über der Schwelle liegt – auf Wunsch zusätzlich mit passender +DI/−DI-Richtung. Ausstiege, SL und TP laufen immer, egal was der ADX sagt.
+    <b>Breakeven und Trailing-Stop</b> (optional, beide in $): ab X $ Buchgewinn wandert der Stop auf den Einstieg; der Trailing-Stop folgt danach dem besten Kurs im eingestellten $-Abstand. Beide ziehen nur nach, nie zurück, und der $-Abstand rechnet immer mit der Größe beim Einstieg – auch nachdem TP1 einen Teil verkauft hat.
     Daten: Binance (Spot/Futures laut Einstellung), nur Coins mit Binance-Paar.</div>
   <div data-mode="zero_lag"><label>Zeitebene (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="zl_resolution">
@@ -2702,6 +2710,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="zl_entry_mode"><option value="signal">Kurs kreuzt die Linie, Trend passt bereits (kleine Pfeile)</option><option value="trend">Beim Kippen des Trends (große Pfeile)</option></select></div>
   <div data-mode="zero_lag"><label>Richtung</label>
     <select class="cfg" id="zl_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
+  <div data-mode="zero_lag"><label>Breakeven: SL auf den Einstieg ab X $ Buchgewinn (0 = aus)</label><input type="number" step="0.5" min="0" id="zl_be_usd"></div>
+  <div data-mode="zero_lag"><label>Trailing-Stop: Abstand in $ zum besten Kurs (0 = aus)</label><input type="number" step="0.5" min="0" id="zl_trail_usd"></div>
+  <div data-mode="zero_lag" style="color:var(--text-dim); font-size:12px; margin-top:-6px;">Der Trailing-Stop setzt beim Einstiegswert ein: erst wenn der Buchgewinn den Abstand erreicht hat, liegt er genau auf dem Einstieg, danach wandert er mit. Unter den Einstieg geht er nie, und er macht den eingestellten Stop-Loss nie schlechter.</div>
   <div data-mode="zero_lag"><label>ADX-Filter: nur handeln ab ADX über (0 = aus, üblich 20–25)</label><input type="number" step="1" min="0" id="zl_adx_min"></div>
   <div data-mode="zero_lag"><label>ADX-Periode</label><input type="number" step="1" min="2" id="zl_adx_len"></div>
   <div data-mode="zero_lag"><label><input type="checkbox" id="zl_adx_directional" style="width:auto; vertical-align:middle;"> Zusätzlich die Richtung prüfen (Long nur bei +DI über −DI, Short umgekehrt)</label></div>
@@ -4276,7 +4287,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <h2 class="section-title">🎲 Zero Lag Monte-Carlo</h2>
 <div class="panel-card">
   <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
-    Testet Kombinationen aus Zeitebene, Länge, Band-Faktor, Stop-Loss, TP1, TP2 und ADX-Schwelle. Jede Achse ist einzeln zuschaltbar: Haken weg heißt „Wert aus den Einstellungen“.
+    Testet Kombinationen aus Zeitebene, Länge, Band-Faktor, Stop-Loss, TP1, TP2, ADX-Schwelle, Breakeven und Trailing-Stop. Jede Achse ist einzeln zuschaltbar: Haken weg heißt „Wert aus den Einstellungen“.
     Einstiegs-Art, Ausstieg, die Anteile von TP1/TP2, Richtung, ADX-Periode/Richtungsprüfung, Margin und Hebel kommen aus den Einstellungen oben.
     Sind es mehr Kombinationen als „Durchläufe“, werden zufällige gezogen – dann lohnen mehrere Seeds.
     Je Zahlen-Achse werden höchstens 40 Werte gebildet; die tatsächlich getesteten Werte stehen nach dem Lauf in der Zeile unter dem Knopf.
@@ -4302,6 +4313,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <span style="display:flex; gap:4px;"><input type="number" step="1" min="0" id="zl-mc-tp2-min" value="0" style="width:70px;"><input type="number" step="1" min="0" id="zl-mc-tp2-max" value="60" style="width:70px;"><input type="number" step="1" min="0.5" id="zl-mc-tp2-step" value="20" style="width:70px;"></span></div>
     <div><label><input type="checkbox" id="zl-mc-use-adx" style="width:auto; vertical-align:middle;"> ADX-Schwelle: von / bis / Schritt (0 = Filter aus)</label>
       <span style="display:flex; gap:4px;"><input type="number" step="1" min="0" id="zl-mc-adx-min" value="0" style="width:70px;"><input type="number" step="1" min="0" id="zl-mc-adx-max" value="30" style="width:70px;"><input type="number" step="1" min="1" id="zl-mc-adx-step" value="10" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="zl-mc-use-be" style="width:auto; vertical-align:middle;"> Breakeven $: von / bis / Schritt (0 = aus)</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="0.5" min="0" id="zl-mc-be-min" value="0" style="width:70px;"><input type="number" step="0.5" min="0" id="zl-mc-be-max" value="6" style="width:70px;"><input type="number" step="0.5" min="0.5" id="zl-mc-be-step" value="2" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="zl-mc-use-trail" style="width:auto; vertical-align:middle;"> Trailing-Stop $: von / bis / Schritt (0 = aus)</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="0.5" min="0" id="zl-mc-trail-min" value="0" style="width:70px;"><input type="number" step="0.5" min="0" id="zl-mc-trail-max" value="9" style="width:70px;"><input type="number" step="0.5" min="0.5" id="zl-mc-trail-step" value="3" style="width:70px;"></span></div>
     <button id="btn-zl-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
   </div>
   <div id="zl-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
@@ -4314,6 +4329,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="zl_tp1_usd">TP1 $ ⇅</th>
       <th class="sortable" data-key="zl_tp2_usd">TP2 $ ⇅</th>
       <th class="sortable" data-key="zl_adx_min">ADX ⇅</th>
+      <th class="sortable" data-key="zl_be_usd">BE $ ⇅</th>
+      <th class="sortable" data-key="zl_trail_usd">Trail $ ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -4330,6 +4347,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="zl_tp1_usd">TP1 $ ⇅</th>
       <th class="sortable" data-key="zl_tp2_usd">TP2 $ ⇅</th>
       <th class="sortable" data-key="zl_adx_min">ADX ⇅</th>
+      <th class="sortable" data-key="zl_be_usd">BE $ ⇅</th>
+      <th class="sortable" data-key="zl_trail_usd">Trail $ ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -6167,17 +6186,19 @@ const zlMcRowHtml = (r) => `
     <td>${r.zl_tp1_usd > 0 ? r.zl_tp1_usd : '–'}</td>
     <td>${r.zl_tp2_usd > 0 ? r.zl_tp2_usd : '–'}</td>
     <td>${r.zl_adx_min > 0 ? r.zl_adx_min : '–'}</td>
+    <td>${r.zl_be_usd > 0 ? r.zl_be_usd : '–'}</td>
+    <td>${r.zl_trail_usd > 0 ? r.zl_trail_usd : '–'}</td>
     <td>${r.trades}</td><td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td><td>${r.avg_bars_held}</td>
-    ${applyBtn({zl_resolution: r.zl_resolution, zl_length: r.zl_length, zl_mult: r.zl_mult, zl_sl_usd: r.zl_sl_usd, zl_tp1_usd: r.zl_tp1_usd, zl_tp2_usd: r.zl_tp2_usd, zl_adx_min: r.zl_adx_min})}
+    ${applyBtn({zl_resolution: r.zl_resolution, zl_length: r.zl_length, zl_mult: r.zl_mult, zl_sl_usd: r.zl_sl_usd, zl_tp1_usd: r.zl_tp1_usd, zl_tp2_usd: r.zl_tp2_usd, zl_adx_min: r.zl_adx_min, zl_be_usd: r.zl_be_usd, zl_trail_usd: r.zl_trail_usd})}
   </tr>`;
 const renderZlMcResults = makeSortableTable('zl-mc-results-table', () => window.zlMcResultsData, zlMcRowHtml);
 const renderZlMcWorst = makeSortableTable('zl-mc-worst-table', () => window.zlMcWorstData, zlMcRowHtml);
 
 function zlMergeMc(a, b) {
-  const key = r => [r.zl_resolution, r.zl_length, r.zl_mult, r.zl_sl_usd, r.zl_tp1_usd, r.zl_tp2_usd, r.zl_adx_min].join('|');
+  const key = r => [r.zl_resolution, r.zl_length, r.zl_mult, r.zl_sl_usd, r.zl_tp1_usd, r.zl_tp2_usd, r.zl_adx_min, r.zl_be_usd, r.zl_trail_usd].join('|');
   const merge = (x, y, cmp, lim) => {
     const seen = new Set(), out = [];
     [...(x || []), ...(y || [])].forEach(r => { const k = key(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
@@ -6217,6 +6238,8 @@ document.getElementById('btn-zl-mc').addEventListener('click', async () => {
     tp1_usds: rng('zl-mc-use-tp1', 'zl-mc-tp1'),
     tp2_usds: rng('zl-mc-use-tp2', 'zl-mc-tp2'),
     adx_mins: rng('zl-mc-use-adx', 'zl-mc-adx'),
+    be_usds: rng('zl-mc-use-be', 'zl-mc-be'),
+    trail_usds: rng('zl-mc-use-trail', 'zl-mc-trail'),
     config: buildConfigPayload(),
   };
   btn.disabled = true;
@@ -7467,6 +7490,8 @@ async function refresh() {
     document.getElementById('zl_mult').value = data.config.zl_mult ?? 1.2;
     document.getElementById('zl_entry_mode').value = data.config.zl_entry_mode || 'signal';
     document.getElementById('zl_direction_mode').value = data.config.zl_direction_mode || 'both';
+    document.getElementById('zl_be_usd').value = data.config.zl_be_usd ?? 0;
+    document.getElementById('zl_trail_usd').value = data.config.zl_trail_usd ?? 0;
     document.getElementById('zl_adx_min').value = data.config.zl_adx_min ?? 0;
     document.getElementById('zl_adx_len').value = data.config.zl_adx_len ?? 14;
     document.getElementById('zl_adx_directional').checked = !!data.config.zl_adx_directional;
@@ -8096,6 +8121,8 @@ function buildConfigPayload() {
     zl_mult: parseFloat(document.getElementById('zl_mult').value) || 1.2,
     zl_entry_mode: document.getElementById('zl_entry_mode').value,
     zl_direction_mode: document.getElementById('zl_direction_mode').value,
+    zl_be_usd: parseFloat(document.getElementById('zl_be_usd').value) || 0,
+    zl_trail_usd: parseFloat(document.getElementById('zl_trail_usd').value) || 0,
     zl_adx_min: parseFloat(document.getElementById('zl_adx_min').value) || 0,
     zl_adx_len: parseInt(document.getElementById('zl_adx_len').value) || 14,
     zl_adx_directional: document.getElementById('zl_adx_directional').checked,
@@ -8806,7 +8833,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "zl_resolution", "zl_length", "zl_mult", "zl_entry_mode", "zl_direction_mode", "zl_adx_min", "zl_adx_len", "zl_adx_directional", "zl_invert", "zl_exit_mode",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "zl_resolution", "zl_length", "zl_mult", "zl_entry_mode", "zl_direction_mode", "zl_adx_min", "zl_adx_len", "zl_adx_directional", "zl_be_usd", "zl_trail_usd", "zl_invert", "zl_exit_mode",
                 "zl_flip_on_exit", "zl_sl_mode", "zl_sl_trail", "zl_sl_usd", "zl_tp1_usd", "zl_tp1_pct", "zl_tp2_usd", "zl_tp2_pct",
                 "dv_sl_cooldown_seconds", "gq_resolution", "gq_htf_resolution", "gq_rsi_len", "gq_ma_len", "gq_buy_level", "gq_sell_level", "gq_direction_mode", "gq_atr_len", "gq_entry_cond", "gq_exit_mode", "gq_sl_mult", "gq_tp1_rr", "gq_tp1_pct", "gq_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "pv_resolution", "pv_left", "pv_right", "pv_buffer_pct", "pv_candle_type", "pv_renko_mode", "pv_renko_atr_len", "pv_renko_mult", "pv_renko_pct", "pv_exit_mode", "pv_direction_mode", "pv_sl_usd", "pv_tp_usd", "pv_profit_only_close", "pv_tp_mode", "pv_be_trigger_usd", "pv_tp1_usd", "pv_tp2_usd", "pv_tp3_usd", "pv_tp1_pct", "pv_tp2_pct", "pv_be_after_tp1", "pv_sl_to_tp1_on_tp2", "pv_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_be_trigger_usd", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_be_pct","vc_tp_mode","vc_tp_usd","vc_wa_tf","vc_wa_src","vc_wa_n1","vc_wa_n2","vc_wa_sig_len","vc_wa_wave_scale","vc_wa_zone","vc_tp1_on","vc_tp1_rr","vc_tp1_pct","vc_adx_min","vc_adx_len","vc_adx_directional","vc_cross_min_pct","vc_cross_confirm","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
@@ -9432,7 +9459,8 @@ async def handle_zl_montecarlo(request):
         result = await asyncio.wait_for(
             run_zl_montecarlo(symbol, cfg, days, body.get("resolutions", ""), body.get("lengths", ""),
                               body.get("mults", ""), body.get("sl_usds", ""), body.get("tp1_usds", ""),
-                              body.get("tp2_usds", ""), body.get("adx_mins", ""), runs, exclude_top_n, seed),
+                              body.get("tp2_usds", ""), body.get("adx_mins", ""), body.get("be_usds", ""),
+                              body.get("trail_usds", ""), runs, exclude_top_n, seed),
             timeout=BACKTEST_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe, weniger Werte je Achse oder kürzeren Zeitraum wählen."}, status=504)

@@ -10,6 +10,9 @@ Nachbau von "Zero Lag Trend Signals (MTF)" von AlgoAlpha:
   * Einstiegssignal (die kleinen Pfeile im Original): Schluss kreuzt die zlema-Linie, waehrend der Trend
     schon in dieselbe Richtung zeigt und auch auf der Kerze davor zeigte.
   * Zusaetzlich waehlbar: Einstieg direkt beim Kippen des Trends (die grossen Pfeile des Originals).
+  * Breakeven in $ (eigener Zusatz): ab X $ Buchgewinn wandert der Stop-Loss auf den Einstieg.
+  * $-Trailing-Stop (eigener Zusatz): setzt beim Einstiegswert ein und folgt dem besten Kurs
+    in festem $-Abstand. Kein ATR. Beide rechnen mit der Groesse beim Einstieg und ziehen nur nach.
   * ADX-Filter (eigener Zusatz, nicht im Original): nur handeln, wenn der ADX ueber der Schwelle liegt -
     wahlweise zusaetzlich mit passender +DI/-DI-Ausrichtung. Laeuft auf den eigenen Kerzen, keine zweite Zeiteinheit.
   * Umkehr (waehlbar): aus einem Kaufsignal wird ein Short und umgekehrt - fuer Maerkte, in denen das
@@ -67,6 +70,14 @@ def _zl_params(cfg):
         "tp1_pct": min(100.0, max(0.0, float(cfg.get("zl_tp1_pct", 50.0) or 0.0))),
         "tp2_usd": max(0.0, float(cfg.get("zl_tp2_usd", 0.0) or 0.0)),       # 0 = TP2 aus
         "tp2_pct": min(100.0, max(0.0, float(cfg.get("zl_tp2_pct", 100.0) or 0.0))),
+        # Breakeven: ab diesem Buchgewinn in $ wandert der Stop-Loss auf den Einstieg (0 = aus).
+        # Unabhaengig von TP1 - greift also auch ohne TP1 und meist deutlich frueher.
+        "be_usd": max(0.0, float(cfg.get("zl_be_usd", 0.0) or 0.0)),
+        # $-Trailing-Stop (0 = aus): der Stop folgt dem besten Kurs in diesem festen $-Abstand,
+        # sobald der Buchgewinn den Abstand erreicht hat - er liegt dann genau auf dem Einstieg
+        # und wandert ab da mit. Er zieht nur nach, nie zurueck, und macht den eingestellten
+        # Stop-Loss nie schlechter. Kein ATR, nur $.
+        "trail_usd": max(0.0, float(cfg.get("zl_trail_usd", 0.0) or 0.0)),
         # ADX-Filter: nur handeln, wenn der Trend stark genug ist (0 = aus)
         "adx_min": max(0.0, float(cfg.get("zl_adx_min", 0.0) or 0.0)),
         "adx_len": max(2, int(cfg.get("zl_adx_len", 14) or 14)),
@@ -185,7 +196,8 @@ def zl_levels(direction, entry, size, arr, i, p):
     sgn = 1 if direction == "long" else -1
     tp1 = entry + sgn * p["tp1_usd"] / size if (p["tp1_usd"] > 0 and size > 0) else None
     tp2 = entry + sgn * p["tp2_usd"] / size if (p["tp2_usd"] > 0 and size > 0) else None
-    return sl, tp1, tp2
+    be = entry + sgn * p["be_usd"] / size if (p["be_usd"] > 0 and size > 0) else None
+    return sl, tp1, tp2, be
 
 
 def zl_trail(direction, sl, arr, i, p):
@@ -201,6 +213,45 @@ def zl_trail(direction, sl, arr, i, p):
     return max(sl, cand) if direction == "long" else min(sl, cand)
 
 
+def _zl_clamp_be(direction, sl, entry, be_done):
+    """Nach dem Breakeven darf der Stop nie wieder hinter den Einstieg zurueck - auch nicht,
+    wenn der nachziehende Band-Stop weiter weg liegt."""
+    if not be_done or not entry:
+        return sl
+    if sl is None:
+        return entry
+    return max(sl, entry) if direction == "long" else min(sl, entry)
+
+
+def _zl_trail_usd(direction, sl, entry, best, size, p):
+    """$-Trailing-Stop: folgt dem besten Kurs seit dem Einstieg in festem $-Abstand.
+
+    Er greift erst, wenn der Buchgewinn den Abstand erreicht hat - dann liegt der Stop genau auf
+    dem Einstieg und wandert ab da mit. Vorher bleibt der eingestellte Stop-Loss unberuehrt, ein
+    enger Trail kann also nie einen weiteren Stop-Loss ersetzen. Zieht nur nach, nie zurueck."""
+    if p["trail_usd"] <= 0 or not size or best is None or not entry:
+        return sl
+    dist = p["trail_usd"] / size
+    cand = best - dist if direction == "long" else best + dist
+    if (direction == "long" and cand < entry) or (direction == "short" and cand > entry):
+        return sl                     # noch nicht genug Gewinn fuer den Trail
+    if sl is None:
+        return cand
+    return max(sl, cand) if direction == "long" else min(sl, cand)
+
+
+def _zl_stop_reason(direction, sl, entry, tp1_done, be_done):
+    """Grund fuer einen Stop-Treffer: BREAKEVEN (Stop genau auf dem Einstieg), TRAIL (Stop schon
+    im Gewinn) oder SL."""
+    if sl is None or not entry:
+        return "SL"
+    if abs(sl - entry) < 1e-12:
+        return "BREAKEVEN" if (tp1_done or be_done) else "SL"
+    if (direction == "long" and sl > entry) or (direction == "short" and sl < entry):
+        return "TRAIL"
+    return "SL"
+
+
 def _allowed(target, p):
     return not ((target == "long" and p["direction"] == "short_only") or (target == "short" and p["direction"] == "long_only"))
 
@@ -213,6 +264,10 @@ def _zl_reset_state(st):
     st["zl_tp1"] = None
     st["zl_tp2"] = None
     st["zl_tp1_done"] = False
+    st["zl_be"] = None
+    st["zl_be_done"] = False
+    st["zl_best"] = None
+    st["zl_size0"] = None
 
 
 async def check_zl_sl_tp(symbol, price):
@@ -226,12 +281,29 @@ async def check_zl_sl_tp(symbol, price):
     entry = st.get("avg_entry_price")
     sl = st.get("zl_sl")
     if sl is not None and ((pos == "long" and price <= sl) or (pos == "short" and price >= sl)):
-        reason = "BREAKEVEN" if st.get("zl_tp1_done") and entry and abs(sl - entry) < 1e-12 else "SL"
+        reason = _zl_stop_reason(pos, sl, entry, st.get("zl_tp1_done"), st.get("zl_be_done"))
         debug_log(f"🚪 [{symbol}] Zero Lag {reason}: {pos.upper()} @ {price} (Ziel war {round(sl, 6)})")
         await execute_exit(symbol, price, reason)
         if st["position"] is None:
             _zl_reset_state(st)
         return
+    be = st.get("zl_be")
+    if be is not None and not st.get("zl_be_done") and ((pos == "long" and price >= be) or (pos == "short" and price <= be)):
+        st["zl_be_done"] = True
+        if entry:
+            st["zl_sl"] = _zl_clamp_be(pos, st.get("zl_sl"), entry, True)
+            debug_log(f"🛡️ [{symbol}] Zero Lag Breakeven: {p['be_usd']:g} $ im Plus - SL auf den Einstieg {round(entry, 6)}")
+        # kein return: TP1/TP2 koennen im selben Tick noch greifen
+    if p["trail_usd"] > 0 and entry:
+        best = st.get("zl_best") or entry
+        best = max(best, price) if pos == "long" else min(best, price)
+        st["zl_best"] = best
+        size0 = st.get("zl_size0") or st.get("total_coin_size") or 0
+        new_sl = _zl_trail_usd(pos, st.get("zl_sl"), entry, best, size0, p)
+        if new_sl is not None and (st.get("zl_sl") is None or abs(new_sl - st["zl_sl"]) > 1e-12):
+            st["zl_sl"] = new_sl
+            debug_log(f"🪜 [{symbol}] Zero Lag Trailing-Stop nachgezogen: {round(new_sl, 6)} "
+                      f"({p['trail_usd']:g} $ hinter {round(best, 6)})")
     tp1 = st.get("zl_tp1")
     if tp1 is not None and not st.get("zl_tp1_done") and ((pos == "long" and price >= tp1) or (pos == "short" and price <= tp1)):
         st["zl_tp1_done"] = True
@@ -306,8 +378,12 @@ def _zl_adx_ok_at(target, adx, i):
 def _set_levels(st, cfg, target, price, arr, i, p):
     entry = st.get("avg_entry_price") or price
     size = st.get("total_coin_size") or 0
-    st["zl_sl"], st["zl_tp1"], st["zl_tp2"] = zl_levels(target, entry, size, arr, i, p)
+    st["zl_sl"], st["zl_tp1"], st["zl_tp2"], st["zl_be"] = zl_levels(target, entry, size, arr, i, p)
     st["zl_tp1_done"] = False
+    st["zl_be_done"] = False
+    st["zl_best"] = entry             # bester Kurs seit dem Einstieg (fuer den $-Trailing-Stop)
+    st["zl_size0"] = size or None     # Groesse beim Einstieg: $-Abstaende rechnen immer damit,
+                                      # auch nachdem TP1/TP2 einen Teil verkauft haben
 
 
 async def zl_check_candle(symbol, cfg, p, arr, i, price, adx=None):
@@ -318,7 +394,8 @@ async def zl_check_candle(symbol, cfg, p, arr, i, price, adx=None):
     pos = st["position"]
     target = zl_entry_signal(arr, i, p)
     if pos is not None:
-        st["zl_sl"] = zl_trail(pos, st.get("zl_sl"), arr, i, p)
+        st["zl_sl"] = _zl_clamp_be(pos, zl_trail(pos, st.get("zl_sl"), arr, i, p),
+                                   st.get("avg_entry_price"), st.get("zl_be_done"))
         if not zl_exit_signal(arr, i, pos, p):
             return
         opposite = target is not None and target != pos
@@ -412,10 +489,10 @@ def zl_simulate(ts, h, l, c, arr, cfg, p, i_start, adx=None):
             d, e = position["dir"], position["entry"]
             sgn = 1 if d == "long" else -1
             if not position["tp1_done"]:
-                position["sl"] = zl_trail(d, position["sl"], arr, i - 1, p)
+                position["sl"] = _zl_clamp_be(d, zl_trail(d, position["sl"], arr, i - 1, p), e, position["be_done"])
             sl = position["sl"]
             if sl is not None and ((sgn > 0 and l[i] <= sl) or (sgn < 0 and h[i] >= sl)):
-                reason = "BREAKEVEN" if position["tp1_done"] and abs(sl - e) < 1e-12 else "SL"
+                reason = _zl_stop_reason(d, sl, e, position["tp1_done"], position["be_done"])
                 _bt_close_trade(trades, d, e, sl, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
             else:
@@ -439,6 +516,18 @@ def zl_simulate(ts, h, l, c, arr, cfg, p, i_start, adx=None):
                         part = position["size"] * p["tp2_pct"] / 100.0
                         _bt_close_trade(trades, d, e, t2, part, i, position["entry_i"], "TP2", ts=ts)
                         position["size"] -= part
+                # Breakeven ERST JETZT pruefen: innerhalb einer Kerze ist die Reihenfolge der Kurse
+                # unbekannt, deshalb gilt fuer SL/TP dieser Kerze noch der alte Stop. Sonst wuerde
+                # der Backtest einen Stop nutzen, der zum Zeitpunkt des Tiefs noch nicht dort lag.
+                if position is not None and position["be"] is not None and not position["be_done"] \
+                        and ((sgn > 0 and h[i] >= position["be"]) or (sgn < 0 and l[i] <= position["be"])):
+                    position["be_done"] = True
+                    position["sl"] = _zl_clamp_be(d, position["sl"], e, True)
+                # $-Trailing-Stop ebenfalls erst jetzt: der beste Kurs DIESER Kerze darf den Stop
+                # erst fuer die FOLGENDEN Kerzen enger machen, sonst waere es ein Blick nach vorn.
+                if position is not None and p["trail_usd"] > 0:
+                    position["best"] = max(position["best"], h[i]) if sgn > 0 else min(position["best"], l[i])
+                    position["sl"] = _zl_trail_usd(d, position["sl"], e, position["best"], position["size0"], p)
         target = zl_entry_signal(arr, i, p)
         if target is not None and not _zl_adx_ok_at(target, adx, i):
             target = None
@@ -451,9 +540,10 @@ def zl_simulate(ts, h, l, c, arr, cfg, p, i_start, adx=None):
             position = None
         if position is None and target is not None and _allowed(target, p):
             size = (margin * leverage) / c[i]
-            sl, tp1, tp2 = zl_levels(target, c[i], size, arr, i, p)
-            position = {"dir": target, "entry": c[i], "size": size, "entry_i": i, "sl": sl,
-                        "tp1": tp1, "tp2": tp2, "tp1_done": False}
+            sl, tp1, tp2, be = zl_levels(target, c[i], size, arr, i, p)
+            position = {"dir": target, "entry": c[i], "size": size, "size0": size, "entry_i": i,
+                        "sl": sl, "tp1": tp1, "tp2": tp2, "tp1_done": False, "be": be,
+                        "be_done": False, "best": c[i]}
     if position is not None:
         _bt_close_trade(trades, position["dir"], position["entry"], c[n - 1], position["size"], n - 1,
                         position["entry_i"], "END-OF-BACKTEST", ts=ts)
@@ -594,7 +684,7 @@ def zl_mc_resolutions(text):
 
 
 def _zl_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
-    """prepared: {Zeitebene: (candles, i_start)}. combos: (Zeitebene, Laenge, Faktor, SL $, TP1 $, TP2 $, ADX)."""
+    """prepared: {Zeitebene: (candles, i_start)}. combos: (Zeitebene, Laenge, Faktor, SL $, TP1 $, TP2 $, ADX, BE $, Trail $)."""
     base_p = _zl_params(base_cfg)
     # Nach (Zeitebene, Laenge, Faktor) sortieren: so wird je Gruppe nur EINE Rechnung im Speicher gehalten.
     # Ein Woerterbuch ueber alle Kombinationen waere bei 100.000 Kerzen schnell dreistellig in MB.
@@ -602,12 +692,13 @@ def _zl_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
     cur_key, arr = None, None
     adx_cache = {}                                      # ADX-Schwelle -> (long_ok, short_ok); je Zeitebene nur ein Aufruf pro Wert
     out = []
-    for res, length, mult, sl_usd, tp1, tp2, adx_min in combos:
+    for res, length, mult, sl_usd, tp1, tp2, adx_min, be_usd, trail_usd in combos:
         if time.time() > deadline:
             break
         candles, i_start = prepared[res]
         ts, o, h, l, c, v = candles
-        p = dict(base_p, res=res, length=length, mult=mult, sl_usd=sl_usd, tp1_usd=tp1, tp2_usd=tp2, adx_min=adx_min)
+        p = dict(base_p, res=res, length=length, mult=mult, sl_usd=sl_usd, tp1_usd=tp1, tp2_usd=tp2,
+                 adx_min=adx_min, be_usd=be_usd, trail_usd=trail_usd)
         if p["sl_mode"] == "usd" and sl_usd <= 0:
             p = dict(p, sl_mode="aus")
         if cur_key != (res, length, mult):
@@ -620,7 +711,7 @@ def _zl_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
         trades = zl_simulate(ts, h, l, c, arr, base_cfg, p, i_start, adx_cache[adx_min])
         st = summarize_backtest_trades(trades, exclude_top_n)
         out.append({"zl_resolution": res, "zl_length": length, "zl_mult": mult, "zl_sl_usd": sl_usd,
-                    "zl_tp1_usd": tp1, "zl_tp2_usd": tp2, "zl_adx_min": adx_min,
+                    "zl_tp1_usd": tp1, "zl_tp2_usd": tp2, "zl_adx_min": adx_min, "zl_be_usd": be_usd, "zl_trail_usd": trail_usd,
                     "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
                     "total_pnl_usd": st["total_pnl_usd"], "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"],
                     "max_drawdown_usd": st["max_drawdown_usd"], "avg_bars_held": st["avg_bars_held"]})
@@ -628,8 +719,9 @@ def _zl_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
 
 
 async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mults=None, sl_usds=None, tp1_usds=None,
-                            tp2_usds=None, adx_mins=None, runs=500, exclude_top_n=1, seed=None):
-    """Raster ueber Zeitebene x Laenge x Band-Faktor x SL x TP1 x TP2 x ADX-Schwelle. Die Zahlen-Achsen kommen als
+                            tp2_usds=None, adx_mins=None, be_usds=None, trail_usds=None, runs=500,
+                            exclude_top_n=1, seed=None):
+    """Raster ueber Zeitebene x Laenge x Band-Faktor x SL x TP1 x TP2 x ADX-Schwelle x Breakeven x Trailing-Stop. Die Zahlen-Achsen kommen als
     {"min": .., "max": .., "step": ..}; eine leere oder abgeschaltete Achse nimmt den Wert aus den Einstellungen.
     Kommagetrennte Listen werden weiterhin akzeptiert. Alles andere (Einstiegs-Modus, Ausstieg, Anteile,
     Richtung, ADX-Laenge/Richtungspruefung, Margin, Hebel) kommt aus den Einstellungen."""
@@ -647,11 +739,14 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
     tp1_list = axis(tp1_usds, float, 0.0, 10_000.0, base_p["tp1_usd"])
     tp2_list = axis(tp2_usds, float, 0.0, 10_000.0, base_p["tp2_usd"])
     adx_list = axis(adx_mins, float, 0.0, 100.0, base_p["adx_min"])
+    be_list = axis(be_usds, float, 0.0, 10_000.0, base_p["be_usd"])
+    trail_list = axis(trail_usds, float, 0.0, 10_000.0, base_p["trail_usd"])
     runs = max(1, min(ZL_MC_MAX_RUNS, int(runs)))
     mt = cfg.get("binance_market_type", "spot")
     max_candles = BACKTEST_MAX_CANDLES.get("zero_lag", 100_000)
-    combos = [(r, ln, m, sl, t1, t2, a) for r in res_list for ln in len_list for m in mult_list
-              for sl in sl_list for t1 in tp1_list for t2 in tp2_list for a in adx_list]
+    combos = [(r, ln, m, sl, t1, t2, a, be, tr) for r in res_list for ln in len_list for m in mult_list
+              for sl in sl_list for t1 in tp1_list for t2 in tp2_list for a in adx_list
+              for be in be_list for tr in trail_list]
     requested = len(combos)
     rng = random.Random(seed)
     if len(combos) > runs:
@@ -696,7 +791,7 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
         "symbol": symbol, "entry_mode": "zero_lag", "days": days, "actual_days_covered": round(days_cov, 1),
         "candles_processed": n_max, "resolutions": used_res, "skipped_resolutions": skipped,
         "lengths": len_list, "mults": mult_list, "sl_usds": sl_list, "tp1_usds": tp1_list, "tp2_usds": tp2_list,
-        "adx_mins": adx_list,
+        "adx_mins": adx_list, "be_usds": be_list, "trail_usds": trail_list,
         "min_reliable_trades": min_trades, "seed": seed,
         "combos_tested": len(results), "combos_requested": requested, "combos_drawn": len(combos),
         "profitable_pct": round(pos / len(results) * 100, 1) if results else 0,
