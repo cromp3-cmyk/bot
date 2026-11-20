@@ -782,6 +782,9 @@ def default_config():
 def default_state():
     return {
         "position": None, "avg_entry_price": None, "total_coin_size": 0.0,
+        # Stand des realisierten PnL auf der Boerse beim Einstieg - daraus wird der echte PnL
+        # bestimmt, wenn die Position AUSSERHALB des Bots geschlossen wird (sync_position_with_exchange).
+        "exchange_realized_pnl": None,
         "entry_count": 0, "anchor_price": None, "last_price": None, "g2_trigger_armed": True, "g2_levels": None,
         "current_position_entries": [],
         "price_history": [],
@@ -966,6 +969,7 @@ async def load_bot_configs():
 # einer Position steckt, wie viele Nachkaeufe schon liefen und wie sein Ø-Einstieg war.
 PERSISTED_STATE_KEYS = [
     "position", "avg_entry_price", "total_coin_size", "entry_count", "anchor_price",
+    "exchange_realized_pnl",
     "position_opened_at", "last_entry_price", "stats", "trade_log",
     # current_position_entries MUSS persistiert werden: sonst zeigt die Tabelle "Laufende
     # Nachkäufe" nach einem Neustart/Redeploy faelschlich "keine offene Position", OBWOHL
@@ -1155,6 +1159,251 @@ async def get_account_position_from_exchange(client, market_index, retries=5, de
     return None
 
 
+# ========== ABGLEICH MIT DER BOERSE: AUSSERHALB DES BOTS GESCHLOSSENE POSITIONEN ==========
+# Schliesst man eine Position manuell in der Lighter-App (oder sie wird liquidiert), erfaehrt der Bot
+# davon von sich aus NICHTS: er fuehrt sie in seinem Zustand weiter, zieht SL/TP nach und schickt
+# irgendwann einen Exit fuer etwas, das es nicht mehr gibt - beim Wechsel (execute_reverse, ohne
+# reduce_only) wuerde er sogar eine echte neue Position in doppelter Groesse eroeffnen. Deshalb
+# vergleicht dieser Abgleich die eigene Position regelmaessig mit der echten Position auf Lighter.
+#
+# Zwei Sicherungen, damit er nie eine LAUFENDE Position aus dem Bot loescht:
+#   1. Eine Boersen-Antwort, die nicht kommt, aendert nie etwas (siehe fetch_exchange_position:
+#      "flach" und "keine Antwort" werden streng getrennt).
+#   2. Erst wenn die Boerse ZWEIMAL HINTEREINANDER flach meldet, wird gebucht.
+# Abschalten: POSITION_SYNC_SECONDS=0 in den Render-Umgebungsvariablen.
+POSITION_SYNC_SECONDS = int(os.getenv("POSITION_SYNC_SECONDS", "30") or 0)
+POSITION_SYNC_GRACE_SECONDS = int(os.getenv("POSITION_SYNC_GRACE_SECONDS", "30") or 0)
+_pos_sync_flat_hits = {}        # Symbol -> wie oft die Boerse hintereinander flach gemeldet hat
+
+# entry_mode -> (Modul, Reset-Funktion) der Strategie-eigenen SL/TP-Marken. Lazy importiert, weil
+# diese Module umgekehrt bot_core importieren. Modi ohne Eintrag brauchen keinen: sie halten keine
+# eigenen Marken im Zustand oder setzen sie beim naechsten Einstieg ohnehin komplett neu.
+_STRATEGY_STATE_RESETS = {
+    "zero_lag": ("zerolag", "_zl_reset_state"),
+    "vwap_cross": ("vwap_cross", "_vc_reset_state"),
+    "gold_scalper": ("goldscalper", "_gq_reset_state"),
+    "dollar701": ("dollar701", "_dv_reset_state"),
+    "pure_momentum": ("pure_momentum", "_pm_reset_state"),
+    "punk_algo": ("punk_algo", "_pa_reset_state"),
+    "wae_ema": ("wae_ema", "_we_reset_state"),
+    "wt_div": ("wt_div", "_wd_reset_state"),
+    "mom_field": ("mom_field", "_mf_reset_state"),
+    "auction_trend": ("auction", "_ar_reset_state"),
+    "pivot_reversal": ("pivot", "_pv_reset_state"),
+    "lsob": ("lsob", "_lb_reset_state"),
+    "rlm": ("rlm", "_rlm_reset_state"),
+    "ab_breakout": ("strategies", "_ab_reset_state"),
+    "ema_rsi": ("strategies", "_er_reset_state"),
+    "rsi_signal": ("strategies", "_rsi_reset_state"),
+    "mvwap_mf_signal": ("strategies", "_mvwap_reset_state"),
+    "scalp_vwap_obv_rsi": ("strategies", "_scalp_reset_state"),
+    "liquidity_waves": ("strategies", "_liq_reset_state"),
+    "wellenanker": ("strategies", "_wa_reset_state"),
+    "mtf_spread": ("strategies", "_mt_reset_state"),
+}
+
+
+async def fetch_exchange_position(client, market_index, retries=2, delay=0.5):
+    """(Position oder None, ob die Abfrage geklappt hat).
+
+    Wichtiger Unterschied zu get_account_position_from_exchange: dort bedeutet None sowohl "keine
+    Position offen" als auch "Boerse hat nicht geantwortet". Fuer den Abgleich mit dem eigenen
+    Zustand muessen diese beiden Faelle streng getrennt werden - eine ausgefallene Abfrage darf
+    NIEMALS als "Position ist weg" durchgehen."""
+    try:
+        import lighter
+        account_api = lighter.AccountApi(client.api_client)
+    except Exception as e:
+        debug_log("⚠️ Positions-Abgleich: AccountApi nicht verfügbar", {"error": str(e)})
+        return None, False
+    for attempt in range(max(1, retries)):
+        try:
+            resp = await asyncio.wait_for(
+                account_api.account(by="index", value=str(client.account_index)),
+                timeout=EXCHANGE_CALL_TIMEOUT_SECONDS)
+            if resp and resp.accounts:
+                for pos in (resp.accounts[0].positions or []):
+                    if pos.market_id == market_index:
+                        return pos, True
+                return None, True              # Konto hat geantwortet, dieser Markt ist flach
+        except Exception as e:
+            debug_log(f"⚠️ Positions-Abgleich fehlgeschlagen (Versuch {attempt+1}/{retries})", {"error": str(e)})
+        if attempt + 1 < max(1, retries):
+            await asyncio.sleep(delay)
+    return None, False
+
+
+def _position_age_seconds(st):
+    """Alter der offenen Position in Sekunden, oder None wenn unbekannt."""
+    opened = st.get("position_opened_at")
+    if not opened:
+        return None
+    try:
+        return (now_local() - datetime.fromisoformat(str(opened))).total_seconds()
+    except Exception:
+        return None
+
+
+def _reset_strategy_levels(symbol):
+    """SL/TP-Marken der aktiven Strategie loeschen - sie setzt sie beim naechsten Einstieg neu."""
+    cfg, st = BOTS[symbol]["config"], BOTS[symbol]["state"]
+    target = _STRATEGY_STATE_RESETS.get(cfg.get("entry_mode"))
+    if not target:
+        return
+    try:
+        import importlib
+        getattr(importlib.import_module(target[0]), target[1])(st)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] Konnte die Marken der Strategie nicht zurücksetzen (ignoriert)", {"error": str(e)})
+
+
+def _external_close_pnl(st, realized):
+    """(Ausstiegspreis, PnL, ob geschaetzt) fuer eine ausserhalb des Bots geschlossene Position.
+
+    Hat die Boerse ihren Stand des realisierten PnL geliefert UND gab es beim Einstieg eine
+    Grundlage, ist die Differenz der ECHTE PnL - daraus laesst sich der Ausstiegspreis
+    zurueckrechnen. Sonst bleibt nur die Schaetzung mit dem letzten bekannten Kurs."""
+    own_size = float(st["total_coin_size"] or 0.0)
+    entry = st["avg_entry_price"]
+    baseline = st.get("exchange_realized_pnl")
+    long_side = st["position"] == "long"
+    if realized is not None and baseline is not None and own_size > 0:
+        pnl = float(realized) - float(baseline)
+        return entry + (pnl / own_size if long_side else -pnl / own_size), pnl, False
+    price = st.get("last_price") or entry
+    pnl = (price - entry) * own_size if long_side else (entry - price) * own_size
+    return price, pnl, True
+
+
+async def _book_external_close(symbol, exit_price, pnl_usd, estimated, reason):
+    """Bucht eine AUSSERHALB des Bots geschlossene Position ins Trade-Log und macht den Bot flach.
+    Gleiche Aufraeumarbeit wie _execute_exit_locked, nur ohne eigene Order - die ist ja schon
+    passiert. Zusaetzlich fallen die Marken der Strategie weg, damit der naechste Trade sauber
+    startet und nicht mit dem Stop-Loss des alten weiterlaeuft."""
+    st = BOTS[symbol]["state"]
+    side = st["position"]
+    stats = st["stats"]
+    stats["trades"] += 1
+    stats["total_pnl_usd"] += pnl_usd
+    stats["wins" if pnl_usd > 0 else "losses"] += 1
+    st["trade_log"].append({
+        "side": side, "avg_entry": round(st["avg_entry_price"], 2), "exit": round(exit_price, 4),
+        "entries": st["entry_count"], "pnl_usd": round(pnl_usd, 3),
+        "opened_at": st.get("position_opened_at"), "closed_at": now_local().isoformat(),
+        "reason": reason, "external": True, "pnl_estimated": estimated,
+    })
+    debug_log(f"🏁 [{symbol}] Position war auf Lighter schon geschlossen ({reason}): {side.upper()} "
+              f"Ø{round(st['avg_entry_price'], 2)} -> {round(exit_price, 4)} | PnL "
+              f"{'ca. ' if estimated else ''}${round(pnl_usd, 3)} - Bot ist jetzt wieder flach")
+    st["position"] = None
+    st["avg_entry_price"] = None
+    st["total_coin_size"] = 0.0
+    st["entry_count"] = 0
+    st["anchor_price"] = exit_price
+    st["position_opened_at"] = None
+    st["last_entry_price"] = None
+    st["exchange_realized_pnl"] = None
+    st["g2_trigger_armed"] = True
+    st["g2_levels"] = None
+    st["current_position_entries"] = []
+    _reset_strategy_levels(symbol)
+    await save_bot_state()
+
+
+async def sync_position_with_exchange(symbol):
+    """Vergleicht die Position des Bots mit der echten Position auf Lighter.
+
+    Ist dort nichts (mehr) offen, obwohl der Bot eine Position fuehrt, wird der Trade gebucht und
+    der Zustand aufgeraeumt. Ist dort weniger offen als im Bot, wird die Groesse angepasst, damit
+    ein spaeterer Exit nicht mehr verkauft als vorhanden. Eine Position, die auf Lighter OHNE den
+    Bot eroeffnet wurde, uebernimmt der Bot ausdruecklich NICHT - er wuerde sie sonst mit den
+    Marken der Strategie verwalten, die zu diesem Einstieg gar nicht passen."""
+    b = BOTS[symbol]
+    st, cfg = b["state"], b["config"]
+    if cfg.get("dry_run"):
+        return
+    if st["position"] is None or not st.get("total_coin_size") or not st.get("avg_entry_price"):
+        _pos_sync_flat_hits.pop(symbol, None)
+        return                                  # nichts offen -> nichts abzugleichen (spart Anfragen)
+    age = _position_age_seconds(st)
+    if age is not None and age < POSITION_SYNC_GRACE_SECONDS:
+        return                                  # frischer Einstieg: die Boerse verbucht ihn ggf. erst
+    # Stand VOR der Abfrage merken: waehrend sie laeuft, kann der Bot selbst ein- oder aussteigen.
+    before = (st["position"], float(st["total_coin_size"]), st["entry_count"])
+    client = get_lighter_client(account_role(cfg))
+    if client is None:
+        return
+    try:
+        pos, ok = await fetch_exchange_position(client, MARKET_INDICES[symbol])
+    finally:
+        await _safe_close_client(client)
+    if not ok:
+        return                                  # keine Antwort -> NIE etwas aendern
+    size, sign, realized = 0.0, 0, None
+    if pos is not None:
+        try:
+            size = abs(float(pos.position))
+        except (TypeError, ValueError):
+            size = 0.0
+        try:
+            sign = int(getattr(pos, "sign", 0) or 0)
+        except (TypeError, ValueError):
+            sign = 0
+        try:
+            realized = float(pos.realized_pnl) if pos.realized_pnl is not None else None
+        except (TypeError, ValueError):
+            realized = None
+
+    async with _get_symbol_lock(symbol):
+        # Hat der Bot in der Zwischenzeit selbst gehandelt, ist die Antwort veraltet -> verwerfen.
+        if st["position"] is None or (st["position"], float(st["total_coin_size"] or 0), st["entry_count"]) != before:
+            _pos_sync_flat_hits.pop(symbol, None)
+            return
+        own_size = float(st["total_coin_size"])
+        own_sign = 1 if st["position"] == "long" else -1
+        gone = size <= own_size * 0.02 or (size > 0 and sign != 0 and sign != own_sign)
+
+        if not gone:
+            _pos_sync_flat_hits.pop(symbol, None)
+            if size < own_size * 0.98:
+                # Teilweise manuell geschlossen: Restgroesse uebernehmen, Ø-Einstieg bleibt.
+                debug_log(f"✂️ [{symbol}] Auf Lighter wurde ein Teil geschlossen: {round(own_size, 6)} -> "
+                          f"{round(size, 6)} - Größe im Bot angepasst (Ø-Einstieg bleibt)")
+                st["total_coin_size"] = size
+                await save_bot_state()
+            return
+
+        hits = _pos_sync_flat_hits.get(symbol, 0) + 1
+        _pos_sync_flat_hits[symbol] = hits
+        if hits < 2:
+            debug_log(f"🔍 [{symbol}] Lighter meldet keine Position mehr, der Bot führt aber eine - "
+                      f"wird beim nächsten Durchgang bestätigt, dann gebucht")
+            return
+        _pos_sync_flat_hits.pop(symbol, None)
+
+        reason = "MANUELL GESCHLOSSEN" if size <= own_size * 0.02 else "MANUELL GEDREHT"
+        exit_price, pnl, estimated = _external_close_pnl(st, realized)
+        await _book_external_close(symbol, exit_price, pnl, estimated, reason)
+
+
+async def position_sync_loop():
+    """Prueft regelmaessig, ob die Positionen im Bot noch zu Lighter passen. Fragt nur fuer Coins
+    an, die im Bot ueberhaupt eine offene Position haben - fuer alle anderen kostet der Abgleich
+    keine einzige Anfrage."""
+    if POSITION_SYNC_SECONDS <= 0:
+        debug_log("ℹ️ Positions-Abgleich mit Lighter ist abgeschaltet (POSITION_SYNC_SECONDS=0)")
+        return
+    debug_log(f"🔄 Positions-Abgleich mit Lighter aktiv (alle {POSITION_SYNC_SECONDS}s, "
+              f"Schonfrist nach Einstieg {POSITION_SYNC_GRACE_SECONDS}s)")
+    await asyncio.sleep(20)                     # erst den gespeicherten Zustand laden lassen
+    while True:
+        for s in SYMBOLS:
+            try:
+                await sync_position_with_exchange(s)
+            except Exception as e:
+                debug_log(f"⚠️ [{s}] Positions-Abgleich fehlgeschlagen (ignoriert)", {"error": str(e)})
+        await asyncio.sleep(POSITION_SYNC_SECONDS)
+
 
 def estimate_liquidation_price(symbol):
     b = BOTS[symbol]
@@ -1339,6 +1588,19 @@ async def _execute_entry_locked(symbol, direction, price, is_add_on, size_multip
             real_price = _extract_valid_price(real_pos)
             extra_attempts += 1
         await _safe_close_client(client)
+
+        # Stand des realisierten PnL merken. Wird die Position spaeter AUSSERHALB des Bots
+        # geschlossen (manuell in der Lighter-App, Liquidation), ergibt die Differenz dazu den
+        # ECHTEN PnL - siehe sync_position_with_exchange. Beim Ersteinstieg erst leeren, damit
+        # nie eine Grundlage aus dem vorherigen Trade stehen bleibt; bei einem Nachkauf nur
+        # ueberschreiben, wenn die Boerse tatsaechlich einen Wert geliefert hat.
+        if not is_add_on:
+            st["exchange_realized_pnl"] = None
+        if real_pos is not None and real_pos.realized_pnl is not None:
+            try:
+                st["exchange_realized_pnl"] = float(real_pos.realized_pnl)
+            except (TypeError, ValueError):
+                pass
         if real_price is not None:
             if price and abs(real_price - price) / price > 0.0005:
                 debug_log(f"🎯 [{symbol}] Echter Fill-Preis von der Börse: {real_price} (Ziel war {price}, Abweichung {round((real_price-price)/price*100,3)}%)")
@@ -1435,6 +1697,54 @@ async def _execute_reverse_locked(symbol, price, reason, size_multiplier=None):
             await _safe_close_client(client)
             debug_log(f"⚠️ [{symbol}] Reverse: neue Position unter Mindestgröße - abgebrochen")
             return False
+
+        # SICHERHEITSPRUEFUNG VOR EINER ORDER OHNE reduce_only: die Reverse-Order ist so gross wie
+        # alte PLUS neue Position. Wurde die alte Position zwischenzeitlich AUSSERHALB des Bots
+        # geschlossen (manuell in der Lighter-App, Liquidation), gibt es nichts zu schliessen - die
+        # Order wuerde dann eine echte neue Position in DOPPELTER Groesse eroeffnen. Deshalb hier
+        # einmal den echten Stand holen (kostet den Wechsel ca. eine halbe Sekunde, verhindert aber
+        # genau diesen Fall). Antwortet die Boerse nicht, bleibt es beim bisherigen Verhalten.
+        real, real_ok = await fetch_exchange_position(client, market_index, retries=2, delay=0.4)
+        real_size, real_sign, real_realized = 0.0, 0, None
+        if real is not None:
+            try:
+                real_size = abs(float(real.position))
+            except (TypeError, ValueError):
+                real_size = 0.0
+            try:
+                real_sign = int(getattr(real, "sign", 0) or 0)
+            except (TypeError, ValueError):
+                real_sign = 0
+            try:
+                real_realized = float(real.realized_pnl) if real.realized_pnl is not None else None
+            except (TypeError, ValueError):
+                real_realized = None
+        own_sign = 1 if closing_side == "long" else -1
+        if real_ok and (real_size <= old_size * 0.02 or (real_size > 0 and real_sign != 0 and real_sign != own_sign)):
+            await _safe_close_client(client)
+            debug_log(f"⚠️ [{symbol}] Wechsel abgebrochen - auf Lighter ist die {closing_side.upper()}-Position "
+                      f"nicht mehr offen (manuell geschlossen oder gedreht). Sie wird jetzt gebucht, "
+                      f"danach steigt der Bot normal in {target.upper()} ein.")
+            ext_price, ext_pnl, ext_est = _external_close_pnl(st, real_realized)
+            await _book_external_close(symbol, ext_price, ext_pnl, ext_est, "MANUELL GESCHLOSSEN")
+            return await _execute_entry_locked(symbol, target, price, is_add_on=False)
+        if real_ok and real_size > 0 and abs(real_size - old_size) > old_size * 0.02:
+            # Teilweise manuell geschlossen: mit der ECHTEN Restgroesse drehen, nicht mit der eigenen.
+            debug_log(f"⚠️ [{symbol}] Wechsel: auf Lighter sind nur {round(real_size, 6)} statt "
+                      f"{round(old_size, 6)} offen - es wird mit der echten Größe gedreht")
+            old_size = real_size
+            st["total_coin_size"] = old_size
+            old_base = int(round(old_size * precision))
+            pnl_usd = (price - avg_old) * old_size if closing_side == "long" else (avg_old - price) * old_size
+            if size_multiplier is None:
+                new_usdc = old_size * price
+                new_base = int((new_usdc / price) * precision)
+                new_units = new_base / precision
+                if new_base * (1 / precision) < get_min_base_amount(symbol):
+                    await _safe_close_client(client)
+                    debug_log(f"⚠️ [{symbol}] Wechsel: neue Position unter Mindestgröße - abgebrochen")
+                    return False
+
         is_ask = closing_side == "long"   # Long wird verkauft (is_ask), Short wird gekauft
         tx, tx_hash, err = await place_market_order(client, market_index, symbol, is_ask, old_base + new_base, price, reduce_only=False)
         await _safe_close_client(client)
@@ -1457,6 +1767,7 @@ async def _execute_reverse_locked(symbol, price, reason, size_multiplier=None):
     st["position"] = target
     st["avg_entry_price"] = price
     st["total_coin_size"] = new_units
+    st["exchange_realized_pnl"] = None      # neue Position, alte Grundlage gilt nicht mehr (siehe _reverse_confirm)
     st["position_opened_at"] = now_local().isoformat()
     st["last_entry_price"] = price
     st["entry_count"] = 1
@@ -1495,6 +1806,11 @@ async def _reverse_confirm(symbol, target, avg_old):
                         st["last_entry_price"] = real
                         if st.get("current_position_entries"):
                             st["current_position_entries"][0]["price"] = round(real, 6)
+                        try:
+                            if pos.realized_pnl is not None:
+                                st["exchange_realized_pnl"] = float(pos.realized_pnl)
+                        except (TypeError, ValueError):
+                            pass
                         debug_log(f"🎯 [{symbol}] Reverse: echter Einstiegspreis von der Börse {real} (Ziel war {round(old, 6)})")
                         await save_bot_state()
                     return
@@ -1586,6 +1902,13 @@ async def _execute_partial_exit_locked(symbol, price, fraction, reason):
     })
 
     st["total_coin_size"] -= close_size
+    if not cfg["dry_run"]:
+        # Grundlage fuer den Abgleich nachziehen: dieser Teil-PnL ist oben schon verbucht, er darf
+        # spaeter nicht ein zweites Mal in der Differenz landen. Ist der echte Teil-PnL unbekannt,
+        # wird die Grundlage geleert - dann rechnet der Abgleich lieber mit einer Schaetzung als
+        # mit einer Zahl, die den Teil-Exit doppelt zaehlt.
+        st["exchange_realized_pnl"] = (realized_pnl_before + real_pnl_usd) \
+            if (realized_pnl_before is not None and real_pnl_usd is not None) else None
     debug_log(f"✂️ [{symbol}] Teil-Exit ({reason}): {position_side.upper()} {round(fraction*100)}% @ {exit_price_for_log} | PnL ${round(pnl_usd,3)} | Rest {round(st['total_coin_size'],6)}")
     await save_bot_state()
     return True
@@ -1690,6 +2013,7 @@ async def _execute_exit_locked(symbol, price, reason):
     st["total_coin_size"] = 0.0
     st["entry_count"] = 0
     st["anchor_price"] = exit_price_for_log
+    st["exchange_realized_pnl"] = None
     st["position_opened_at"] = None
     st["last_entry_price"] = None
     st["g2_trigger_armed"] = True  # ungenutzt, siehe g2_levels - bleibt fuer Abwaertskompatibilitaet
@@ -1920,7 +2244,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.12-a</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.12-b</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
@@ -7658,7 +7982,7 @@ async function refresh() {
     const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('de-DE', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-';
     document.querySelector('#trades-table tbody').innerHTML = trades.map(t => `
       <tr><td>${fmtTime(t.opened_at)}</td><td>${fmtTime(t.closed_at)}</td><td>${t.side}</td><td>${t.avg_entry}</td><td>${t.exit}</td><td>${t.entries}</td><td>${t.reason ?? '-'}</td>
-      <td class="${t.pnl_usd>=0?'green':'red'}">${t.pnl_usd}</td></tr>
+      <td class="${t.pnl_usd>=0?'green':'red'}" title="${t.pnl_estimated ? 'Außerhalb des Bots geschlossen - PnL aus dem letzten bekannten Kurs geschätzt' : ''}">${t.pnl_estimated ? 'ca. ' : ''}${t.pnl_usd}</td></tr>
     `).join('') || '<tr><td colspan="8" style="color:var(--text-dim);">Noch keine abgeschlossenen Trades</td></tr>';
   } catch (e) {
     console.error('Trade-Tabelle-Fehler:', e);

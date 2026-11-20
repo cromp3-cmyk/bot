@@ -15,6 +15,7 @@ from bot_core import (
     handle_config_update, handle_control, handle_close_position, handle_reverse_position, handle_reset,
     handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_gc_trend, handle_scalp_trend, handle_dv_montecarlo, handle_gq_montecarlo, handle_vc_montecarlo, handle_zl_montecarlo, handle_config_defaults, handle_rlm_montecarlo, handle_pa_montecarlo, handle_we_montecarlo, handle_wd_montecarlo, handle_ar_montecarlo, handle_pv_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
+    position_sync_loop,
 )
 from strategies import (
     trading_loop, binance_1s_poll_loop, ab_poll_loop, er_poll_loop, mt_poll_loop, rsi_poll_loop, mvwap_poll_loop, scalp_poll_loop,
@@ -187,6 +188,10 @@ async def main():
         *[wa_poll_loop(s) for s in SYMBOLS],
         *[vc_poll_loop(s) for s in SYMBOLS],
         state_persist_loop(),
+        # Merkt, wenn eine Position AUSSERHALB des Bots geschlossen wurde (manuell in der
+        # Lighter-App, Liquidation) und raeumt den Zustand auf - sonst verwaltet der Bot eine
+        # Position weiter, die es nicht mehr gibt.
+        position_sync_loop(),
         binance_ws_cache_loop(),
         screener_loop(),
         vwap_scanner_loop(),
