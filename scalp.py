@@ -44,8 +44,8 @@ from screener import (
 # ============================================================================
 # KONFIGURATION
 # ============================================================================
-TFS = ["10s", "15s", "30s", "1m", "5m", "15m"]
-SECOND_AGG = {"10s": 10, "15s": 15, "30s": 30}   # aus 1s-Spot-Kerzen zusammengerechnet
+TFS = ["5s", "10s", "15s", "30s", "1m", "5m", "15m"]
+SECOND_AGG = {"5s": 5, "10s": 10, "15s": 15, "30s": 30}   # aus 1s-Spot-Kerzen zusammengerechnet
 MAX_SECOND_TF = 300                               # MTF-Tabelle: Sekunden-Zeitebenen bis 300 s frei waehlbar
 
 
@@ -56,7 +56,8 @@ def _sec_of(tf):
         return 0
     n = int(m.group(1))
     return n if 1 <= n <= MAX_SECOND_TF else 0
-CHART_BARS = 200                                  # so viele Kerzen gehen an den Browser
+CHART_BARS = 200                                  # Standard-Kerzenzahl (Autotrade, Uebersichten)
+CHART_VIEW_BARS = 600                             # so viele Kerzen gehen an den Browser (Chart zum Scrollen/Zoomen)
 WARMUP_BARS = 150                                 # zusaetzliche Kerzen fuer das Einschwingen der Indikatoren
 MIN_BARS = 60                                     # Autotrade: darunter keine Signale (Indikator noch nicht eingeschwungen)
 MIN_CHART_BARS = 30                               # Chart: ab so vielen Kerzen wird schon gezeichnet (mit Hinweis)
@@ -73,7 +74,8 @@ AUTO_LOG = []    # neueste zuerst
 WA_SOURCES = ("close", "hlc3", "ohlc4", "hl2")
 WA_CFG = {"n1": WA_N1, "n2": WA_N2, "z1": WA_Z1, "src": "close",
           "strat": "wa", "candles": "normal", "w2_level": 10.0, "w2_line": "signal", "w2_profit": False,
-          "wd_ob": 45.0, "wd_os": -65.0, "wd_pivot": 2, "wd_maxr": 120, "wd_hidden": False, "wd_line": "wt2"}   # strat: "wd" = Wellenanker-Divergenz (wie wt_div-Bot/Pine), "wa" = Wellenanker-Signale, "ha" = Heikin-Ashi-Farbwechsel, "w2" = Wellenanker 2 (Level-Durchbruch)
+          "wd_ob": 45.0, "wd_os": -65.0, "wd_pivot": 2, "wd_maxr": 120, "wd_hidden": False, "wd_line": "wt2",
+          "zl_len": 70, "zl_mult": 1.2, "zl_entry": "signal", "zl_invert": False}   # strat "zl" = Zero Lag Trend (AlgoAlpha, wie zerolag.py)   # strat: "wd" = Wellenanker-Divergenz (wie wt_div-Bot/Pine), "wa" = Wellenanker-Signale, "ha" = Heikin-Ashi-Farbwechsel, "w2" = Wellenanker 2 (Level-Durchbruch)
 WA_FILE = os.getenv("SCALP_SETTINGS_FILE", "scalp_settings.json")
 
 
@@ -187,6 +189,23 @@ def _validate_wa(d, base):
             new["wd_maxr"] = int(d["wd_maxr"])
     except (TypeError, ValueError):
         raise ValueError("Divergenz: Level, Pivot-Länge und Max-Abstand müssen Zahlen sein")
+    try:
+        if "zl_len" in d:
+            new["zl_len"] = int(d["zl_len"])
+        if "zl_mult" in d:
+            new["zl_mult"] = float(d["zl_mult"])
+    except (TypeError, ValueError):
+        raise ValueError("Zero Lag: Länge und Faktor müssen Zahlen sein")
+    if "zl_entry" in d:
+        if d["zl_entry"] not in ("signal", "trend"):
+            raise ValueError("Zero Lag: Einstieg = Signal (Linien-Kreuzung) oder Trendwechsel")
+        new["zl_entry"] = d["zl_entry"]
+    if "zl_invert" in d:
+        new["zl_invert"] = d["zl_invert"] in (True, "true", "1", 1)
+    if not 2 <= new["zl_len"] <= 500:
+        raise ValueError("Zero Lag: Länge 2 bis 500")
+    if not 0.1 <= new["zl_mult"] <= 10:
+        raise ValueError("Zero Lag: Faktor 0,1 bis 10")
     if "wd_hidden" in d:
         new["wd_hidden"] = d["wd_hidden"] in (True, "true", "1", 1)
     if "wd_line" in d:
@@ -206,8 +225,8 @@ def _validate_wa(d, base):
     if "strat" in d:
         if d["strat"] == "st":   # alte Supertrend-Einstellung -> jetzt Heikin-Ashi-Wechsel
             d = dict(d, strat="ha")
-        if d["strat"] not in ("wa", "ha", "w2", "wx", "wd"):
-            raise ValueError("Strategie muss Wellenanker, Wellenanker 2, Kreuzung zu Kreuzung, Divergenz oder Heikin-Ashi sein")
+        if d["strat"] not in ("wa", "ha", "w2", "wx", "wd", "zl"):
+            raise ValueError("Strategie muss Wellenanker, Wellenanker 2, Kreuzung zu Kreuzung, Divergenz, Zero Lag oder Heikin-Ashi sein")
         new["strat"] = d["strat"]
     if not 2 <= new["n1"] <= 100:
         raise ValueError("Kanal-Länge: 2 bis 100")
@@ -390,8 +409,28 @@ def _wd_series(cs, cfg, pairs=None):
     return wt1, wt2, events
 
 
+def _zl_series(cs, cfg):
+    """Zero Lag Trend (wie zerolag.py / AlgoAlpha): -> (arr, events). Einstieg 'signal' = Schluss kreuzt die Zero-Lag-Linie im Trend,
+    'trend' = Trendwechsel (Band-Ausbruch). zl_invert dreht Long/Short."""
+    from zerolag import zl_build
+    h = [x["h"] for x in cs]
+    l = [x["l"] for x in cs]
+    c = [x["c"] for x in cs]
+    arr = zl_build(h, l, c, {"length": cfg["zl_len"], "mult": cfg["zl_mult"], "invert": bool(cfg["zl_invert"])})
+    up, dn = (arr["flip_up"], arr["flip_dn"]) if cfg["zl_entry"] == "trend" else (arr["buy"], arr["sell"])
+    events = []
+    for i in range(len(c)):
+        if up[i]:
+            events.append({"kind": "long", "idx": i, "flip": i, "ext": False, "strong": False})
+        elif dn[i]:
+            events.append({"kind": "short", "idx": i, "flip": i, "ext": False, "strong": False})
+    return arr, events
+
+
 def _signal_events(cs, cfg):
     """Signale der gewaehlten Strategie (Autotrade nutzt nur diese)."""
+    if cfg["strat"] == "zl":
+        return _zl_series(cs, cfg)[1]
     if cfg["strat"] == "ha":
         return _ha_series(cs)[2]
     if cfg["strat"] in ("w2", "wx"):
@@ -402,6 +441,8 @@ def _signal_events(cs, cfg):
 
 
 def _tf_state(cs, cfg):
+    if cfg["strat"] == "zl":
+        return _zl_series(cs, cfg)[0]["trend"][-1]   # Trendzustand: 1 / -1 / 0 (invertiert siehe zl_invert nur bei Signalen)
     if cfg["strat"] == "ha":
         return _ha_series(cs)[1][-1]
     if cfg["strat"] == "wd":
@@ -626,7 +667,7 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
     wt1, wt2, events = _wa_series(cs, cfg)
     states[tf] = _tf_state(cs, cfg)
     n = len(cs)
-    off = max(0, n - CHART_BARS)
+    off = max(0, n - CHART_VIEW_BARS)
     candles, w1, w2 = [], [], []
     ha = _heikin_ashi(cs) if cfg.get("candles") == "ha" else None
     for i in range(off, n):
@@ -647,7 +688,13 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
         events = _ha_series(cs)[2]   # Marker/Signale = HA-Farbwechsel, die Welle bleibt nur als Anzeige
     elif cfg["strat"] in ("w2", "wx"):
         events = _w2_series(cs, cfg)[2]   # Marker = Level-Durchbruch
-    div_lines = []
+    div_lines, zl_lines = [], []
+    if cfg["strat"] == "zl":
+        zarr, events = _zl_series(cs, cfg)
+        for i in range(off, n):
+            z, v = zarr["zlema"][i], zarr["vol"][i]
+            if z is not None:
+                zl_lines.append({"time": cs[i]["ts"] // 1000, "b": _r(z, 8), "u": None if v is None else _r(z + v, 8), "d": None if v is None else _r(z - v, 8)})
     if cfg["strat"] == "wd":
         pairs = []
         events = _wd_series(cs, cfg, pairs)[2]   # Marker = Divergenz (Bestaetigungs-Kerze)
@@ -661,7 +708,7 @@ def _compute_chart(main_raw, tf, other_raws, cfg):
             markers.append({"time": x["ts"] // 1000, "kind": e["kind"], "strong": bool(e["strong"]),
                             "ext": bool(e["ext"]), "price": x["c"], "live": e["idx"] == n - 1})
     a, b = wt1[-1], wt2[-1]
-    return {"candles": candles, "wt1": w1, "wt2": w2, "vix": vix, "markers": markers, "div_lines": div_lines, "warm": n >= MIN_BARS, "bars": n,
+    return {"candles": candles, "wt1": w1, "wt2": w2, "vix": vix, "markers": markers, "div_lines": div_lines, "warm": n >= MIN_BARS, "bars": n, "zl_lines": zl_lines,
             "wt1v": _r(a, 1), "wt2v": _r(b, 1), "diff": _r(a - b, 1),
             "strat": cfg["strat"]}, states
 
@@ -840,11 +887,11 @@ async def _run_auto(sym):
     if cfg["strat"] in ("w2", "wx"):
         await _run_auto_w2(sym, a, ev, cfg)
         return
-    st_mode = cfg["strat"] in ("ha", "wd")
+    st_mode = cfg["strat"] in ("ha", "wd", "zl")
     kind_ok = st_mode or (a["normal"] and not ev["strong"] and not ev["ext"]) or (a["strong"] and ev["strong"]) or (a["ext"] and ev["ext"])
     if not kind_ok or not a[ev["kind"]]:
         return
-    sig = "DIV" if cfg["strat"] == "wd" else "HA" if st_mode else ("◆" if ev["ext"] else "◉" if ev["strong"] else "●")
+    sig = "DIV" if cfg["strat"] == "wd" else "ZL" if cfg["strat"] == "zl" else "HA" if st_mode else ("◆" if ev["ext"] else "◉" if ev["strong"] else "●")
     st = BOTS[sym]["state"]
     if st.get("position") == ev["kind"]:
         _log(sym, f"{a['tf']} {ev['kind'].capitalize()} {sig} – Position läuft schon in diese Richtung, übersprungen")
@@ -937,7 +984,7 @@ async def handle_scalp_chart(request):
     tf = request.query.get("tf", "1m")
     if sym is None or tf not in TFS:
         return web.json_response({"error": "unknown coin/tf"}, status=400)
-    main_raw, reason = _raw_candles(sym, tf)
+    main_raw, reason = _raw_candles(sym, tf, CHART_VIEW_BARS + WARMUP_BARS)
     if reason:
         return web.json_response({"ok": False, "reason": reason, "tfstates": {}})
     cached = _tfstate_cache.get(sym)
@@ -1179,7 +1226,7 @@ async def _wa_update(b, sym):
     a = AUTO.get(sym)
     if a:
         a["last_ts"] = None   # neue Basislinie: Signale mit den neuen Einstellungen zaehlen erst ab jetzt
-    _log(sym, f"Strategie: {'Wellenanker-Divergenz (' + c['wd_line'].upper() + ', Pivot ' + str(c['wd_pivot']) + ', ' + format(c['wd_os'], 'g') + '/' + format(c['wd_ob'], 'g') + ', max ' + str(c['wd_maxr']) + (', + versteckte' if c['wd_hidden'] else '') + ')' if c['strat'] == 'wd' else 'Heikin-Ashi-Wechsel' if c['strat'] == 'ha' else 'Kreuzung zu Kreuzung' + (', nicht im Minus schließen' if c['w2_profit'] else '') if c['strat'] == 'wx' else 'Wellenanker 2 (Level ±' + format(c['w2_level'], 'g') + ', ' + c['w2_line'] + ', TP Gegenkreuzung' + (', nicht im Minus schließen' if c['w2_profit'] else '') + ')' if c['strat'] == 'w2' else 'Wellenanker'} · Kerzen {c['candles']} · Wellenanker: Kanal {c['n1']}, Durchschnitt {c['n2']}, Zone ±{c['z1']:g}, Quelle {c['src']}")
+    _log(sym, f"Strategie: {'Zero Lag Trend (Länge ' + str(c['zl_len']) + ', Faktor ' + format(c['zl_mult'], 'g') + ', Einstieg ' + c['zl_entry'] + (', invertiert' if c['zl_invert'] else '') + ')' if c['strat'] == 'zl' else ''}{'Wellenanker-Divergenz (' + c['wd_line'].upper() + ', Pivot ' + str(c['wd_pivot']) + ', ' + format(c['wd_os'], 'g') + '/' + format(c['wd_ob'], 'g') + ', max ' + str(c['wd_maxr']) + (', + versteckte' if c['wd_hidden'] else '') + ')' if c['strat'] == 'wd' else 'Heikin-Ashi-Wechsel' if c['strat'] == 'ha' else 'Kreuzung zu Kreuzung' + (', nicht im Minus schließen' if c['w2_profit'] else '') if c['strat'] == 'wx' else 'Wellenanker 2 (Level ±' + format(c['w2_level'], 'g') + ', ' + c['w2_line'] + ', TP Gegenkreuzung' + (', nicht im Minus schließen' if c['w2_profit'] else '') + ')' if c['strat'] == 'w2' else 'Wellenanker'} · Kerzen {c['candles']} · Wellenanker: Kanal {c['n1']}, Durchschnitt {c['n2']}, Zone ±{c['z1']:g}, Quelle {c['src']}")
     return web.json_response({"success": True, "persistent": saved, "wa": dict(c, z3=_z3(c), own=True)})
 
 
@@ -1195,7 +1242,7 @@ SCALP_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#07080b"><meta name="apple-mobile-web-app-capable" content="yes">
 <title>Scalp Dashboard</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
-<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/klinecharts@9.8.10/dist/umd/klinecharts.min.js"></script>
 <style>
 :root{--g:#1fcf6e;--r:#f0354b;--y:#f5b83d;--mut:#7d8696;--bd:#242932}
 *{box-sizing:border-box}
@@ -1218,7 +1265,7 @@ button{font-family:inherit;cursor:pointer}
 .tfbar{display:flex;gap:4px;padding:4px;background:#0d1015;border:1px solid #1f242c;border-radius:12px}
 .tfbar button{min-width:44px;min-height:36px;padding:0 12px;border:0;border-radius:9px;background:transparent;color:var(--mut);font-size:12px;font-weight:600}
 .tfbar button.on{background:#2a303a;color:#fff}
-#chart{height:440px;position:relative}#wachart{height:170px}#vixchart{height:130px}
+#chart{height:760px;position:relative;touch-action:none}
 .cwrap{position:relative;border-top:1px solid #1f242c;border-bottom:1px solid #1f242c}
 #cmsg{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:20px;color:var(--mut);font-size:13px;background:rgba(18,21,27,.85);z-index:5}
 .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
@@ -1276,7 +1323,7 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
  .main{gap:10px}
  .left,.right{flex:1 1 100%;max-width:100%}
  .card{padding:12px;border-radius:14px;gap:10px}
- #chart{height:min(46vh,380px)}#wachart{height:130px}#vixchart{height:100px}
+ #chart{height:min(78vh,620px)}
  .tfbar{width:100%;overflow-x:auto}.tfbar button{flex:1 0 auto;min-width:44px;min-height:40px;padding:0 10px}
  .inp,.wafld .inp,select.inp{font-size:16px;min-height:44px}
  .wafld{flex:1 1 44%!important;min-width:0}
@@ -1312,7 +1359,11 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
    </div>
    <details id="cfgbox" class="cfgbox"><summary>⚙ Einstellungen · Strategie &amp; Wellenanker</summary>
    <div class="row" style="gap:8px;padding-bottom:6px">
-    <label class="wafld" style="flex:0 0 210px"><span class="lab">Strategie (Signale)</span><select class="inp" id="st-strat"><option value="wa">Wellenanker</option><option value="w2">Wellenanker 2 (Level)</option><option value="wx">Kreuzung zu Kreuzung</option><option value="wd">Wellenanker Divergenz</option><option value="ha">Heikin-Ashi Wechsel</option></select></label>
+    <label class="wafld" style="flex:0 0 210px"><span class="lab">Strategie (Signale)</span><select class="inp" id="st-strat"><option value="wa">Wellenanker</option><option value="w2">Wellenanker 2 (Level)</option><option value="wx">Kreuzung zu Kreuzung</option><option value="wd">Wellenanker Divergenz</option><option value="zl">Zero Lag Trend</option><option value="ha">Heikin-Ashi Wechsel</option></select></label>
+    <label class="wafld zlf" style="flex:0 0 120px"><span class="lab">ZL Länge</span><input class="inp" id="zl-len" type="number" step="1" min="2" max="500"></label>
+    <label class="wafld zlf" style="flex:0 0 120px"><span class="lab">ZL Band-Faktor</span><input class="inp" id="zl-mult" type="number" step="0.1" min="0.1" max="10"></label>
+    <label class="wafld zlf" style="flex:0 0 190px"><span class="lab">ZL Einstieg</span><select class="inp" id="zl-entry"><option value="signal">Linien-Kreuzung (Pfeil)</option><option value="trend">Trendwechsel (Band)</option></select></label>
+    <label class="wafld zlf" style="flex:0 0 150px"><span class="lab">ZL Signale drehen</span><select class="inp" id="zl-invert"><option value="false">Aus</option><option value="true">An</option></select></label>
     <label class="wafld w2f w2lf" style="flex:0 0 130px"><span class="lab">Level ± (0–30)</span><input class="inp" id="w2-level" type="number" step="0.5" min="0" max="30"></label>
     <label class="wafld w2f w2lf" style="flex:0 0 150px"><span class="lab">Linie</span><select class="inp" id="w2-line"><option value="signal">Signallinie</option><option value="wave">Welle</option><option value="both">Beide</option></select></label>
     <label class="wafld w2f" style="flex:0 0 200px"><span class="lab">Nicht im Minus schließen</span><select class="inp" id="w2-profit"><option value="false">Aus</option><option value="true">An</option></select></label>
@@ -1336,12 +1387,10 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
     <div class="row" style="gap:10px;align-items:baseline"><b style="font-size:13px">Wellenanker</b><span class="lab" id="wazones">WaveTrend</span></div>
     <div class="row mono" style="gap:14px;font-size:12px;font-weight:700"><span id="wt1v" style="color:#7FB5F0">WT1 –</span><span id="wt2v" style="color:#2F7BFF">WT2 –</span><span id="wdv" style="color:#aab2c0">Δ –</span></div>
    </div>
-   <div class="cwrap"><div id="wachart"></div></div>
    <div class="row" style="justify-content:space-between;padding-top:6px">
     <div class="row" style="gap:10px;align-items:baseline"><b style="font-size:13px">Williams Vix Fix</b><span class="lab">grün = Panik-Extrem (Bollinger oben / 85%-Perzentil)</span></div>
     <span id="vixv" class="mono" style="font-size:12px;font-weight:700;color:#aab2c0">–</span>
    </div>
-   <div class="cwrap"><div id="vixchart"></div></div>
    <div class="row small" style="gap:16px"><span>▲▼ Long/Short-Signal</span><span id="leg1">◉ stark (RSI + Geldfluss)</span><span id="leg2">◆ extrem (±75)</span><span>TP/SL-Linie mit Finger/Maus ziehen</span></div>
    <div class="small">Chart = Binance-Kerzen (HYPE: Lighter-Kerzen). Orders, TP/SL und Kurs oben = Lighter. TP/SL überwacht der Bot (Kurs-Check jede Sekunde) – es liegen keine Stop-Orders auf der Börse.</div>
   </div>
@@ -1413,7 +1462,7 @@ body.laying .right>.card,body.laying .left{outline:1px dashed #3b82f6}
 </div>
 <div id="toast"></div>
 <script>
-const G='#1fcf6e',R='#f0354b',TFS=['10s','15s','30s','1m','5m','15m'];
+const G='#1fcf6e',R='#f0354b',TFS=['5s','10s','15s','30s','1m','5m','15m'];
 const $=id=>document.getElementById(id);
 function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
 
@@ -1452,46 +1501,96 @@ function sg(v){return(v>=0?'+$':'−$')+Math.abs(v).toFixed(2)}
 function toast(m,bad){const t=$('toast');t.textContent=m;t.className=bad?'bad':'';t.style.display='block';clearTimeout(toast._t);toast._t=setTimeout(()=>t.style.display='none',4500)}
 async function api(path,body){const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:undefined);let j={};try{j=await r.json()}catch(e){}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
 
-/* ---------- Charts ---------- */
-const LW=window.LightweightCharts;
-const base={layout:{background:{type:'solid',color:'#12151b'},textColor:'#7d8696',fontFamily:"'JetBrains Mono',monospace",fontSize:10},
- grid:{vertLines:{color:'rgba(255,255,255,0.04)'},horzLines:{color:'rgba(255,255,255,0.045)'}},
- rightPriceScale:{borderColor:'#1f242c',minimumWidth:76},timeScale:{borderColor:'#1f242c',timeVisible:true,secondsVisible:true,rightOffset:6},autoSize:true};
-const pc=LW.createChart($('chart'),base),wc=LW.createChart($('wachart'),Object.assign({},base,{handleScroll:false,handleScale:false})),vc=LW.createChart($('vixchart'),Object.assign({},base,{handleScroll:false,handleScale:false}));
-const candle=pc.addCandlestickSeries({upColor:G,downColor:R,borderVisible:false,wickUpColor:G,wickDownColor:R,lastValueVisible:true,priceLineVisible:true});
-const wt1s=wc.addLineSeries({color:'#7FB5F0',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
-const wt2s=wc.addLineSeries({color:'#2F7BFF',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
-const vixs=vc.addHistogramSeries({priceLineVisible:false,lastValueVisible:false,priceFormat:{type:'price',precision:2,minMove:0.01}});
-let zoneLines=[];
+/* ---------- Chart (KLineChart): Preis + Wellenanker + Williams Vix Fix in EINEM Chart ---------- */
+const KL=window.klinecharts;
+const TZ=(()=>{try{return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){return 'UTC'}})();
+let WTD={},VXD={},CND={},lastTsMs=0,mkIds=new Set(),dvSig='',zonesSpec=null,zonesOn=false;
+const dim='rgba(255,255,255,.045)';
+KL.registerIndicator({name:'WA_WT',shortName:'Wellenanker',precision:2,calcParams:[],
+ figures:[{key:'wt1',title:'WT1: ',type:'line'},{key:'wt2',title:'WT2: ',type:'line'}],
+ calc:list=>list.map(k=>{const w=WTD[k.timestamp];return w?{wt1:w[0],wt2:w[1]}:{}})});
+KL.registerIndicator({name:'WA_VIX',shortName:'Williams Vix Fix',precision:2,calcParams:[],
+ figures:[{key:'v',title:'VIX: ',type:'bar',baseValue:0,styles:d=>{const c=d&&d.current&&d.current.indicatorData;return{color:c&&c.hot?G:'#59606d'}}}],
+ calc:list=>list.map(k=>{const v=VXD[k.timestamp];return v?{v:v[0],hot:v[1]}:{}})});
+let ZLD={};
+KL.registerIndicator({name:'ZL',shortName:'Zero Lag',precision:4,calcParams:[],
+ figures:[{key:'b',title:'ZL: ',type:'line'},{key:'u',title:'oben: ',type:'line'},{key:'d',title:'unten: ',type:'line'}],
+ calc:list=>list.map(k=>{const z=ZLD[k.timestamp];return z?{b:z[0],u:z[1],d:z[2]}:{}})});
+KL.registerOverlay({name:'lvl',totalStep:2,lock:true,needDefaultPointFigure:false,needDefaultXAxisFigure:false,needDefaultYAxisFigure:true,
+ createPointFigures:({coordinates,bounding,overlay})=>{
+  const c=coordinates[0],e=overlay.extendData||{};if(!c)return[];
+  const f=[{type:'line',attrs:{coordinates:[{x:0,y:c.y},{x:bounding.width,y:c.y}]},styles:{style:'dashed',dashedValue:[5,4],color:e.color||'#888',size:1},ignoreEvent:true}];
+  if(e.title)f.push({type:'text',attrs:{x:bounding.width-80,y:c.y-3,text:e.title,align:'right',baseline:'bottom'},styles:{style:'fill',color:e.color||'#888',size:11,weight:'bold',backgroundColor:'transparent',borderSize:0,paddingLeft:0,paddingRight:0,paddingTop:0,paddingBottom:0},ignoreEvent:true});
+  return f}});
+KL.registerOverlay({name:'sigMark',totalStep:2,lock:true,needDefaultPointFigure:false,needDefaultXAxisFigure:false,needDefaultYAxisFigure:false,
+ createPointFigures:({coordinates,overlay})=>{
+  const c=coordinates[0],e=overlay.extendData||{};if(!c)return[];const l=e.kind==='long';
+  return[{type:'text',attrs:{x:c.x,y:c.y+(l?15:-15),text:(l?'▲':'▼')+(e.ext?'◆':e.strong?'◉':''),align:'center',baseline:'middle'},styles:{style:'fill',color:l?G:R,size:13,weight:'bold',backgroundColor:'transparent',borderSize:0,paddingLeft:0,paddingRight:0,paddingTop:0,paddingBottom:0},ignoreEvent:true}]}});
+KL.registerOverlay({name:'sigDot',totalStep:2,lock:true,needDefaultPointFigure:false,needDefaultXAxisFigure:false,needDefaultYAxisFigure:false,
+ createPointFigures:({coordinates,overlay})=>{
+  const c=coordinates[0],e=overlay.extendData||{};if(!c)return[];
+  return[{type:'circle',attrs:{x:c.x,y:c.y,r:e.strong?5:3},styles:{style:'fill',color:e.kind==='long'?G:R},ignoreEvent:true}]}});
+KL.registerOverlay({name:'zoneLine',totalStep:2,lock:true,needDefaultPointFigure:false,needDefaultXAxisFigure:false,needDefaultYAxisFigure:true,
+ createPointFigures:({coordinates,bounding,overlay})=>{
+  const c=coordinates[0],e=overlay.extendData||{};if(!c)return[];
+  return[{type:'line',attrs:{coordinates:[{x:0,y:c.y},{x:bounding.width,y:c.y}]},styles:{style:e.dash?'dashed':'solid',dashedValue:[4,4],color:e.color,size:1},ignoreEvent:true}]}});
+const chartEl=$('chart');
+chartEl.style.background='#12151b';
+const kc=KL.init(chartEl,{styles:{
+ grid:{horizontal:{color:dim},vertical:{color:'rgba(255,255,255,0.04)'}},
+ candle:{bar:{upColor:G,downColor:R,noChangeColor:'#888',upBorderColor:G,downBorderColor:R,noChangeBorderColor:'#888',upWickColor:G,downWickColor:R,noChangeWickColor:'#888'},
+  priceMark:{last:{upColor:G,downColor:R,noChangeColor:'#888'}},tooltip:{showRule:'always'}},
+ indicator:{lastValueMark:{show:false}},
+ xAxis:{axisLine:{color:'#1f242c'},tickLine:{color:'#1f242c'},tickText:{color:'#7d8696',size:10}},
+ yAxis:{axisLine:{color:'#1f242c'},tickLine:{color:'#1f242c'},tickText:{color:'#7d8696',size:10}},
+ separator:{color:'#1f242c',activeBackgroundColor:'rgba(59,130,246,.25)'},
+ crosshair:{horizontal:{line:{color:'#59606d'}},vertical:{line:{color:'#59606d'}}}}});
+kc.setTimezone(TZ);kc.setOffsetRightDistance(70);kc.setPriceVolumePrecision(2,0);
+kc.createIndicator({name:'WA_WT',styles:{lines:[{color:'#7FB5F0',size:2,style:'solid',smooth:false,dashedValue:[2,2]},{color:'#2F7BFF',size:2,style:'solid',smooth:false,dashedValue:[2,2]}]}},false,{id:'wa_pane',height:150});
+kc.createIndicator({name:'ZL',visible:false,styles:{lines:[{color:'#f5b83d',size:2,style:'solid',smooth:false,dashedValue:[2,2]},{color:'rgba(31,207,110,.7)',size:1,style:'dashed',smooth:false,dashedValue:[4,4]},{color:'rgba(240,53,75,.7)',size:1,style:'dashed',smooth:false,dashedValue:[4,4]}]}},true,{id:'candle_pane'});
+kc.createIndicator('WA_VIX',false,{id:'vix_pane',height:100});
 function setZones(z1,z3,lvl){
- zoneLines.forEach(l=>wt2s.removePriceLine(l));zoneLines=[];
- if(lvl){[[z1,'rgba(240,53,75,.8)',2],[0,'#3a4150',0],[-z1,'rgba(31,207,110,.8)',2]].forEach(a=>zoneLines.push(wt2s.createPriceLine({price:a[0],color:a[1],lineWidth:1,lineStyle:a[2],axisLabelVisible:true,title:''})));$('wazones').textContent='WaveTrend · Level ±'+z1;return}
- [[z3,'rgba(255,255,255,.25)',3],[z1,'rgba(240,53,75,.6)',2],[0,'#3a4150',0],[-z1,'rgba(31,207,110,.6)',2],[-z3,'rgba(255,255,255,.25)',3]].forEach(a=>zoneLines.push(wt2s.createPriceLine({price:a[0],color:a[1],lineWidth:1,lineStyle:a[2],axisLabelVisible:true,title:''})));
- $('wazones').textContent='WaveTrend · Zonen ±'+z1+' / ±'+z3;
+ zonesSpec=lvl?[[z1,'rgba(240,53,75,.8)',1],[0,'#3a4150',0],[-z1,'rgba(31,207,110,.8)',1]]:[[z3,'rgba(255,255,255,.3)',1],[z1,'rgba(240,53,75,.6)',1],[0,'#3a4150',0],[-z1,'rgba(31,207,110,.6)',1],[-z3,'rgba(255,255,255,.3)',1]];
+ zonesOn=false;
+ $('wazones').textContent=lvl?'WaveTrend · Level ±'+z1:'WaveTrend · Zonen ±'+z1+' / ±'+z3;
+}
+function drawZones(){
+ if(zonesOn||!zonesSpec||!lastTsMs)return;zonesOn=true;
+ try{kc.removeOverlay({groupId:'zones'})}catch(e){}
+ zonesSpec.forEach(a=>kc.createOverlay({name:'zoneLine',groupId:'zones',lock:true,points:[{timestamp:lastTsMs,value:a[0]}],extendData:{color:a[1],dash:a[2]}},'wa_pane'));
 }
 setZones(36,75);
-pc.timeScale().subscribeVisibleLogicalRangeChange(r=>{if(r)try{wc.timeScale().setVisibleLogicalRange(r);vc.timeScale().setVisibleLogicalRange(r)}catch(e){}});
+function resetChart(){
+ try{kc.removeOverlay({groupId:'mk'});kc.removeOverlay({groupId:'dv'})}catch(e){}
+ mkIds=new Set();dvSig='';WTD={};VXD={};CND={};ZLD={};lastTsMs=0;zonesOn=false;
+ kc.applyNewData([]);
+}
 
 /* ---------- Linien (Einstieg / TP / SL) + Ziehen ---------- */
 const lines={entry:null,tp:null,sl:null},vals={tp:null,sl:null};let drag=null;
 function setLine(kind,price,opts){
- if(price==null){if(lines[kind]){candle.removePriceLine(lines[kind]);lines[kind]=null}return}
- if(lines[kind])lines[kind].applyOptions(Object.assign({price},opts));
- else lines[kind]=candle.createPriceLine(Object.assign({price,lineWidth:1,lineStyle:2,axisLabelVisible:true},opts));
+ const id='L_'+kind;
+ if(price==null){if(lines[kind]){try{kc.removeOverlay({id})}catch(e){}lines[kind]=null}return}
+ const pts=[{timestamp:lastTsMs||Date.now(),value:price}],ext={color:opts.color,title:opts.title||''};
+ if(lines[kind])kc.overrideOverlay({id,points:pts,extendData:ext});
+ else{kc.createOverlay({id,name:'lvl',lock:true,zLevel:5,points:pts,extendData:ext},'candle_pane');lines[kind]=id}
 }
 function pnlAt(p){const pos=ST&&ST.coin&&ST.coin.position;if(!pos||!pos.avg||!pos.size)return null;return(pos.side==='long'?p-pos.avg:pos.avg-p)*pos.size}
 function lineTitle(kind,p){const v=pnlAt(p);return(kind==='tp'?'TP ':'SL ')+(v==null?'':sg(v))}
-function nearLine(y){for(const k of['tp','sl']){if(lines[k]&&vals[k]!=null){const yy=candle.priceToCoordinate(vals[k]);if(yy!=null&&Math.abs(yy-y)<=9)return k}}return null}
-const chartEl=$('chart');
-function yOf(ev){return ev.clientY-chartEl.getBoundingClientRect().top}
-['mousedown','touchstart'].forEach(n=>chartEl.addEventListener(n,ev=>{const t=ev.touches?ev.touches[0]:ev;if(nearLine(t.clientY-chartEl.getBoundingClientRect().top)){ev.stopPropagation()}},true));
-chartEl.addEventListener('pointerdown',ev=>{const k=nearLine(yOf(ev));if(!k)return;drag=k;ev.stopPropagation();ev.preventDefault();pc.applyOptions({handleScroll:false,handleScale:false});try{chartEl.setPointerCapture(ev.pointerId)}catch(e){}},true);
+function pxY(v){try{const r=kc.convertToPixel({value:v},{paneId:'candle_pane'});return r&&r.y!=null?r.y:null}catch(e){return null}}
+function nearLine(y){for(const k of['tp','sl']){if(lines[k]&&vals[k]!=null){const yy=pxY(vals[k]);if(yy!=null&&Math.abs(yy-y)<=10)return k}}return null}
+function yOf(ev){const t=ev.touches&&ev.touches[0]?ev.touches[0]:ev;return t.clientY-chartEl.getBoundingClientRect().top}
+['mousedown','touchstart','pointerdown'].forEach(n=>chartEl.addEventListener(n,ev=>{
+ const k=nearLine(yOf(ev));if(!k)return;
+ if(n==='pointerdown'){drag=k;try{chartEl.setPointerCapture(ev.pointerId)}catch(e){}}
+ ev.stopPropagation();if(ev.cancelable)ev.preventDefault()},{capture:true,passive:false}));
 chartEl.addEventListener('pointermove',ev=>{
  if(!drag){chartEl.style.cursor=nearLine(yOf(ev))?'ns-resize':'';return}
- const p=candle.coordinateToPrice(yOf(ev));if(p==null||p<=0)return;
- vals[drag]=p;setLine(drag,p,{title:lineTitle(drag,p)});$(drag+'-in').value=p.toFixed(digits(p));updTpslPnl();
+ let p=null;try{const r=kc.convertFromPixel({y:yOf(ev)},{paneId:'candle_pane'});p=r&&r.value}catch(e){}
+ if(p==null||!(p>0))return;
+ vals[drag]=p;setLine(drag,p,{color:drag==='tp'?G:R,title:lineTitle(drag,p)});$(drag+'-in').value=p.toFixed(digits(p));updTpslPnl();
 });
-async function endDrag(ev){if(!drag)return;drag=null;pc.applyOptions({handleScroll:true,handleScale:true});await saveTpsl()}
+async function endDrag(ev){if(!drag)return;drag=null;await saveTpsl()}
 chartEl.addEventListener('pointerup',endDrag);chartEl.addEventListener('pointercancel',endDrag);
 
 function updTpslPnl(){
@@ -1510,45 +1609,54 @@ document.querySelectorAll('.q button[data-k]').forEach(b=>b.addEventListener('cl
  vals[b.dataset.k]=b.dataset.k==='tp'?pos.avg+d*off:pos.avg-d*off;await saveTpsl()}));
 
 /* ---------- Chart-Daten ---------- */
-let divSeries=[],divSig='';
-function setDivLines(list){const sig=JSON.stringify(list)+tzoff;if(sig===divSig)return;divSig=sig;
- divSeries.forEach(([ch,se])=>{try{ch.removeSeries(se)}catch(e){}});divSeries=[];
- list.forEach(dv=>{const opt={color:dv.kind==='long'?G:R,lineWidth:2,lineStyle:dv.hidden?2:0,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false};
-  const a=pc.addLineSeries(opt);a.setData([{time:dv.t1+tzoff,value:dv.p1},{time:dv.t2+tzoff,value:dv.p2}]);divSeries.push([pc,a]);
-  const b=wc.addLineSeries(opt);b.setData([{time:dv.t1+tzoff,value:dv.w1},{time:dv.t2+tzoff,value:dv.w2}]);divSeries.push([wc,b])})}
-function shift(arr){return arr.map(x=>Object.assign({},x,{time:x.time+tzoff}))}
+function setDivLines(list){const sig=JSON.stringify(list);if(sig===dvSig)return;dvSig=sig;
+ try{kc.removeOverlay({groupId:'dv'})}catch(e){}
+ list.forEach(dv=>{const st={line:{color:dv.kind==='long'?G:R,size:2,style:dv.hidden?'dashed':'solid',dashedValue:[4,4]}};
+  const base={name:'segment',groupId:'dv',lock:true,needDefaultPointFigure:false,needDefaultXAxisFigure:false,needDefaultYAxisFigure:false,styles:st};
+  kc.createOverlay(Object.assign({points:[{timestamp:dv.t1*1000,value:dv.p1},{timestamp:dv.t2*1000,value:dv.p2}]},base),'candle_pane');
+  kc.createOverlay(Object.assign({points:[{timestamp:dv.t1*1000,value:dv.w1},{timestamp:dv.t2*1000,value:dv.w2}]},base),'wa_pane')})}
+function syncMarkers(list,strat){
+ const want=new Map();
+ list.forEach(m=>{const c=CND[m.time*1000];const ts=m.time*1000,l=m.kind==='long';
+  want.set('m|'+ts+'|'+m.kind+'|'+(m.ext?2:m.strong?1:0),{name:'sigMark',pane:'candle_pane',ts,v:c?(l?c.low:c.high):m.price,ext:m});
+  const w=WTD[ts];if(strat!=='ha'&&strat!=='zl'&&w)want.set('d|'+ts+'|'+m.kind+'|'+(m.strong?1:0),{name:'sigDot',pane:'wa_pane',ts,v:w[1],ext:m})});
+ mkIds.forEach(id=>{if(!want.has(id)){try{kc.removeOverlay({id})}catch(e){}mkIds.delete(id)}});
+ want.forEach((o,id)=>{if(mkIds.has(id))return;
+  kc.createOverlay({id,name:o.name,groupId:'mk',lock:true,points:[{timestamp:o.ts,value:o.v}],extendData:{kind:o.ext.kind,strong:o.ext.strong,ext:o.ext.ext}},o.pane);mkIds.add(id)})}
 function applyChart(d,key){
  renderTfStates(d.tfstates||{});renderTrend(d.trend||{});renderMtf(d.mtf);
  if(d.wa){
-  const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.candles+'|'+d.wa.w2_level+'|'+d.wa.w2_line+'|'+d.wa.w2_profit+'|'+d.wa.wd_os+'|'+d.wa.wd_ob+'|'+d.wa.wd_pivot+'|'+d.wa.wd_maxr+'|'+d.wa.wd_line+'|'+d.wa.wd_hidden;
+  const k=d.wa.n1+'|'+d.wa.n2+'|'+d.wa.z1+'|'+d.wa.src+'|'+d.wa.strat+'|'+d.wa.candles+'|'+d.wa.w2_level+'|'+d.wa.w2_line+'|'+d.wa.w2_profit+'|'+d.wa.wd_os+'|'+d.wa.wd_ob+'|'+d.wa.wd_pivot+'|'+d.wa.wd_maxr+'|'+d.wa.wd_line+'|'+d.wa.wd_hidden+'|'+d.wa.zl_len+'|'+d.wa.zl_mult+'|'+d.wa.zl_entry+'|'+d.wa.zl_invert;
   if(k!==waKey){if(waKey!=='')loadedKey=null;waKey=k;applyMode(d.wa.strat);if(d.wa.strat==='w2')setZones(d.wa.w2_level,d.wa.w2_level,true);else setZones(d.wa.z1,d.wa.z3);if(!waBusy())fillWa(d.wa)}
  }
  const msg=$('cmsg');
  if(!d.ok){msg.textContent=d.reason||'keine Daten';msg.style.display='flex';return}
  msg.style.display='none';
- const cd=shift(d.candles),w1=shift(d.wt1),w2=shift(d.wt2),vx=shift(d.vix||[]).map(p=>({time:p.time,value:p.value,color:p.hot?'#1fcf6e':'#59606d'}));
- if(vx.length){const l=d.vix[d.vix.length-1];$('vixv').textContent=l.value.toFixed(2)+(l.hot?' · PANIK':'');$('vixv').style.color=l.hot?G:'#aab2c0'}
- if(loadedKey!==key){
-  const p=cd.length?cd[cd.length-1].close:1,dg=digits(p);
-  candle.applyOptions({priceFormat:{type:'price',precision:dg,minMove:Math.pow(10,-dg)}});
-  candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);vixs.setData(vx);
-  const n=cd.length;pc.timeScale().setVisibleLogicalRange({from:Math.max(0,n-110),to:n+6});
-  loadedKey=key;lastT=cd.length?cd[cd.length-1].time:0;
- }else if(cd.length){
-  /* nur die letzte Kerze aktualisieren bzw. neue anhaengen (aeltere Zeiten wuerde die Bibliothek ablehnen) */
-  const upd=(s,arr)=>{for(const p of arr){if(p.time>=lastT)s.update(p)}};
-  try{upd(candle,cd);upd(wt1s,w1);upd(wt2s,w2);upd(vixs,vx)}
-  catch(e){candle.setData(cd);wt1s.setData(w1);wt2s.setData(w2);vixs.setData(vx);}
-  lastT=cd[cd.length-1].time;
+ const cd=d.candles.map(c=>({timestamp:c.time*1000,open:c.open,high:c.high,low:c.low,close:c.close,volume:0}));
+ if(!cd.length)return;
+ if(d.vix&&d.vix.length){const l=d.vix[d.vix.length-1];$('vixv').textContent=l.value.toFixed(2)+(l.hot?' · PANIK':'');$('vixv').style.color=l.hot?G:'#aab2c0'}
+ const full=loadedKey!==key||cd[0].timestamp>lastTsMs;
+ if(full){resetChart()}
+ cd.forEach(c=>{CND[c.timestamp]=c});
+ d.wt1.forEach((p,i)=>{const q=d.wt2[i];if(p.value!=null&&q&&q.value!=null)WTD[p.time*1000]=[p.value,q.value]});
+ (d.vix||[]).forEach(p=>{VXD[p.time*1000]=[p.value,!!p.hot]});
+ (d.zl_lines||[]).forEach(p=>{ZLD[p.time*1000]=[p.b,p.u,p.d]});
+ if(full){
+  const dg=digits(cd[cd.length-1].close);kc.setPriceVolumePrecision(dg,0);
+  kc.applyNewData(cd);loadedKey=key;
+ }else{
+  cd.forEach(c=>{if(c.timestamp>=lastTsMs)kc.updateData(c)});
+  kc.overrideIndicator({name:'WA_WT'});kc.overrideIndicator({name:'WA_VIX'});kc.overrideIndicator({name:'ZL'});
  }
+ lastTsMs=cd[cd.length-1].timestamp;
+ try{kc.overrideIndicator({name:'ZL',visible:d.strat==='zl'},'candle_pane')}catch(e){}
+ drawZones();
  setDivLines(d.div_lines||[]);
- const ms=d.markers.map(m=>({time:m.time+tzoff,pos:m.kind==='long'?'belowBar':'aboveBar',color:m.kind==='long'?G:R,shape:m.kind==='long'?'arrowUp':'arrowDown',text:m.ext?'◆':m.strong?'◉':''}));
- candle.setMarkers(ms.map(m=>({time:m.time,position:m.pos,color:m.color,shape:m.shape,text:m.text})));
- wt2s.setMarkers(d.strat==='ha'?[]:d.markers.map(m=>({time:m.time+tzoff,position:'inBar',color:m.kind==='long'?G:R,shape:m.ext?'square':'circle',size:m.strong?2:1})));
+ syncMarkers(d.markers||[],d.strat);
  $('wt1v').textContent='WT1 '+(d.wt1v>0?'+':'')+d.wt1v;$('wt2v').textContent='WT2 '+(d.wt2v>0?'+':'')+d.wt2v;$('wdv').textContent='Δ '+(d.diff>0?'+':'')+d.diff+(d.warm?'':'  ⚠ nur '+d.bars+' Kerzen Historie – Indikator noch ungenau');
  const f=d.markers.slice(-5).reverse();
  $('feed').innerHTML=f.length?f.map(m=>{const l=m.kind==='long',t=new Date(m.time*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  return '<div class="feed"><span class="mono" style="color:var(--mut)">'+t+' · '+d.tf+'</span><span class="pill '+(l?'g':'r')+'" style="padding:3px 10px">'+(l?'Long':'Short')+' '+(d.strat==='ha'?'HA':d.strat==='wd'?'DIV':m.ext?'◆':m.strong?'◉':'●')+'</span><span class="mono" style="color:#cfd5e0">'+fmtP(m.price)+'</span></div>'}).join(''):'<div class="small">Noch keine Signale im sichtbaren Bereich.</div>';
+  return '<div class="feed"><span class="mono" style="color:var(--mut)">'+t+' · '+d.tf+'</span><span class="pill '+(l?'g':'r')+'" style="padding:3px 10px">'+(l?'Long':'Short')+' '+(d.strat==='ha'?'HA':d.strat==='zl'?'ZL':d.strat==='wd'?'DIV':m.ext?'◆':m.strong?'◉':'●')+'</span><span class="mono" style="color:#cfd5e0">'+fmtP(m.price)+'</span></div>'}).join(''):'<div class="small">Noch keine Signale im sichtbaren Bereich.</div>';
 }
 function renderTfStates(s){
  $('tfs').innerHTML=TFS.map(t=>{const v=s[t];const txt=v===undefined||v===null?'…':v===1?'LONG':v===-1?'SHORT':'ABWARTEN';const c=v===1?G:v===-1?R:'#7d8696';
@@ -1645,12 +1753,12 @@ async function pollStatusOnce(){
 async function pollStatus(){await pollStatusOnce();setTimeout(pollStatus,1000)}
 
 /* ---------- Wellenanker-Einstellungen ---------- */
-const WA_IDS=['wd-os','wd-ob','wd-pivot','wd-maxr','wd-line','wd-hidden','wa-n1','wa-n2','wa-z1','wa-src','st-strat','st-candles','w2-level','w2-line','w2-profit'];
-function applyMode(s){const st=s==='ha'||s==='w2'||s==='wx'||s==='wd';document.querySelectorAll('.wdf').forEach(e=>e.style.display=s==='wd'?'':'none');document.querySelectorAll('.w2f').forEach(e=>e.style.display=(s==='w2'||s==='wx')?'':'none');document.querySelectorAll('.w2lf').forEach(e=>{if(s==='wx')e.style.display='none'});document.querySelectorAll('.zonef').forEach(e=>e.style.display=(s==='w2'||s==='wx'||s==='wd')?'none':'');$('sigrow').style.display=st?'none':'';$('siglab').textContent=s==='wd'?'Einstieg bei Wellenanker-Divergenz (Bestätigungs-Kerze): Long = Kurs tiefer, Welle höher · Short = Kurs höher, Welle tiefer':s==='ha'?'Einstieg bei Heikin-Ashi-Farbwechsel (grün = Long, rot = Short)':s==='w2'?'Einstieg bei Level-Durchbruch · TP bei Gegenkreuzung der Linien':s==='wx'?'Jede Kreuzung der beiden Linien = Wechsel (Long ↔ Short), egal wo':'Einstieg bei Signal';['leg1','leg2'].forEach(i=>$(i).style.display=st?'none':'')}
+const WA_IDS=['wd-os','wd-ob','wd-pivot','wd-maxr','wd-line','wd-hidden','wa-n1','wa-n2','wa-z1','wa-src','zl-len','zl-mult','zl-entry','zl-invert','st-strat','st-candles','w2-level','w2-line','w2-profit'];
+function applyMode(s){const st=s==='ha'||s==='w2'||s==='wx'||s==='wd'||s==='zl';document.querySelectorAll('.zlf').forEach(e=>e.style.display=s==='zl'?'':'none');document.querySelectorAll('.wdf').forEach(e=>e.style.display=s==='wd'?'':'none');document.querySelectorAll('.w2f').forEach(e=>e.style.display=(s==='w2'||s==='wx')?'':'none');document.querySelectorAll('.w2lf').forEach(e=>{if(s==='wx')e.style.display='none'});document.querySelectorAll('.zonef').forEach(e=>e.style.display=(s==='w2'||s==='wx'||s==='wd'||s==='zl')?'none':'');$('sigrow').style.display=st?'none':'';$('siglab').textContent=s==='zl'?'Einstieg bei Zero Lag Trend (Linien-Kreuzung im Trend bzw. Trendwechsel, Einstellung oben)':s==='wd'?'Einstieg bei Wellenanker-Divergenz (Bestätigungs-Kerze): Long = Kurs tiefer, Welle höher · Short = Kurs höher, Welle tiefer':s==='ha'?'Einstieg bei Heikin-Ashi-Farbwechsel (grün = Long, rot = Short)':s==='w2'?'Einstieg bei Level-Durchbruch · TP bei Gegenkreuzung der Linien':s==='wx'?'Jede Kreuzung der beiden Linien = Wechsel (Long ↔ Short), egal wo':'Einstieg bei Signal';['leg1','leg2'].forEach(i=>$(i).style.display=st?'none':'')}
 function waBusy(){return WA_IDS.some(i=>document.activeElement===$(i))}
-function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src;$('st-strat').value=w.strat||'wa';$('st-candles').value=w.candles||'normal';$('w2-level').value=w.w2_level;$('w2-line').value=w.w2_line||'signal';$('w2-profit').value=String(!!w.w2_profit);$('wd-os').value=w.wd_os;$('wd-ob').value=w.wd_ob;$('wd-pivot').value=w.wd_pivot;$('wd-maxr').value=w.wd_maxr;$('wd-line').value=w.wd_line||'wt2';$('wd-hidden').value=String(!!w.wd_hidden)}
+function fillWa(w){$('wa-n1').value=w.n1;$('wa-n2').value=w.n2;$('wa-z1').value=w.z1;$('wa-src').value=w.src;$('st-strat').value=w.strat||'wa';$('st-candles').value=w.candles||'normal';$('w2-level').value=w.w2_level;$('w2-line').value=w.w2_line||'signal';$('w2-profit').value=String(!!w.w2_profit);$('wd-os').value=w.wd_os;$('wd-ob').value=w.wd_ob;$('wd-pivot').value=w.wd_pivot;$('wd-maxr').value=w.wd_maxr;$('wd-line').value=w.wd_line||'wt2';$('wd-hidden').value=String(!!w.wd_hidden);$('zl-len').value=w.zl_len;$('zl-mult').value=w.zl_mult;$('zl-entry').value=w.zl_entry||'signal';$('zl-invert').value=String(!!w.zl_invert)}
 async function saveWa(){
- const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value,strat:$('st-strat').value,candles:$('st-candles').value,w2_level:String($('w2-level').value).replace(',','.'),w2_line:$('w2-line').value,w2_profit:$('w2-profit').value,wd_os:String($('wd-os').value).replace(',','.'),wd_ob:String($('wd-ob').value).replace(',','.'),wd_pivot:$('wd-pivot').value,wd_maxr:$('wd-maxr').value,wd_line:$('wd-line').value,wd_hidden:$('wd-hidden').value};
+ const body={n1:$('wa-n1').value,n2:$('wa-n2').value,z1:String($('wa-z1').value).replace(',','.'),src:$('wa-src').value,strat:$('st-strat').value,candles:$('st-candles').value,w2_level:String($('w2-level').value).replace(',','.'),w2_line:$('w2-line').value,w2_profit:$('w2-profit').value,wd_os:String($('wd-os').value).replace(',','.'),wd_ob:String($('wd-ob').value).replace(',','.'),wd_pivot:$('wd-pivot').value,wd_maxr:$('wd-maxr').value,wd_line:$('wd-line').value,wd_hidden:$('wd-hidden').value,zl_len:$('zl-len').value,zl_mult:String($('zl-mult').value).replace(',','.'),zl_entry:$('zl-entry').value,zl_invert:$('zl-invert').value};
  try{const r=await api('/api/scalp/auto',{coin,wa:body});toast(r.persistent?'Einstellungen für '+coin+' gespeichert (Autotrade startet mit neuer Basislinie)':'Übernommen, aber NICHT dauerhaft gespeichert (kein Redis erreichbar) – nach Neustart weg',!r.persistent);loadedKey=null;waKey='';loadChart()}
  catch(e){toast(e.message,true)}
 }
@@ -1667,7 +1775,7 @@ WA_IDS.forEach(i=>$(i).addEventListener('change',saveWa));
  setInterval(sync,600);sync()})();
 
 /* ---------- Aktionen ---------- */
-function switchCoin(c){if(c===coin)return;coin=c;ls('scalp_coin',c);loadedKey=null;ST=null;['entry','tp','sl'].forEach(k=>setLine(k,null));candle.setData([]);wt1s.setData([]);wt2s.setData([]);candle.setMarkers([]);wt2s.setMarkers([]);autoDirty=false;$('cname').textContent=c;pollStatusOnce();loadChart()}
+function switchCoin(c){if(c===coin)return;coin=c;ls('scalp_coin',c);loadedKey=null;ST=null;['entry','tp','sl'].forEach(k=>setLine(k,null));resetChart();autoDirty=false;$('cname').textContent=c;pollStatusOnce();loadChart()}
 function renderTfBar(){$('tfbar').innerHTML=TFS.map(t=>'<button data-t="'+t+'" class="'+(t===tf?'on':'')+'">'+t+'</button>').join('');
  document.querySelectorAll('#tfbar button').forEach(b=>b.addEventListener('click',async()=>{tf=b.dataset.t;ls('scalp_tf',tf);loadedKey=null;renderTfBar();loadChart();
   if(ST&&ST.coin&&ST.coin.auto.enabled){try{await api('/api/scalp/auto',{coin,tf});toast('Autotrade folgt jetzt '+tf+' (neue Basislinie)')}catch(e){toast(e.message,true)}pollStatusOnce()}}))}
