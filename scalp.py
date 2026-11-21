@@ -1243,6 +1243,7 @@ SCALP_HTML = r"""<!DOCTYPE html>
 <title>Scalp Dashboard</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/klinecharts@9.8.10/dist/umd/klinecharts.min.js"></script>
+<script>window.klinecharts||document.write('<script src="https://unpkg.com/klinecharts@9.8.10/dist/umd/klinecharts.min.js"><\/script>')</script>
 <style>
 :root{--g:#1fcf6e;--r:#f0354b;--y:#f5b83d;--mut:#7d8696;--bd:#242932}
 *{box-sizing:border-box}
@@ -1502,7 +1503,9 @@ function toast(m,bad){const t=$('toast');t.textContent=m;t.className=bad?'bad':'
 async function api(path,body){const r=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:undefined);let j={};try{j=await r.json()}catch(e){}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
 
 /* ---------- Chart (KLineChart): Preis + Wellenanker + Williams Vix Fix in EINEM Chart ---------- */
-const KL=window.klinecharts;
+const NOP=()=>{};
+const KL=window.klinecharts||{registerIndicator:NOP,registerOverlay:NOP,init:()=>new Proxy({},{get:()=>()=>null})};
+if(!window.klinecharts)setTimeout(()=>{const m=$('cmsg');if(m){m.textContent='Chart-Bibliothek konnte nicht geladen werden (Adblocker/Netz?) – Trading-Buttons funktionieren trotzdem.';m.style.display='flex'}},300);
 const TZ=(()=>{try{return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){return 'UTC'}})();
 let WTD={},VXD={},CND={},lastTsMs=0,mkIds=new Set(),dvSig='',zonesSpec=null,zonesOn=false;
 const dim='rgba(255,255,255,.045)';
@@ -1545,10 +1548,10 @@ const kc=KL.init(chartEl,{styles:{
  yAxis:{axisLine:{color:'#1f242c'},tickLine:{color:'#1f242c'},tickText:{color:'#7d8696',size:10}},
  separator:{color:'#1f242c',activeBackgroundColor:'rgba(59,130,246,.25)'},
  crosshair:{horizontal:{line:{color:'#59606d'}},vertical:{line:{color:'#59606d'}}}}});
-kc.setTimezone(TZ);kc.setOffsetRightDistance(70);kc.setPriceVolumePrecision(2,0);
-kc.createIndicator({name:'WA_WT',styles:{lines:[{color:'#7FB5F0',size:2,style:'solid',smooth:false,dashedValue:[2,2]},{color:'#2F7BFF',size:2,style:'solid',smooth:false,dashedValue:[2,2]}]}},false,{id:'wa_pane',height:150});
-kc.createIndicator({name:'ZL',visible:false,styles:{lines:[{color:'#f5b83d',size:2,style:'solid',smooth:false,dashedValue:[2,2]},{color:'rgba(31,207,110,.7)',size:1,style:'dashed',smooth:false,dashedValue:[4,4]},{color:'rgba(240,53,75,.7)',size:1,style:'dashed',smooth:false,dashedValue:[4,4]}]}},true,{id:'candle_pane'});
-kc.createIndicator('WA_VIX',false,{id:'vix_pane',height:100});
+try{kc.setTimezone(TZ);kc.setOffsetRightDistance(70);kc.setPriceVolumePrecision(2,0);}catch(e){console.error(e)}
+try{kc.createIndicator({name:'WA_WT',styles:{lines:[{color:'#7FB5F0',size:2,style:'solid',smooth:false,dashedValue:[2,2]},{color:'#2F7BFF',size:2,style:'solid',smooth:false,dashedValue:[2,2]}]}},false,{id:'wa_pane',height:150});}catch(e){console.error(e)}
+try{kc.createIndicator({name:'ZL',visible:false,styles:{lines:[{color:'#f5b83d',size:2,style:'solid',smooth:false,dashedValue:[2,2]},{color:'rgba(31,207,110,.7)',size:1,style:'dashed',smooth:false,dashedValue:[4,4]},{color:'rgba(240,53,75,.7)',size:1,style:'dashed',smooth:false,dashedValue:[4,4]}]}},true,{id:'candle_pane'});}catch(e){console.error(e)}
+try{kc.createIndicator('WA_VIX',false,{id:'vix_pane',height:100});}catch(e){console.error(e)}
 function setZones(z1,z3,lvl){
  zonesSpec=lvl?[[z1,'rgba(240,53,75,.8)',1],[0,'#3a4150',0],[-z1,'rgba(31,207,110,.8)',1]]:[[z3,'rgba(255,255,255,.3)',1],[z1,'rgba(240,53,75,.6)',1],[0,'#3a4150',0],[-z1,'rgba(31,207,110,.6)',1],[-z3,'rgba(255,255,255,.3)',1]];
  zonesOn=false;
@@ -1563,12 +1566,13 @@ setZones(36,75);
 function resetChart(){
  try{kc.removeOverlay({groupId:'mk'});kc.removeOverlay({groupId:'dv'})}catch(e){}
  mkIds=new Set();dvSig='';WTD={};VXD={};CND={};ZLD={};lastTsMs=0;zonesOn=false;
- kc.applyNewData([]);
+ try{kc.applyNewData([])}catch(e){}
 }
 
 /* ---------- Linien (Einstieg / TP / SL) + Ziehen ---------- */
 const lines={entry:null,tp:null,sl:null},vals={tp:null,sl:null};let drag=null;
-function setLine(kind,price,opts){
+function setLine(kind,price,opts){try{setLine0(kind,price,opts)}catch(e){console.error(e)}}
+function setLine0(kind,price,opts){
  const id='L_'+kind;
  if(price==null){if(lines[kind]){try{kc.removeOverlay({id})}catch(e){}lines[kind]=null}return}
  const pts=[{timestamp:lastTsMs||Date.now(),value:price}],ext={color:opts.color,title:opts.title||''};
