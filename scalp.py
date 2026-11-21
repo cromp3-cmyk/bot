@@ -1065,6 +1065,25 @@ async def _body(request):
         return {}
 
 
+_BG_TASKS = set()
+
+
+def _bg(coro, sym, label):
+    """Fuehrt die Order im Hintergrund aus: die Seite bekommt SOFORT eine Antwort (die Market-Order geht trotzdem direkt raus,
+    nur das Warten auf die Fill-Bestaetigung der Boerse (bis ~6 s) blockiert den Klick nicht mehr). Fehler stehen im Autotrade-Log."""
+    async def run():
+        try:
+            ok, err = await coro
+            if not ok:
+                _log(sym, f"{label} → FEHLER: {err}", "err")
+        except Exception as e:
+            _log(sym, f"{label} → FEHLER: {e}", "err")
+            debug_log(f"⚠️ [{sym}] Scalp {label} fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+    t = asyncio.create_task(run())
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+
+
 async def handle_scalp_order(request):
     b = await _body(request)
     sym = str(b.get("coin", "")).upper()
@@ -1077,10 +1096,13 @@ async def handle_scalp_order(request):
         return web.json_response({"error": "Größe ist keine Zahl"}, status=400)
     if usd is not None and usd <= 0:
         usd = None
-    ok, err = await _place(sym, direction, "SCALP", usd)
-    if not ok:
-        return web.json_response({"error": err}, status=500)
-    return web.json_response({"success": True})
+    _m, e0 = _size_mult(sym, usd)
+    if e0:
+        return web.json_response({"error": e0}, status=400)
+    if BOTS[sym]["state"].get("last_price") is None:
+        return web.json_response({"error": "kein aktueller Preis bekannt"}, status=400)
+    _bg(_place(sym, direction, "SCALP", usd), sym, f"Manuell {direction.capitalize()}")
+    return web.json_response({"success": True, "pending": True})
 
 
 async def handle_scalp_close(request):
@@ -1088,10 +1110,12 @@ async def handle_scalp_close(request):
     sym = str(b.get("coin", "")).upper()
     if sym not in BOTS:
         return web.json_response({"error": "coin ungültig"}, status=400)
-    ok, err = await _close(sym, "SCALP-MANUAL")
-    if not ok:
-        return web.json_response({"error": err}, status=400)
-    return web.json_response({"success": True})
+    if BOTS[sym]["state"].get("position") is None:
+        return web.json_response({"error": "keine offene Position"}, status=400)
+    if BOTS[sym]["state"].get("last_price") is None:
+        return web.json_response({"error": "kein aktueller Preis bekannt"}, status=400)
+    _bg(_close(sym, "SCALP-MANUAL"), sym, "Manuell schließen")
+    return web.json_response({"success": True, "pending": True})
 
 
 async def handle_scalp_reverse(request):
@@ -1106,9 +1130,7 @@ async def handle_scalp_reverse(request):
         return web.json_response({"error": "keine offene Position zum Umkehren"}, status=400)
     target = "short" if side == "long" else "long"
     usd = float(size) * float(price)
-    ok, err = await _place(sym, target, "SCALP-REVERSE", usd)   # _place schliesst die Gegenposition und eroeffnet neu
-    if not ok:
-        return web.json_response({"error": err}, status=500)
+    _bg(_place(sym, target, "SCALP-REVERSE", usd), sym, f"Reverse {side} → {target}")   # _place schliesst die Gegenposition und eroeffnet neu
     _log(sym, f"Reverse: {side} → {target} ({usd:,.0f} USDC)", target)
     return web.json_response({"success": True, "direction": target})
 
@@ -1786,12 +1808,13 @@ function renderTfBar(){$('tfbar').innerHTML=TFS.map(t=>'<button data-t="'+t+'" c
 async function order(dir){
  const c=ST&&ST.coin;if(!c)return;
  const usd=parseFloat($('o-usd').value.replace(',','.'))||null;
- try{await api('/api/scalp/order',{coin,direction:dir,usd});toast((dir==='long'?'Long':'Short')+' ausgeführt'+(c.dry_run?' (Dry-Run)':''))}catch(e){toast(e.message,true)}
- pollStatusOnce();
+ const bs=[$('bLong'),$('bShort')];bs.forEach(b=>b.disabled=true);toast('Market-Order gesendet …');
+ try{await api('/api/scalp/order',{coin,direction:dir,usd});toast((dir==='long'?'Long':'Short')+' Market-Order gesendet'+(c.dry_run?' (Dry-Run)':'')+' – Position erscheint nach der Börsen-Bestätigung')}catch(e){toast(e.message,true)}
+ bs.forEach(b=>b.disabled=false);pollStatusOnce();
 }
 $('bLong').addEventListener('click',()=>order('long'));$('bShort').addEventListener('click',()=>order('short'));
 $('bRev').addEventListener('click',async()=>{$('bRev').disabled=true;try{const r=await api('/api/scalp/reverse',{coin});toast('Reverse → '+(r.direction==='long'?'Long':'Short'))}catch(e){toast(e.message,true)}pollStatusOnce()});
-$('bClose').addEventListener('click',async()=>{try{await api('/api/scalp/close',{coin});toast('Position geschlossen')}catch(e){toast(e.message,true)}pollStatusOnce()});
+$('bClose').addEventListener('click',async()=>{$('bClose').disabled=true;toast('Schließen gesendet …');try{await api('/api/scalp/close',{coin});toast('Schließen als Market-Order gesendet')}catch(e){toast(e.message,true)}pollStatusOnce()});
 async function autoSend(extra){
  const body=Object.assign({coin,tf,normal:$('a-normal').checked,strong:$('a-strong').checked,ext:$('a-ext').checked,long:$('a-long').checked,short:$('a-short').checked,
   usd:parseFloat($('a-usd').value.replace(',','.'))||0,tp_usd:parseFloat($('a-tp').value.replace(',','.'))||0,sl_usd:parseFloat($('a-sl').value.replace(',','.'))||0},extra||{});
