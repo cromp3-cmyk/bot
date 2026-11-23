@@ -15,6 +15,8 @@ Nachbau von "Zero Lag Trend Signals (MTF)" von AlgoAlpha:
     in festem $-Abstand. Kein ATR. Beide rechnen mit der Groesse beim Einstieg und ziehen nur nach.
   * ADX-Filter (eigener Zusatz, nicht im Original): nur handeln, wenn der ADX ueber der Schwelle liegt -
     wahlweise zusaetzlich mit passender +DI/-DI-Ausrichtung. Laeuft auf den eigenen Kerzen, keine zweite Zeiteinheit.
+  * Wellenanker-Bestaetigung (eigener Zusatz): ein Signal zaehlt nur, wenn die Welle (WaveTrend) in den letzten
+    N Kerzen gekreuzt hat - Long: WT1 kreuzt WT2 nach oben UNTER -Zone, Short: nach unten UEBER +Zone.
   * Umkehr (waehlbar): aus einem Kaufsignal wird ein Short und umgekehrt - fuer Maerkte, in denen das
     Original gegen den Kurs laeuft.
 
@@ -83,6 +85,10 @@ def _zl_params(cfg):
         "adx_len": max(2, int(cfg.get("zl_adx_len", 14) or 14)),
         "adx_dir": bool(cfg.get("zl_adx_directional", False)),                # zusaetzlich +DI/-DI in Signalrichtung
         "invert": bool(cfg.get("zl_invert", False)),                          # Signale umdrehen: Long-Signal -> Short
+        # Wellenanker-Bestaetigung: Signal nur, wenn die Welle vorher (max. wf_bars Kerzen zurueck) ueber/unter der Zone gekreuzt hat
+        "wf_on": bool(cfg.get("zl_wf_on", False)),
+        "wf_zone": min(90.0, max(0.0, float(cfg.get("zl_wf_zone", 30.0) or 0.0))),
+        "wf_bars": min(200, max(1, int(cfg.get("zl_wf_bars", 10) or 10))),
     }
 
 
@@ -353,18 +359,58 @@ async def _zl_fetch(symbol, cfg, p, res=None, bars=None):
     return d
 
 
+def zl_wt(o, h, l, c):
+    """Wellenanker-Welle (WT1, WT2) mit den Standard-Werten des Bots."""
+    from strategies import compute_wavetrend_series
+    try:
+        from screener import WA_N1, WA_N2, WA_SIG, WA_SCALE
+    except Exception:
+        WA_N1, WA_N2, WA_SIG, WA_SCALE = 10, 21, 4, 1.35
+    return compute_wavetrend_series(o or c, h, l, c, WA_N1, WA_N2, WA_SIG, "close", WA_SCALE)
+
+
+def zl_wf_from_wt(wt1, wt2, zone, bars):
+    """(long_ok, short_ok) je Kerze: True, wenn in den letzten `bars` Kerzen (inkl. dieser) eine passende Wellen-Kreuzung war.
+    Long: WT1 kreuzt WT2 nach oben, WT2 unter -zone. Short: WT1 kreuzt WT2 nach unten, WT2 ueber +zone."""
+    n = len(wt1)
+    last_up = last_dn = -10 ** 9
+    lo, so = [False] * n, [False] * n
+    for i in range(n):
+        if i > 0 and None not in (wt1[i], wt2[i], wt1[i - 1], wt2[i - 1]):
+            if wt1[i] > wt2[i] and wt1[i - 1] <= wt2[i - 1] and wt2[i] < -zone:
+                last_up = i
+            elif wt1[i] < wt2[i] and wt1[i - 1] >= wt2[i - 1] and wt2[i] > zone:
+                last_dn = i
+        lo[i] = i - last_up <= bars
+        so[i] = i - last_dn <= bars
+    return lo, so
+
+
 def zl_adx_ok(ts, o, h, l, c, p):
-    """(long_ok, short_ok) je Kerze oder (None, None), wenn der ADX-Filter aus ist.
-    Der ADX laeuft auf den EIGENEN Kerzen der Strategie - eine zweite Zeiteinheit braucht er nicht."""
-    if p["adx_min"] <= 0:
-        return None, None
-    from strategies import compute_adx_filter_series
-    return compute_adx_filter_series((ts, o or [0.0] * len(c), h, l, c), p["adx_len"], p["adx_min"],
-                                     directional=p["adx_dir"], mode="require_trend")
+    """(long_ok, short_ok) je Kerze oder (None, None), wenn ADX-Filter UND Wellenanker-Bestaetigung aus sind.
+    Beide laufen auf den EIGENEN Kerzen der Strategie - eine zweite Zeiteinheit brauchen sie nicht.
+    (Der Name bleibt, damit Live, Backtest, Chart und Monte-Carlo ohne Aenderung beide Filter nutzen.)"""
+    res = None
+    if p["adx_min"] > 0:
+        from strategies import compute_adx_filter_series
+        a = compute_adx_filter_series((ts, o or [0.0] * len(c), h, l, c), p["adx_len"], p["adx_min"],
+                                      directional=p["adx_dir"], mode="require_trend")
+        if a is not None and a[0] is not None:
+            res = (list(a[0]), list(a[1]))
+    if p.get("wf_on"):
+        wt1, wt2 = zl_wt(o, h, l, c)
+        w = zl_wf_from_wt(wt1, wt2, p["wf_zone"], p["wf_bars"])
+        res = w if res is None else ([x and y for x, y in zip(res[0], w[0])], [x and y for x, y in zip(res[1], w[1])])
+    return res if res is not None else (None, None)
 
 
 def _zl_adx_text(p):
-    return f"ADX({p['adx_len']}) unter {p['adx_min']:g}" + (" oder falsche Richtung (+DI/-DI)" if p["adx_dir"] else "")
+    parts = []
+    if p["adx_min"] > 0:
+        parts.append(f"ADX({p['adx_len']}) unter {p['adx_min']:g}" + (" oder falsche Richtung (+DI/-DI)" if p["adx_dir"] else ""))
+    if p.get("wf_on"):
+        parts.append(f"keine Wellenanker-Kreuzung (Zone ±{p['wf_zone']:g}, max. {p['wf_bars']} Kerzen zurück)")
+    return " / ".join(parts) or "Filter"
 
 
 def _zl_adx_ok_at(target, adx, i):
@@ -683,48 +729,47 @@ def zl_mc_resolutions(text):
     return out[:ZL_MC_MAX_VALUES]
 
 
-def _zl_mc_compute(prepared, base_cfg, combos, exclude_top_n, deadline):
-    """prepared: {Zeitebene: (candles, i_start)}. combos: (Zeitebene, Laenge, Faktor, SL $, TP1 $, TP2 $, ADX, BE $, Trail $)."""
+def _zl_mc_compute(candles, i_start, base_cfg, combos, exclude_top_n, deadline):
+    """candles: (ts,o,h,l,c,v) der eingestellten Zeitebene. combos: (Laenge, Faktor, WA-Zone, WA-Kerzen zurueck).
+    Alles andere (SL/TP/ADX/Breakeven/Trailing/Ausstieg) kommt aus den Einstellungen."""
     base_p = _zl_params(base_cfg)
-    # Nach (Zeitebene, Laenge, Faktor) sortieren: so wird je Gruppe nur EINE Rechnung im Speicher gehalten.
-    # Ein Woerterbuch ueber alle Kombinationen waere bei 100.000 Kerzen schnell dreistellig in MB.
-    combos = sorted(combos, key=lambda x: (x[0], x[1], x[2]))
+    ts, o, h, l, c, v = candles
+    combos = sorted(combos, key=lambda x: (x[0], x[1]))   # je (Laenge, Faktor) nur EINE Rechnung im Speicher
     cur_key, arr = None, None
-    adx_cache = {}                                      # ADX-Schwelle -> (long_ok, short_ok); je Zeitebene nur ein Aufruf pro Wert
+    adx_only = None
+    if base_p["adx_min"] > 0:                              # ADX-Filter der Einstellungen einmal rechnen
+        lo, so = zl_adx_ok(ts, o, h, l, c, dict(base_p, wf_on=False))
+        adx_only = (lo, so) if lo is not None else None
+    wt1, wt2 = zl_wt(o, h, l, c)                           # Welle einmal rechnen, Zone/Kerzen nur noch neu auswerten
+    wf_cache = {}
     out = []
-    for res, length, mult, sl_usd, tp1, tp2, adx_min, be_usd, trail_usd in combos:
+    for length, mult, zone, bars in combos:
         if time.time() > deadline:
             break
-        candles, i_start = prepared[res]
-        ts, o, h, l, c, v = candles
-        p = dict(base_p, res=res, length=length, mult=mult, sl_usd=sl_usd, tp1_usd=tp1, tp2_usd=tp2,
-                 adx_min=adx_min, be_usd=be_usd, trail_usd=trail_usd)
-        if p["sl_mode"] == "usd" and sl_usd <= 0:
-            p = dict(p, sl_mode="aus")
-        if cur_key != (res, length, mult):
-            arr = None                                  # alte Rechnung zuerst freigeben
+        p = dict(base_p, length=length, mult=mult, wf_on=True, wf_zone=zone, wf_bars=bars)
+        if cur_key != (length, mult):
+            arr = None
             arr = zl_build(h, l, c, p)
-            cur_key = (res, length, mult)
-        if adx_min not in adx_cache:
-            lo, so = zl_adx_ok(ts, o, h, l, c, p)
-            adx_cache[adx_min] = (lo, so) if lo is not None else None
-        trades = zl_simulate(ts, h, l, c, arr, base_cfg, p, i_start, adx_cache[adx_min])
+            cur_key = (length, mult)
+        if (zone, bars) not in wf_cache:
+            wf_cache[(zone, bars)] = zl_wf_from_wt(wt1, wt2, zone, bars)
+        w = wf_cache[(zone, bars)]
+        flt = w if adx_only is None else ([x and y for x, y in zip(adx_only[0], w[0])], [x and y for x, y in zip(adx_only[1], w[1])])
+        trades = zl_simulate(ts, h, l, c, arr, base_cfg, p, i_start, flt)
         st = summarize_backtest_trades(trades, exclude_top_n)
-        out.append({"zl_resolution": res, "zl_length": length, "zl_mult": mult, "zl_sl_usd": sl_usd,
-                    "zl_tp1_usd": tp1, "zl_tp2_usd": tp2, "zl_adx_min": adx_min, "zl_be_usd": be_usd, "zl_trail_usd": trail_usd,
+        out.append({"zl_length": length, "zl_mult": mult, "zl_wf_zone": zone, "zl_wf_bars": bars,
                     "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
                     "total_pnl_usd": st["total_pnl_usd"], "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"],
                     "max_drawdown_usd": st["max_drawdown_usd"], "avg_bars_held": st["avg_bars_held"]})
     return out
 
 
-async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mults=None, sl_usds=None, tp1_usds=None,
-                            tp2_usds=None, adx_mins=None, be_usds=None, trail_usds=None, runs=500,
+async def run_zl_montecarlo(symbol, cfg, days, lengths=None, mults=None, wf_zones=None, wf_barss=None, runs=500,
                             exclude_top_n=1, seed=None):
-    """Raster ueber Zeitebene x Laenge x Band-Faktor x SL x TP1 x TP2 x ADX-Schwelle x Breakeven x Trailing-Stop. Die Zahlen-Achsen kommen als
-    {"min": .., "max": .., "step": ..}; eine leere oder abgeschaltete Achse nimmt den Wert aus den Einstellungen.
-    Kommagetrennte Listen werden weiterhin akzeptiert. Alles andere (Einstiegs-Modus, Ausstieg, Anteile,
-    Richtung, ADX-Laenge/Richtungspruefung, Margin, Hebel) kommt aus den Einstellungen."""
+    """Raster ueber Laenge x Band-Faktor x Wellenanker-Zone (Kreuzung unter/ueber +-Zone) x Wellenanker-Kerzen (wie weit die Kreuzung
+    zurueckliegen darf). Die Achsen kommen als {"min": .., "max": .., "step": ..} (oder kommagetrennte Liste); eine leere Achse nimmt den
+    Wert aus den Einstellungen. Der Wellenanker-Filter ist im Test AN, sobald eine seiner beiden Achsen gesetzt ist, sonst gilt die
+    Einstellung. Zeitebene, Einstieg, Ausstieg, SL/TP, ADX, Breakeven, Trailing, Margin und Hebel kommen aus den Einstellungen."""
     import random
     cfg = dict(cfg)
     base_p = _zl_params(cfg)
@@ -732,53 +777,35 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
     def axis(val, cast, lo, hi, fallback):
         return (zl_mc_range(val, cast, lo, hi) if isinstance(val, dict) else zl_mc_values(val, cast, lo, hi)) or [fallback]
 
-    res_list = zl_mc_resolutions(resolutions) or [base_p["res"]]
+    wf_axes = bool(isinstance(wf_zones, dict) or isinstance(wf_barss, dict) or wf_zones or wf_barss)
     len_list = axis(lengths, int, 2, 500, base_p["length"])
     mult_list = axis(mults, float, 0.1, 10.0, base_p["mult"])
-    sl_list = axis(sl_usds, float, 0.0, 10_000.0, base_p["sl_usd"])
-    tp1_list = axis(tp1_usds, float, 0.0, 10_000.0, base_p["tp1_usd"])
-    tp2_list = axis(tp2_usds, float, 0.0, 10_000.0, base_p["tp2_usd"])
-    adx_list = axis(adx_mins, float, 0.0, 100.0, base_p["adx_min"])
-    be_list = axis(be_usds, float, 0.0, 10_000.0, base_p["be_usd"])
-    trail_list = axis(trail_usds, float, 0.0, 10_000.0, base_p["trail_usd"])
+    zone_list = axis(wf_zones, float, 0.0, 90.0, base_p["wf_zone"])
+    bars_list = axis(wf_barss, int, 1, 200, base_p["wf_bars"])
+    if not wf_axes and not base_p["wf_on"]:
+        zone_list, bars_list = [base_p["wf_zone"]], [base_p["wf_bars"]]   # Filter aus -> keine Wellenanker-Achsen sinnvoll
     runs = max(1, min(ZL_MC_MAX_RUNS, int(runs)))
     mt = cfg.get("binance_market_type", "spot")
+    res = base_p["res"]
     max_candles = BACKTEST_MAX_CANDLES.get("zero_lag", 100_000)
-    combos = [(r, ln, m, sl, t1, t2, a, be, tr) for r in res_list for ln in len_list for m in mult_list
-              for sl in sl_list for t1 in tp1_list for t2 in tp2_list for a in adx_list
-              for be in be_list for tr in trail_list]
+    combos = [(ln, m, z, b) for ln in len_list for m in mult_list for z in zone_list for b in bars_list]
     requested = len(combos)
     rng = random.Random(seed)
     if len(combos) > runs:
         combos = rng.sample(combos, runs)
-    # Zeitebene fuer Zeitebene: die Kerzen der einen werden freigegeben, bevor die naechsten geladen werden.
-    # Alle gleichzeitig im Speicher zu halten war der Grund, warum dem Server bei mehreren Zeitebenen die Luft ausging.
-    skipped, days_cov, n_max, results = [], 0.0, 0, []
+    warm = (max(len_list) * 4 + 60) * _tf_ms(res) / 86_400_000
+    cap = min(max_candles, 5000) if res in SUB_MINUTE_RESOLUTIONS else max_candles
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, res, days + warm + 1, cap, market_type=mt)
+    if err or not candles or len(candles[4]) < 100:
+        return {"error": f"Für die Zeitebene {res} gab es nicht genug Kerzen" + (f" ({err})." if err else ".")}
+    ts = candles[0]
+    start_ts = ts[-1] - int(days * 86_400_000)
+    i_start = next((i for i, t in enumerate(ts) if t >= start_ts), 1)
+    days_cov = (ts[-1] - ts[i_start]) / 86_400_000
+    n_max = len(ts)
     deadline = time.time() + 240
-    used_res = []
-    for res in res_list:
-        grp = [x for x in combos if x[0] == res]
-        if not grp:
-            continue
-        warm = (max(len_list) * 4 + 60) * _tf_ms(res) / 86_400_000
-        cap = min(max_candles, 5000) if res in SUB_MINUTE_RESOLUTIONS else max_candles
-        candles, err = await _fetch_cached_mo7_backtest_candles(symbol, res, days + warm + 1, cap, market_type=mt)
-        if err or not candles or len(candles[4]) < 100:
-            skipped.append(res)
-            continue
-        ts = candles[0]
-        start_ts = ts[-1] - int(days * 86_400_000)
-        i_start = next((i for i, t in enumerate(ts) if t >= start_ts), 1)
-        days_cov = max(days_cov, (ts[-1] - ts[i_start]) / 86_400_000)
-        n_max = max(n_max, len(ts))
-        used_res.append(res)
-        results += await asyncio.to_thread(_zl_mc_compute, {res: (candles, i_start)}, cfg, grp, exclude_top_n, deadline)
-        candles = None
-        if time.time() > deadline:
-            break
-    if not results:
-        return {"error": "Für keine der gewählten Zeitebenen gab es genug Kerzen"
-                         + (f" (übersprungen: {', '.join(skipped)})." if skipped else ".")}
+    results = await asyncio.to_thread(_zl_mc_compute, candles, i_start, cfg, combos, exclude_top_n, deadline)
+    candles = None
     if not results:
         return {"error": "Keine Kombination konnte in der verfügbaren Zeit gerechnet werden - weniger Durchläufe oder kürzeren Zeitraum wählen."}
     pnls = sorted(r["total_pnl_usd"] for r in results)
@@ -789,9 +816,8 @@ async def run_zl_montecarlo(symbol, cfg, days, resolutions="", lengths=None, mul
     worst = sorted(results, key=lambda r: r["total_pnl_usd"])
     return {
         "symbol": symbol, "entry_mode": "zero_lag", "days": days, "actual_days_covered": round(days_cov, 1),
-        "candles_processed": n_max, "resolutions": used_res, "skipped_resolutions": skipped,
-        "lengths": len_list, "mults": mult_list, "sl_usds": sl_list, "tp1_usds": tp1_list, "tp2_usds": tp2_list,
-        "adx_mins": adx_list, "be_usds": be_list, "trail_usds": trail_list,
+        "candles_processed": n_max, "resolution": res,
+        "lengths": len_list, "mults": mult_list, "wf_zones": zone_list, "wf_bars": bars_list,
         "min_reliable_trades": min_trades, "seed": seed,
         "combos_tested": len(results), "combos_requested": requested, "combos_drawn": len(combos),
         "profitable_pct": round(pos / len(results) * 100, 1) if results else 0,
