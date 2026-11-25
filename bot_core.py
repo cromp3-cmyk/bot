@@ -434,6 +434,7 @@ def default_config():
         "sa_ema_len": int(os.getenv("SA_EMA_LEN", "10")),
         "sa_max_bars": int(os.getenv("SA_MAX_BARS", "3")),
         "sa_direction_mode": os.getenv("SA_DIRECTION_MODE", "both"),
+        "sa_exit_on_flip": os.getenv("SA_EXIT_ON_FLIP", "true").lower() == "true",   # Trade beenden, sobald der SAR gegen die Position dreht
         "sa_sl_usd": float(os.getenv("SA_SL_USD", "0")),   # optionaler fester SL: Verlust der Position in $ (0 = aus)
         "sa_tp_usd": float(os.getenv("SA_TP_USD", "0")),   # optionaler fester TP: Gewinn der Position in $ (0 = aus)
 
@@ -2336,7 +2337,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
       <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + fester $-SL/TP)</option>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
-      <option value="sar_ema">SAR + EMA Wechsel (Parabolic SAR + EMA10, Signal in den ersten N Kerzen eines neuen SAR-Trends, nur Wechsel Long ↔ Short)</option>
+      <option value="sar_ema">SAR + EMA Wechsel (Parabolic SAR + EMA10, Signal in den ersten N Kerzen eines neuen SAR-Trends, Wechsel Long ↔ Short, Ende beim SAR-Kippen)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="zero_lag">Zero Lag Trend (Zero-Lag-EMA mit Band, Trendzustand + Einstiegspfeile, TP1/TP2, Monte-Carlo)</option>
       <option value="gold_scalper">Gold Scalper (RSI-Banker-Kreuzung + Ausbruch über Hoch/Tief der letzten 4h-Kerze, Ausstieg über ATR-Bänder)</option>
@@ -2674,7 +2675,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="pure_momentum"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="pm_sl_cooldown_seconds"></div>
 
   <div data-mode="sar_ema" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
-    🟢🔴 <b>SAR + EMA Wechsel</b>: Der Parabolic SAR bestimmt den Trend (SAR unter dem Kurs = aufwärts). Nach jedem Kippen gilt ein Fenster von N Kerzen: das Signal ist die <b>erste Kerze, die über (Long) bzw. unter (Short) der EMA schließt</b>. Pro SAR-Trend höchstens ein Signal. <b>Nur Wechsel</b>: ein Gegensignal schließt die Position und eröffnet sofort die Gegenrichtung, es gibt keinen Ausstieg beim SAR-Kippen. SL/TP sind optional (0 = aus).
+    🟢🔴 <b>SAR + EMA Wechsel</b>: Der Parabolic SAR bestimmt den Trend (SAR unter dem Kurs = aufwärts). Nach jedem Kippen gilt ein Fenster von N Kerzen: das Signal ist die <b>erste Kerze, die über (Long) bzw. unter (Short) der EMA schließt</b>. Pro SAR-Trend höchstens ein Signal. <b>Wechsel</b>: ein Gegensignal schließt die Position und eröffnet sofort die Gegenrichtung. Option „Trade beenden, sobald der SAR gegen die Position dreht“ (wie im Original): dann wird geschlossen und es bleibt flach bis zum nächsten Signal. SL/TP sind optional (0 = aus).
   </div>
   <div data-mode="sar_ema"><label>Zeitebene (Signal bei Kerzenschluss)</label>
     <select class="cfg" id="sa_resolution">
@@ -2700,6 +2701,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="sar_ema"><label>Richtung</label>
     <select class="cfg" id="sa_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
   </div>
+  <div data-mode="sar_ema"><label><input type="checkbox" id="sa_exit_on_flip" style="width:auto; vertical-align:middle;"> Trade beenden, sobald der SAR gegen die Position dreht (wie im Original)</label></div>
   <div data-mode="sar_ema"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="sa_sl_usd"></div>
   <div data-mode="sar_ema"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="sa_tp_usd"></div>
 
@@ -7504,6 +7506,7 @@ async function refresh() {
     document.getElementById('sa_ema_len').value = data.config.sa_ema_len;
     document.getElementById('sa_max_bars').value = data.config.sa_max_bars;
     document.getElementById('sa_direction_mode').value = data.config.sa_direction_mode || 'both';
+    document.getElementById('sa_exit_on_flip').checked = data.config.sa_exit_on_flip !== false;
     document.getElementById('sa_sl_usd').value = data.config.sa_sl_usd || 0;
     document.getElementById('sa_tp_usd').value = data.config.sa_tp_usd || 0;
 
@@ -8148,6 +8151,7 @@ function buildConfigPayload() {
     sa_ema_len: parseInt(document.getElementById('sa_ema_len').value) || 10,
     sa_max_bars: parseInt(document.getElementById('sa_max_bars').value) || 3,
     sa_direction_mode: document.getElementById('sa_direction_mode').value,
+    sa_exit_on_flip: document.getElementById('sa_exit_on_flip').checked,
     sa_sl_usd: parseFloat(document.getElementById('sa_sl_usd').value) || 0,
     sa_tp_usd: parseFloat(document.getElementById('sa_tp_usd').value) || 0,
     dv_resolution: getResolutionField('dv_resolution'),
@@ -8885,7 +8889,7 @@ async def handle_config_update(request):
                 "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_be_pct","vc_tp_mode","vc_tp_usd","vc_wa_tf","vc_wa_src","vc_wa_n1","vc_wa_n2","vc_wa_sig_len","vc_wa_wave_scale","vc_wa_zone","vc_tp1_on","vc_tp1_rr","vc_tp1_pct","vc_adx_min","vc_adx_len","vc_adx_directional","vc_cross_min_pct","vc_cross_confirm","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
-                "sa_resolution", "sa_start", "sa_inc", "sa_max", "sa_ema_len", "sa_max_bars", "sa_direction_mode", "sa_sl_usd", "sa_tp_usd",
+                "sa_resolution", "sa_start", "sa_inc", "sa_max", "sa_ema_len", "sa_max_bars", "sa_direction_mode", "sa_exit_on_flip", "sa_sl_usd", "sa_tp_usd",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",

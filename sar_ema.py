@@ -7,7 +7,8 @@ Portiert aus dem TradingView-Indikator "SAR + EMA10 Signale" (Pine v6), aber NUR
   * In diesem Fenster ist das Signal die ERSTE Kerze, die ueber (Long) bzw. unter (Short) der EMA schliesst -
     sie darf die EMA kreuzen oder schon darueber/darunter liegen. Pro SAR-Trend hoechstens ein Signal.
   * Wechsel: ein Gegensignal schliesst die Position und eroeffnet SOFORT die Gegenrichtung (Reverse).
-    Es gibt keinen Ausstieg beim SAR-Kippen (die "Trade beenden"-Option des Originals bleibt aus).
+  * SAR-Ende (wie im Original, Option "Trade beenden, sobald SAR gegen die Position dreht", Standard AN): kippt der SAR gegen die
+    Position und es gibt auf dieser Kerze kein Gegensignal, wird die Position geschlossen und es bleibt flach bis zum naechsten Signal.
 Optional: fester Dollar-SL / Dollar-TP (jeweils 0 = aus). Standard: nur der Wechsel.
 """
 
@@ -51,6 +52,7 @@ def _sa_params(cfg):
         "max": max(0.001, float(cfg.get("sa_max", 0.2) or 0.2)),
         "ema_len": max(1, int(cfg.get("sa_ema_len", 10) or 10)),
         "max_bars": max(1, int(cfg.get("sa_max_bars", 3) or 3)),
+        "exit_on_flip": bool(cfg.get("sa_exit_on_flip", True)),
         "sl_usd": max(0.0, float(cfg.get("sa_sl_usd", 0.0) or 0.0)),
         "tp_usd": max(0.0, float(cfg.get("sa_tp_usd", 0.0) or 0.0)),
     }
@@ -123,11 +125,13 @@ def sa_build(h, l, c, p):
     ema = _ema_series(c, p["ema_len"])
     up = [sar[i] is not None and sar[i] < c[i] for i in range(n)]
     buy, sell = [False] * n, [False] * n
+    flip_up, flip_dn = [False] * n, [False] * n
     since = None          # Kerzen seit dem letzten SAR-Kippen (0 = erste Kerze des neuen Trends)
     done = False
     for i in range(1, n):
         flip = up[i] != up[i - 1]
         if flip:
+            flip_up[i], flip_dn[i] = up[i], not up[i]
             done = False
             since = 0
         elif since is not None:
@@ -140,7 +144,7 @@ def sa_build(h, l, c, p):
         elif (not up[i]) and c[i] < ema[i]:
             sell[i] = True
             done = True
-    return {"sar": sar, "ema": ema, "up": up, "buy": buy, "sell": sell}
+    return {"sar": sar, "ema": ema, "up": up, "buy": buy, "sell": sell, "flip_up": flip_up, "flip_dn": flip_dn}
 
 
 def _sa_levels(direction, entry, size, p):
@@ -180,12 +184,24 @@ async def check_sa_sl_tp(symbol, price):
             _sa_reset_state(st)
 
 
-async def check_sa_entry(symbol, buy_signal, sell_signal, price):
-    """Signal auf der geschlossenen Kerze. Gegen-Signal schliesst und dreht, gleiche Richtung wird ignoriert."""
+async def check_sa_entry(symbol, buy_signal, sell_signal, price, flip_up=False, flip_dn=False):
+    """Signal auf der geschlossenen Kerze. Gegen-Signal schliesst und dreht, gleiche Richtung wird ignoriert.
+    Kippt der SAR gegen die Position (und es gibt kein Gegensignal), wird sie geschlossen (Option sa_exit_on_flip)."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
         return
+    pos0 = st["position"]
+    if pos0 is not None and _sa_params(cfg)["exit_on_flip"]:
+        # wie im Original: exitLong = Long und (Verkaufssignal oder SAR kippt nach unten) - Signal VOR der Richtungs-Sperre
+        raw_opp = sell_signal if pos0 == "long" else buy_signal
+        sar_end = flip_dn if pos0 == "long" else flip_up
+        if sar_end and not raw_opp:
+            debug_log(f"🏁 [{symbol}] SAR+EMA SAR-Ende: {pos0.upper()} schließen @ {price}")
+            await execute_exit(symbol, price, "SA-SAR-ENDE")
+            if st["position"] is None:
+                _sa_reset_state(st)
+            return
     mode = cfg.get("sa_direction_mode", "both")
     if mode == "long_only":
         sell_signal = False
@@ -267,7 +283,7 @@ async def sa_poll_loop(symbol):
                     for idx in new_indices:
                         price_i = st["last_price"] if (idx == len(closed_ts) - 1 and st["last_price"] is not None) else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
-                        await check_sa_entry(symbol, arr["buy"][idx], arr["sell"][idx], price_i)
+                        await check_sa_entry(symbol, arr["buy"][idx], arr["sell"][idx], price_i, arr["flip_up"][idx], arr["flip_dn"][idx])
                 elif due_heartbeat and not closed_ts and (resolution in SUB_MINUTE_RESOLUTIONS or _need_fetch):
                     last_heartbeat = now
                     debug_log(f"⏳ [{symbol}] SAR+EMA wartet: keine Kerzen erhalten (Auflösung {resolution})")
@@ -279,7 +295,7 @@ async def sa_poll_loop(symbol):
 # ============================================================================
 # BACKTEST
 # ============================================================================
-def _sa_simulate(candles, cfg, buy_sig, sell_sig, warmup, p):
+def _sa_simulate(candles, cfg, buy_sig, sell_sig, warmup, p, flip_up=None, flip_dn=None):
     """Gegenstueck zu check_sa_entry/check_sa_sl_tp: Einstieg zum Schlusskurs der Signal-Kerze, optionaler SL/TP ab der
     naechsten Kerze ueber Hoch/Tief (SL gewinnt bei Gleichzeitigkeit), Gegen-Signal dreht."""
     ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
@@ -297,6 +313,12 @@ def _sa_simulate(candles, cfg, buy_sig, sell_sig, warmup, p):
                 _bt_close_trade(trades, pdir, entry, tp, position["size"], i, position["entry_i"], "TP", ts=ts)
                 position = None
         buy, sell = buy_sig[i], sell_sig[i]
+        if position is not None and p["exit_on_flip"] and flip_up is not None:
+            raw_opp = sell if position["dir"] == "long" else buy
+            if (flip_dn[i] if position["dir"] == "long" else flip_up[i]) and not raw_opp:
+                _bt_close_trade(trades, position["dir"], position["entry"], c[i], position["size"], i, position["entry_i"], "SA-SAR-ENDE", ts=ts)
+                position = None
+                continue
         if mode == "long_only":
             sell = False
         elif mode == "short_only":
@@ -332,7 +354,7 @@ async def run_sa_backtest(symbol, cfg, days, exclude_top_n=1):
         return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
     base_ts = candles[0]
     arr = await asyncio.to_thread(sa_build, candles[2], candles[3], candles[4], p)
-    trades = _sa_simulate(candles, cfg, arr["buy"], arr["sell"], _sa_warmup(p), p)
+    trades = _sa_simulate(candles, cfg, arr["buy"], arr["sell"], _sa_warmup(p), p, arr["flip_up"], arr["flip_dn"])
     stats = summarize_backtest_trades(trades, exclude_top_n)
     actual_days = (base_ts[-1] - base_ts[0]) / 86_400_000
     return {
