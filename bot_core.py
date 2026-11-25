@@ -4392,6 +4392,62 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 </div>
 
+<div data-mode-section="sar_ema" style="display:none;">
+<h2 class="section-title">🎲 SAR + EMA Monte-Carlo</h2>
+<div class="panel-card">
+  <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px;">
+    Testet Kombinationen aus SAR Start, SAR Schritt, SAR Maximum und EMA-Länge. Jede Achse ist einzeln zuschaltbar: Haken weg heißt „Wert aus den Einstellungen“.
+    Zeitebene, Fenster (erste N Kerzen), Richtung, SAR-Ende, SL/TP, Margin und Hebel kommen aus den Einstellungen oben.
+    Sind es mehr Kombinationen als „Durchläufe“, werden zufällige gezogen – dann lohnen mehrere Seeds.
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label>Zeitraum (Tage)</label><input type="number" step="1" id="sa-mc-days" value="30" style="width:90px;"></div>
+    <div><label>Durchläufe (max. 2000)</label><input type="number" step="50" min="1" max="2000" id="sa-mc-runs" value="500" style="width:90px;"></div>
+    <div><label>Zufalls-Seed (leer = zufällig)</label><input type="number" step="1" id="sa-mc-seed" style="width:110px;"></div>
+    <div><label>bis Seed (leer = nur einer, max. 20)</label><input type="number" step="1" id="sa-mc-seed-to" style="width:110px;"></div>
+    <div><label>Robustheits-Check: beste N ausschließen</label><input type="number" step="1" min="0" id="sa-mc-exclude-top-n" value="1" style="width:90px;"></div>
+  </div>
+  <div style="display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+    <div><label><input type="checkbox" id="sa-mc-use-start" checked style="width:auto; vertical-align:middle;"> SAR Start: von / bis / Schritt</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="0.01" min="0.001" id="sa-mc-start-min" value="0.01" style="width:70px;"><input type="number" step="0.01" min="0.001" id="sa-mc-start-max" value="0.03" style="width:70px;"><input type="number" step="0.01" min="0.001" id="sa-mc-start-step" value="0.01" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="sa-mc-use-inc" checked style="width:auto; vertical-align:middle;"> SAR Schritt: von / bis / Schritt</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="0.01" min="0.001" id="sa-mc-inc-min" value="0.01" style="width:70px;"><input type="number" step="0.01" min="0.001" id="sa-mc-inc-max" value="0.03" style="width:70px;"><input type="number" step="0.01" min="0.001" id="sa-mc-inc-step" value="0.01" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="sa-mc-use-max" checked style="width:auto; vertical-align:middle;"> SAR Maximum: von / bis / Schritt</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="0.05" min="0.001" id="sa-mc-max-min" value="0.1" style="width:70px;"><input type="number" step="0.05" min="0.001" id="sa-mc-max-max" value="0.3" style="width:70px;"><input type="number" step="0.05" min="0.001" id="sa-mc-max-step" value="0.1" style="width:70px;"></span></div>
+    <div><label><input type="checkbox" id="sa-mc-use-ema" checked style="width:auto; vertical-align:middle;"> EMA Länge: von / bis / Schritt</label>
+      <span style="display:flex; gap:4px;"><input type="number" step="1" min="1" id="sa-mc-ema-min" value="5" style="width:70px;"><input type="number" step="1" min="1" id="sa-mc-ema-max" value="20" style="width:70px;"><input type="number" step="1" min="1" id="sa-mc-ema-step" value="1" style="width:70px;"></span></div>
+    <button id="btn-sa-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
+  </div>
+  <div id="sa-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="sa-mc-top-title">📈 Die 30 besten Kombinationen</h3>
+  <table id="sa-mc-results-table" style="display:none; margin-top:8px;"><thead><tr>
+      <th class="sortable" data-key="sa_start">SAR Start ⇅</th>
+      <th class="sortable" data-key="sa_inc">SAR Schritt ⇅</th>
+      <th class="sortable" data-key="sa_max">SAR Max ⇅</th>
+      <th class="sortable" data-key="sa_ema_len">EMA ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen ⇅</th>
+      <th></th></tr></thead><tbody></tbody></table>
+  <h3 style="margin-top:20px; font-size:14px; color:var(--text-dim); display:none;" id="sa-mc-worst-title">📉 Die 20 schlechtesten</h3>
+  <table id="sa-mc-worst-table" style="display:none; margin-top:8px;"><thead><tr>
+      <th class="sortable" data-key="sa_start">SAR Start ⇅</th>
+      <th class="sortable" data-key="sa_inc">SAR Schritt ⇅</th>
+      <th class="sortable" data-key="sa_max">SAR Max ⇅</th>
+      <th class="sortable" data-key="sa_ema_len">EMA ⇅</th>
+      <th class="sortable" data-key="trades">Trades ⇅</th>
+      <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
+      <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
+      <th class="sortable" data-key="total_pnl_excl_top_n_usd">PnL ohne beste N $ ⇅</th>
+      <th class="sortable" data-key="max_drawdown_usd">Max DD $ ⇅</th>
+      <th class="sortable" data-key="avg_bars_held">Ø Kerzen ⇅</th>
+      <th></th></tr></thead><tbody></tbody></table>
+</div>
+</div>
+
 <div data-mode-section="vwap_cross" style="display:none;">
 <h2 class="section-title">🎲 EMA 9 + VWAP Monte-Carlo</h2>
 <div class="panel-card">
@@ -6289,6 +6345,94 @@ document.getElementById('btn-zl-mc').addEventListener('click', async () => {
       window.zlMcWorstData = data.worst_results || [];
       renderZlMcResults();
       renderZlMcWorst();
+      Object.values(tables).forEach(t => t.style.display = '');
+      Object.values(titles).forEach(t => t.style.display = '');
+    }
+  } catch (e) {
+    if (sweepSymbol !== currentSymbol) return;
+    statusEl.innerText = `❌ Fehler: ${e}`;
+  }
+  if (sweepSymbol === currentSymbol) btn.disabled = false;
+});
+
+window.saMcResultsData = [];
+window.saMcWorstData = [];
+const saMcRowHtml = (r) => `
+  <tr>
+    <td>${r.sa_start}</td><td>${r.sa_inc}</td><td>${r.sa_max}</td><td>${r.sa_ema_len}</td>
+    <td>${r.trades}</td><td>${r.win_rate_pct}%</td>
+    <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
+    <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
+    <td>${r.max_drawdown_usd}</td><td>${r.avg_bars_held}</td>
+    ${applyBtn({sa_start: r.sa_start, sa_inc: r.sa_inc, sa_max: r.sa_max, sa_ema_len: r.sa_ema_len})}
+  </tr>`;
+const renderSaMcResults = makeSortableTable('sa-mc-results-table', () => window.saMcResultsData, saMcRowHtml);
+const renderSaMcWorst = makeSortableTable('sa-mc-worst-table', () => window.saMcWorstData, saMcRowHtml);
+
+function saMergeMc(a, b) {
+  const key = r => [r.sa_start, r.sa_inc, r.sa_max, r.sa_ema_len].join('|');
+  const merge = (x, y, cmp, lim) => {
+    const seen = new Set(), out = [];
+    [...(x || []), ...(y || [])].forEach(r => { const k = key(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
+    return out.sort(cmp).slice(0, lim);
+  };
+  const ok = r => r.trades >= (a.min_reliable_trades || 5) ? 1 : 0;
+  a.results = merge(a.results, b.results, (p, q) => (ok(q) - ok(p)) || (q.total_pnl_usd - p.total_pnl_usd), 30);
+  a.worst_results = merge(a.worst_results, b.worst_results, (p, q) => p.total_pnl_usd - q.total_pnl_usd, 20);
+  a.combos_tested += b.combos_tested; a.combos_requested += b.combos_requested;
+  a.profitable_pct = Math.round((a.profitable_pct + b.profitable_pct) * 5) / 10;
+  a.best_pnl_usd = Math.max(a.best_pnl_usd, b.best_pnl_usd); a.worst_pnl_usd = Math.min(a.worst_pnl_usd, b.worst_pnl_usd);
+  return a;
+}
+
+document.getElementById('btn-sa-mc').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-sa-mc');
+  const statusEl = document.getElementById('sa-mc-status');
+  const tables = {top: document.getElementById('sa-mc-results-table'), worst: document.getElementById('sa-mc-worst-table')};
+  const titles = {top: document.getElementById('sa-mc-top-title'), worst: document.getElementById('sa-mc-worst-title')};
+  const sweepSymbol = currentSymbol;
+  const axis = (use, id) => document.getElementById(use).checked ? document.getElementById(id).value : '';
+  // Zahlen-Achse: von / bis / Schritt. Haken weg -> null, dann nimmt der Server den Wert aus den Einstellungen.
+  const rng = (use, id) => document.getElementById(use).checked ? {
+    min: parseFloat(document.getElementById(id + '-min').value),
+    max: parseFloat(document.getElementById(id + '-max').value),
+    step: parseFloat(document.getElementById(id + '-step').value),
+  } : null;
+  const payload = {
+    days: parseInt(document.getElementById('sa-mc-days').value) || 30,
+    runs: parseInt(document.getElementById('sa-mc-runs').value) || 500,
+    seed: document.getElementById('sa-mc-seed').value,
+    exclude_top_n: parseInt(document.getElementById('sa-mc-exclude-top-n').value) || 0,
+    starts: rng('sa-mc-use-start', 'sa-mc-start'),
+    incs: rng('sa-mc-use-inc', 'sa-mc-inc'),
+    maxs: rng('sa-mc-use-max', 'sa-mc-max'),
+    emas: rng('sa-mc-use-ema', 'sa-mc-ema'),
+    config: buildConfigPayload(),
+  };
+  btn.disabled = true;
+  Object.values(tables).forEach(t => t.style.display = 'none');
+  Object.values(titles).forEach(t => t.style.display = 'none');
+  statusEl.innerText = '⏳ Lade Kerzen und teste die Kombinationen...';
+  try {
+    const s1 = parseInt(payload.seed), s2 = parseInt(document.getElementById('sa-mc-seed-to').value);
+    const seeds = (!isNaN(s1) && !isNaN(s2) && s2 > s1) ? Array.from({length: Math.min(s2 - s1 + 1, 20)}, (_, i) => s1 + i) : [payload.seed];
+    let data = null;
+    for (let si = 0; si < seeds.length; si++) {
+      if (seeds.length > 1) statusEl.innerText = `⏳ Seed ${seeds[si]} (${si + 1} von ${seeds.length})...`;
+      const res = await fetch(`/api/sa_mc?symbol=${sweepSymbol}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...payload, seed: seeds[si]})});
+      const d = await res.json();
+      if (sweepSymbol !== currentSymbol) return;
+      if (d.error) { data = d; break; }
+      data = si === 0 ? d : saMergeMc(data, d);
+    }
+    if (data.error) {
+      statusEl.innerText = `❌ ${data.error}`;
+    } else {
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet (Zeitebene ${data.resolution}, SAR Start ${data.starts.join(', ')}, Schritt ${data.incs.join(', ')}, Maximum ${data.maxs.join(', ')}, EMA ${data.emas.join(', ')}) · ${data.profitable_pct}% im Plus · Median ${data.median_pnl_usd} $ · bester ${data.best_pnl_usd} $`;
+      window.saMcResultsData = data.results || [];
+      window.saMcWorstData = data.worst_results || [];
+      renderSaMcResults();
+      renderSaMcWorst();
       Object.values(tables).forEach(t => t.style.display = '');
       Object.values(titles).forEach(t => t.style.display = '');
     }
@@ -9519,6 +9663,38 @@ async def handle_zl_montecarlo(request):
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe, weniger Werte je Achse oder kürzeren Zeitraum wählen."}, status=504)
     except Exception as e:
         debug_log(f"⚠️ [{symbol}] Zero-Lag-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
+        return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
+    return web.json_response(result)
+
+
+async def handle_sa_montecarlo(request):
+    """Monte-Carlo fuer SAR + EMA: SAR Start x Schritt x Maximum x EMA-Laenge (siehe run_sa_montecarlo)."""
+    from sar_ema import run_sa_montecarlo
+    symbol = request.query.get("symbol", SYMBOLS[0]).upper()
+    if symbol not in BOTS:
+        return web.json_response({"error": "unknown symbol"}, status=404)
+    body = await request.json()
+    try:
+        days = max(1, min(365, int(body.get("days", 30))))
+        runs = max(1, min(2000, int(body.get("runs", 500))))
+        exclude_top_n = max(0, min(50, int(body.get("exclude_top_n", 1))))
+        seed = body.get("seed")
+        seed = int(seed) if seed not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Ungültige Zahlenwerte in den Bereichen."}, status=400)
+    cfg = dict(BOTS[symbol]["config"])
+    overrides = body.get("config")
+    if isinstance(overrides, dict):
+        cfg.update({k: v for k, v in overrides.items() if k in cfg})
+    try:
+        result = await asyncio.wait_for(
+            run_sa_montecarlo(symbol, cfg, days, body.get("starts", ""), body.get("incs", ""),
+                              body.get("maxs", ""), body.get("emas", ""), runs, exclude_top_n, seed),
+            timeout=BACKTEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe, weniger Werte je Achse oder kürzeren Zeitraum wählen."}, status=504)
+    except Exception as e:
+        debug_log(f"⚠️ [{symbol}] SAR-EMA-Monte-Carlo fehlgeschlagen", {"error": str(e), "traceback": traceback.format_exc()})
         return web.json_response({"error": f"Monte-Carlo fehlgeschlagen: {e}"}, status=500)
     return web.json_response(result)
 

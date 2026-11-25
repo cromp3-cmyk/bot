@@ -120,9 +120,15 @@ def sar_series(h, l, c, start, inc, mx):
 
 def sa_build(h, l, c, p):
     """-> dict: sar, ema, up (Trend aufwaerts), buy[], sell[] je Kerze (Signale wie im Pine-Script)."""
-    n = len(c)
     sar = sar_series(h, l, c, p["start"], p["inc"], p["max"])
     ema = _ema_series(c, p["ema_len"])
+    return sa_signals(sar, ema, c, p["max_bars"])
+
+
+def sa_signals(sar, ema, c, max_bars):
+    """Signale aus fertigen SAR-/EMA-Reihen (Monte-Carlo rechnet SAR und EMA nur einmal je Wert)."""
+    n = len(c)
+    p = {"max_bars": max_bars}
     up = [sar[i] is not None and sar[i] < c[i] for i in range(n)]
     buy, sell = [False] * n, [False] * n
     flip_up, flip_dn = [False] * n, [False] * n
@@ -399,3 +405,90 @@ def sa_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
              {"key": "sa_dn", "label": "SAR (Abwärts)", "data": sar_dn}]
     return {"candles": candles, "wt1": [], "wt2": [], "markers": markers, "levels": [], "entry_mode": "sar_ema",
             "wt1v": 0, "wt2v": 0, "bars": n, "sa_lines": lines}
+
+
+# ============================================================================
+# MONTE-CARLO
+# ============================================================================
+def _sa_mc_compute(candles, i_start, base_cfg, combos, exclude_top_n, deadline):
+    """combos: (SAR Start, SAR Schritt, SAR Maximum, EMA-Laenge). Fenster, Richtung, SL/TP, Margin und Hebel kommen aus den Einstellungen."""
+    base_p = _sa_params(base_cfg)
+    ts, o, h, l, c, v = candles
+    combos = sorted(combos)
+    sar_cache, ema_cache, out = {}, {}, []
+    for start, inc, mx, eln in combos:
+        if time.time() > deadline:
+            break
+        p = dict(base_p, start=start, inc=inc, max=mx, ema_len=eln)
+        k = (start, inc, mx)
+        if k not in sar_cache:
+            if len(sar_cache) > 3:
+                sar_cache.clear()    # sortiert -> alte Schluessel werden nicht mehr gebraucht
+            sar_cache[k] = sar_series(h, l, c, start, inc, mx)
+        if eln not in ema_cache:
+            ema_cache[eln] = _ema_series(c, eln)
+        arr = sa_signals(sar_cache[k], ema_cache[eln], c, p["max_bars"])
+        trades = _sa_simulate(candles, base_cfg, arr["buy"], arr["sell"], i_start, p, arr["flip_up"], arr["flip_dn"])
+        st = summarize_backtest_trades(trades, exclude_top_n)
+        out.append({"sa_start": start, "sa_inc": inc, "sa_max": mx, "sa_ema_len": eln,
+                    "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
+                    "total_pnl_usd": st["total_pnl_usd"], "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"],
+                    "max_drawdown_usd": st["max_drawdown_usd"], "avg_bars_held": st["avg_bars_held"]})
+    return out
+
+
+async def run_sa_montecarlo(symbol, cfg, days, starts=None, incs=None, maxs=None, emas=None, runs=500, exclude_top_n=1, seed=None):
+    """Raster ueber SAR Start x SAR Schritt x SAR Maximum x EMA-Laenge. Achsen als {"min","max","step"} (oder Liste); eine leere Achse
+    nimmt den Wert aus den Einstellungen. Zeitebene, Fenster, Richtung, SAR-Ende, SL/TP, Margin und Hebel kommen aus den Einstellungen."""
+    import random
+    from zerolag import zl_mc_range, zl_mc_values, ZL_MC_MAX_RUNS
+    cfg = dict(cfg)
+    base_p = _sa_params(cfg)
+
+    def axis(val, cast, lo, hi, fallback):
+        return (zl_mc_range(val, cast, lo, hi) if isinstance(val, dict) else zl_mc_values(val, cast, lo, hi)) or [fallback]
+
+    start_l = axis(starts, float, 0.001, 1.0, base_p["start"])
+    inc_l = axis(incs, float, 0.001, 1.0, base_p["inc"])
+    max_l = axis(maxs, float, 0.001, 2.0, base_p["max"])
+    ema_l = axis(emas, int, 1, 500, base_p["ema_len"])
+    runs = max(1, min(ZL_MC_MAX_RUNS, int(runs)))
+    res = cfg.get("sa_resolution", "5m")
+    mt = cfg.get("binance_market_type", "spot")
+    max_candles = BACKTEST_MAX_CANDLES.get("sar_ema", 100_000)
+    combos = [(a, b, m, e) for a in start_l for b in inc_l for m in max_l for e in ema_l]
+    requested = len(combos)
+    rng = random.Random(seed)
+    if len(combos) > runs:
+        combos = rng.sample(combos, runs)
+    warm = (max(ema_l) * 3 + 250) * _res_seconds(res) / 86_400
+    cap = min(max_candles, 5000) if res in SUB_MINUTE_RESOLUTIONS else max_candles
+    candles, err = await _fetch_cached_mo7_backtest_candles(symbol, res, days + warm + 1, cap, market_type=mt)
+    if err or not candles or len(candles[4]) < 100:
+        return {"error": f"Für die Zeitebene {res} gab es nicht genug Kerzen" + (f" ({err})." if err else ".")}
+    ts = candles[0]
+    start_ts = ts[-1] - int(days * 86_400_000)
+    i_start = next((i for i, t in enumerate(ts) if t >= start_ts), 1)
+    days_cov = (ts[-1] - ts[i_start]) / 86_400_000
+    n_max = len(ts)
+    deadline = time.time() + 240
+    results = await asyncio.to_thread(_sa_mc_compute, candles, i_start, cfg, combos, exclude_top_n, deadline)
+    candles = None
+    if not results:
+        return {"error": "Keine Kombination konnte in der verfügbaren Zeit gerechnet werden - weniger Durchläufe oder kürzeren Zeitraum wählen."}
+    pnls = sorted(r["total_pnl_usd"] for r in results)
+    median = pnls[len(pnls) // 2] if len(pnls) % 2 else (pnls[len(pnls) // 2 - 1] + pnls[len(pnls) // 2]) / 2
+    pos = sum(1 for r in results if r["total_pnl_usd"] > 0)
+    min_trades = 5
+    best = sorted(results, key=lambda r: (r["trades"] >= min_trades, r["total_pnl_usd"]), reverse=True)
+    worst = sorted(results, key=lambda r: r["total_pnl_usd"])
+    return {
+        "symbol": symbol, "entry_mode": "sar_ema", "days": days, "actual_days_covered": round(days_cov, 1),
+        "candles_processed": n_max, "resolution": res,
+        "starts": start_l, "incs": inc_l, "maxs": max_l, "emas": ema_l,
+        "min_reliable_trades": min_trades, "seed": seed,
+        "combos_tested": len(results), "combos_requested": requested, "combos_drawn": len(combos),
+        "profitable_pct": round(pos / len(results) * 100, 1),
+        "median_pnl_usd": round(median, 2), "best_pnl_usd": pnls[-1], "worst_pnl_usd": pnls[0],
+        "results": best[:30], "worst_results": worst[:20],
+    }

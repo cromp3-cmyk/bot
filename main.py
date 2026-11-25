@@ -13,7 +13,7 @@ from bot_core import (
     load_global_settings, handle_global_settings_get, handle_global_settings_update,
     handle_index, handle_symbols, handle_overview, handle_status,
     handle_config_update, handle_control, handle_close_position, handle_reverse_position, handle_reset,
-    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_gc_trend, handle_scalp_trend, handle_dv_montecarlo, handle_gq_montecarlo, handle_vc_montecarlo, handle_zl_montecarlo, handle_config_defaults, handle_rlm_montecarlo, handle_pa_montecarlo, handle_we_montecarlo, handle_wd_montecarlo, handle_ar_montecarlo, handle_pv_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
+    handle_manual_trade, handle_backtest, handle_wa_live_chart, handle_wa_trend, handle_gc_trend, handle_scalp_trend, handle_dv_montecarlo, handle_gq_montecarlo, handle_vc_montecarlo, handle_zl_montecarlo, handle_sa_montecarlo, handle_config_defaults, handle_rlm_montecarlo, handle_pa_montecarlo, handle_we_montecarlo, handle_wd_montecarlo, handle_ar_montecarlo, handle_pv_montecarlo, handle_ab_sweep, handle_er_sweep, handle_ab_signal_sweep, handle_liq_sweep, handle_wa_sweep,
     basic_auth_middleware, DASHBOARD_USERNAME, DASHBOARD_PASSWORD, DASHBOARD_PASSWORD_GENERATED,
     position_sync_loop,
 )
@@ -70,6 +70,7 @@ async def start_web_server():
     app.router.add_post("/api/ab_sweep", handle_ab_sweep)
     app.router.add_post("/api/dv_mc", handle_dv_montecarlo)
     app.router.add_post("/api/zl_mc", handle_zl_montecarlo)
+    app.router.add_post("/api/sa_mc", handle_sa_montecarlo)
     app.router.add_post("/api/vc_mc", handle_vc_montecarlo)
     app.router.add_post("/api/gq_mc", handle_gq_montecarlo)
     app.router.add_post("/api/rlm_mc", handle_rlm_montecarlo)
