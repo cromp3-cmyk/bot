@@ -1979,6 +1979,9 @@ def _simulate_cp_trades(candles, cfg, bull, bear, risk_atr, warmup):
 async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
     if entry_mode == "mtf_spread":
         return await run_mt_backtest(symbol, cfg, days, exclude_top_n)
+    if entry_mode == "sar_ema":
+        from sar_ema import run_sa_backtest
+        return await run_sa_backtest(symbol, cfg, days, exclude_top_n)
     if entry_mode == "pure_momentum":
         from pure_momentum import run_pm_backtest
         return await run_pm_backtest(symbol, cfg, days, exclude_top_n)
@@ -2278,7 +2281,7 @@ async def run_backtest(symbol, entry_mode, cfg, days, exclude_top_n=1):
             "chart": wa_chart_payload(candles[0], candles[1], candles[2], candles[3], candles[4], cfg),
         }
 
-    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, ema_rsi, mtf_spread, pure_momentum, dollar701, gold_scalper, zero_lag, punk_algo, wae_ema, wt_div, mom_field, auction_trend, lsob, trendfolge, rlm, vwap_cross, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
+    return {"error": f"Backtest für '{entry_mode}' nicht unterstützt (nur ab_breakout, ema_rsi, mtf_spread, pure_momentum, sar_ema, dollar701, gold_scalper, zero_lag, punk_algo, wae_ema, wt_div, mom_field, auction_trend, lsob, trendfolge, rlm, vwap_cross, rsi_signal, mvwap_mf_signal, scalp_vwap_obv_rsi, liquidity_waves, wellenanker - Grid braucht historische Tick-/Orderbuchdaten, die es nicht gibt)."}
 AB_SWEEP_MAX_COMBOS = 600
 AB_SWEEP_MIN_RELIABLE_TRADES = 5
 
@@ -2562,6 +2565,7 @@ BACKTEST_MAX_CANDLES = {
     "ema_rsi": 100_000,
     "mtf_spread": 100_000,
     "pure_momentum": 100_000,
+    "sar_ema": 100_000,
     "dollar701": 100_000,
     "gold_scalper": 100_000,
     "zero_lag": 100_000,

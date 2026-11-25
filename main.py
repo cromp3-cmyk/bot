@@ -22,6 +22,7 @@ from strategies import (
     liq_poll_loop, wa_poll_loop, load_binance_ban_state,
 )
 from pure_momentum import pm_poll_loop
+from sar_ema import sa_poll_loop
 from dollar701 import dv_poll_loop
 from goldscalper import gq_poll_loop
 from zerolag import zl_poll_loop
@@ -168,6 +169,7 @@ async def main():
         *[er_poll_loop(s) for s in SYMBOLS],
         *[mt_poll_loop(s) for s in SYMBOLS],
         *[pm_poll_loop(s) for s in SYMBOLS],
+        *[sa_poll_loop(s) for s in SYMBOLS],
         *[dv_poll_loop(s) for s in SYMBOLS],
         *[gq_poll_loop(s) for s in SYMBOLS],
         *[zl_poll_loop(s) for s in SYMBOLS],

@@ -426,6 +426,17 @@ def default_config():
         "pm_trail_usd": float(os.getenv("PM_TRAIL_USD", "0")),   # Trailing-Stop-Abstand in $ (0 = aus)
         "pm_sl_cooldown_seconds": float(os.getenv("PM_SL_COOLDOWN_SECONDS", "30.0")),
 
+        # ===== SAR + EMA Wechsel (entry_mode sar_ema): Parabolic SAR + EMA, Signal in den ersten N Kerzen eines neuen SAR-Trends =====
+        "sa_resolution": os.getenv("SA_RESOLUTION", "5m"),
+        "sa_start": float(os.getenv("SA_START", "0.02")),
+        "sa_inc": float(os.getenv("SA_INC", "0.02")),
+        "sa_max": float(os.getenv("SA_MAX", "0.2")),
+        "sa_ema_len": int(os.getenv("SA_EMA_LEN", "10")),
+        "sa_max_bars": int(os.getenv("SA_MAX_BARS", "3")),
+        "sa_direction_mode": os.getenv("SA_DIRECTION_MODE", "both"),
+        "sa_sl_usd": float(os.getenv("SA_SL_USD", "0")),   # optionaler fester SL: Verlust der Position in $ (0 = aus)
+        "sa_tp_usd": float(os.getenv("SA_TP_USD", "0")),   # optionaler fester TP: Gewinn der Position in $ (0 = aus)
+
         # ===== Dollar701 SuperTrend (entry_mode dollar701) =====
         "dv_resolution": os.getenv("DV_RESOLUTION", "5m"),
         "dv_sens": float(os.getenv("DV_SENS", "7.0")),   # Sensitivity 1-15, 2 Nachkommastellen (Perioden=(S+1)*10, Multiplikator=(S+1)/2)
@@ -993,6 +1004,7 @@ PERSISTED_STATE_KEYS = [
     "ab_sl_price", "ab_tp1_price", "ab_tp2_price", "ab_tp3_price", "ab_tp1_done", "ab_tp2_done", "ab_be_done",
     "er_sl_price", "er_tp1_price", "er_tp2_price", "er_tp3_price", "er_tp1_done", "er_tp2_done", "er_sl_cooldown_until",
     "pm_sl_price", "pm_tp_price", "pm_trail_extreme", "pm_sl_cooldown_until",
+    "sa_sl_price", "sa_tp_price",
     "dv_sl_price", "dv_tp_price", "dv_trail_extreme", "dv_sl_cooldown_until",
     "gq_sl_price", "gq_tp1_price", "gq_tp1_done", "gq_tp1_ms", "gq_sl_cooldown_until",
     "vc_sl", "vc_tp", "vc_tp1", "vc_tp1_done", "vc_be_done",
@@ -1194,6 +1206,7 @@ _STRATEGY_STATE_RESETS = {
     "gold_scalper": ("goldscalper", "_gq_reset_state"),
     "dollar701": ("dollar701", "_dv_reset_state"),
     "pure_momentum": ("pure_momentum", "_pm_reset_state"),
+    "sar_ema": ("sar_ema", "_sa_reset_state"),
     "punk_algo": ("punk_algo", "_pa_reset_state"),
     "wae_ema": ("wae_ema", "_we_reset_state"),
     "wt_div": ("wt_div", "_wd_reset_state"),
@@ -2323,6 +2336,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <option value="ab_breakout">Al-Shatri Breakout (Range-Ausbruch + EMA-Trend + RSI, Presets, Ausstieg wählbar: Wechsel bei Gegen-Signal + $-SL oder Original-Plan mit ATR-SL + TP1/TP2/TP3)</option>
       <option value="mtf_spread">Wellenanker MTF Spread Trend (9 Zeitebenen in 3 Blöcken, Trend % dreht aus Buy/Sell-Level, Filter + fester $-SL/TP)</option>
       <option value="pure_momentum">Pure Momentum Oscillator (Signal bei jedem Farbwechsel grün/rot, Wechsel-System, ATR-SL/TP)</option>
+      <option value="sar_ema">SAR + EMA Wechsel (Parabolic SAR + EMA10, Signal in den ersten N Kerzen eines neuen SAR-Trends, nur Wechsel Long ↔ Short)</option>
       <option value="dollar701">Dollar701 SuperTrend (Buy/Sell bei jedem SuperTrend-Wechsel, Sensitivity 2 Nachkommastellen, fester $-SL/-TP, Monte-Carlo-Test)</option>
       <option value="zero_lag">Zero Lag Trend (Zero-Lag-EMA mit Band, Trendzustand + Einstiegspfeile, TP1/TP2, Monte-Carlo)</option>
       <option value="gold_scalper">Gold Scalper (RSI-Banker-Kreuzung + Ausbruch über Hoch/Tief der letzten 4h-Kerze, Ausstieg über ATR-Bänder)</option>
@@ -2658,6 +2672,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="pure_momentum"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="pm_tp_usd"></div>
   <div data-mode="pure_momentum"><label>Trailing-Stop (Abstand in $ hinter dem besten Kurs, laeuft mit; 0 = aus)</label><input type="number" step="0.1" min="0" id="pm_trail_usd"></div>
   <div data-mode="pure_momentum"><label>Cooldown nach SL (Sek.)</label><input type="number" step="1" id="pm_sl_cooldown_seconds"></div>
+
+  <div data-mode="sar_ema" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
+    🟢🔴 <b>SAR + EMA Wechsel</b>: Der Parabolic SAR bestimmt den Trend (SAR unter dem Kurs = aufwärts). Nach jedem Kippen gilt ein Fenster von N Kerzen: das Signal ist die <b>erste Kerze, die über (Long) bzw. unter (Short) der EMA schließt</b>. Pro SAR-Trend höchstens ein Signal. <b>Nur Wechsel</b>: ein Gegensignal schließt die Position und eröffnet sofort die Gegenrichtung, es gibt keinen Ausstieg beim SAR-Kippen. SL/TP sind optional (0 = aus).
+  </div>
+  <div data-mode="sar_ema"><label>Zeitebene (Signal bei Kerzenschluss)</label>
+    <select class="cfg" id="sa_resolution">
+      <option value="5s">5 Sekunden (aus Binance-1s-Kerzen)</option><option value="10s">10 Sekunden (aus Binance-1s-Kerzen)</option>
+      <option value="15s">15 Sekunden</option>
+      <option value="30s">30 Sekunden</option>
+      <option value="45s">45 Sekunden</option>
+      <option value="1m">1 Minute</option>
+      <option value="5m">5 Minuten</option>
+      <option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option>
+      <option value="1h">1 Stunde</option>
+      <option value="4h">4 Stunden</option>
+      <option value="custom">Eigene Minuten...</option>
+    </select>
+    <input type="number" step="1" min="1" id="sa_resolution_custom_minutes" placeholder="z.B. 8 oder 24" style="display:none; margin-top:6px; width:140px;">
+  </div>
+  <div data-mode="sar_ema"><label>SAR Start</label><input type="number" step="0.01" min="0.001" id="sa_start"></div>
+  <div data-mode="sar_ema"><label>SAR Schritt</label><input type="number" step="0.01" min="0.001" id="sa_inc"></div>
+  <div data-mode="sar_ema"><label>SAR Maximum</label><input type="number" step="0.01" min="0.001" id="sa_max"></div>
+  <div data-mode="sar_ema"><label>EMA Länge</label><input type="number" step="1" min="1" id="sa_ema_len"></div>
+  <div data-mode="sar_ema"><label>Signal erlaubt in den ersten N Kerzen eines neuen SAR-Trends</label><input type="number" step="1" min="1" id="sa_max_bars"></div>
+  <div data-mode="sar_ema"><label>Richtung</label>
+    <select class="cfg" id="sa_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
+  </div>
+  <div data-mode="sar_ema"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="sa_sl_usd"></div>
+  <div data-mode="sar_ema"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="sa_tp_usd"></div>
 
   <div data-mode="dollar701" style="grid-column:1/-1; font-size:12px; color:var(--text-dim); padding:6px 0;">
     📈 <b>Dollar701 SuperTrend</b>: Buy/Sell-Signal des Dollar701-Indikators. SuperTrend auf hl2 mit ATR-Länge = (Sensitivity+1)×10 und Multiplikator = (Sensitivity+1)/2. <b>Signal bei jedem Trendwechsel</b> (rot→grün = Long, grün→rot = Short) auf der geschlossenen Kerze. Ausstieg: Gegen-Signal dreht die Position, dazu optional fester $-SL und fester $-TP. Unten im Backtest-Bereich: Monte-Carlo-Test über Sensitivity × SL × TP.
@@ -5474,6 +5518,7 @@ const OV_DEF = [
   ['vwap_d','VWAP Day','#f5b83d',true], ['vwap_w','VWAP Week','#3b82f6',true], ['vwap_m','VWAP Month','#a855f7',true],
   ['vc_vwap','VWAP der Strategie','#c67600',true], ['vc_bup','VWAP Band oben','#a69b33',true], ['vc_blo','VWAP Band unten','#a69b33',true],
   ['zl_basis','Zero-Lag-Linie','#8b5cf6',true], ['zl_up','Zero-Lag Band oben','#ff1100',true], ['zl_dn','Zero-Lag Band unten','#00ffbb',true],
+  ['sa_ema','SAR-Strategie EMA','#22d3ee',true], ['sa_up','SAR (Aufwärts)','#22c55e',true], ['sa_dn','SAR (Abwärts)','#ef4444',true],
   ['ema9','9 EMA','#e5e7eb',false], ['ema21','21 EMA','#22d3ee',true], ['ema50','50 EMA','#f97316',true],
   ['swing_h','Swing High','#f0354b',true], ['swing_l','Swing Low','#1fcf6e',true]];
 let OV = {};
@@ -5843,7 +5888,7 @@ function getResolutionField(fieldId) {
   }
   return select.value;
 }
-document.querySelectorAll('#zl_resolution, #vc_resolution, #gq_resolution, #da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #mf_resolution, #ar_resolution, #pv_resolution, #lb_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
+document.querySelectorAll('#sa_resolution, #zl_resolution, #vc_resolution, #gq_resolution, #da_resolution, #es_resolution, #ht_resolution, #cp_resolution, #utb_resolution, #wtc_resolution, #pk_resolution, #pk_mtf_tf1, #pk_mtf_tf2, #pk_mtf_tf3, #utb_mtf_tf1, #utb_mtf_tf2, #utb_mtf_tf3, #fr_resolution, #cd_resolution, #fr_zscore_resolution, #cd_zscore_resolution, #rf_resolution, #rf_zscore_resolution, #utb_zscore_resolution, #fr_mtf_tf1, #fr_adx_resolution, #sr_resolution, #sr_adx_resolution, #sr_ema_resolution, #hvd_resolution, #hvd_adx_filter_resolution, #ab_resolution, #er_resolution, #mt_resolution, #pm_resolution, #wd_resolution, #mf_resolution, #ar_resolution, #pv_resolution, #lb_resolution, #we_resolution, #pa_resolution, #dv_resolution, #ab_trend_filter_resolution, #hvd_trend_filter_resolution, #rsi_resolution, #rsi_supertrend_filter_resolution, #mvwap_resolution, #mvwap_supertrend_filter_resolution, #scalp_timeframe, #scalp_supertrend_filter_resolution, #liq_timeframe, #wa_timeframe').forEach(sel => {
   sel.addEventListener('change', () => {
     const customInput = document.getElementById(sel.id + '_custom_minutes');
     customInput.style.display = sel.value === 'custom' ? '' : 'none';
@@ -7452,6 +7497,16 @@ async function refresh() {
     document.getElementById('pm_trail_usd').value = data.config.pm_trail_usd || 0;
     document.getElementById('pm_sl_cooldown_seconds').value = data.config.pm_sl_cooldown_seconds;
 
+    setResolutionField('sa_resolution', data.config.sa_resolution);
+    document.getElementById('sa_start').value = data.config.sa_start;
+    document.getElementById('sa_inc').value = data.config.sa_inc;
+    document.getElementById('sa_max').value = data.config.sa_max;
+    document.getElementById('sa_ema_len').value = data.config.sa_ema_len;
+    document.getElementById('sa_max_bars').value = data.config.sa_max_bars;
+    document.getElementById('sa_direction_mode').value = data.config.sa_direction_mode || 'both';
+    document.getElementById('sa_sl_usd').value = data.config.sa_sl_usd || 0;
+    document.getElementById('sa_tp_usd').value = data.config.sa_tp_usd || 0;
+
     setResolutionField('dv_resolution', data.config.dv_resolution);
     document.getElementById('dv_sens').value = data.config.dv_sens;
     document.getElementById('dv_direction_mode').value = data.config.dv_direction_mode || 'both';
@@ -8086,6 +8141,15 @@ function buildConfigPayload() {
     pm_tp_usd: parseFloat(document.getElementById('pm_tp_usd').value) || 0,
     pm_trail_usd: parseFloat(document.getElementById('pm_trail_usd').value) || 0,
     pm_sl_cooldown_seconds: parseFloat(document.getElementById('pm_sl_cooldown_seconds').value),
+    sa_resolution: getResolutionField('sa_resolution'),
+    sa_start: parseFloat(document.getElementById('sa_start').value) || 0.02,
+    sa_inc: parseFloat(document.getElementById('sa_inc').value) || 0.02,
+    sa_max: parseFloat(document.getElementById('sa_max').value) || 0.2,
+    sa_ema_len: parseInt(document.getElementById('sa_ema_len').value) || 10,
+    sa_max_bars: parseInt(document.getElementById('sa_max_bars').value) || 3,
+    sa_direction_mode: document.getElementById('sa_direction_mode').value,
+    sa_sl_usd: parseFloat(document.getElementById('sa_sl_usd').value) || 0,
+    sa_tp_usd: parseFloat(document.getElementById('sa_tp_usd').value) || 0,
     dv_resolution: getResolutionField('dv_resolution'),
     dv_sens: parseFloat(document.getElementById('dv_sens').value) || 7,
     dv_direction_mode: document.getElementById('dv_direction_mode').value,
@@ -8821,6 +8885,7 @@ async def handle_config_update(request):
                 "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_be_pct","vc_tp_mode","vc_tp_usd","vc_wa_tf","vc_wa_src","vc_wa_n1","vc_wa_n2","vc_wa_sig_len","vc_wa_wave_scale","vc_wa_zone","vc_tp1_on","vc_tp1_rr","vc_tp1_pct","vc_adx_min","vc_adx_len","vc_adx_directional","vc_cross_min_pct","vc_cross_confirm","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
+                "sa_resolution", "sa_start", "sa_inc", "sa_max", "sa_ema_len", "sa_max_bars", "sa_direction_mode", "sa_sl_usd", "sa_tp_usd",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
@@ -8967,10 +9032,11 @@ async def handle_wa_live_chart(request):
     is_rlm = cfg.get("entry_mode") == "rlm"
     is_vc = cfg.get("entry_mode") == "vwap_cross"
     is_zl = cfg.get("entry_mode") == "zero_lag"
+    is_sa = cfg.get("entry_mode") == "sar_ema"
     tf = request.query.get("tf", "")
     SUBMIN = {"5s": 5, "10s": 10, "15s": 15, "30s": 30, "45s": 45}
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
-        tf = cfg.get("pv_resolution", "15m") if is_pv else cfg.get("ar_resolution", "15m") if is_ar else cfg.get("lb_resolution", "15m") if is_lb else cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("zl_resolution", "5m") if is_zl else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else cfg.get("gq_resolution", "1m") if is_gq else "5m")
+        tf = cfg.get("pv_resolution", "15m") if is_pv else cfg.get("ar_resolution", "15m") if is_ar else cfg.get("lb_resolution", "15m") if is_lb else cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("zl_resolution", "5m") if is_zl else cfg.get("sa_resolution", "5m") if is_sa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else cfg.get("gq_resolution", "1m") if is_gq else "5m")
         if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
             tf = "5m"
     if tf in SUBMIN:
@@ -9018,6 +9084,9 @@ async def handle_wa_live_chart(request):
     elif is_pa:
         from punk_algo import pa_chart_payload
         payload = await asyncio.to_thread(pa_chart_payload, ts, o, h, l, c, cfg, 1000)
+    elif is_sa:
+        from sar_ema import sa_chart_payload
+        payload = await asyncio.to_thread(sa_chart_payload, ts, o, h, l, c, cfg, 1000)
     elif is_zl:
         from zerolag import zl_chart_payload
         payload = await zl_chart_payload(symbol, cfg, ts, o, h, l, c, tf)
@@ -9105,7 +9174,7 @@ async def handle_wa_live_chart(request):
                 trade_marks.append({"time": t_in, "kind": "entry", "dir": st["position"], "price": en.get("price")})
     except Exception as e:
         debug_log(f"⚠️ Chart-Trade-Markierungen fehlgeschlagen: {e}")
-    for ln in (payload.pop("vc_lines", None) or []) + (payload.pop("zl_lines", None) or []):   # Linien der Strategie
+    for ln in (payload.pop("vc_lines", None) or []) + (payload.pop("zl_lines", None) or []) + (payload.pop("sa_lines", None) or []):   # Linien der Strategie
         if ln.get("data"):
             overlays.append(ln)
     payload.update({"trade_marks": trade_marks, "ok": True, "price": st.get("last_price"), "position": pos, "resolution": tf, "grid": grid, "overlays": overlays, "structure": structure,
