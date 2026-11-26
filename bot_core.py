@@ -2268,7 +2268,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.12-c</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.12-d</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
@@ -5603,6 +5603,7 @@ function wacSetOverlays(list) {
     let s = wacOvSeries[o.key];
     if (!s) { s = wacOvSeries[o.key] = WAC.price.addLineSeries({lineWidth: o.key.startsWith('swing') ? 1 : 2, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, lineStyle: o.key.startsWith('swing') ? 2 : 0}); }
     s.applyOptions({color: cfg.c, visible: cfg.on, title: o.label});
+    if (o.key === 'sa_up' || o.key === 'sa_dn') s.applyOptions({lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 2});   // SAR als Punkte wie im Original
     s.setData(o.data);
   });
   Object.keys(wacOvSeries).forEach(k => { if (!seen[k]) wacOvSeries[k].setData([]); });
@@ -5651,6 +5652,8 @@ function wacRender(d, markers, keepRange) {
 function wacSigMarkers(d) {
   const sig = (d.markers || []).map(m => m.kind === 'pivot_low' ? {time: m.time, position: 'belowBar', color: '#facc15', shape: 'circle', text: m.text || ''}
     : m.kind === 'pivot_high' ? {time: m.time, position: 'aboveBar', color: '#facc15', shape: 'circle', text: m.text || ''}
+    : m.kind === 'exit_x'
+    ? {time: m.time, position: m.dir === 'long' ? 'aboveBar' : 'belowBar', color: '#9ca3af', shape: 'circle', text: m.text || ''}
     : m.kind === 'long'
     ? {time: m.time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: m.text || ''}
     : {time: m.time, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: m.text || ''});

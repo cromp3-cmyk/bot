@@ -387,6 +387,20 @@ def sa_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
     n = len(c)
     off = max(0, n - max_bars)
     candles, markers, ema_l, sar_up, sar_dn = [], [], [], [], []
+    mode = cfg.get("sa_direction_mode", "both")
+    pos = None   # Positionsverlauf nur aus den Signalen (ohne SL/TP) -> zeigt, wo ein SAR-Ende die Position beenden wuerde
+    exits = {}
+    for i in range(1, n):
+        buy, sell = arr["buy"][i], arr["sell"][i]
+        if pos and p["exit_on_flip"] and (arr["flip_dn"][i] if pos == "long" else arr["flip_up"][i]) and not (sell if pos == "long" else buy):
+            exits[i] = pos
+            pos = None
+        if mode == "long_only":
+            sell = False
+        elif mode == "short_only":
+            buy = False
+        if buy != sell:
+            pos = "long" if buy else "short"
     for i in range(off, n):
         t = ts[i] // 1000
         candles.append({"time": t, "open": o[i], "high": h[i], "low": l[i], "close": c[i]})
@@ -397,9 +411,11 @@ def sa_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
             sar_up.append({"time": t, "value": s} if arr["up"][i] else {"time": t})   # Luecken als Whitespace
             sar_dn.append({"time": t} if arr["up"][i] else {"time": t, "value": s})
         if arr["buy"][i]:
-            markers.append({"time": t, "kind": "long", "price": c[i]})
+            markers.append({"time": t, "kind": "long", "price": c[i], "text": "BUY"})
         if arr["sell"][i]:
-            markers.append({"time": t, "kind": "short", "price": c[i]})
+            markers.append({"time": t, "kind": "short", "price": c[i], "text": "SELL"})
+        if i in exits:
+            markers.append({"time": t, "kind": "exit_x", "dir": exits[i], "price": c[i], "text": "SAR-Ende"})
     lines = [{"key": "sa_ema", "label": f"EMA {p['ema_len']}", "data": ema_l},
              {"key": "sa_up", "label": "SAR (Aufwärts)", "data": sar_up},
              {"key": "sa_dn", "label": "SAR (Abwärts)", "data": sar_dn}]
