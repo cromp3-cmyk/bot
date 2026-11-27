@@ -15,6 +15,7 @@ import websockets
 import aiohttp
 import json
 import time
+import re
 import os
 import secrets
 import base64
@@ -435,6 +436,11 @@ def default_config():
         "sa_max_bars": int(os.getenv("SA_MAX_BARS", "3")),
         "sa_direction_mode": os.getenv("SA_DIRECTION_MODE", "both"),
         "sa_exit_on_flip": os.getenv("SA_EXIT_ON_FLIP", "true").lower() == "true",   # Trade beenden, sobald der SAR gegen die Position dreht
+        "sa_exit_wa": os.getenv("SA_EXIT_WA", "false").lower() == "true",   # Ausstieg: Wellenanker-Kreuzung (WT1 x WT2)
+        "sa_wa_zone": float(os.getenv("SA_WA_ZONE", "0")),                  # 0 = jede Kreuzung, sonst nur ueber +Zone (Long-Ende) / unter -Zone (Short-Ende)
+        "sa_exit_pv": os.getenv("SA_EXIT_PV", "false").lower() == "true",   # Ausstieg: Pivot-Kreuzung
+        "sa_pv_left": int(os.getenv("SA_PV_LEFT", "1")),
+        "sa_pv_right": int(os.getenv("SA_PV_RIGHT", "1")),
         "sa_sl_usd": float(os.getenv("SA_SL_USD", "0")),   # optionaler fester SL: Verlust der Position in $ (0 = aus)
         "sa_tp_usd": float(os.getenv("SA_TP_USD", "0")),   # optionaler fester TP: Gewinn der Position in $ (0 = aus)
 
@@ -2268,7 +2274,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.12-d</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.13</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
@@ -2701,7 +2707,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div data-mode="sar_ema"><label>Richtung</label>
     <select class="cfg" id="sa_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
   </div>
-  <div data-mode="sar_ema"><label><input type="checkbox" id="sa_exit_on_flip" style="width:auto; vertical-align:middle;"> Trade beenden, sobald der SAR gegen die Position dreht (wie im Original)</label></div>
+  <div data-mode="sar_ema"><label><input type="checkbox" id="sa_exit_on_flip" style="width:auto; vertical-align:middle;"> Ausstieg: SAR-Ende – Trade beenden, sobald der SAR gegen die Position dreht (wie im Original)</label></div>
+  <div data-mode="sar_ema"><label><input type="checkbox" id="sa_exit_wa" style="width:auto; vertical-align:middle;"> Ausstieg: Wellenanker-Kreuzung (Long: WT1 kreuzt unter WT2, Short: darüber)</label></div>
+  <div data-mode="sar_ema"><label>Wellenanker-Zone für den Ausstieg (0 = jede Kreuzung, sonst nur über +Zone bzw. unter −Zone)</label><input type="number" step="1" min="0" max="90" id="sa_wa_zone"></div>
+  <div data-mode="sar_ema"><label><input type="checkbox" id="sa_exit_pv" style="width:auto; vertical-align:middle;"> Ausstieg: Pivot-Kreuzung (Long: Tief unter letztes Pivot-Tief, Short: Hoch über letztes Pivot-Hoch)</label></div>
+  <div data-mode="sar_ema"><label>Pivot links / rechts (Kerzen)</label><span style="display:flex; gap:4px;"><input type="number" step="1" min="1" id="sa_pv_left" style="width:70px;"><input type="number" step="1" min="1" id="sa_pv_right" style="width:70px;"></span></div>
   <div data-mode="sar_ema"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="sa_sl_usd"></div>
   <div data-mode="sar_ema"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="sa_tp_usd"></div>
 
@@ -4416,6 +4426,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <span style="display:flex; gap:4px;"><input type="number" step="0.05" min="0.001" id="sa-mc-max-min" value="0.1" style="width:70px;"><input type="number" step="0.05" min="0.001" id="sa-mc-max-max" value="0.3" style="width:70px;"><input type="number" step="0.05" min="0.001" id="sa-mc-max-step" value="0.1" style="width:70px;"></span></div>
     <div><label><input type="checkbox" id="sa-mc-use-ema" checked style="width:auto; vertical-align:middle;"> EMA Länge: von / bis / Schritt</label>
       <span style="display:flex; gap:4px;"><input type="number" step="1" min="1" id="sa-mc-ema-min" value="5" style="width:70px;"><input type="number" step="1" min="1" id="sa-mc-ema-max" value="20" style="width:70px;"><input type="number" step="1" min="1" id="sa-mc-ema-step" value="1" style="width:70px;"></span></div>
+    <div><label>Ausstiege testen (jede Kombination wird einzeln getestet)</label>
+      <span style="display:flex; flex-wrap:wrap; gap:10px; font-size:12px;">
+        <label><input type="checkbox" id="sa-mc-ex-none" style="width:auto; vertical-align:middle;"> nur Wechsel</label>
+        <label><input type="checkbox" id="sa-mc-ex-sar" checked style="width:auto; vertical-align:middle;"> SAR-Ende</label>
+        <label><input type="checkbox" id="sa-mc-ex-wa" style="width:auto; vertical-align:middle;"> Wellenanker</label>
+        <label><input type="checkbox" id="sa-mc-ex-pv" style="width:auto; vertical-align:middle;"> Pivot</label>
+        <label><input type="checkbox" id="sa-mc-ex-combo" style="width:auto; vertical-align:middle;"> + alle Mischungen</label>
+      </span></div>
     <button id="btn-sa-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
   </div>
   <div id="sa-mc-status" style="color:var(--text-dim); font-size:13px;"></div>
@@ -4425,6 +4443,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="sa_inc">SAR Schritt ⇅</th>
       <th class="sortable" data-key="sa_max">SAR Max ⇅</th>
       <th class="sortable" data-key="sa_ema_len">EMA ⇅</th>
+      <th class="sortable" data-key="sa_exits">Ausstieg ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -4438,6 +4457,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <th class="sortable" data-key="sa_inc">SAR Schritt ⇅</th>
       <th class="sortable" data-key="sa_max">SAR Max ⇅</th>
       <th class="sortable" data-key="sa_ema_len">EMA ⇅</th>
+      <th class="sortable" data-key="sa_exits">Ausstieg ⇅</th>
       <th class="sortable" data-key="trades">Trades ⇅</th>
       <th class="sortable" data-key="win_rate_pct">Trefferquote ⇅</th>
       <th class="sortable" data-key="total_pnl_usd">PnL $ ⇅</th>
@@ -6362,18 +6382,18 @@ window.saMcResultsData = [];
 window.saMcWorstData = [];
 const saMcRowHtml = (r) => `
   <tr>
-    <td>${r.sa_start}</td><td>${r.sa_inc}</td><td>${r.sa_max}</td><td>${r.sa_ema_len}</td>
+    <td>${r.sa_start}</td><td>${r.sa_inc}</td><td>${r.sa_max}</td><td>${r.sa_ema_len}</td><td>${r.sa_exits}</td>
     <td>${r.trades}</td><td>${r.win_rate_pct}%</td>
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td><td>${r.avg_bars_held}</td>
-    ${applyBtn({sa_start: r.sa_start, sa_inc: r.sa_inc, sa_max: r.sa_max, sa_ema_len: r.sa_ema_len})}
+    ${applyBtn({sa_start: r.sa_start, sa_inc: r.sa_inc, sa_max: r.sa_max, sa_ema_len: r.sa_ema_len, sa_exit_on_flip: r.sa_exit_on_flip, sa_exit_wa: r.sa_exit_wa, sa_exit_pv: r.sa_exit_pv})}
   </tr>`;
 const renderSaMcResults = makeSortableTable('sa-mc-results-table', () => window.saMcResultsData, saMcRowHtml);
 const renderSaMcWorst = makeSortableTable('sa-mc-worst-table', () => window.saMcWorstData, saMcRowHtml);
 
 function saMergeMc(a, b) {
-  const key = r => [r.sa_start, r.sa_inc, r.sa_max, r.sa_ema_len].join('|');
+  const key = r => [r.sa_start, r.sa_inc, r.sa_max, r.sa_ema_len, r.sa_exits].join('|');
   const merge = (x, y, cmp, lim) => {
     const seen = new Set(), out = [];
     [...(x || []), ...(y || [])].forEach(r => { const k = key(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
@@ -6410,6 +6430,16 @@ document.getElementById('btn-sa-mc').addEventListener('click', async () => {
     incs: rng('sa-mc-use-inc', 'sa-mc-inc'),
     maxs: rng('sa-mc-use-max', 'sa-mc-max'),
     emas: rng('sa-mc-use-ema', 'sa-mc-ema'),
+    exits: (() => {
+      const on = id => document.getElementById(id).checked;
+      const l = [];
+      if (on('sa-mc-ex-none')) l.push('none');
+      if (on('sa-mc-ex-sar')) l.push('sar');
+      if (on('sa-mc-ex-wa')) l.push('wa');
+      if (on('sa-mc-ex-pv')) l.push('pivot');
+      if (on('sa-mc-ex-combo')) l.push('sar+wa', 'sar+pivot', 'wa+pivot', 'sar+wa+pivot');
+      return l;
+    })(),
     config: buildConfigPayload(),
   };
   btn.disabled = true;
@@ -6431,7 +6461,7 @@ document.getElementById('btn-sa-mc').addEventListener('click', async () => {
     if (data.error) {
       statusEl.innerText = `❌ ${data.error}`;
     } else {
-      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet (Zeitebene ${data.resolution}, SAR Start ${data.starts.join(', ')}, Schritt ${data.incs.join(', ')}, Maximum ${data.maxs.join(', ')}, EMA ${data.emas.join(', ')}) · ${data.profitable_pct}% im Plus · Median ${data.median_pnl_usd} $ · bester ${data.best_pnl_usd} $`;
+      statusEl.innerText = `${data.combos_tested} von ${data.combos_requested} Kombinationen getestet (Zeitebene ${data.resolution}, SAR Start ${data.starts.join(', ')}, Schritt ${data.incs.join(', ')}, Maximum ${data.maxs.join(', ')}, EMA ${data.emas.join(', ')}, Ausstiege: ${(data.exits || []).join(' | ')}) · ${data.profitable_pct}% im Plus · Median ${data.median_pnl_usd} $ · bester ${data.best_pnl_usd} $`;
       window.saMcResultsData = data.results || [];
       window.saMcWorstData = data.worst_results || [];
       renderSaMcResults();
@@ -7654,6 +7684,11 @@ async function refresh() {
     document.getElementById('sa_max_bars').value = data.config.sa_max_bars;
     document.getElementById('sa_direction_mode').value = data.config.sa_direction_mode || 'both';
     document.getElementById('sa_exit_on_flip').checked = data.config.sa_exit_on_flip !== false;
+    document.getElementById('sa_exit_wa').checked = !!data.config.sa_exit_wa;
+    document.getElementById('sa_wa_zone').value = data.config.sa_wa_zone ?? 0;
+    document.getElementById('sa_exit_pv').checked = !!data.config.sa_exit_pv;
+    document.getElementById('sa_pv_left').value = data.config.sa_pv_left ?? 1;
+    document.getElementById('sa_pv_right').value = data.config.sa_pv_right ?? 1;
     document.getElementById('sa_sl_usd').value = data.config.sa_sl_usd || 0;
     document.getElementById('sa_tp_usd').value = data.config.sa_tp_usd || 0;
 
@@ -8299,6 +8334,11 @@ function buildConfigPayload() {
     sa_max_bars: parseInt(document.getElementById('sa_max_bars').value) || 3,
     sa_direction_mode: document.getElementById('sa_direction_mode').value,
     sa_exit_on_flip: document.getElementById('sa_exit_on_flip').checked,
+    sa_exit_wa: document.getElementById('sa_exit_wa').checked,
+    sa_wa_zone: parseFloat(document.getElementById('sa_wa_zone').value) || 0,
+    sa_exit_pv: document.getElementById('sa_exit_pv').checked,
+    sa_pv_left: parseInt(document.getElementById('sa_pv_left').value) || 1,
+    sa_pv_right: parseInt(document.getElementById('sa_pv_right').value) || 1,
     sa_sl_usd: parseFloat(document.getElementById('sa_sl_usd').value) || 0,
     sa_tp_usd: parseFloat(document.getElementById('sa_tp_usd').value) || 0,
     dv_resolution: getResolutionField('dv_resolution'),
@@ -9036,7 +9076,7 @@ async def handle_config_update(request):
                 "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_be_pct","vc_tp_mode","vc_tp_usd","vc_wa_tf","vc_wa_src","vc_wa_n1","vc_wa_n2","vc_wa_sig_len","vc_wa_wave_scale","vc_wa_zone","vc_tp1_on","vc_tp1_rr","vc_tp1_pct","vc_adx_min","vc_adx_len","vc_adx_directional","vc_cross_min_pct","vc_cross_confirm","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
-                "sa_resolution", "sa_start", "sa_inc", "sa_max", "sa_ema_len", "sa_max_bars", "sa_direction_mode", "sa_exit_on_flip", "sa_sl_usd", "sa_tp_usd",
+                "sa_resolution", "sa_start", "sa_inc", "sa_max", "sa_ema_len", "sa_max_bars", "sa_direction_mode", "sa_exit_on_flip", "sa_exit_wa", "sa_wa_zone", "sa_exit_pv", "sa_pv_left", "sa_pv_right", "sa_sl_usd", "sa_tp_usd",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
@@ -9188,7 +9228,7 @@ async def handle_wa_live_chart(request):
     SUBMIN = {"5s": 5, "10s": 10, "15s": 15, "30s": 30, "45s": 45}
     if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d") and tf not in SUBMIN:
         tf = cfg.get("pv_resolution", "15m") if is_pv else cfg.get("ar_resolution", "15m") if is_ar else cfg.get("lb_resolution", "15m") if is_lb else cfg.get("mf_resolution", "15m") if is_mf else cfg.get("wd_resolution", "15m") if is_wd else cfg.get("we_resolution", "5m") if is_we else cfg.get("pa_resolution", "5m") if is_pa else cfg.get("zl_resolution", "5m") if is_zl else cfg.get("sa_resolution", "5m") if is_sa else cfg.get("vc_resolution", "15m") if is_vc else cfg.get("rlm_resolution", "5m") if is_rlm else cfg.get("tfl_resolution", "1m") if is_tfl else cfg.get("wa_timeframe", "15m") if is_wa else (cfg.get("mt_resolution", "5m") if is_mt else cfg.get("pm_resolution", "5m") if is_pm else cfg.get("dv_resolution", "5m") if is_dv else cfg.get("gq_resolution", "1m") if is_gq else "5m")
-        if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN:
+        if tf not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h") and tf not in SUBMIN and not re.match(r"^\d{1,4}m$", str(tf)):   # eigene Minuten (8m, 24m ...) werden aus 1m-Kerzen zusammengesetzt
             tf = "5m"
     if tf in SUBMIN:
         from strategies import get_seconds_candles
@@ -9692,7 +9732,7 @@ async def handle_sa_montecarlo(request):
     try:
         result = await asyncio.wait_for(
             run_sa_montecarlo(symbol, cfg, days, body.get("starts", ""), body.get("incs", ""),
-                              body.get("maxs", ""), body.get("emas", ""), runs, exclude_top_n, seed),
+                              body.get("maxs", ""), body.get("emas", ""), body.get("exits"), runs, exclude_top_n, seed),
             timeout=BACKTEST_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         return web.json_response({"error": "Monte-Carlo-Test abgebrochen (Zeitlimit) - weniger Durchläufe, weniger Werte je Achse oder kürzeren Zeitraum wählen."}, status=504)

@@ -9,6 +9,10 @@ Portiert aus dem TradingView-Indikator "SAR + EMA10 Signale" (Pine v6), aber NUR
   * Wechsel: ein Gegensignal schliesst die Position und eroeffnet SOFORT die Gegenrichtung (Reverse).
   * SAR-Ende (wie im Original, Option "Trade beenden, sobald SAR gegen die Position dreht", Standard AN): kippt der SAR gegen die
     Position und es gibt auf dieser Kerze kein Gegensignal, wird die Position geschlossen und es bleibt flach bis zum naechsten Signal.
+  * Weitere, einzeln zuschaltbare Ausstiege (alle wirken wie das SAR-Ende: schliessen, dann flach bis zum naechsten Signal):
+      - Wellenanker-Kreuzung: Long endet, wenn WT1 unter WT2 kreuzt (optional nur ueber +Zone), Short, wenn WT1 ueber WT2 kreuzt (optional unter -Zone).
+      - Pivot-Kreuzung: Long endet, wenn das Tief unter das letzte Pivot-Tief faellt, Short, wenn das Hoch ueber das letzte Pivot-Hoch steigt.
+    Mehrere Ausstiege koennen gleichzeitig aktiv sein, der erste, der greift, schliesst.
 Optional: fester Dollar-SL / Dollar-TP (jeweils 0 = aus). Standard: nur der Wechsel.
 """
 
@@ -53,13 +57,18 @@ def _sa_params(cfg):
         "ema_len": max(1, int(cfg.get("sa_ema_len", 10) or 10)),
         "max_bars": max(1, int(cfg.get("sa_max_bars", 3) or 3)),
         "exit_on_flip": bool(cfg.get("sa_exit_on_flip", True)),
+        "exit_wa": bool(cfg.get("sa_exit_wa", False)),
+        "wa_zone": min(90.0, max(0.0, float(cfg.get("sa_wa_zone", 0.0) or 0.0))),
+        "exit_pv": bool(cfg.get("sa_exit_pv", False)),
+        "pv_left": max(1, int(cfg.get("sa_pv_left", 1) or 1)),
+        "pv_right": max(1, int(cfg.get("sa_pv_right", 1) or 1)),
         "sl_usd": max(0.0, float(cfg.get("sa_sl_usd", 0.0) or 0.0)),
         "tp_usd": max(0.0, float(cfg.get("sa_tp_usd", 0.0) or 0.0)),
     }
 
 
 def _sa_warmup(p):
-    return max(3 * p["ema_len"], 50) + 5
+    return max(3 * p["ema_len"], 50, 3 * (p.get("pv_left", 1) + p.get("pv_right", 1)) + 10, 120 if p.get("exit_wa") else 0) + 5
 
 
 # ============================================================================
@@ -118,11 +127,88 @@ def sar_series(h, l, c, start, inc, mx):
     return out
 
 
+def _sa_wt(h, l, c):
+    """Wellenanker-Welle (WT1, WT2) mit den Standard-Werten des Bots (wie bei Zero Lag / Scalp)."""
+    from strategies import compute_wavetrend_series
+    try:
+        from screener import WA_N1, WA_N2, WA_SIG, WA_SCALE
+    except Exception:
+        WA_N1, WA_N2, WA_SIG, WA_SCALE = 10, 21, 4, 1.35
+    return compute_wavetrend_series(c, h, l, c, WA_N1, WA_N2, WA_SIG, "close", WA_SCALE)
+
+
+def _sa_wa_cross(wt1, wt2, zone):
+    """-> (exit_long[], exit_short[]): Long-Ausstieg = WT1 kreuzt unter WT2 (bei zone>0 nur wenn WT2 ueber +zone),
+    Short-Ausstieg = WT1 kreuzt ueber WT2 (bei zone>0 nur wenn WT2 unter -zone)."""
+    n = len(wt1)
+    xl, xs = [False] * n, [False] * n
+    for i in range(1, n):
+        if None in (wt1[i], wt2[i], wt1[i - 1], wt2[i - 1]):
+            continue
+        if wt1[i] < wt2[i] and wt1[i - 1] >= wt2[i - 1] and (zone <= 0 or wt2[i] > zone):
+            xl[i] = True
+        elif wt1[i] > wt2[i] and wt1[i - 1] <= wt2[i - 1] and (zone <= 0 or wt2[i] < -zone):
+            xs[i] = True
+    return xl, xs
+
+
+def _sa_pivot_cross(h, l, left, right):
+    """Pivot-Kreuzung wie im Pivot-Reversal: -> (exit_long[], exit_short[]).
+    Long-Ausstieg: das Tief kreuzt (von oben) das letzte Pivot-Tief. Short-Ausstieg: das Hoch kreuzt (von unten) das letzte Pivot-Hoch.
+    Ein Pivot ist erst `right` Kerzen spaeter bestaetigt (kein Blick in die Zukunft)."""
+    n = len(h)
+    xl, xs = [False] * n, [False] * n
+    hpr = lpr = None
+    prev_h = prev_l = None
+    for j in range(n):
+        i = j - right
+        if i >= left:
+            if h[i] > max(h[i - left:i]) and h[i] >= max(h[i + 1:i + right + 1]):
+                hpr = h[i]
+            if l[i] < min(l[i - left:i]) and l[i] <= min(l[i + 1:i + right + 1]):
+                lpr = l[i]
+        if j > 0:
+            if prev_h is not None and hpr is not None and h[j] > hpr and h[j - 1] <= prev_h:
+                xs[j] = True
+            if prev_l is not None and lpr is not None and l[j] < lpr and l[j - 1] >= prev_l:
+                xl[j] = True
+        prev_h, prev_l = hpr, lpr
+    return xl, xs
+
+
+def sa_apply_exits(arr, p, wa=None, pv=None):
+    """Haengt arr["exit_long"] / arr["exit_short"] an: je Kerze der Grund ("SA-SAR-ENDE", "SA-WA-KREUZ", "SA-PIVOT") oder None.
+    wa / pv sind fertige (exit_long, exit_short)-Paare (Monte-Carlo rechnet sie einmal)."""
+    n = len(arr["buy"])
+    el, es = [None] * n, [None] * n
+    for i in range(n):
+        if p["exit_on_flip"]:
+            if arr["flip_dn"][i]:
+                el[i] = "SA-SAR-ENDE"
+            if arr["flip_up"][i]:
+                es[i] = "SA-SAR-ENDE"
+        if wa is not None and p["exit_wa"]:
+            if wa[0][i] and el[i] is None:
+                el[i] = "SA-WA-KREUZ"
+            if wa[1][i] and es[i] is None:
+                es[i] = "SA-WA-KREUZ"
+        if pv is not None and p["exit_pv"]:
+            if pv[0][i] and el[i] is None:
+                el[i] = "SA-PIVOT"
+            if pv[1][i] and es[i] is None:
+                es[i] = "SA-PIVOT"
+    arr["exit_long"], arr["exit_short"] = el, es
+    return arr
+
+
 def sa_build(h, l, c, p):
-    """-> dict: sar, ema, up (Trend aufwaerts), buy[], sell[] je Kerze (Signale wie im Pine-Script)."""
+    """-> dict: sar, ema, up (Trend aufwaerts), buy[], sell[], exit_long[], exit_short[] je Kerze (Signale wie im Pine-Script + Ausstiege)."""
     sar = sar_series(h, l, c, p["start"], p["inc"], p["max"])
     ema = _ema_series(c, p["ema_len"])
-    return sa_signals(sar, ema, c, p["max_bars"])
+    arr = sa_signals(sar, ema, c, p["max_bars"])
+    wa = _sa_wa_cross(*_sa_wt(h, l, c), p["wa_zone"]) if p["exit_wa"] else None
+    pv = _sa_pivot_cross(h, l, p["pv_left"], p["pv_right"]) if p["exit_pv"] else None
+    return sa_apply_exits(arr, p, wa, pv)
 
 
 def sa_signals(sar, ema, c, max_bars):
@@ -190,21 +276,21 @@ async def check_sa_sl_tp(symbol, price):
             _sa_reset_state(st)
 
 
-async def check_sa_entry(symbol, buy_signal, sell_signal, price, flip_up=False, flip_dn=False):
+async def check_sa_entry(symbol, buy_signal, sell_signal, price, exit_long=None, exit_short=None):
     """Signal auf der geschlossenen Kerze. Gegen-Signal schliesst und dreht, gleiche Richtung wird ignoriert.
-    Kippt der SAR gegen die Position (und es gibt kein Gegensignal), wird sie geschlossen (Option sa_exit_on_flip)."""
+    Greift ein gewaehlter Ausstieg (SAR-Ende / Wellenanker-Kreuzung / Pivot-Kreuzung) und es gibt kein Gegensignal, wird sie geschlossen."""
     b = BOTS[symbol]
     st, cfg = b["state"], b["config"]
     if not cfg["bot_active"] or price is None:
         return
     pos0 = st["position"]
-    if pos0 is not None and _sa_params(cfg)["exit_on_flip"]:
-        # wie im Original: exitLong = Long und (Verkaufssignal oder SAR kippt nach unten) - Signal VOR der Richtungs-Sperre
+    if pos0 is not None:
+        # wie im Original: exitLong = Long und (Verkaufssignal oder Ausstieg) - Signal VOR der Richtungs-Sperre
         raw_opp = sell_signal if pos0 == "long" else buy_signal
-        sar_end = flip_dn if pos0 == "long" else flip_up
-        if sar_end and not raw_opp:
-            debug_log(f"🏁 [{symbol}] SAR+EMA SAR-Ende: {pos0.upper()} schließen @ {price}")
-            await execute_exit(symbol, price, "SA-SAR-ENDE")
+        why = exit_long if pos0 == "long" else exit_short
+        if why and not raw_opp:
+            debug_log(f"🏁 [{symbol}] SAR+EMA Ausstieg ({why}): {pos0.upper()} schließen @ {price}")
+            await execute_exit(symbol, price, why)
             if st["position"] is None:
                 _sa_reset_state(st)
             return
@@ -256,11 +342,19 @@ async def sa_poll_loop(symbol):
                         closed_ts, closed_o, closed_h, closed_l, closed_c = local
                 else:
                     _per = _res_seconds(resolution)
-                    _need_fetch = last_processed_ts is None or (time.time() % _per) < 6 or _per <= 60
+                    # abrufen, solange eine geschlossene Kerze noch nicht verarbeitet ist (kein starres 6-s-Fenster, das ein Fehlschlag verpasst)
+                    _last_close_ms = int(time.time() // _per) * _per * 1000
+                    _need_fetch = last_processed_ts is None or last_processed_ts < _last_close_ms - _per * 1000 or _per <= 60
                     data = await fetch_candles_binance_multi(symbol, resolution, count_back=needed_bars, market_type=cfg.get("binance_market_type", "spot")) if _need_fetch else None
                     if data:
                         timestamps, opens, highs, lows, closes = data[:5]
-                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:-1], opens[:-1], highs[:-1], lows[:-1], closes[:-1]
+                        # geschlossen = Beginn + Kerzenlaenge liegt in der Vergangenheit. Wichtig bei eigenen Minuten (8m, 24m ...): dort ist die
+                        # letzte zusammengesetzte Kerze schon fertig, ein pauschales [:-1] wuerde sie um eine ganze Kerze verspaeten.
+                        _now_ms = time.time() * 1000
+                        _k = len(timestamps)
+                        while _k > 0 and timestamps[_k - 1] + _per * 1000 > _now_ms + 500:
+                            _k -= 1
+                        closed_ts, closed_o, closed_h, closed_l, closed_c = timestamps[:_k], opens[:_k], highs[:_k], lows[:_k], closes[:_k]
 
                 now = time.time()
                 due_heartbeat = now - last_heartbeat > 300
@@ -289,7 +383,7 @@ async def sa_poll_loop(symbol):
                     for idx in new_indices:
                         price_i = st["last_price"] if (idx == len(closed_ts) - 1 and st["last_price"] is not None) else closed_c[idx]
                         last_processed_ts = closed_ts[idx]
-                        await check_sa_entry(symbol, arr["buy"][idx], arr["sell"][idx], price_i, arr["flip_up"][idx], arr["flip_dn"][idx])
+                        await check_sa_entry(symbol, arr["buy"][idx], arr["sell"][idx], price_i, arr["exit_long"][idx], arr["exit_short"][idx])
                 elif due_heartbeat and not closed_ts and (resolution in SUB_MINUTE_RESOLUTIONS or _need_fetch):
                     last_heartbeat = now
                     debug_log(f"⏳ [{symbol}] SAR+EMA wartet: keine Kerzen erhalten (Auflösung {resolution})")
@@ -301,7 +395,7 @@ async def sa_poll_loop(symbol):
 # ============================================================================
 # BACKTEST
 # ============================================================================
-def _sa_simulate(candles, cfg, buy_sig, sell_sig, warmup, p, flip_up=None, flip_dn=None):
+def _sa_simulate(candles, cfg, buy_sig, sell_sig, warmup, p, exit_long=None, exit_short=None):
     """Gegenstueck zu check_sa_entry/check_sa_sl_tp: Einstieg zum Schlusskurs der Signal-Kerze, optionaler SL/TP ab der
     naechsten Kerze ueber Hoch/Tief (SL gewinnt bei Gleichzeitigkeit), Gegen-Signal dreht."""
     ts, h, l, c = candles[0], candles[2], candles[3], candles[4]
@@ -319,10 +413,11 @@ def _sa_simulate(candles, cfg, buy_sig, sell_sig, warmup, p, flip_up=None, flip_
                 _bt_close_trade(trades, pdir, entry, tp, position["size"], i, position["entry_i"], "TP", ts=ts)
                 position = None
         buy, sell = buy_sig[i], sell_sig[i]
-        if position is not None and p["exit_on_flip"] and flip_up is not None:
+        if position is not None and exit_long is not None:
             raw_opp = sell if position["dir"] == "long" else buy
-            if (flip_dn[i] if position["dir"] == "long" else flip_up[i]) and not raw_opp:
-                _bt_close_trade(trades, position["dir"], position["entry"], c[i], position["size"], i, position["entry_i"], "SA-SAR-ENDE", ts=ts)
+            why = exit_long[i] if position["dir"] == "long" else exit_short[i]
+            if why and not raw_opp:
+                _bt_close_trade(trades, position["dir"], position["entry"], c[i], position["size"], i, position["entry_i"], why, ts=ts)
                 position = None
                 continue
         if mode == "long_only":
@@ -360,7 +455,7 @@ async def run_sa_backtest(symbol, cfg, days, exclude_top_n=1):
         return {"error": f"Zu wenig historische Kerzen für einen aussagekräftigen Backtest erhalten (mind. ~{min_needed} nötig)."}
     base_ts = candles[0]
     arr = await asyncio.to_thread(sa_build, candles[2], candles[3], candles[4], p)
-    trades = _sa_simulate(candles, cfg, arr["buy"], arr["sell"], _sa_warmup(p), p, arr["flip_up"], arr["flip_dn"])
+    trades = _sa_simulate(candles, cfg, arr["buy"], arr["sell"], _sa_warmup(p), p, arr["exit_long"], arr["exit_short"])
     stats = summarize_backtest_trades(trades, exclude_top_n)
     actual_days = (base_ts[-1] - base_ts[0]) / 86_400_000
     return {
@@ -392,8 +487,9 @@ def sa_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
     exits = {}
     for i in range(1, n):
         buy, sell = arr["buy"][i], arr["sell"][i]
-        if pos and p["exit_on_flip"] and (arr["flip_dn"][i] if pos == "long" else arr["flip_up"][i]) and not (sell if pos == "long" else buy):
-            exits[i] = pos
+        why = (arr["exit_long"][i] if pos == "long" else arr["exit_short"][i]) if pos else None
+        if why and not (sell if pos == "long" else buy):
+            exits[i] = (pos, why)
             pos = None
         if mode == "long_only":
             sell = False
@@ -415,7 +511,8 @@ def sa_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
         if arr["sell"][i]:
             markers.append({"time": t, "kind": "short", "price": c[i], "text": "SELL"})
         if i in exits:
-            markers.append({"time": t, "kind": "exit_x", "dir": exits[i], "price": c[i], "text": "SAR-Ende"})
+            markers.append({"time": t, "kind": "exit_x", "dir": exits[i][0], "price": c[i],
+                            "text": {"SA-SAR-ENDE": "SAR-Ende", "SA-WA-KREUZ": "WA-Kreuz", "SA-PIVOT": "Pivot"}.get(exits[i][1], "Ende")})
     lines = [{"key": "sa_ema", "label": f"EMA {p['ema_len']}", "data": ema_l},
              {"key": "sa_up", "label": "SAR (Aufwärts)", "data": sar_up},
              {"key": "sa_dn", "label": "SAR (Abwärts)", "data": sar_dn}]
@@ -426,16 +523,37 @@ def sa_chart_payload(ts, o, h, l, c, cfg, max_bars=1000):
 # ============================================================================
 # MONTE-CARLO
 # ============================================================================
+def _sa_ex_label(ex):
+    names = [n for n, on in zip(("SAR", "WA", "Pivot"), ex) if on]
+    return " + ".join(names) if names else "nur Wechsel"
+
+
+def _sa_parse_exits(val, base_p):
+    """["sar", "wa", "sar+wa", "none", ...] (oder kommagetrennter Text) -> Liste von (SAR-Ende, Wellenanker, Pivot). Leer = Einstellung."""
+    if isinstance(val, str):
+        val = [x for x in val.replace(";", ",").split(",") if x.strip()]
+    out = []
+    for item in val or []:
+        parts = {x.strip().lower() for x in str(item).split("+")}
+        ex = ("sar" in parts, "wa" in parts, "pivot" in parts or "pv" in parts)
+        if ex not in out:
+            out.append(ex)
+    return out or [(base_p["exit_on_flip"], base_p["exit_wa"], base_p["exit_pv"])]
+
+
 def _sa_mc_compute(candles, i_start, base_cfg, combos, exclude_top_n, deadline):
     """combos: (SAR Start, SAR Schritt, SAR Maximum, EMA-Laenge). Fenster, Richtung, SL/TP, Margin und Hebel kommen aus den Einstellungen."""
     base_p = _sa_params(base_cfg)
     ts, o, h, l, c, v = candles
     combos = sorted(combos)
     sar_cache, ema_cache, out = {}, {}, []
-    for start, inc, mx, eln in combos:
+    # Ausstiegs-Kreuzungen nur einmal und nur falls eine Kombination sie braucht
+    wa_all = _sa_wa_cross(*_sa_wt(h, l, c), base_p["wa_zone"]) if any(x[1] for *_, x in combos) else None
+    pv_all = _sa_pivot_cross(h, l, base_p["pv_left"], base_p["pv_right"]) if any(x[2] for *_, x in combos) else None
+    for start, inc, mx, eln, ex in combos:
         if time.time() > deadline:
             break
-        p = dict(base_p, start=start, inc=inc, max=mx, ema_len=eln)
+        p = dict(base_p, start=start, inc=inc, max=mx, ema_len=eln, exit_on_flip=ex[0], exit_wa=ex[1], exit_pv=ex[2])
         k = (start, inc, mx)
         if k not in sar_cache:
             if len(sar_cache) > 3:
@@ -443,17 +561,18 @@ def _sa_mc_compute(candles, i_start, base_cfg, combos, exclude_top_n, deadline):
             sar_cache[k] = sar_series(h, l, c, start, inc, mx)
         if eln not in ema_cache:
             ema_cache[eln] = _ema_series(c, eln)
-        arr = sa_signals(sar_cache[k], ema_cache[eln], c, p["max_bars"])
-        trades = _sa_simulate(candles, base_cfg, arr["buy"], arr["sell"], i_start, p, arr["flip_up"], arr["flip_dn"])
+        arr = sa_apply_exits(sa_signals(sar_cache[k], ema_cache[eln], c, p["max_bars"]), p, wa_all, pv_all)
+        trades = _sa_simulate(candles, base_cfg, arr["buy"], arr["sell"], i_start, p, arr["exit_long"], arr["exit_short"])
         st = summarize_backtest_trades(trades, exclude_top_n)
-        out.append({"sa_start": start, "sa_inc": inc, "sa_max": mx, "sa_ema_len": eln,
+        out.append({"sa_start": start, "sa_inc": inc, "sa_max": mx, "sa_ema_len": eln, "sa_exits": _sa_ex_label(ex),
+                    "sa_exit_on_flip": ex[0], "sa_exit_wa": ex[1], "sa_exit_pv": ex[2],
                     "trades": st["trades"], "win_rate_pct": st["win_rate_pct"],
                     "total_pnl_usd": st["total_pnl_usd"], "total_pnl_excl_top_n_usd": st["total_pnl_excl_top_n_usd"],
                     "max_drawdown_usd": st["max_drawdown_usd"], "avg_bars_held": st["avg_bars_held"]})
     return out
 
 
-async def run_sa_montecarlo(symbol, cfg, days, starts=None, incs=None, maxs=None, emas=None, runs=500, exclude_top_n=1, seed=None):
+async def run_sa_montecarlo(symbol, cfg, days, starts=None, incs=None, maxs=None, emas=None, exits=None, runs=500, exclude_top_n=1, seed=None):
     """Raster ueber SAR Start x SAR Schritt x SAR Maximum x EMA-Laenge. Achsen als {"min","max","step"} (oder Liste); eine leere Achse
     nimmt den Wert aus den Einstellungen. Zeitebene, Fenster, Richtung, SAR-Ende, SL/TP, Margin und Hebel kommen aus den Einstellungen."""
     import random
@@ -472,7 +591,8 @@ async def run_sa_montecarlo(symbol, cfg, days, starts=None, incs=None, maxs=None
     res = cfg.get("sa_resolution", "5m")
     mt = cfg.get("binance_market_type", "spot")
     max_candles = BACKTEST_MAX_CANDLES.get("sar_ema", 100_000)
-    combos = [(a, b, m, e) for a in start_l for b in inc_l for m in max_l for e in ema_l]
+    ex_list = _sa_parse_exits(exits, base_p)
+    combos = [(a, b, m, e, x) for a in start_l for b in inc_l for m in max_l for e in ema_l for x in ex_list]
     requested = len(combos)
     rng = random.Random(seed)
     if len(combos) > runs:
@@ -501,7 +621,7 @@ async def run_sa_montecarlo(symbol, cfg, days, starts=None, incs=None, maxs=None
     return {
         "symbol": symbol, "entry_mode": "sar_ema", "days": days, "actual_days_covered": round(days_cov, 1),
         "candles_processed": n_max, "resolution": res,
-        "starts": start_l, "incs": inc_l, "maxs": max_l, "emas": ema_l,
+        "starts": start_l, "incs": inc_l, "maxs": max_l, "emas": ema_l, "exits": [_sa_ex_label(x) for x in ex_list],
         "min_reliable_trades": min_trades, "seed": seed,
         "combos_tested": len(results), "combos_requested": requested, "combos_drawn": len(combos),
         "profitable_pct": round(pos / len(results) * 100, 1),
