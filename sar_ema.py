@@ -370,17 +370,19 @@ def _sa_simulate(candles, cfg, buy_sig, sell_sig, warmup, p, exit_long=None, exi
     position, trades = None, []
     for i in range(max(warmup, 1), n):
         if position is not None:
-            pdir, entry, sl, tp = position["dir"], position["entry"], position["sl"], position["tp"]
+            pdir, entry = position["dir"], position["entry"]
+            if (p["be_on"] or p["trail_on"]) and i > position["entry_i"]:
+                # Breakeven/Trailing mit dem Extrem DIESER Kerze nachziehen und dieselbe Kerze gleich pruefen (pessimistisch:
+                # erst Hoch/Tief, dann Ruecklauf) - so wie der Live-Bot dem Kurs laufend folgt
+                position["peak"] = max(position["peak"], h[i]) if pdir == "long" else min(position["peak"], l[i])
+                position["sl"], position["kind"] = _sa_stop_update(pdir, entry, position["size"], position["peak"], position["sl"], position.get("kind", "SL"), p)
+            sl, tp = position["sl"], position["tp"]
             if sl is not None and ((pdir == "long" and l[i] <= sl) or (pdir == "short" and h[i] >= sl)):
                 _bt_close_trade(trades, pdir, entry, sl, position["size"], i, position["entry_i"], position.get("kind", "SL"), ts=ts)
                 position = None
             elif tp is not None and ((pdir == "long" and h[i] >= tp) or (pdir == "short" and l[i] <= tp)):
                 _bt_close_trade(trades, pdir, entry, tp, position["size"], i, position["entry_i"], "TP", ts=ts)
                 position = None
-            elif p["be_on"] or p["trail_on"]:
-                # Stop erst nach dieser Kerze nachziehen (Hoch/Tief dieser Kerze gilt ab der naechsten)
-                position["peak"] = max(position["peak"], h[i]) if pdir == "long" else min(position["peak"], l[i])
-                position["sl"], position["kind"] = _sa_stop_update(pdir, entry, position["size"], position["peak"], sl, position.get("kind", "SL"), p)
         buy, sell = buy_sig[i], sell_sig[i]
         if position is not None and exit_long is not None:
             raw_opp = sell if position["dir"] == "long" else buy
@@ -432,6 +434,7 @@ async def run_sa_backtest(symbol, cfg, days, exclude_top_n=1):
         "requested_days": days, "actual_days_covered": round(actual_days, 1),
         "candles_processed": len(base_ts), "candle_cap": max_candles, "cache_used": False,
         "signals_buy": sum(arr["buy"]), "signals_sell": sum(arr["sell"]),
+        "exit_settings": {k: p[k] for k in ("exit_on_flip", "be_on", "be_usd", "trail_on", "trail_start_usd", "trail_usd", "sl_usd", "tp_usd")},
         "stats": stats,
         "stats_long": summarize_backtest_trades([t for t in trades if t["dir"] == "long"], exclude_top_n),
         "stats_short": summarize_backtest_trades([t for t in trades if t["dir"] == "short"], exclude_top_n),
