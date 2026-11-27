@@ -436,11 +436,11 @@ def default_config():
         "sa_max_bars": int(os.getenv("SA_MAX_BARS", "3")),
         "sa_direction_mode": os.getenv("SA_DIRECTION_MODE", "both"),
         "sa_exit_on_flip": os.getenv("SA_EXIT_ON_FLIP", "true").lower() == "true",   # Trade beenden, sobald der SAR gegen die Position dreht
-        "sa_exit_wa": os.getenv("SA_EXIT_WA", "false").lower() == "true",   # Ausstieg: Wellenanker-Kreuzung (WT1 x WT2)
-        "sa_wa_zone": float(os.getenv("SA_WA_ZONE", "0")),                  # 0 = jede Kreuzung, sonst nur ueber +Zone (Long-Ende) / unter -Zone (Short-Ende)
-        "sa_exit_pv": os.getenv("SA_EXIT_PV", "false").lower() == "true",   # Ausstieg: Pivot-Kreuzung
-        "sa_pv_left": int(os.getenv("SA_PV_LEFT", "1")),
-        "sa_pv_right": int(os.getenv("SA_PV_RIGHT", "1")),
+        "sa_be_on": os.getenv("SA_BE_ON", "false").lower() == "true",        # Breakeven: Stop auf Einstieg, sobald der Gewinn den Wert erreicht
+        "sa_be_usd": float(os.getenv("SA_BE_USD", "0")),
+        "sa_trail_on": os.getenv("SA_TRAIL_ON", "false").lower() == "true",  # Trailing-Stop ab Gewinn-Startwert, fester $-Abstand zum besten Kurs
+        "sa_trail_start_usd": float(os.getenv("SA_TRAIL_START_USD", "0")),
+        "sa_trail_usd": float(os.getenv("SA_TRAIL_USD", "0")),
         "sa_sl_usd": float(os.getenv("SA_SL_USD", "0")),   # optionaler fester SL: Verlust der Position in $ (0 = aus)
         "sa_tp_usd": float(os.getenv("SA_TP_USD", "0")),   # optionaler fester TP: Gewinn der Position in $ (0 = aus)
 
@@ -2274,7 +2274,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.13</span></div>
+  <div class="brand"><span class="dot"></span>⚡ GridBot <select id="symbol-select"></select><span style="font:11px ui-monospace,monospace;opacity:.55;margin-left:8px;" data-v="b" title="Stand der Oberflaeche - hilft beim Pruefen, ob ein Deploy angekommen ist">v19.14</span></div>
   <div class="topbar-right">
     <a href="/screener" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">🔍 Coin Screener →</a><a href="/vwap-scanner" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">📊 VWAP-Scanner →</a><a href="/scalp" style="color:#93c5fd; text-decoration:none; font-size:13px; margin-right:14px;">⚡ Scalp →</a><span id="mode-badge"></span><span id="active-badge"></span>
   </div>
@@ -2708,10 +2708,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="sa_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select>
   </div>
   <div data-mode="sar_ema"><label><input type="checkbox" id="sa_exit_on_flip" style="width:auto; vertical-align:middle;"> Ausstieg: SAR-Ende – Trade beenden, sobald der SAR gegen die Position dreht (wie im Original)</label></div>
-  <div data-mode="sar_ema"><label><input type="checkbox" id="sa_exit_wa" style="width:auto; vertical-align:middle;"> Ausstieg: Wellenanker-Kreuzung (Long: WT1 kreuzt unter WT2, Short: darüber)</label></div>
-  <div data-mode="sar_ema"><label>Wellenanker-Zone für den Ausstieg (0 = jede Kreuzung, sonst nur über +Zone bzw. unter −Zone)</label><input type="number" step="1" min="0" max="90" id="sa_wa_zone"></div>
-  <div data-mode="sar_ema"><label><input type="checkbox" id="sa_exit_pv" style="width:auto; vertical-align:middle;"> Ausstieg: Pivot-Kreuzung (Long: Tief unter letztes Pivot-Tief, Short: Hoch über letztes Pivot-Hoch)</label></div>
-  <div data-mode="sar_ema"><label>Pivot links / rechts (Kerzen)</label><span style="display:flex; gap:4px;"><input type="number" step="1" min="1" id="sa_pv_left" style="width:70px;"><input type="number" step="1" min="1" id="sa_pv_right" style="width:70px;"></span></div>
+  <div data-mode="sar_ema"><label><input type="checkbox" id="sa_be_on" style="width:auto; vertical-align:middle;"> Breakeven: Stop auf Einstiegskurs, sobald der Gewinn den Wert erreicht</label></div>
+  <div data-mode="sar_ema"><label>Breakeven ab Gewinn ($ der Position)</label><input type="number" step="0.1" min="0" id="sa_be_usd"></div>
+  <div data-mode="sar_ema"><label><input type="checkbox" id="sa_trail_on" style="width:auto; vertical-align:middle;"> Trailing-Stop: folgt dem besten Kurs im festen $-Abstand</label></div>
+  <div data-mode="sar_ema"><label>Trailing startet ab Gewinn ($)</label><input type="number" step="0.1" min="0" id="sa_trail_start_usd"></div>
+  <div data-mode="sar_ema"><label>Trailing-Abstand ($ der Position)</label><input type="number" step="0.1" min="0" id="sa_trail_usd"></div>
   <div data-mode="sar_ema"><label>Stop-Loss (fester $-Verlust der Position, 0 = kein SL)</label><input type="number" step="0.1" min="0" id="sa_sl_usd"></div>
   <div data-mode="sar_ema"><label>Take-Profit (fester $-Gewinn der Position, 0 = kein TP)</label><input type="number" step="0.1" min="0" id="sa_tp_usd"></div>
 
@@ -4426,12 +4427,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <span style="display:flex; gap:4px;"><input type="number" step="0.05" min="0.001" id="sa-mc-max-min" value="0.1" style="width:70px;"><input type="number" step="0.05" min="0.001" id="sa-mc-max-max" value="0.3" style="width:70px;"><input type="number" step="0.05" min="0.001" id="sa-mc-max-step" value="0.1" style="width:70px;"></span></div>
     <div><label><input type="checkbox" id="sa-mc-use-ema" checked style="width:auto; vertical-align:middle;"> EMA Länge: von / bis / Schritt</label>
       <span style="display:flex; gap:4px;"><input type="number" step="1" min="1" id="sa-mc-ema-min" value="5" style="width:70px;"><input type="number" step="1" min="1" id="sa-mc-ema-max" value="20" style="width:70px;"><input type="number" step="1" min="1" id="sa-mc-ema-step" value="1" style="width:70px;"></span></div>
-    <div><label>Ausstiege testen (jede Kombination wird einzeln getestet)</label>
+    <div><label>Ausstiege testen (Breakeven/Trailing-Werte aus den Einstellungen)</label>
       <span style="display:flex; flex-wrap:wrap; gap:10px; font-size:12px;">
         <label><input type="checkbox" id="sa-mc-ex-none" style="width:auto; vertical-align:middle;"> nur Wechsel</label>
         <label><input type="checkbox" id="sa-mc-ex-sar" checked style="width:auto; vertical-align:middle;"> SAR-Ende</label>
-        <label><input type="checkbox" id="sa-mc-ex-wa" style="width:auto; vertical-align:middle;"> Wellenanker</label>
-        <label><input type="checkbox" id="sa-mc-ex-pv" style="width:auto; vertical-align:middle;"> Pivot</label>
+        <label><input type="checkbox" id="sa-mc-ex-be" style="width:auto; vertical-align:middle;"> Breakeven</label>
+        <label><input type="checkbox" id="sa-mc-ex-trail" style="width:auto; vertical-align:middle;"> Trailing</label>
         <label><input type="checkbox" id="sa-mc-ex-combo" style="width:auto; vertical-align:middle;"> + alle Mischungen</label>
       </span></div>
     <button id="btn-sa-mc" style="padding:12px 24px;">🎲 Monte-Carlo starten</button>
@@ -6387,7 +6388,7 @@ const saMcRowHtml = (r) => `
     <td class="${r.total_pnl_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_usd}</td>
     <td class="${r.total_pnl_excl_top_n_usd >= 0 ? 'green' : 'red'}">${r.total_pnl_excl_top_n_usd}</td>
     <td>${r.max_drawdown_usd}</td><td>${r.avg_bars_held}</td>
-    ${applyBtn({sa_start: r.sa_start, sa_inc: r.sa_inc, sa_max: r.sa_max, sa_ema_len: r.sa_ema_len, sa_exit_on_flip: r.sa_exit_on_flip, sa_exit_wa: r.sa_exit_wa, sa_exit_pv: r.sa_exit_pv})}
+    ${applyBtn({sa_start: r.sa_start, sa_inc: r.sa_inc, sa_max: r.sa_max, sa_ema_len: r.sa_ema_len, sa_exit_on_flip: r.sa_exit_on_flip, sa_be_on: r.sa_be_on, sa_trail_on: r.sa_trail_on})}
   </tr>`;
 const renderSaMcResults = makeSortableTable('sa-mc-results-table', () => window.saMcResultsData, saMcRowHtml);
 const renderSaMcWorst = makeSortableTable('sa-mc-worst-table', () => window.saMcWorstData, saMcRowHtml);
@@ -6435,9 +6436,9 @@ document.getElementById('btn-sa-mc').addEventListener('click', async () => {
       const l = [];
       if (on('sa-mc-ex-none')) l.push('none');
       if (on('sa-mc-ex-sar')) l.push('sar');
-      if (on('sa-mc-ex-wa')) l.push('wa');
-      if (on('sa-mc-ex-pv')) l.push('pivot');
-      if (on('sa-mc-ex-combo')) l.push('sar+wa', 'sar+pivot', 'wa+pivot', 'sar+wa+pivot');
+      if (on('sa-mc-ex-be')) l.push('be');
+      if (on('sa-mc-ex-trail')) l.push('trail');
+      if (on('sa-mc-ex-combo')) l.push('sar+be', 'sar+trail', 'be+trail', 'sar+be+trail');
       return l;
     })(),
     config: buildConfigPayload(),
@@ -7684,11 +7685,11 @@ async function refresh() {
     document.getElementById('sa_max_bars').value = data.config.sa_max_bars;
     document.getElementById('sa_direction_mode').value = data.config.sa_direction_mode || 'both';
     document.getElementById('sa_exit_on_flip').checked = data.config.sa_exit_on_flip !== false;
-    document.getElementById('sa_exit_wa').checked = !!data.config.sa_exit_wa;
-    document.getElementById('sa_wa_zone').value = data.config.sa_wa_zone ?? 0;
-    document.getElementById('sa_exit_pv').checked = !!data.config.sa_exit_pv;
-    document.getElementById('sa_pv_left').value = data.config.sa_pv_left ?? 1;
-    document.getElementById('sa_pv_right').value = data.config.sa_pv_right ?? 1;
+    document.getElementById('sa_be_on').checked = !!data.config.sa_be_on;
+    document.getElementById('sa_be_usd').value = data.config.sa_be_usd ?? 0;
+    document.getElementById('sa_trail_on').checked = !!data.config.sa_trail_on;
+    document.getElementById('sa_trail_start_usd').value = data.config.sa_trail_start_usd ?? 0;
+    document.getElementById('sa_trail_usd').value = data.config.sa_trail_usd ?? 0;
     document.getElementById('sa_sl_usd').value = data.config.sa_sl_usd || 0;
     document.getElementById('sa_tp_usd').value = data.config.sa_tp_usd || 0;
 
@@ -8334,11 +8335,11 @@ function buildConfigPayload() {
     sa_max_bars: parseInt(document.getElementById('sa_max_bars').value) || 3,
     sa_direction_mode: document.getElementById('sa_direction_mode').value,
     sa_exit_on_flip: document.getElementById('sa_exit_on_flip').checked,
-    sa_exit_wa: document.getElementById('sa_exit_wa').checked,
-    sa_wa_zone: parseFloat(document.getElementById('sa_wa_zone').value) || 0,
-    sa_exit_pv: document.getElementById('sa_exit_pv').checked,
-    sa_pv_left: parseInt(document.getElementById('sa_pv_left').value) || 1,
-    sa_pv_right: parseInt(document.getElementById('sa_pv_right').value) || 1,
+    sa_be_on: document.getElementById('sa_be_on').checked,
+    sa_be_usd: parseFloat(document.getElementById('sa_be_usd').value) || 0,
+    sa_trail_on: document.getElementById('sa_trail_on').checked,
+    sa_trail_start_usd: parseFloat(document.getElementById('sa_trail_start_usd').value) || 0,
+    sa_trail_usd: parseFloat(document.getElementById('sa_trail_usd').value) || 0,
     sa_sl_usd: parseFloat(document.getElementById('sa_sl_usd').value) || 0,
     sa_tp_usd: parseFloat(document.getElementById('sa_tp_usd').value) || 0,
     dv_resolution: getResolutionField('dv_resolution'),
@@ -9076,7 +9077,7 @@ async def handle_config_update(request):
                 "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_be_pct","vc_tp_mode","vc_tp_usd","vc_wa_tf","vc_wa_src","vc_wa_n1","vc_wa_n2","vc_wa_sig_len","vc_wa_wave_scale","vc_wa_zone","vc_tp1_on","vc_tp1_rr","vc_tp1_pct","vc_adx_min","vc_adx_len","vc_adx_directional","vc_cross_min_pct","vc_cross_confirm","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
                 "tfl_resolution", "tfl_trend_tf", "tfl_trend_mode", "tfl_trend_ilen", "tfl_trend_slen", "tfl_direction_mode", "tfl_tp_usd", "tfl_sl_usd", "tfl_max_entries", "tfl_flip_mode",
                 "pm_resolution", "pm_len", "pm_long", "pm_short", "pm_direction_mode", "pm_sl_usd", "pm_tp_usd", "pm_trail_usd", "pm_sl_cooldown_seconds",
-                "sa_resolution", "sa_start", "sa_inc", "sa_max", "sa_ema_len", "sa_max_bars", "sa_direction_mode", "sa_exit_on_flip", "sa_exit_wa", "sa_wa_zone", "sa_exit_pv", "sa_pv_left", "sa_pv_right", "sa_sl_usd", "sa_tp_usd",
+                "sa_resolution", "sa_start", "sa_inc", "sa_max", "sa_ema_len", "sa_max_bars", "sa_direction_mode", "sa_exit_on_flip", "sa_be_on", "sa_be_usd", "sa_trail_on", "sa_trail_start_usd", "sa_trail_usd", "sa_sl_usd", "sa_tp_usd",
                 "mt_resolution", "mt_use_b1", "mt_block1", "mt_use_b2", "mt_block2", "mt_use_b3", "mt_block3", "mt_n1", "mt_n2", "mt_sig", "mt_scale", "mt_src", "mt_spread_full", "mt_signal_mode", "mt_confirm_bars", "mt_red_below", "mt_green_above", "mt_buy_level", "mt_sell_level", "mt_lookback", "mt_use_limit_filter", "mt_long_limit", "mt_short_limit", "mt_use_accel", "mt_accel", "mt_force_change", "mt_direction_mode", "mt_exit_mode", "mt_sl_usd", "mt_tp_usd", "mt_tp1_close_pct", "mt_tp2_close_pct", "mt_sl_to_breakeven_on_tp1", "mt_sl_to_tp1_on_tp2", "mt_sl_cooldown_seconds",
                 "ab_trend_filter_enabled", "ab_trend_filter_resolution", "ab_trend_filter_atr_period", "ab_trend_filter_multiplier",
                 "ab_aso_filter_enabled", "ab_aso_filter_length", "ab_aso_filter_mode", "ab_aso_filter_confirm_bars",
