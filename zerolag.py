@@ -13,6 +13,9 @@ Nachbau von "Zero Lag Trend Signals (MTF)" von AlgoAlpha:
   * Breakeven in $ (eigener Zusatz): ab X $ Buchgewinn wandert der Stop-Loss auf den Einstieg.
   * $-Trailing-Stop (eigener Zusatz): setzt beim Einstiegswert ein und folgt dem besten Kurs
     in festem $-Abstand. Kein ATR. Beide rechnen mit der Groesse beim Einstieg und ziehen nur nach.
+  * Trailing-Startwert (eigener Zusatz): der $-Trail wird erst aktiv, wenn der Buchgewinn den eingestellten Startwert erreicht hat.
+  * EMA-Filter (eigener Zusatz): Long nur ueber, Short nur unter einer EMA (z. B. 50) - die EMA laeuft auf einer frei
+    waehlbaren Zeitebene (leer = Zeitebene der Strategie), ohne Blick in die Zukunft.
   * ADX-Filter (eigener Zusatz, nicht im Original): nur handeln, wenn der ADX ueber der Schwelle liegt -
     wahlweise zusaetzlich mit passender +DI/-DI-Ausrichtung. Laeuft auf den eigenen Kerzen, keine zweite Zeiteinheit.
   * Wellenanker-Bestaetigung (eigener Zusatz): ein Signal zaehlt nur, wenn die Welle (WaveTrend) in den letzten
@@ -80,6 +83,8 @@ def _zl_params(cfg):
         # und wandert ab da mit. Er zieht nur nach, nie zurueck, und macht den eingestellten
         # Stop-Loss nie schlechter. Kein ATR, nur $.
         "trail_usd": max(0.0, float(cfg.get("zl_trail_usd", 0.0) or 0.0)),
+        # Trail-Aktivierung: erst ab diesem Buchgewinn in $ beginnt der Trail (0 = wie bisher: sobald der Gewinn den Abstand erreicht hat)
+        "trail_start_usd": max(0.0, float(cfg.get("zl_trail_start_usd", 0.0) or 0.0)),
         # ADX-Filter: nur handeln, wenn der Trend stark genug ist (0 = aus)
         "adx_min": max(0.0, float(cfg.get("zl_adx_min", 0.0) or 0.0)),
         "adx_len": max(2, int(cfg.get("zl_adx_len", 14) or 14)),
@@ -89,6 +94,10 @@ def _zl_params(cfg):
         "wf_on": bool(cfg.get("zl_wf_on", False)),
         "wf_zone": min(90.0, max(0.0, float(cfg.get("zl_wf_zone", 30.0) or 0.0))),
         "wf_bars": min(200, max(1, int(cfg.get("zl_wf_bars", 10) or 10))),
+        # EMA-Filter: Long nur wenn der Schluss ueber der EMA liegt, Short nur darunter. ema_tf "" = Zeitebene der Strategie.
+        "ema_on": bool(cfg.get("zl_ema_on", False)),
+        "ema_len": min(1000, max(2, int(cfg.get("zl_ema_len", 50) or 50))),
+        "ema_tf": _zl_res(cfg.get("zl_ema_tf", ""), "") if str(cfg.get("zl_ema_tf", "") or "").strip() else "",
     }
 
 
@@ -239,7 +248,14 @@ def _zl_trail_usd(direction, sl, entry, best, size, p):
         return sl
     dist = p["trail_usd"] / size
     cand = best - dist if direction == "long" else best + dist
-    if (direction == "long" and cand < entry) or (direction == "short" and cand > entry):
+    start = p.get("trail_start_usd", 0.0)
+    if start > 0:
+        # Mit Startwert: der Trail beginnt erst, wenn der beste Kurs den Gewinn `start` erreicht hat. Danach folgt der Stop
+        # dem besten Kurs im festen Abstand - auch wenn er dabei noch unter dem Einstieg liegt (Abstand groesser als Startwert).
+        gain = (best - entry) * size if direction == "long" else (entry - best) * size
+        if gain < start:
+            return sl
+    elif (direction == "long" and cand < entry) or (direction == "short" and cand > entry):
         return sl                     # noch nicht genug Gewinn fuer den Trail
     if sl is None:
         return cand
@@ -404,12 +420,67 @@ def zl_adx_ok(ts, o, h, l, c, p):
     return res if res is not None else (None, None)
 
 
+def _zl_and_filters(a, b):
+    """Zwei (long_ok, short_ok)-Paare verknuepfen. None = Filter aus."""
+    if a is None or a[0] is None:
+        return b
+    if b is None or b[0] is None:
+        return a
+    return ([x and y for x, y in zip(a[0], b[0])], [x and y for x, y in zip(a[1], b[1])])
+
+
+def zl_ema_align(base_ts, base_c, base_ms, hts, hc, h_ms, ema_len):
+    """(long_ok, short_ok) je Basis-Kerze: Schluss ueber / unter der EMA der Filter-Zeitebene. Es zaehlt nur die letzte GESCHLOSSENE
+    Filter-Kerze zum Schlusszeitpunkt der Basis-Kerze - so schaut der Backtest nicht in die Zukunft."""
+    from bisect import bisect_right
+    ema = _ema(hc, ema_len)
+    close_ts = [t + h_ms for t in hts]
+    n = len(base_c)
+    lo, so = [False] * n, [False] * n
+    for i in range(n):
+        k = bisect_right(close_ts, base_ts[i] + base_ms) - 1
+        if k < max(1, ema_len // 2) or ema[k] is None:
+            continue
+        lo[i] = base_c[i] > ema[k]
+        so[i] = base_c[i] < ema[k]
+    return lo, so
+
+
+async def zl_ema_filter(symbol, cfg, p, base_ts, base_c, days=None):
+    """EMA-Filter auf eigener Zeitebene. days=None -> live (letzte Kerzen), sonst Backtest ueber `days` Tage.
+    -> (long_ok, short_ok) passend zu base_ts oder None, wenn der Filter aus ist / keine Daten kamen."""
+    if not p.get("ema_on"):
+        return None
+    base_ms = (base_ts[1] - base_ts[0]) if len(base_ts) > 1 else _tf_ms(p["res"])
+    tf = p["ema_tf"] or p["res"]
+    if tf == p["res"]:
+        return zl_ema_align(base_ts, base_c, base_ms, base_ts, base_c, base_ms, p["ema_len"])
+    h_ms = _tf_ms(tf)
+    need = p["ema_len"] * 4 + 60
+    if days is None:
+        from strategies import fetch_candles_binance_multi
+        d = await fetch_candles_binance_multi(symbol, tf, count_back=min(1000, need), market_type=_zl_market(symbol, cfg))
+        if not d or len(d[4]) < max(10, p["ema_len"] // 2):
+            return None
+        hts, hc = d[0], d[4]
+    else:
+        warm_days = need * h_ms / 86_400_000
+        cap = 5000 if tf in SUB_MINUTE_RESOLUTIONS else 50_000
+        data, err = await _fetch_cached_mo7_backtest_candles(symbol, tf, days + warm_days + 1, cap, market_type=cfg.get("binance_market_type", "spot"))
+        if err or not data or len(data[4]) < max(10, p["ema_len"] // 2):
+            return None
+        hts, hc = data[0], data[4]
+    return await asyncio.to_thread(zl_ema_align, base_ts, base_c, base_ms, hts, hc, h_ms, p["ema_len"])
+
+
 def _zl_adx_text(p):
     parts = []
     if p["adx_min"] > 0:
         parts.append(f"ADX({p['adx_len']}) unter {p['adx_min']:g}" + (" oder falsche Richtung (+DI/-DI)" if p["adx_dir"] else ""))
     if p.get("wf_on"):
         parts.append(f"keine Wellenanker-Kreuzung (Zone ±{p['wf_zone']:g}, max. {p['wf_bars']} Kerzen zurück)")
+    if p.get("ema_on"):
+        parts.append(f"Kurs auf falscher Seite der EMA {p['ema_len']} ({p['ema_tf'] or p['res']})")
     return " / ".join(parts) or "Filter"
 
 
@@ -505,9 +576,15 @@ async def zl_poll_loop(symbol):
                                 if not first_run:          # erste Kerze nach dem Start nur merken, nicht handeln
                                     arr = await asyncio.to_thread(zl_build, d[2], d[3], d[4], p)
                                     lo, so = await asyncio.to_thread(zl_adx_ok, d[0], d[1], d[2], d[3], d[4], p)
+                                    flt = (lo, so) if lo is not None else None
+                                    if p["ema_on"]:
+                                        ef = await zl_ema_filter(symbol, cfg, p, d[0], d[4])
+                                        if ef is None:
+                                            debug_log(f"⚠️ [{symbol}] Zero Lag: EMA-Filter ohne Kerzen ({p['ema_tf'] or p['res']}) - Signal wird verworfen.")
+                                            ef = ([False] * len(d[4]), [False] * len(d[4]))
+                                        flt = _zl_and_filters(flt, ef)
                                     await zl_check_candle(symbol, cfg, p, arr, len(d[4]) - 1,
-                                                          price if price is not None else d[4][-1],
-                                                          (lo, so) if lo is not None else None)
+                                                          price if price is not None else d[4][-1], flt)
                         elif d:
                             wait = 3.0                     # neue Kerze noch nicht bei Binance verfuegbar
                         else:
@@ -615,6 +692,11 @@ async def run_zl_backtest(symbol, cfg, days, exclude_top_n=1):
     arr = await asyncio.to_thread(zl_build, h, l, c, p)
     lo, so = await asyncio.to_thread(zl_adx_ok, ts, o, h, l, c, p)
     adx = (lo, so) if lo is not None else None
+    if p["ema_on"]:
+        ef = await zl_ema_filter(symbol, cfg, p, ts, c, days + warm_days)
+        if ef is None:
+            return {"error": f"Keine Kerzen für die EMA-Filter-Zeitebene {p['ema_tf'] or p['res']} erhalten."}
+        adx = _zl_and_filters(adx, ef)
     trades = zl_simulate(ts, h, l, c, arr, cfg, p, i_start, adx)
     stats = summarize_backtest_trades(trades, exclude_top_n)
     # Nur Signale zaehlen, die auch durch den ADX-Filter kommen - sonst passt die Zahl nicht zu den Trades
@@ -653,6 +735,8 @@ async def zl_chart_payload(symbol, cfg, ts, o, h, l, c, tf):
                 # der Chart Signale, die der Bot gar nicht nehmen wuerde.
                 lo, so = await asyncio.to_thread(zl_adx_ok, d[0], d[1], d[2], d[3], d[4], p)
                 adx = (lo, so) if lo is not None else None
+                if p["ema_on"]:
+                    adx = _zl_and_filters(adx, await zl_ema_filter(symbol, cfg, p, d[0], d[4]) or ([False] * len(d[4]), [False] * len(d[4])))
                 first_t = candles[0]["time"] if candles else 0
                 base, up, dn = [], [], []
                 for i in range(len(d[0])):
@@ -729,7 +813,7 @@ def zl_mc_resolutions(text):
     return out[:ZL_MC_MAX_VALUES]
 
 
-def _zl_mc_compute(candles, i_start, base_cfg, combos, exclude_top_n, deadline):
+def _zl_mc_compute(candles, i_start, base_cfg, combos, exclude_top_n, deadline, ema_f=None):
     """candles: (ts,o,h,l,c,v) der eingestellten Zeitebene. combos: (Laenge, Faktor, WA-Zone, WA-Kerzen zurueck).
     Alles andere (SL/TP/ADX/Breakeven/Trailing/Ausstieg) kommt aus den Einstellungen."""
     base_p = _zl_params(base_cfg)
@@ -755,6 +839,8 @@ def _zl_mc_compute(candles, i_start, base_cfg, combos, exclude_top_n, deadline):
             wf_cache[(zone, bars)] = zl_wf_from_wt(wt1, wt2, zone, bars)
         w = wf_cache[(zone, bars)]
         flt = w if adx_only is None else ([x and y for x, y in zip(adx_only[0], w[0])], [x and y for x, y in zip(adx_only[1], w[1])])
+        if ema_f is not None:
+            flt = _zl_and_filters(flt, ema_f)
         trades = zl_simulate(ts, h, l, c, arr, base_cfg, p, i_start, flt)
         st = summarize_backtest_trades(trades, exclude_top_n)
         out.append({"zl_length": length, "zl_mult": mult, "zl_wf_zone": zone, "zl_wf_bars": bars,
@@ -804,7 +890,12 @@ async def run_zl_montecarlo(symbol, cfg, days, lengths=None, mults=None, wf_zone
     days_cov = (ts[-1] - ts[i_start]) / 86_400_000
     n_max = len(ts)
     deadline = time.time() + 240
-    results = await asyncio.to_thread(_zl_mc_compute, candles, i_start, cfg, combos, exclude_top_n, deadline)
+    ema_f = None
+    if base_p["ema_on"]:
+        ema_f = await zl_ema_filter(symbol, cfg, base_p, ts, candles[4], days + warm)
+        if ema_f is None:
+            return {"error": f"Keine Kerzen für die EMA-Filter-Zeitebene {base_p['ema_tf'] or res} erhalten."}
+    results = await asyncio.to_thread(_zl_mc_compute, candles, i_start, cfg, combos, exclude_top_n, deadline, ema_f)
     candles = None
     if not results:
         return {"error": "Keine Kombination konnte in der verfügbaren Zeit gerechnet werden - weniger Durchläufe oder kürzeren Zeitraum wählen."}

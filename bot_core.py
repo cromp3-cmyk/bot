@@ -463,6 +463,10 @@ def default_config():
         "zl_flip_on_exit": os.getenv("ZL_FLIP_ON_EXIT", "false").lower() == "true",
         "zl_be_usd": float(os.getenv("ZL_BE_USD", "0")),                # SL auf Einstieg ab X $ Buchgewinn (0 = aus)
         "zl_trail_usd": float(os.getenv("ZL_TRAIL_USD", "0")),          # $-Trailing-Stop, Abstand zum besten Kurs (0 = aus)
+        "zl_trail_start_usd": float(os.getenv("ZL_TRAIL_START_USD", "0")),  # Trail erst ab X $ Buchgewinn aktiv (0 = sobald Gewinn = Abstand)
+        "zl_ema_on": os.getenv("ZL_EMA_ON", "false").lower() == "true",     # EMA-Filter: Long nur ueber, Short nur unter der EMA
+        "zl_ema_len": int(os.getenv("ZL_EMA_LEN", "50")),
+        "zl_ema_tf": os.getenv("ZL_EMA_TF", ""),                            # Zeitebene der EMA ("" = wie die Strategie)
         "zl_adx_min": float(os.getenv("ZL_ADX_MIN", "0")),             # nur handeln, wenn ADX darueber liegt (0 = Filter aus)
         "zl_adx_len": int(os.getenv("ZL_ADX_LEN", "14")),
         "zl_adx_directional": os.getenv("ZL_ADX_DIRECTIONAL", "false").lower() == "true",
@@ -2772,7 +2776,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <select class="cfg" id="zl_direction_mode"><option value="both">Beide</option><option value="long_only">Nur Long</option><option value="short_only">Nur Short</option></select></div>
   <div data-mode="zero_lag"><label>Breakeven: SL auf den Einstieg ab X $ Buchgewinn (0 = aus)</label><input type="number" step="0.5" min="0" id="zl_be_usd"></div>
   <div data-mode="zero_lag"><label>Trailing-Stop: Abstand in $ zum besten Kurs (0 = aus)</label><input type="number" step="0.5" min="0" id="zl_trail_usd"></div>
-  <div data-mode="zero_lag" style="color:var(--text-dim); font-size:12px; margin-top:-6px;">Der Trailing-Stop setzt beim Einstiegswert ein: erst wenn der Buchgewinn den Abstand erreicht hat, liegt er genau auf dem Einstieg, danach wandert er mit. Unter den Einstieg geht er nie, und er macht den eingestellten Stop-Loss nie schlechter.</div>
+  <div data-mode="zero_lag"><label>Trailing-Stop: aktivieren ab X $ Buchgewinn (0 = sobald der Gewinn den Abstand erreicht hat)</label><input type="number" step="0.5" min="0" id="zl_trail_start_usd"></div>
+  <div data-mode="zero_lag" style="color:var(--text-dim); font-size:12px; margin-top:-6px;">Der Trailing-Stop setzt beim Einstiegswert ein: erst wenn der Buchgewinn den Abstand erreicht hat, liegt er genau auf dem Einstieg, danach wandert er mit. Unter den Einstieg geht er nie, und er macht den eingestellten Stop-Loss nie schlechter. Mit einem Startwert wartet der Trail, bis der Buchgewinn diesen Wert erreicht hat, und folgt dann dem besten Kurs im Abstand (ist der Abstand größer als der Startwert, liegt der Stop zuerst noch unter dem Einstieg).</div>
+  <div data-mode="zero_lag"><label><input type="checkbox" id="zl_ema_on" style="width:auto; vertical-align:middle;"> EMA-Filter: Long nur, wenn der Kurs über der EMA liegt, Short nur darunter</label></div>
+  <div data-mode="zero_lag"><label>EMA-Länge (z. B. 50)</label><input type="number" step="1" min="2" max="1000" id="zl_ema_len"></div>
+  <div data-mode="zero_lag"><label>EMA-Zeitebene</label>
+    <select class="cfg" id="zl_ema_tf">
+      <option value="">Wie die Strategie</option>
+      <option value="1m">1 Minute</option><option value="3m">3 Minuten</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option>
+      <option value="30m">30 Minuten</option><option value="1h">1 Stunde</option><option value="2h">2 Stunden</option><option value="4h">4 Stunden</option>
+      <option value="6h">6 Stunden</option><option value="12h">12 Stunden</option><option value="1d">1 Tag</option>
+    </select></div>
   <div data-mode="zero_lag"><label>ADX-Filter: nur handeln ab ADX über (0 = aus, üblich 20–25)</label><input type="number" step="1" min="0" id="zl_adx_min"></div>
   <div data-mode="zero_lag"><label>ADX-Periode</label><input type="number" step="1" min="2" id="zl_adx_len"></div>
   <div data-mode="zero_lag"><label><input type="checkbox" id="zl_adx_directional" style="width:auto; vertical-align:middle;"> Zusätzlich die Richtung prüfen (Long nur bei +DI über −DI, Short umgekehrt)</label></div>
@@ -7708,6 +7722,10 @@ async function refresh() {
     document.getElementById('zl_direction_mode').value = data.config.zl_direction_mode || 'both';
     document.getElementById('zl_be_usd').value = data.config.zl_be_usd ?? 0;
     document.getElementById('zl_trail_usd').value = data.config.zl_trail_usd ?? 0;
+    document.getElementById('zl_trail_start_usd').value = data.config.zl_trail_start_usd ?? 0;
+    document.getElementById('zl_ema_on').checked = !!data.config.zl_ema_on;
+    document.getElementById('zl_ema_len').value = data.config.zl_ema_len ?? 50;
+    document.getElementById('zl_ema_tf').value = data.config.zl_ema_tf || '';
     document.getElementById('zl_adx_min').value = data.config.zl_adx_min ?? 0;
     document.getElementById('zl_adx_len').value = data.config.zl_adx_len ?? 14;
     document.getElementById('zl_adx_directional').checked = !!data.config.zl_adx_directional;
@@ -8357,6 +8375,10 @@ function buildConfigPayload() {
     zl_direction_mode: document.getElementById('zl_direction_mode').value,
     zl_be_usd: parseFloat(document.getElementById('zl_be_usd').value) || 0,
     zl_trail_usd: parseFloat(document.getElementById('zl_trail_usd').value) || 0,
+    zl_trail_start_usd: parseFloat(document.getElementById('zl_trail_start_usd').value) || 0,
+    zl_ema_on: document.getElementById('zl_ema_on').checked,
+    zl_ema_len: parseInt(document.getElementById('zl_ema_len').value) || 50,
+    zl_ema_tf: document.getElementById('zl_ema_tf').value,
     zl_adx_min: parseFloat(document.getElementById('zl_adx_min').value) || 0,
     zl_adx_len: parseInt(document.getElementById('zl_adx_len').value) || 14,
     zl_adx_directional: document.getElementById('zl_adx_directional').checked,
@@ -9071,7 +9093,7 @@ async def handle_config_update(request):
                 "er_resolution", "er_ema_len", "er_rsi_len", "er_rsi_mid", "er_invert", "er_direction_mode", "er_exit_mode",
                 "er_sl_lookback", "er_sl_buffer_pct", "er_tp_mode", "er_tp_step_usd", "er_tp_step_atr_mult", "er_atr_len",
                 "er_tp1_close_pct", "er_tp2_close_pct", "er_sl_to_breakeven_on_tp1", "er_sl_to_tp1_on_tp2", "er_sl_cooldown_seconds",
-                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "zl_resolution", "zl_length", "zl_mult", "zl_entry_mode", "zl_direction_mode", "zl_adx_min", "zl_adx_len", "zl_adx_directional", "zl_be_usd", "zl_trail_usd", "zl_invert", "zl_wf_on", "zl_wf_zone", "zl_wf_bars", "zl_exit_mode",
+                "dv_resolution", "dv_sens", "dv_direction_mode", "dv_exit_mode", "dv_sl_usd", "dv_tp_usd", "dv_trail_usd", "zl_resolution", "zl_length", "zl_mult", "zl_entry_mode", "zl_direction_mode", "zl_adx_min", "zl_adx_len", "zl_adx_directional", "zl_be_usd", "zl_trail_usd", "zl_trail_start_usd", "zl_ema_on", "zl_ema_len", "zl_ema_tf", "zl_invert", "zl_wf_on", "zl_wf_zone", "zl_wf_bars", "zl_exit_mode",
                 "zl_flip_on_exit", "zl_sl_mode", "zl_sl_trail", "zl_sl_usd", "zl_tp1_usd", "zl_tp1_pct", "zl_tp2_usd", "zl_tp2_pct",
                 "dv_sl_cooldown_seconds", "gq_resolution", "gq_htf_resolution", "gq_rsi_len", "gq_ma_len", "gq_buy_level", "gq_sell_level", "gq_direction_mode", "gq_atr_len", "gq_entry_cond", "gq_exit_mode", "gq_sl_mult", "gq_tp1_rr", "gq_tp1_pct", "gq_sl_cooldown_seconds", "pa_resolution", "pa_period1", "pa_mult1", "pa_period2", "pa_mult2", "pa_direction_mode", "pa_wt_exit_enabled", "pa_wt_level", "pa_sl_usd", "pa_tp_usd", "pa_sl_cooldown_seconds", "we_resolution", "we_zone_tf", "we_zone_mode", "we_ema_len", "we_sensitivity", "we_fast_len", "we_slow_len", "we_channel_len", "we_bb_mult", "we_dead_len", "we_dead_mult", "we_exit_mode", "we_direction_mode", "we_sl_usd", "we_tp_usd", "we_sl_cooldown_seconds", "lb_resolution", "lb_pivot_left", "lb_pivot_right", "lb_inval_tol_pct", "lb_retest_tol_pct", "lb_strict_wick", "lb_max_pen_pct", "lb_require_sweep", "lb_box_mode", "lb_entry_mode", "lb_max_age", "lb_direction_mode", "lb_rr", "lb_be_frac", "lb_sl_buffer_pct", "lb_min_risk_pct", "lb_max_risk_pct", "lb_need_reaction", "lb_need_breakout", "lb_need_rejection", "lb_sl_mode", "lb_min_tp_pct", "lb_be_offset_pct", "lb_tp1_pct", "lb_session_on", "lb_session_from", "lb_session_to", "lb_sl_cooldown_seconds", "pv_resolution", "pv_left", "pv_right", "pv_buffer_pct", "pv_candle_type", "pv_renko_mode", "pv_renko_atr_len", "pv_renko_mult", "pv_renko_pct", "pv_exit_mode", "pv_direction_mode", "pv_sl_usd", "pv_tp_usd", "pv_profit_only_close", "pv_tp_mode", "pv_be_trigger_usd", "pv_tp1_usd", "pv_tp2_usd", "pv_tp3_usd", "pv_tp1_pct", "pv_tp2_pct", "pv_be_after_tp1", "pv_sl_to_tp1_on_tp2", "pv_sl_cooldown_seconds", "ar_resolution", "ar_atr_len", "ar_center_inf", "ar_territory_inf", "ar_shock", "ar_drive_len", "ar_persist_len", "ar_min_migration", "ar_persist_inf", "ar_reversal_thr", "ar_overlap_len", "ar_overlap_prot", "ar_exit_mode", "ar_direction_mode", "ar_sl_usd", "ar_tp_usd", "ar_profit_only_close", "ar_tp_mode", "ar_be_trigger_usd", "ar_tp1_usd", "ar_tp2_usd", "ar_tp3_usd", "ar_tp1_pct", "ar_tp2_pct", "ar_be_after_tp1", "ar_sl_to_tp1_on_tp2", "ar_sl_cooldown_seconds", "mf_resolution", "mf_entry_mode", "mf_early_max", "mf_mom_len", "mf_smooth_len", "mf_exit_mode", "mf_direction_mode", "mf_sl_usd", "mf_tp_usd", "mf_profit_only_close", "mf_tp_mode", "mf_tp1_usd", "mf_tp2_usd", "mf_tp3_usd", "mf_tp1_pct", "mf_tp2_pct", "mf_be_after_tp1", "mf_sl_to_tp1_on_tp2", "mf_sl_cooldown_seconds", "wd_resolution", "wd_src", "wd_n1", "wd_n2", "wd_sig_len", "wd_wave_scale", "wd_line", "wd_pivot_left", "wd_pivot_right", "wd_min_range", "wd_max_range", "wd_div_ob", "wd_div_os", "wd_exit_zone", "wd_entry_type", "wd_cross_zone", "wd_max_entries", "wd_profit_only_close", "wd_add_dist_pct", "wd_add_dist_dir", "wd_tp_mode", "wd_tp1_usd", "wd_tp2_usd", "wd_tp3_usd", "wd_tp1_pct", "wd_tp2_pct", "wd_be_after_tp1", "wd_sl_to_tp1_on_tp2", "wd_use_regular", "wd_use_hidden", "wd_exit_mode", "wd_direction_mode", "wd_sl_usd", "wd_tp_usd", "wd_sl_cooldown_seconds",
                 "vc_resolution","vc_ema_len","vc_source","vc_anchor","vc_band_mult","vc_band_volume","vc_direction_mode","vc_sl_buffer_pct","vc_be_pct","vc_tp_mode","vc_tp_usd","vc_wa_tf","vc_wa_src","vc_wa_n1","vc_wa_n2","vc_wa_sig_len","vc_wa_wave_scale","vc_wa_zone","vc_tp1_on","vc_tp1_rr","vc_tp1_pct","vc_adx_min","vc_adx_len","vc_adx_directional","vc_cross_min_pct","vc_cross_confirm","rlm_resolution","rlm_swing_len","rlm_level_tol","rlm_min_touches","rlm_half_life","rlm_levels_per_side","rlm_min_score","rlm_reject_clv","rlm_cooldown","rlm_sl_usd","rlm_tp_usd","rlm_atr_len","rlm_tp1_r","rlm_tp2_r","rlm_tp3_r","rlm_tp1_close_pct","rlm_tp2_close_pct","rlm_direction_mode","rlm_candle_type","rlm_trend_filter","rlm_trend_tf","rlm_trend_mode","rlm_trend_ilen","rlm_trend_slen","rlm_sl_mode","rlm_be_after_tp1","rlm_reverse",
