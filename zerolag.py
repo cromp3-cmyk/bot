@@ -255,6 +255,8 @@ def _zl_trail_usd(direction, sl, entry, best, size, p):
         gain = (best - entry) * size if direction == "long" else (entry - best) * size
         if gain < start:
             return sl
+        # nie unter den Einstieg: ist der Abstand groesser als der Startwert, setzt der Trail beim Einstieg ein
+        cand = max(cand, entry) if direction == "long" else min(cand, entry)
     elif (direction == "long" and cand < entry) or (direction == "short" and cand > entry):
         return sl                     # noch nicht genug Gewinn fuer den Trail
     if sl is None:
@@ -262,13 +264,15 @@ def _zl_trail_usd(direction, sl, entry, best, size, p):
     return max(sl, cand) if direction == "long" else min(sl, cand)
 
 
-def _zl_stop_reason(direction, sl, entry, tp1_done, be_done):
+def _zl_stop_reason(direction, sl, entry, tp1_done, be_done, trail=False):
     """Grund fuer einen Stop-Treffer: BREAKEVEN (Stop genau auf dem Einstieg), TRAIL (Stop schon
     im Gewinn) oder SL."""
     if sl is None or not entry:
         return "SL"
     if abs(sl - entry) < 1e-12:
-        return "BREAKEVEN" if (tp1_done or be_done) else "SL"
+        if tp1_done or be_done:
+            return "BREAKEVEN"
+        return "TRAIL" if trail else "SL"          # Trail auf dem Einstieg (Startwert erreicht) ist kein Stop-Loss
     if (direction == "long" and sl > entry) or (direction == "short" and sl < entry):
         return "TRAIL"
     return "SL"
@@ -303,7 +307,8 @@ async def check_zl_sl_tp(symbol, price):
     entry = st.get("avg_entry_price")
     sl = st.get("zl_sl")
     if sl is not None and ((pos == "long" and price <= sl) or (pos == "short" and price >= sl)):
-        reason = _zl_stop_reason(pos, sl, entry, st.get("zl_tp1_done"), st.get("zl_be_done"))
+        reason = _zl_stop_reason(pos, sl, entry, st.get("zl_tp1_done"), st.get("zl_be_done"),
+                                 p["trail_usd"] > 0 and st.get("zl_best") is not None and st.get("zl_best") != entry)
         debug_log(f"🚪 [{symbol}] Zero Lag {reason}: {pos.upper()} @ {price} (Ziel war {round(sl, 6)})")
         await execute_exit(symbol, price, reason)
         if st["position"] is None:
@@ -615,7 +620,8 @@ def zl_simulate(ts, h, l, c, arr, cfg, p, i_start, adx=None):
                 position["sl"] = _zl_clamp_be(d, zl_trail(d, position["sl"], arr, i - 1, p), e, position["be_done"])
             sl = position["sl"]
             if sl is not None and ((sgn > 0 and l[i] <= sl) or (sgn < 0 and h[i] >= sl)):
-                reason = _zl_stop_reason(d, sl, e, position["tp1_done"], position["be_done"])
+                reason = _zl_stop_reason(d, sl, e, position["tp1_done"], position["be_done"],
+                                         p["trail_usd"] > 0 and position["best"] != e)
                 _bt_close_trade(trades, d, e, sl, position["size"], i, position["entry_i"], reason, ts=ts)
                 position = None
             else:
